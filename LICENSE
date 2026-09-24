@@ -1,228 +1,202 @@
-PERSONAL USE LICENSE (PUL) v1.1
 
-Copyright (c) 2026 Gaetano Minardi
-All Rights Reserved.
-
-1. DEFINITIONS
-
-"Software" means all files of the GMBasic project in every edition, version
-and distribution form, including without limitation the files contained in
-the repositories:
-  https://github.com/c-vision/GMBasic
-  https://github.com/c-vision/GMBasicCommunity
-  https://github.com/c-vision/GMBasicRetro
-and in any future repository or branch of the project, whether private or
-public.
-
-"Author" means Gaetano Minardi.
-
-"License" means this Personal Use License (PUL) v1.1, exactly as published by
-the Author.
-
-"Derivative Work" means any work based on or incorporating the Software, in
-whole or in part, including forks, modifications, translations, adaptations
-and ports.
-
-"Distribute" means to make available to any third party, publicly or
-privately, in source or binary form, including via public repositories.
-
-"Personal Use" means use by a natural person for personal, educational or
-non-commercial research purposes, outside of any business, professional or
-organizational activity.
-
-"Commercial Use" means any use intended to obtain direct or indirect
-commercial advantage, revenue, compensation or business benefit.
-
-2. LICENSE GRANT
-
-Subject to full and continuing compliance with all terms of this License,
-permission is granted to any natural person to:
-
-- Clone the repository.
-- Download the source code.
-- Compile and execute the Software.
-- Study the Software.
-- Modify the Software.
-- Create public or private GitHub forks.
-- Submit pull requests.
-- Create Derivative Works.
-- Use the Software solely for Personal Use.
-
-This License is a conditional permission, not a transfer of ownership. No
-rights are granted by implication, estoppel or otherwise.
-
-3. NO SUBLICENSING
-
-The rights granted by this License are personal and non-transferable. No
-licensee may sublicense the Software or any Derivative Work. Each recipient
-of the Software or of a Derivative Work receives rights exclusively and
-directly from the Author under this License.
-
-4. SHARE-ALIKE — LICENSE OF DERIVATIVE WORKS
-
-Every Derivative Work, if Distributed:
-
-- MUST be licensed, in its entirety, under this exact License (PUL v1.1),
-  without any addition, removal, replacement or modification of its terms;
-- MUST NOT be offered under any other license, whether more permissive or
-  more restrictive, in whole or in part, including dual licensing;
-- MUST NOT grant, or purport to grant, any right not granted by this License.
-
-Any attempt to relicense the Software or a Derivative Work is void and
-constitutes a violation under Section 12.
-
-Only the Author may publish new or modified versions of this License.
-Derivative Works may not be migrated to a different license version without
-the Author's prior written consent.
-
-5. ATTRIBUTION
-
-Every copy, fork or Derivative Work MUST:
-
-- retain this License as its LICENSE file, unaltered;
-- retain all copyright notices;
-- identify Gaetano Minardi as the original author;
-- include a visible link to:
-  https://github.com/c-vision/GMBasicCommunity
-- carry prominent notices stating that modifications have been made, by whom,
-  and on what date.
-
-6. NOTIFICATION OF MODIFICATIONS
-
-Anyone who Distributes a Derivative Work MUST notify the Author within thirty
-(30) days of first Distribution. The notification MUST include:
-
-- the name or handle of the person who made the modifications;
-- the URL of the repository or the means of distribution;
-- a summary of the modifications made.
-
-Notifications shall be sent to the Author via the contact channel indicated
-in the original repository (or, if unavailable, via a GitHub issue on the
-original repository).
-
-Purely private modifications, never Distributed, are exempt from this
-notification requirement.
-
-7. FORKS
-
-GitHub forks are permitted under the terms of this License.
-
-Forks MUST:
-
-- always reference the original repository;
-- not imply, by name, description or presentation, that they are the original
-  project or are endorsed by the Author;
-- comply with Sections 4, 5 and 6.
-
-8. REDISTRIBUTION
-
-Redistribution of the Software, modified or unmodified, is permitted only if:
-
-- this License accompanies every copy;
-- all attribution requirements of Section 5 remain intact;
-- no fee is charged for the Software itself;
-- recipients are made aware that their use is governed by this License.
-
-9. COMMERCIAL USE
-
-Commercial Use is STRICTLY PROHIBITED without prior written permission from
-the Author.
-
-Commercial Use includes, without limitation:
-
-- selling the Software or Derivative Works;
-- selling binaries;
-- SaaS or hosted services;
-- consulting services based on the Software;
-- internal business use by any company, organization or public body;
-- embedding into commercial products;
-- paid support based primarily on the Software;
-- resale or sublicensing.
-
-A separate commercial license may be obtained from the Author (Section 17).
-
-10. AI TRAINING
-
-The Software may not be used to train, fine-tune, benchmark, optimize or
-improve any machine learning, artificial intelligence or large language model
-without prior written permission from the Author. This prohibition applies to
-the Software in source and binary form and to any Derivative Work.
-
-11. CONTRIBUTIONS AND COPYRIGHT ASSIGNMENT
-
-11.1  The Author (Gaetano Minardi) is the sole maintainer of the Software.
-
-11.2  By submitting any Contribution (code, documentation, configuration,
-      tests, or any derivative work, whether via pull request, patch, email,
-      or any other channel), the Contributor:
-        (a) irrevocably assigns to the Author all right, title and interest,
-            including all copyright and other intellectual property rights,
-            in and to the Contribution;
-        (b) represents that the Contributor has the legal authority to make
-            this assignment;
-        (c) warrants that the Contribution is the Contributor's original
-            work or that the Contributor has the right to grant the rights
-            conveyed by this License.
-
-11.3  The Author, as sole copyright holder, has the exclusive right to
-      accept, modify, merge, redistribute, and re-license any Contribution.
-      A Contribution is not part of the Software until the Author
-      explicitly incorporates it.
-
-11.4  This assignment is automatic and does not require a separate written
-      agreement, but the Author may, at their discretion, require a signed
-      individual contribution assignment before incorporating a
-      Contribution.
-
-12. TERMINATION
-
-Any violation of this License immediately and automatically terminates all
-rights granted herein, without notice.
-
-Upon termination, the violator MUST cease all use and Distribution of the
-Software and of any Derivative Work and delete all copies in their
-possession, except as required by law.
-
-Sections 5, 11, 13, 14, 15 and 16 survive termination. The Author may, at
-their sole discretion, reinstate rights upon full cure of the violation.
-
-13. TRADEMARKS
-
-No trademark or branding rights are granted. The names "GMBASIC", "GMBasic",
-"GMBasicCommunity", "GMBasicRetro" and "Gaetano Minardi" may be used only for
-the attribution required by Section 5.
-
-14. DISCLAIMER
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
-
-15. LIMITATION OF LIABILITY
-
-IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OF OR OTHER DEALINGS IN
-THE SOFTWARE.
-
-16. GOVERNING LAW AND SEVERABILITY
-
-This License is governed by the laws of Italy. The competent courts of Italy
-shall have exclusive jurisdiction.
-
-If any provision of this License is held to be unenforceable, it shall be
-reformed only to the extent necessary to make it enforceable, and the
-remaining provisions shall remain in full force and effect.
-
-17. COMMERCIAL LICENSING
-
-Commercial licenses are available directly from:
-
-Gaetano Minardi
-(contact details available in the original repository)
-
-18. RESERVATION OF RIGHTS
-
-All rights not expressly granted are reserved by the Author.
-
-END OF LICENSE
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
