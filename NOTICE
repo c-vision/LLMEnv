@@ -1,0 +1,32 @@
+LLMEnv
+Copyright (c) 2026 Gaetano Minardi
+All Rights Reserved.
+
+This product is licensed under the Personal Use License (PUL) v1.1.
+See the LICENSE file in the root of this repository for the full terms.
+
+Original repository (licenza di riferimento):
+https://github.com/c-vision/GMBasicCommunity
+
+Original author:
+Gaetano Minardi
+
+Gaetano Minardi is the sole maintainer and copyright holder. All contributions
+are assigned to the maintainer under PUL v1.1, Section 11 (CONTRIBUTIONS AND
+COPYRIGHT ASSIGNMENT).
+
+--------------------------------------------------------------------------------
+MODIFICATIONS LOG (PUL v1.1, Section 5)
+--------------------------------------------------------------------------------
+
+  Date        | Author (name/handle)   | Summary of modifications
+  ------------|------------------------|------------------------------------
+  2026-09-24  | Gaetano Minardi        | Nuovo repo LLMEnv (scheletro); aggiunta licenza PUL v1.1
+
+--------------------------------------------------------------------------------
+
+Notifications (PUL v1.1, Section 6): gmbasic@maxxcom.it
+Commercial licenses: directly from the Author.
+Trademark notice: no trademark or branding rights are granted (PUL v1.1, Section 13).
+
+END OF NOTICE

@@ -1,0 +1,228 @@
+PERSONAL USE LICENSE (PUL) v1.1
+
+Copyright (c) 2026 Gaetano Minardi
+All Rights Reserved.
+
+1. DEFINITIONS
+
+"Software" means all files of the GMBasic project in every edition, version
+and distribution form, including without limitation the files contained in
+the repositories:
+  https://github.com/c-vision/GMBasic
+  https://github.com/c-vision/GMBasicCommunity
+  https://github.com/c-vision/GMBasicRetro
+and in any future repository or branch of the project, whether private or
+public.
+
+"Author" means Gaetano Minardi.
+
+"License" means this Personal Use License (PUL) v1.1, exactly as published by
+the Author.
+
+"Derivative Work" means any work based on or incorporating the Software, in
+whole or in part, including forks, modifications, translations, adaptations
+and ports.
+
+"Distribute" means to make available to any third party, publicly or
+privately, in source or binary form, including via public repositories.
+
+"Personal Use" means use by a natural person for personal, educational or
+non-commercial research purposes, outside of any business, professional or
+organizational activity.
+
+"Commercial Use" means any use intended to obtain direct or indirect
+commercial advantage, revenue, compensation or business benefit.
+
+2. LICENSE GRANT
+
+Subject to full and continuing compliance with all terms of this License,
+permission is granted to any natural person to:
+
+- Clone the repository.
+- Download the source code.
+- Compile and execute the Software.
+- Study the Software.
+- Modify the Software.
+- Create public or private GitHub forks.
+- Submit pull requests.
+- Create Derivative Works.
+- Use the Software solely for Personal Use.
+
+This License is a conditional permission, not a transfer of ownership. No
+rights are granted by implication, estoppel or otherwise.
+
+3. NO SUBLICENSING
+
+The rights granted by this License are personal and non-transferable. No
+licensee may sublicense the Software or any Derivative Work. Each recipient
+of the Software or of a Derivative Work receives rights exclusively and
+directly from the Author under this License.
+
+4. SHARE-ALIKE — LICENSE OF DERIVATIVE WORKS
+
+Every Derivative Work, if Distributed:
+
+- MUST be licensed, in its entirety, under this exact License (PUL v1.1),
+  without any addition, removal, replacement or modification of its terms;
+- MUST NOT be offered under any other license, whether more permissive or
+  more restrictive, in whole or in part, including dual licensing;
+- MUST NOT grant, or purport to grant, any right not granted by this License.
+
+Any attempt to relicense the Software or a Derivative Work is void and
+constitutes a violation under Section 12.
+
+Only the Author may publish new or modified versions of this License.
+Derivative Works may not be migrated to a different license version without
+the Author's prior written consent.
+
+5. ATTRIBUTION
+
+Every copy, fork or Derivative Work MUST:
+
+- retain this License as its LICENSE file, unaltered;
+- retain all copyright notices;
+- identify Gaetano Minardi as the original author;
+- include a visible link to:
+  https://github.com/c-vision/GMBasicCommunity
+- carry prominent notices stating that modifications have been made, by whom,
+  and on what date.
+
+6. NOTIFICATION OF MODIFICATIONS
+
+Anyone who Distributes a Derivative Work MUST notify the Author within thirty
+(30) days of first Distribution. The notification MUST include:
+
+- the name or handle of the person who made the modifications;
+- the URL of the repository or the means of distribution;
+- a summary of the modifications made.
+
+Notifications shall be sent to the Author via the contact channel indicated
+in the original repository (or, if unavailable, via a GitHub issue on the
+original repository).
+
+Purely private modifications, never Distributed, are exempt from this
+notification requirement.
+
+7. FORKS
+
+GitHub forks are permitted under the terms of this License.
+
+Forks MUST:
+
+- always reference the original repository;
+- not imply, by name, description or presentation, that they are the original
+  project or are endorsed by the Author;
+- comply with Sections 4, 5 and 6.
+
+8. REDISTRIBUTION
+
+Redistribution of the Software, modified or unmodified, is permitted only if:
+
+- this License accompanies every copy;
+- all attribution requirements of Section 5 remain intact;
+- no fee is charged for the Software itself;
+- recipients are made aware that their use is governed by this License.
+
+9. COMMERCIAL USE
+
+Commercial Use is STRICTLY PROHIBITED without prior written permission from
+the Author.
+
+Commercial Use includes, without limitation:
+
+- selling the Software or Derivative Works;
+- selling binaries;
+- SaaS or hosted services;
+- consulting services based on the Software;
+- internal business use by any company, organization or public body;
+- embedding into commercial products;
+- paid support based primarily on the Software;
+- resale or sublicensing.
+
+A separate commercial license may be obtained from the Author (Section 17).
+
+10. AI TRAINING
+
+The Software may not be used to train, fine-tune, benchmark, optimize or
+improve any machine learning, artificial intelligence or large language model
+without prior written permission from the Author. This prohibition applies to
+the Software in source and binary form and to any Derivative Work.
+
+11. CONTRIBUTIONS AND COPYRIGHT ASSIGNMENT
+
+11.1  The Author (Gaetano Minardi) is the sole maintainer of the Software.
+
+11.2  By submitting any Contribution (code, documentation, configuration,
+      tests, or any derivative work, whether via pull request, patch, email,
+      or any other channel), the Contributor:
+        (a) irrevocably assigns to the Author all right, title and interest,
+            including all copyright and other intellectual property rights,
+            in and to the Contribution;
+        (b) represents that the Contributor has the legal authority to make
+            this assignment;
+        (c) warrants that the Contribution is the Contributor's original
+            work or that the Contributor has the right to grant the rights
+            conveyed by this License.
+
+11.3  The Author, as sole copyright holder, has the exclusive right to
+      accept, modify, merge, redistribute, and re-license any Contribution.
+      A Contribution is not part of the Software until the Author
+      explicitly incorporates it.
+
+11.4  This assignment is automatic and does not require a separate written
+      agreement, but the Author may, at their discretion, require a signed
+      individual contribution assignment before incorporating a
+      Contribution.
+
+12. TERMINATION
+
+Any violation of this License immediately and automatically terminates all
+rights granted herein, without notice.
+
+Upon termination, the violator MUST cease all use and Distribution of the
+Software and of any Derivative Work and delete all copies in their
+possession, except as required by law.
+
+Sections 5, 11, 13, 14, 15 and 16 survive termination. The Author may, at
+their sole discretion, reinstate rights upon full cure of the violation.
+
+13. TRADEMARKS
+
+No trademark or branding rights are granted. The names "GMBASIC", "GMBasic",
+"GMBasicCommunity", "GMBasicRetro" and "Gaetano Minardi" may be used only for
+the attribution required by Section 5.
+
+14. DISCLAIMER
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
+
+15. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OF OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+16. GOVERNING LAW AND SEVERABILITY
+
+This License is governed by the laws of Italy. The competent courts of Italy
+shall have exclusive jurisdiction.
+
+If any provision of this License is held to be unenforceable, it shall be
+reformed only to the extent necessary to make it enforceable, and the
+remaining provisions shall remain in full force and effect.
+
+17. COMMERCIAL LICENSING
+
+Commercial licenses are available directly from:
+
+Gaetano Minardi
+(contact details available in the original repository)
+
+18. RESERVATION OF RIGHTS
+
+All rights not expressly granted are reserved by the Author.
+
+END OF LICENSE
