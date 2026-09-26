@@ -1,37 +1,45 @@
 # LLMEnv
 
-**Soluzione C** con due progetti **separati**, consumati come **librerie statiche** da GMBasic e FastLLM:
+**Soluzione C** con **progetti CMake autonomi** (uno per responsabilità, **grafo aciclico**), consumati
+come **librerie statiche** da **GMBasic** e **FastLLM**. C# resta **adapter via P/Invoke**.
 
-| progetto | ruolo | sorgente attuale |
-|---|---|---|
-| **LLMEngine** | **motore di inferenza** — MLX (mlx-c + kernel Metal), GGUF e futuri formati/backend | da estrarre da `GMBasic/native/gmb_host_ai_mlx/` (94 `.c` + 128 `.h`, monolite `gmb_host_ai_mlx.c` da 29.003 righe) |
-| **LLMCodec** | **codec di formati e quantizzazione** — GGUF (parse/write), safetensors, 34 tipi quant, `rolemap`/`.gmbarch`, converter GGUF↔MLX, `moe_quant`, `fp8/fp4`, plugin | da estrarre da `GMBasic/native/gmb_ggml_codec/` (già autonomo: solo `libm`) |
+> **Ambito = `mlx-lm`** (una *libreria* di inferenza): tokenizer + codec/quant + modelli/runner +
+> sampling. **NON** server HTTP, **NON** agenti, **NON** runtime BASIC — quelli restano nei consumatori.
 
-> **Perché non "MLX" nel nome.** Il motore non è solo MLX: legge GGUF e gestirà altri formati → un
-> nome MLX-centrico sarebbe riduttivo e falso.
-
-## Struttura
+## Layer (basso → alto)
 
 ```
-LLMEnv/
-├── LLMEngine/     # solo ciò che è specifico del motore
-├── LLMCodec/      # solo ciò che è specifico del codec
-└── common/        # include/file comuni ai due (una o più cartelle)
+LLMToken(1)   LLMCodec(2)   LLMDesc(3)   LLMMetal(4)
+        └──────── LLMEngine(5, ABI) ────────┘
+                     ├── LLMEngineMLX  (mlx/)
+                     ├── LLMEngineLlama (llama/)
+                     └── LLMEngineMoE  (moe/)
+                 LLMModelIO(6)  ← 1,2,3
+common/  → include/build/helper CONDIVISI fra i layer
 ```
 
-Nella **root** vanno solo i comuni (include condivisi, build); il resto nelle due sottocartelle.
+| # | progetto | responsabilità | dip. |
+|---|---|---|---|
+| 1 | **LLMToken** | lettore tokenizer.json/tiktoken/WordPiece; encode/decode + export | cJSON, PCRE2, sds |
+| 2 | **LLMCodec** | formati GGUF/safetensors + codec quant (plugin). Non legge tokenizer. | solo formato |
+| 3 | **LLMDesc** | role-map `.llmarch` (era `.gmbarch`) + descrizione modello | — |
+| 4 | **LLMMetal** | kernel Metal (GEMV/KV/MPP/OQ) | Metal |
+| 5 | **LLMEngine** (ABI) | interfaccia common runner: load/prefill/decode/KV/sampling | 2,3,4 |
+| 5a/b/c | **LLMEngineMLX / Llama / MoE** | i runner | 5 |
+| 6 | **LLMModelIO** | conversione/quant (MLX↔GGUF) | 1,2,3 |
 
 ## Confini (vincolanti)
 
-- `LLMEngine` e `LLMCodec` **non citano mai GMBasic** (i wrapper verso il compilatore/GPM restano in
-  GMBasic) né **FastLLM**.
-- Dipendenza a senso unico: **GMBasic → LLMEnv**, **FastLLM → LLMEnv**. Mai il contrario.
-- ABI pubbliche: `llmengine.h`, `llmcodec.h` (handle opachi, errori a codici enum, `*_free_str`).
+- **Mai `gmb_`** nei nomi del motore (usare `llm`/`LLM`); `.gmbarch` → `.llmarch`; env del motore `LLM_*`.
+- `LLMEngine`/`LLMCodec` **non citano** GMBasic né FastLLM. Dipendenza a senso unico:
+  **GMBasic → LLMEnv**, **FastLLM → LLMEnv**.
+- **GMBasic** possiede il runtime BASIC + agenti + compilatore; **FastLLM** possiede tutto il suo serving.
 
 ## Stato
 
-**Scheletro.** Il codice non è ancora estratto: un'altra sessione sta completando DeepSeek 4.1 Flash
-nel motore+codec di GMBasic. L'estrazione parte **solo dopo** il congelamento di quella versione.
+**Scheletro.** La scomposizione è **già stata implementata dentro GMBasic** (con nomi `gmb_*`):
+`gmb_model_desc`, `gmb_metal`, `gmb_llm_engine`, `gmb_model_io`, `gmb_plugin`. Il residuo è:
+**rename `gmb_*`→`llm*`**, **esternalizzazione** qui, **split del runner MLX** (`gmb_host_ai_mlx`, 30.883
+righe).
 
-Piano e prove: `AiWiki/01-Projects/LLMEnv/` (`Piani/(open) - Piano-LLMEnv-LLMEngine-LLMCodec.md`,
-`Knowledge/Inventario-Recupero-da-MLXEngine.md`).
+Piano e prove: `AiWiki/01-Projects/LLMEnv/` (`Piani/`, `Knowledge/`, `Todo/(open) - Decisioni-Aperte-LLMEnv.md`).
