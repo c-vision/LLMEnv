@@ -1280,12 +1280,9 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
                         if (rows == 1) {
                             /* DECODE (1 vettore): niente take_axis/stack — 1 kernel, reshape out. */
                             int s1[1] = { K };
-                            mlx_array rv = mlx_array_new(), pk3 = mlx_array_new(), sc3 = mlx_array_new(), y = mlx_array_new();
-                            int p3[3] = { 1, O, cw }, s3[3] = { 1, O, NG };
+                            mlx_array rv = mlx_array_new(), y = mlx_array_new();
                             if (mlx_reshape(&rv, Xh, s1, 1, stream) == 0 &&
-                                mlx_reshape(&pk3, w, p3, 3, stream) == 0 &&
-                                mlx_reshape(&sc3, scales, s3, 3, stream) == 0 &&
-                                llm_mlx_tq_qmv(&y, pk3, sc3, CB, rv, 0, K, O, NG, cw, bits3, grp, trit, stream) == 0) {
+                                llm_mlx_tq_qmv(&y, w, scales, CB, rv, 0, K, O, NG, cw, bits3, grp, trit, stream) == 0) {
                                 mlx_array yc = mlx_array_new();
                                 bool aokc = (mlx_array_dtype(y) == mlx_array_dtype(x)) ? (mlx_array_set(&yc, y) == 0) : (mlx_astype(&yc, y, mlx_array_dtype(x), stream) == 0);
                                 if (aokc) {
@@ -1296,7 +1293,7 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
                                     if (mlx_reshape(&yr, yc, shp, nd, stream) == 0) {
                                         mlx_array_set(res, yr); mlx_array_free(yr);
                                         mlx_array_free(yc);
-                                        mlx_array_free(y); mlx_array_free(sc3); mlx_array_free(pk3); mlx_array_free(rv);
+                                        mlx_array_free(y); mlx_array_free(rv);
                                         mlx_array_free(Xh); mlx_array_free(Xr); mlx_array_free(X2);
                                         return true;
                                     }
@@ -1304,7 +1301,7 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
                                 }
                                 mlx_array_free(yc);
                             }
-                            mlx_array_free(y); mlx_array_free(sc3); mlx_array_free(pk3); mlx_array_free(rv);
+                            mlx_array_free(y); mlx_array_free(rv);
                         } else {
                         mlx_vector_array ys = mlx_vector_array_new();
                         int ok = 1;
@@ -1317,15 +1314,11 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
                                 int s1[1] = { K };
                                 mlx_array rv = mlx_array_new();
                                 if (mlx_reshape(&rv, row, s1, 1, stream) != 0) ok = 0;
-                                mlx_array pk3 = mlx_array_new(); int p3[3] = { 1, O, cw };
-                                mlx_array sc3 = mlx_array_new(); int s3[3] = { 1, O, NG };
                                 mlx_array y = mlx_array_new();
-                                if (ok && mlx_reshape(&pk3, w, p3, 3, stream) == 0 &&
-                                    mlx_reshape(&sc3, scales, s3, 3, stream) == 0 &&
-                                    llm_mlx_tq_qmv(&y, pk3, sc3, CB, rv, 0, K, O, NG, cw, bits3, grp, trit, stream) == 0)
+                                if (ok && llm_mlx_tq_qmv(&y, w, scales, CB, rv, 0, K, O, NG, cw, bits3, grp, trit, stream) == 0)
                                     mlx_vector_array_append_value(ys, y);
                                 else ok = 0;
-                                mlx_array_free(y); mlx_array_free(sc3); mlx_array_free(pk3); mlx_array_free(rv);
+                                mlx_array_free(y); mlx_array_free(rv);
                             }
                             mlx_array_free(row);
                         }
