@@ -68,6 +68,20 @@ fi
 
 echo "== LLMEnv build_ai_libs: rid=$RID  build=$BUILD_DIR  dist=$DIST"
 
+# Fix Metal-4.1 NAX (idempotente). I kernel NAX (tensor unit M5) di MLX 0.32.x NON compilano
+# col compilatore Metal 4.1 (`32023.921`): errore address-space in `steel/{attn,gemm}/nax.h`.
+# Il fix upstream (mlx #3963) è in 0.32.1+, ma 0.32.1+ cambia l'API `compile` (rompe mlx-c
+# 0.6.0). Si applica il SOLO fix Metal alla cache mlx-src, mantenendo l'API 0.32.0.
+MLXSRC="$ROOT/libs/mlx-deps/mlx-src"
+NAXPATCH="$ROOT/LLMEngine/mlx/patches/mlx_metal41_nax.patch"
+if [ -d "$MLXSRC/mlx/backend/metal/kernels" ] && [ -f "$NAXPATCH" ]; then
+    if patch -p1 --forward --dry-run --silent -d "$MLXSRC" < "$NAXPATCH" >/dev/null 2>&1; then
+        patch -p1 --forward -d "$MLXSRC" < "$NAXPATCH" >/dev/null && echo "== applicato fix Metal-4.1 NAX a mlx-src"
+    else
+        echo "== fix Metal-4.1 NAX gia' applicato (o non applicabile)"
+    fi
+fi
+
 # Superbuild: layer base + engine (plugin, moe, llama, mlx). MLX è Apple-Silicon-only;
 # su altre piattaforme il target mlx viene comunque configurato ma è l'unico che
 # richiede Metal. Build dell'intero grafo.

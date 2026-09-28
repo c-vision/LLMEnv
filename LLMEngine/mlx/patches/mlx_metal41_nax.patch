@@ -1,0 +1,3882 @@
+From ef5fc0fab27c63e6976e96b07c234c9e2601d8a7 Mon Sep 17 00:00:00 2001
+From: Valentin Roussellet <vroussellet@apple.com>
+Date: Tue, 4 Aug 2026 00:37:39 -0700
+Subject: [PATCH] Fix implicit `thread` address space qualifier becoming
+ explicit in metal 4.1  (#3963)
+
+---
+ cmake/extension.cmake                         |   3 +-
+ docs/src/dev/extensions.rst                   |  26 +++
+ mlx/backend/metal/kernels/CMakeLists.txt      |   3 +-
+ mlx/backend/metal/kernels/arg_reduce.metal    |   8 +-
+ mlx/backend/metal/kernels/atomic.h            |  12 +-
+ mlx/backend/metal/kernels/binary_ops.h        |  84 ++++-----
+ mlx/backend/metal/kernels/complex.h           |   5 +-
+ mlx/backend/metal/kernels/fft/readwrite.h     |  79 ++++-----
+ mlx/backend/metal/kernels/fp4.h               |   8 +-
+ mlx/backend/metal/kernels/fp8.h               |  14 +-
+ mlx/backend/metal/kernels/fp_quantized.h      |  18 +-
+ mlx/backend/metal/kernels/fp_quantized_nax.h  |  18 +-
+ mlx/backend/metal/kernels/gemv_masked.h       |   4 +-
+ mlx/backend/metal/kernels/logging.h           |   2 +-
+ mlx/backend/metal/kernels/quantized.h         |  14 +-
+ mlx/backend/metal/kernels/quantized_nax.h     |  28 +--
+ mlx/backend/metal/kernels/reduction/ops.h     |  75 ++++----
+ mlx/backend/metal/kernels/scan.h              |  44 ++---
+ mlx/backend/metal/kernels/sort.h              |   2 +-
+ .../steel/attn/kernels/steel_attention_nax.h  |   4 +-
+ mlx/backend/metal/kernels/steel/attn/loader.h |  28 +--
+ mlx/backend/metal/kernels/steel/attn/mma.h    |  58 ++++---
+ mlx/backend/metal/kernels/steel/attn/nax.h    |  71 ++++----
+ .../metal/kernels/steel/attn/transforms.h     |   8 +-
+ .../steel/conv/loaders/loader_channel_l.h     |  48 ++---
+ .../steel/conv/loaders/loader_channel_n.h     |  16 +-
+ .../steel/conv/loaders/loader_general.h       |  20 +--
+ .../steel/gemm/kernels/steel_gemm_masked.h    |   4 +-
+ mlx/backend/metal/kernels/steel/gemm/loader.h |  14 +-
+ mlx/backend/metal/kernels/steel/gemm/mma.h    |  87 ++++++----
+ mlx/backend/metal/kernels/steel/gemm/nax.h    |  71 ++++----
+ .../metal/kernels/steel/gemm/transforms.h     |   8 +-
+ .../kernels/steel/utils/integral_constant.h   |   5 +-
+ mlx/backend/metal/kernels/ternary_ops.h       |   2 +-
+ mlx/backend/metal/kernels/unary_ops.h         | 164 +++++++++---------
+ mlx/backend/metal/kernels/utils.h             |  27 +--
+ 36 files changed, 584 insertions(+), 498 deletions(-)
+
+diff --git a/cmake/extension.cmake b/cmake/extension.cmake
+index 13db804a1c..2f244a14f2 100644
+--- a/cmake/extension.cmake
++++ b/cmake/extension.cmake
+@@ -26,7 +26,8 @@ macro(mlx_build_metallib)
+   set(MTLLIB_BUILD_TARGET "${MTLLIB_OUTPUT_DIRECTORY}/${MTLLIB_TITLE}.metallib")
+ 
+   # Collect compile options
+-  set(MTLLIB_COMPILE_OPTIONS -Wall -Wextra -fno-fast-math -Wno-c++17-extensions)
++  set(MTLLIB_COMPILE_OPTIONS -Wall -Wextra -fno-fast-math -Wno-c++17-extensions
++                             -Wmetal-addr-spaces)
+   if(MLX_METAL_DEBUG OR MTLLIB_DEBUG)
+     set(MTLLIB_COMPILE_OPTIONS ${MTLLIB_COMPILE_OPTIONS} -gline-tables-only
+                                -frecord-sources)
+diff --git a/docs/src/dev/extensions.rst b/docs/src/dev/extensions.rst
+index f98f096a0d..89c8991e56 100644
+--- a/docs/src/dev/extensions.rst
++++ b/docs/src/dev/extensions.rst
+@@ -330,6 +330,32 @@ GPU kernels in MLX are written using Metal.
+     * Documentation for metal shading language: `Metal Specification`_
+     * Using metal from C++: `Metal-cpp`_
+ 
++.. note::
++
++    As of Metal 4.1, the implicit address space of ``this`` in a member function
++    is ``__metal_generic`` rather than ``thread``. Member functions in Metal
++    shading code should therefore carry an explicit address space qualifier,
++    written after the parameter list:
++
++    .. code-block:: C++
++
++        struct Accumulator {
++            float vals[4];
++            thread float& at(short i) thread {
++                return vals[i];
++            }
++        };
++
++    Without the trailing ``thread``, returning a ``thread``-qualified reference
++    to a member no longer compiles::
++
++        error: reference to type 'thread float' could not bind to an lvalue
++        of type '__metal_generic float'
++
++    Metal libraries built with ``mlx_build_metallib`` are compiled with
++    ``-Wmetal-addr-spaces``, which reports a missing qualifier as a warning on
++    toolchains where it is not yet an error.
++
+ Let's keep the GPU kernel simple. We will launch exactly as many threads as
+ there are elements in the output. Each thread will pick the element it needs
+ from ``x`` and ``y``, do the point-wise operation, and update its assigned
+diff --git a/mlx/backend/metal/kernels/CMakeLists.txt b/mlx/backend/metal/kernels/CMakeLists.txt
+index 2bd99d2375..6d9a0883f0 100644
+--- a/mlx/backend/metal/kernels/CMakeLists.txt
++++ b/mlx/backend/metal/kernels/CMakeLists.txt
+@@ -17,7 +17,8 @@ function(build_kernel_base TARGET SRCFILE DEPS)
+       -Wextra
+       -fno-fast-math
+       -Wno-c++17-extensions
+-      -Wno-c++20-extensions)
++      -Wno-c++20-extensions
++      -Wmetal-addr-spaces)
+   if(MLX_METAL_DEBUG)
+     set(METAL_FLAGS ${METAL_FLAGS} -gline-tables-only -frecord-sources)
+   endif()
+diff --git a/mlx/backend/metal/kernels/arg_reduce.metal b/mlx/backend/metal/kernels/arg_reduce.metal
+index 4a83d8e57e..6ce20555f7 100644
+--- a/mlx/backend/metal/kernels/arg_reduce.metal
++++ b/mlx/backend/metal/kernels/arg_reduce.metal
+@@ -16,7 +16,7 @@ template <typename U>
+ struct ArgMin {
+   static constexpr constant U init = Limits<U>::max;
+ 
+-  IndexValPair<U> reduce(IndexValPair<U> best, IndexValPair<U> current) {
++  IndexValPair<U> reduce(IndexValPair<U> best, IndexValPair<U> current) thread {
+     if (best.val > current.val ||
+         (best.val == current.val && best.index > current.index)) {
+       return current;
+@@ -27,7 +27,7 @@ struct ArgMin {
+ 
+   template <int N>
+   IndexValPair<U>
+-  reduce_many(IndexValPair<U> best, thread U* vals, uint32_t offset) {
++  reduce_many(IndexValPair<U> best, thread U* vals, uint32_t offset) thread {
+     for (int i = 0; i < N; i++) {
+       if (vals[i] < best.val) {
+         best.val = vals[i];
+@@ -42,7 +42,7 @@ template <typename U>
+ struct ArgMax {
+   static constexpr constant U init = Limits<U>::min;
+ 
+-  IndexValPair<U> reduce(IndexValPair<U> best, IndexValPair<U> current) {
++  IndexValPair<U> reduce(IndexValPair<U> best, IndexValPair<U> current) thread {
+     if (best.val < current.val ||
+         (best.val == current.val && best.index > current.index)) {
+       return current;
+@@ -53,7 +53,7 @@ struct ArgMax {
+ 
+   template <int N>
+   IndexValPair<U>
+-  reduce_many(IndexValPair<U> best, thread U* vals, uint32_t offset) {
++  reduce_many(IndexValPair<U> best, thread U* vals, uint32_t offset) thread {
+     for (int i = 0; i < N; i++) {
+       if (vals[i] > best.val) {
+         best.val = vals[i];
+diff --git a/mlx/backend/metal/kernels/atomic.h b/mlx/backend/metal/kernels/atomic.h
+index 76362f58ae..3835fff024 100644
+--- a/mlx/backend/metal/kernels/atomic.h
++++ b/mlx/backend/metal/kernels/atomic.h
+@@ -172,7 +172,7 @@ union uint_or_packed {
+ 
+ template <typename T, typename Op>
+ struct mlx_atomic_update_helper {
+-  uint operator()(uint_or_packed<T> init, T update, size_t elem_offset) {
++  uint operator()(uint_or_packed<T> init, T update, size_t elem_offset) thread {
+     Op op;
+     init.val[elem_offset] = op(update, init.val[elem_offset]);
+     return init.bits;
+@@ -209,7 +209,7 @@ struct __None {
+     return true;
+   }
+ 
+-  T operator()(T a, T b) {
++  T operator()(T a, T b) thread {
+ #pragma unused(b)
+     return a;
+   }
+@@ -223,7 +223,7 @@ struct __Add {
+     return true;
+   }
+ 
+-  T operator()(T a, T b) {
++  T operator()(T a, T b) thread {
+     return a + b;
+   }
+ };
+@@ -235,7 +235,7 @@ struct __Mul {
+     return b != 0;
+   }
+ 
+-  T operator()(T a, T b) {
++  T operator()(T a, T b) thread {
+     return a * b;
+   }
+ };
+@@ -246,7 +246,7 @@ struct __Max {
+     return a > b;
+   }
+ 
+-  T operator()(T a, T b) {
++  T operator()(T a, T b) thread {
+     return max(a, b);
+   }
+ };
+@@ -257,7 +257,7 @@ struct __Min {
+     return a < b;
+   }
+ 
+-  T operator()(T a, T b) {
++  T operator()(T a, T b) thread {
+     return min(a, b);
+   }
+ };
+diff --git a/mlx/backend/metal/kernels/binary_ops.h b/mlx/backend/metal/kernels/binary_ops.h
+index 4e3d881fe0..863d6369e2 100644
+--- a/mlx/backend/metal/kernels/binary_ops.h
++++ b/mlx/backend/metal/kernels/binary_ops.h
+@@ -9,33 +9,33 @@ constant mlx::os_log logger("mlx", "binary_ops");
+ 
+ struct Add {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x + y;
+   }
+ };
+ 
+ struct FloorDivide {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x / y;
+   }
+   template <>
+-  float operator()(float x, float y) {
++  float operator()(float x, float y) thread {
+     return trunc(x / y);
+   }
+   template <>
+-  half operator()(half x, half y) {
++  half operator()(half x, half y) thread {
+     return trunc(x / y);
+   }
+   template <>
+-  bfloat16_t operator()(bfloat16_t x, bfloat16_t y) {
++  bfloat16_t operator()(bfloat16_t x, bfloat16_t y) thread {
+     return trunc(x / y);
+   }
+ };
+ 
+ struct Divide {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x / y;
+   }
+ };
+@@ -43,12 +43,12 @@ struct Divide {
+ struct Remainder {
+   template <typename T>
+   metal::enable_if_t<metal::is_integral_v<T> & !metal::is_signed_v<T>, T>
+-  operator()(T x, T y) {
++  operator()(T x, T y) thread {
+     return x % y;
+   }
+   template <typename T>
+   metal::enable_if_t<metal::is_integral_v<T> & metal::is_signed_v<T>, T>
+-  operator()(T x, T y) {
++  operator()(T x, T y) thread {
+     auto r = x % y;
+     if (r != 0 && (r < 0 != y < 0)) {
+       r += y;
+@@ -56,7 +56,7 @@ struct Remainder {
+     return r;
+   }
+   template <typename T>
+-  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T x, T y) {
++  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T x, T y) thread {
+     T r = fmod(x, y);
+     if (r != 0 && (r < 0 != y < 0)) {
+       r += y;
+@@ -64,25 +64,25 @@ struct Remainder {
+     return r;
+   }
+   template <>
+-  complex64_t operator()(complex64_t x, complex64_t y) {
++  complex64_t operator()(complex64_t x, complex64_t y) thread {
+     return x % y;
+   }
+ };
+ 
+ struct Equal {
+   template <typename T>
+-  bool operator()(T x, T y) {
++  bool operator()(T x, T y) thread {
+     return x == y;
+   }
+ };
+ 
+ struct NaNEqual {
+   template <typename T>
+-  bool operator()(T x, T y) {
++  bool operator()(T x, T y) thread {
+     return x == y || (metal::isnan(x) && metal::isnan(y));
+   }
+   template <>
+-  bool operator()(complex64_t x, complex64_t y) {
++  bool operator()(complex64_t x, complex64_t y) thread {
+     return x == y ||
+         (metal::isnan(x.real) && metal::isnan(y.real) && metal::isnan(x.imag) &&
+          metal::isnan(y.imag)) ||
+@@ -93,35 +93,35 @@ struct NaNEqual {
+ 
+ struct Greater {
+   template <typename T>
+-  bool operator()(T x, T y) {
++  bool operator()(T x, T y) thread {
+     return x > y;
+   }
+ };
+ 
+ struct GreaterEqual {
+   template <typename T>
+-  bool operator()(T x, T y) {
++  bool operator()(T x, T y) thread {
+     return x >= y;
+   }
+ };
+ 
+ struct Less {
+   template <typename T>
+-  bool operator()(T x, T y) {
++  bool operator()(T x, T y) thread {
+     return x < y;
+   }
+ };
+ 
+ struct LessEqual {
+   template <typename T>
+-  bool operator()(T x, T y) {
++  bool operator()(T x, T y) thread {
+     return x <= y;
+   }
+ };
+ 
+ struct LogAddExp {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     if (metal::isnan(x) || metal::isnan(y)) {
+       return metal::numeric_limits<T>::quiet_NaN();
+     }
+@@ -133,7 +133,7 @@ struct LogAddExp {
+         : (maxval + log1p(metal::exp(minval - maxval)));
+   };
+ 
+-  complex64_t operator()(complex64_t x, complex64_t y) {
++  complex64_t operator()(complex64_t x, complex64_t y) thread {
+     if (metal::isnan(x.real) || metal::isnan(x.imag) || metal::isnan(y.real) ||
+         metal::isnan(y.imag)) {
+       return metal::numeric_limits<float>::quiet_NaN();
+@@ -154,12 +154,12 @@ struct LogAddExp {
+ 
+ struct Maximum {
+   template <typename T>
+-  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T x, T y) {
++  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T x, T y) thread {
+     return metal::max(x, y);
+   }
+ 
+   template <typename T>
+-  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T x, T y) {
++  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T x, T y) thread {
+     if (metal::isnan(x)) {
+       return x;
+     }
+@@ -167,7 +167,7 @@ struct Maximum {
+   }
+ 
+   template <>
+-  complex64_t operator()(complex64_t x, complex64_t y) {
++  complex64_t operator()(complex64_t x, complex64_t y) thread {
+     if (metal::isnan(x.real) || metal::isnan(x.imag)) {
+       return x;
+     }
+@@ -177,12 +177,12 @@ struct Maximum {
+ 
+ struct Minimum {
+   template <typename T>
+-  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T x, T y) {
++  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T x, T y) thread {
+     return metal::min(x, y);
+   }
+ 
+   template <typename T>
+-  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T x, T y) {
++  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T x, T y) thread {
+     if (metal::isnan(x)) {
+       return x;
+     }
+@@ -190,7 +190,7 @@ struct Minimum {
+   }
+ 
+   template <>
+-  complex64_t operator()(complex64_t x, complex64_t y) {
++  complex64_t operator()(complex64_t x, complex64_t y) thread {
+     if (metal::isnan(x.real) || metal::isnan(x.imag)) {
+       return x;
+     }
+@@ -200,30 +200,32 @@ struct Minimum {
+ 
+ struct Multiply {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x * y;
+   }
+ };
+ 
+ struct NotEqual {
+   template <typename T>
+-  bool operator()(T x, T y) {
++  bool operator()(T x, T y) thread {
+     return x != y;
+   }
+   template <>
+-  bool operator()(complex64_t x, complex64_t y) {
++  bool operator()(complex64_t x, complex64_t y) thread {
+     return x.real != y.real || x.imag != y.imag;
+   }
+ };
+ 
+ struct Power {
+   template <typename T>
+-  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T base, T exp) {
++  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T base, T exp)
++      thread {
+     return metal::pow(base, exp);
+   }
+ 
+   template <typename T>
+-  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T base, T exp) {
++  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T base, T exp)
++      thread {
+     T res = 1;
+     // Undefined to raise integer to negative power
+     if (exp < 0) {
+@@ -243,7 +245,7 @@ struct Power {
+   }
+ 
+   template <>
+-  complex64_t operator()(complex64_t x, complex64_t y) {
++  complex64_t operator()(complex64_t x, complex64_t y) thread {
+     if (x.real == 0 && x.imag == 0) {
+       if (metal::isnan(y.real) || metal::isnan(y.imag)) {
+         auto nan = metal::numeric_limits<float>::quiet_NaN();
+@@ -261,70 +263,70 @@ struct Power {
+ 
+ struct Subtract {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x - y;
+   }
+ };
+ 
+ struct LogicalAnd {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x && y;
+   };
+ };
+ 
+ struct LogicalOr {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x || y;
+   };
+ };
+ 
+ struct BitwiseAnd {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x & y;
+   };
+ };
+ 
+ struct BitwiseOr {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x | y;
+   };
+ };
+ 
+ struct BitwiseXor {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x ^ y;
+   };
+ };
+ 
+ struct LeftShift {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x << y;
+   };
+ };
+ 
+ struct RightShift {
+   template <typename T>
+-  T operator()(T x, T y) {
++  T operator()(T x, T y) thread {
+     return x >> y;
+   };
+ };
+ 
+ struct ArcTan2 {
+   template <typename T>
+-  T operator()(T y, T x) {
++  T operator()(T y, T x) thread {
+     return metal::precise::atan2(y, x);
+   }
+ };
+ 
+ struct DivMod {
+   template <typename T>
+-  metal::array<T, 2> operator()(T x, T y) {
++  metal::array<T, 2> operator()(T x, T y) thread {
+     return {FloorDivide{}(x, y), Remainder{}(x, y)};
+   };
+ };
+diff --git a/mlx/backend/metal/kernels/complex.h b/mlx/backend/metal/kernels/complex.h
+index 6e391483d3..5f654332b3 100644
+--- a/mlx/backend/metal/kernels/complex.h
++++ b/mlx/backend/metal/kernels/complex.h
+@@ -22,8 +22,9 @@ struct complex64_t {
+   float imag;
+ 
+   // Constructors
+-  constexpr complex64_t(float real, float imag) : real(real), imag(imag) {};
+-  constexpr complex64_t() : real(0), imag(0) {};
++  constexpr complex64_t(float real, float imag) thread : real(real),
++                                                         imag(imag) {};
++  constexpr complex64_t() thread : real(0), imag(0) {};
+   constexpr complex64_t() threadgroup : real(0), imag(0) {};
+ 
+   // Conversions to complex64_t
+diff --git a/mlx/backend/metal/kernels/fft/readwrite.h b/mlx/backend/metal/kernels/fft/readwrite.h
+index 0dc62992e6..3d1b23f4ed 100644
+--- a/mlx/backend/metal/kernels/fft/readwrite.h
++++ b/mlx/backend/metal/kernels/fft/readwrite.h
+@@ -57,16 +57,15 @@ struct ReadWriter {
+       const short elems_per_thread_,
+       const uint3 elem_,
+       const uint3 grid_,
+-      const bool inv_)
+-      : in(in_),
+-        buf(buf_),
+-        out(out_),
+-        n(n_),
+-        batch_size(batch_size_),
+-        elems_per_thread(elems_per_thread_),
+-        elem(elem_),
+-        grid(grid_),
+-        inv(inv_) {
++      const bool inv_) thread : in(in_),
++                                buf(buf_),
++                                out(out_),
++                                n(n_),
++                                batch_size(batch_size_),
++                                elems_per_thread(elems_per_thread_),
++                                elem(elem_),
++                                grid(grid_),
++                                inv(inv_) {
+     // Account for padding on last threadgroup
+     threads_per_tg = elem.x == grid.x - 1
+         ? (batch_size - (grid.x - 1) * grid.y) * grid.z
+@@ -74,30 +73,30 @@ struct ReadWriter {
+   }
+ 
+   // ifft(x) = 1/n * conj(fft(conj(x)))
+-  METAL_FUNC float2 post_in(float2 elem) const {
++  METAL_FUNC float2 post_in(float2 elem) const thread {
+     return inv ? float2(elem.x, -elem.y) : elem;
+   }
+ 
+   // Handle float case for generic RFFT alg
+-  METAL_FUNC float2 post_in(float elem) const {
++  METAL_FUNC float2 post_in(float elem) const thread {
+     return float2(elem, 0);
+   }
+ 
+-  METAL_FUNC float2 pre_out(float2 elem) const {
++  METAL_FUNC float2 pre_out(float2 elem) const thread {
+     return inv ? float2(elem.x / n, -elem.y / n) : elem;
+   }
+ 
+-  METAL_FUNC float2 pre_out(float2 elem, int length) const {
++  METAL_FUNC float2 pre_out(float2 elem, int length) const thread {
+     return inv ? float2(elem.x / length, -elem.y / length) : elem;
+   }
+ 
+-  METAL_FUNC bool out_of_bounds() const {
++  METAL_FUNC bool out_of_bounds() const thread {
+     // Account for possible extra threadgroups
+     int grid_index = elem.x * grid.y + elem.y;
+     return grid_index >= batch_size;
+   }
+ 
+-  METAL_FUNC void load() const {
++  METAL_FUNC void load() const thread {
+     size_t batch_idx = size_t(elem.x * grid.y) * n;
+     short tg_idx = elem.y * grid.z + elem.z;
+     short max_index = grid.y * n - 2;
+@@ -120,7 +119,7 @@ struct ReadWriter {
+     }
+   }
+ 
+-  METAL_FUNC void write() const {
++  METAL_FUNC void write() const thread {
+     size_t batch_idx = size_t(elem.x * grid.y) * n;
+     short tg_idx = elem.y * grid.z + elem.z;
+     short max_index = grid.y * n - 2;
+@@ -143,7 +142,8 @@ struct ReadWriter {
+   }
+ 
+   // Padded IO for Bluestein's algorithm
+-  METAL_FUNC void load_padded(int length, const device float2* w_k) const {
++  METAL_FUNC void load_padded(int length, const device float2* w_k)
++      const thread {
+     size_t batch_idx = size_t(elem.x * grid.y) * length + elem.y * length;
+     int fft_idx = elem.z;
+     int m = grid.z;
+@@ -160,7 +160,8 @@ struct ReadWriter {
+     }
+   }
+ 
+-  METAL_FUNC void write_padded(int length, const device float2* w_k) const {
++  METAL_FUNC void write_padded(int length, const device float2* w_k)
++      const thread {
+     size_t batch_idx = size_t(elem.x * grid.y) * length + elem.y * length;
+     int fft_idx = elem.z;
+     int m = grid.z;
+@@ -177,7 +178,7 @@ struct ReadWriter {
+   }
+ 
+   // Strided IO for four step FFT
+-  METAL_FUNC void compute_strided_indices(int stride, int overall_n) {
++  METAL_FUNC void compute_strided_indices(int stride, int overall_n) thread {
+     // Use the batch threadgroup dimension to coalesce memory accesses:
+     // e.g. stride = 12
+     // device      | shared mem
+@@ -199,7 +200,7 @@ struct ReadWriter {
+   }
+ 
+   // Four Step FFT First Step
+-  METAL_FUNC void load_strided(int stride, int overall_n) {
++  METAL_FUNC void load_strided(int stride, int overall_n) thread {
+     compute_strided_indices(stride, overall_n);
+     for (int e = 0; e < elems_per_thread; e++) {
+       buf[strided_shared_idx + e] =
+@@ -207,7 +208,7 @@ struct ReadWriter {
+     }
+   }
+ 
+-  METAL_FUNC void write_strided(int stride, int overall_n) {
++  METAL_FUNC void write_strided(int stride, int overall_n) thread {
+     for (int e = 0; e < elems_per_thread; e++) {
+       float2 output = buf[strided_shared_idx + e];
+       int combined_idx = (strided_device_idx + e * stride) % overall_n;
+@@ -223,7 +224,7 @@ struct ReadWriter {
+ template <>
+ METAL_FUNC void ReadWriter<float2, float2, /*step=*/1>::load_strided(
+     int stride,
+-    int overall_n) {
++    int overall_n) thread {
+   // Silence compiler warnings
+   (void)stride;
+   (void)overall_n;
+@@ -237,7 +238,7 @@ METAL_FUNC void ReadWriter<float2, float2, /*step=*/1>::load_strided(
+ template <>
+ METAL_FUNC void ReadWriter<float2, float2, /*step=*/1>::write_strided(
+     int stride,
+-    int overall_n) {
++    int overall_n) thread {
+   compute_strided_indices(stride, overall_n);
+   for (int e = 0; e < elems_per_thread; e++) {
+     float2 output = buf[strided_shared_idx + e];
+@@ -253,14 +254,14 @@ METAL_FUNC void ReadWriter<float2, float2, /*step=*/1>::write_strided(
+ //
+ // This roughly doubles the throughput over the regular FFT.
+ template <>
+-METAL_FUNC bool ReadWriter<float, float2>::out_of_bounds() const {
++METAL_FUNC bool ReadWriter<float, float2>::out_of_bounds() const thread {
+   int grid_index = elem.x * grid.y + elem.y;
+   // We pack two sequences into one for RFFTs
+   return grid_index * 2 >= batch_size;
+ }
+ 
+ template <>
+-METAL_FUNC void ReadWriter<float, float2>::load() const {
++METAL_FUNC void ReadWriter<float, float2>::load() const thread {
+   size_t batch_idx = size_t(elem.x * grid.y) * n * 2 + elem.y * n * 2;
+   threadgroup float2* seq_buf = buf + elem.y * n;
+ 
+@@ -280,7 +281,7 @@ METAL_FUNC void ReadWriter<float, float2>::load() const {
+ }
+ 
+ template <>
+-METAL_FUNC void ReadWriter<float, float2>::write() const {
++METAL_FUNC void ReadWriter<float, float2>::write() const thread {
+   short n_over_2 = (n / 2) + 1;
+ 
+   size_t batch_idx =
+@@ -317,7 +318,7 @@ METAL_FUNC void ReadWriter<float, float2>::write() const {
+ template <>
+ METAL_FUNC void ReadWriter<float, float2>::load_padded(
+     int length,
+-    const device float2* w_k) const {
++    const device float2* w_k) const thread {
+   size_t batch_idx = size_t(elem.x * grid.y) * length * 2 + elem.y * length * 2;
+   threadgroup float2* seq_buf = buf + elem.y * n;
+ 
+@@ -344,7 +345,7 @@ METAL_FUNC void ReadWriter<float, float2>::load_padded(
+ template <>
+ METAL_FUNC void ReadWriter<float, float2>::write_padded(
+     int length,
+-    const device float2* w_k) const {
++    const device float2* w_k) const thread {
+   int length_over_2 = (length / 2) + 1;
+   size_t batch_idx =
+       size_t(elem.x * grid.y) * length_over_2 * 2 + elem.y * length_over_2 * 2;
+@@ -389,14 +390,14 @@ METAL_FUNC void ReadWriter<float, float2>::write_padded(
+ // x_k = Re(Z_k)
+ // Y_k = Imag(Z_k)
+ template <>
+-METAL_FUNC bool ReadWriter<float2, float>::out_of_bounds() const {
++METAL_FUNC bool ReadWriter<float2, float>::out_of_bounds() const thread {
+   int grid_index = elem.x * grid.y + elem.y;
+   // We pack two sequences into one for IRFFTs
+   return grid_index * 2 >= batch_size;
+ }
+ 
+ template <>
+-METAL_FUNC void ReadWriter<float2, float>::load() const {
++METAL_FUNC void ReadWriter<float2, float>::load() const thread {
+   short n_over_2 = (n / 2) + 1;
+   size_t batch_idx =
+       size_t(elem.x * grid.y) * n_over_2 * 2 + elem.y * n_over_2 * 2;
+@@ -435,7 +436,7 @@ METAL_FUNC void ReadWriter<float2, float>::load() const {
+ }
+ 
+ template <>
+-METAL_FUNC void ReadWriter<float2, float>::write() const {
++METAL_FUNC void ReadWriter<float2, float>::write() const thread {
+   int batch_idx = elem.x * grid.y * n * 2 + elem.y * n * 2;
+   threadgroup float2* seq_buf = buf + elem.y * n;
+ 
+@@ -456,7 +457,7 @@ METAL_FUNC void ReadWriter<float2, float>::write() const {
+ template <>
+ METAL_FUNC void ReadWriter<float2, float>::load_padded(
+     int length,
+-    const device float2* w_k) const {
++    const device float2* w_k) const thread {
+   int n_over_2 = (n / 2) + 1;
+   int length_over_2 = (length / 2) + 1;
+ 
+@@ -504,7 +505,7 @@ METAL_FUNC void ReadWriter<float2, float>::load_padded(
+ template <>
+ METAL_FUNC void ReadWriter<float2, float>::write_padded(
+     int length,
+-    const device float2* w_k) const {
++    const device float2* w_k) const thread {
+   size_t batch_idx = size_t(elem.x * grid.y) * length * 2 + elem.y * length * 2;
+   threadgroup float2* seq_buf = buf + elem.y * n + length - 1;
+ 
+@@ -531,7 +532,7 @@ template <>
+ METAL_FUNC void
+ ReadWriter<float2, float2, /*step=*/1, /*real=*/true>::load_strided(
+     int stride,
+-    int overall_n) {
++    int overall_n) thread {
+   // Silence compiler warnings
+   (void)stride;
+   (void)overall_n;
+@@ -546,7 +547,7 @@ template <>
+ METAL_FUNC void
+ ReadWriter<float2, float2, /*step=*/1, /*real=*/true>::write_strided(
+     int stride,
+-    int overall_n) {
++    int overall_n) thread {
+   int overall_n_over_2 = overall_n / 2 + 1;
+   int coalesce_width = grid.y;
+   int tg_idx = elem.y * grid.z + elem.z;
+@@ -575,7 +576,7 @@ template <>
+ METAL_FUNC void
+ ReadWriter<float2, float2, /*step=*/0, /*real=*/true>::load_strided(
+     int stride,
+-    int overall_n) {
++    int overall_n) thread {
+   int overall_n_over_2 = overall_n / 2 + 1;
+   auto conj = float2(1, -1);
+ 
+@@ -600,7 +601,7 @@ template <>
+ METAL_FUNC void
+ ReadWriter<float2, float, /*step=*/1, /*real=*/true>::load_strided(
+     int stride,
+-    int overall_n) {
++    int overall_n) thread {
+   // Silence compiler warnings
+   (void)stride;
+   (void)overall_n;
+@@ -614,7 +615,7 @@ template <>
+ METAL_FUNC void
+ ReadWriter<float2, float, /*step=*/1, /*real=*/true>::write_strided(
+     int stride,
+-    int overall_n) {
++    int overall_n) thread {
+   compute_strided_indices(stride, overall_n);
+ 
+   for (int e = 0; e < elems_per_thread; e++) {
+diff --git a/mlx/backend/metal/kernels/fp4.h b/mlx/backend/metal/kernels/fp4.h
+index 25642f2016..47bf4dda6f 100644
+--- a/mlx/backend/metal/kernels/fp4.h
++++ b/mlx/backend/metal/kernels/fp4.h
+@@ -1,7 +1,7 @@
+ #pragma once
+ 
+ struct fp4_e2m1 {
+-  fp4_e2m1(float x) {
++  fp4_e2m1(float x) thread {
+     if (metal::isnan(x)) {
+       bits = 0x7;
+       return;
+@@ -30,17 +30,17 @@ struct fp4_e2m1 {
+     bits |= sign_bit;
+   }
+ 
+-  operator float16_t() {
++  operator float16_t() thread {
+     half converted = as_type<half>(ushort((bits & 7) << 9));
+     converted *= 16384.0;
+     return bits & 8 ? -converted : converted;
+   }
+ 
+-  operator float() {
++  operator float() thread {
+     return static_cast<float>(this->operator float16_t());
+   }
+ 
+-  operator bfloat16_t() {
++  operator bfloat16_t() thread {
+     return static_cast<bfloat16_t>(this->operator float16_t());
+   }
+ 
+diff --git a/mlx/backend/metal/kernels/fp8.h b/mlx/backend/metal/kernels/fp8.h
+index 60d34be694..796dd21639 100644
+--- a/mlx/backend/metal/kernels/fp8.h
++++ b/mlx/backend/metal/kernels/fp8.h
+@@ -2,7 +2,7 @@
+ 
+ struct fp8_e4m3 {
+   template <typename T>
+-  fp8_e4m3(T f) {
++  fp8_e4m3(T f) thread {
+     // From PyTorch
+     // https://github.com/pytorch/pytorch/blob/e3643e1e0e923f0fc063dfab6f45c956d568919d/c10/util/Float8_e4m3fn.h#L148
+     uint32_t fp8_max = 543 << 21;
+@@ -29,7 +29,7 @@ struct fp8_e4m3 {
+     bits |= static_cast<uint8_t>(sign >> 24);
+   }
+ 
+-  operator float16_t() {
++  operator float16_t() thread {
+     uint16_t v = (bits & 127) << 7;
+     half converted = as_type<half>(v);
+     converted *= 256.0;
+@@ -37,11 +37,11 @@ struct fp8_e4m3 {
+     return (sign ? -converted : converted);
+   }
+ 
+-  operator bfloat16_t() {
++  operator bfloat16_t() thread {
+     return static_cast<bfloat16_t>(this->operator float16_t());
+   }
+ 
+-  operator float() {
++  operator float() thread {
+     return static_cast<float>(this->operator float16_t());
+   }
+ 
+@@ -49,7 +49,7 @@ struct fp8_e4m3 {
+ };
+ 
+ struct fp8_e8m0 {
+-  fp8_e8m0(float x) {
++  fp8_e8m0(float x) thread {
+     if (!metal::isfinite(x)) {
+       bits = 0xFF;
+       return;
+@@ -66,12 +66,12 @@ struct fp8_e8m0 {
+     bits = static_cast<uint8_t>(n + 127);
+   }
+ 
+-  operator bfloat16_t() {
++  operator bfloat16_t() thread {
+     uint16_t out = (bits == 0 ? 0x40 : (static_cast<uint16_t>(bits) << 7));
+     return as_type<bfloat16_t>(out);
+   }
+ 
+-  operator float() {
++  operator float() thread {
+     uint32_t out = (bits == 0 ? 0x400000 : (static_cast<uint16_t>(bits) << 23));
+     return as_type<float>(out);
+   }
+diff --git a/mlx/backend/metal/kernels/fp_quantized.h b/mlx/backend/metal/kernels/fp_quantized.h
+index 677183fa92..85d4284ac3 100644
+--- a/mlx/backend/metal/kernels/fp_quantized.h
++++ b/mlx/backend/metal/kernels/fp_quantized.h
+@@ -39,7 +39,7 @@ static inline T dequantize_scale(uint8_t s) {
+ 
+ template <int bits>
+ struct Quantize {
+-  uint8_t operator()(float x) {
++  uint8_t operator()(float x) thread {
+     if (bits == 8) {
+       return fp8_e4m3(x).bits;
+     } else {
+@@ -50,7 +50,7 @@ struct Quantize {
+ 
+ template <int bits, typename U = float>
+ struct Dequantize {
+-  U operator()(uint8_t x) {
++  U operator()(uint8_t x) thread {
+     if constexpr (bits == 8) {
+       return U(*(thread fp8_e4m3*)(&x));
+     } else {
+@@ -186,15 +186,15 @@ struct QuantizedBlockLoader {
+       const int src_ld_,
+       threadgroup T* dst_,
+       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+-      ushort simd_lane_id [[thread_index_in_simdgroup]])
++      ushort simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(src_ld_),
+         tile_stride(
+-            reduction_dim ? BCOLS_PACKED * bytes_per_pack
++            reduction_dim ? BCOLS_PACKED* bytes_per_pack
+                           : BROWS * src_ld * bytes_per_pack / pack_factor),
+         group_step_cnt(0),
+-        group_stride(BROWS * src_ld / group_size),
++        group_stride(BROWS* src_ld / group_size),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+-        bi(n_reads * thread_idx / BCOLS_PACKED),
++        bi(n_reads* thread_idx / BCOLS_PACKED),
+         bj((n_reads * thread_idx) % BCOLS_PACKED),
+         dst(dst_ + bi * dst_ld + bj * pack_factor),
+         src(src_ + bi * src_ld * bytes_per_pack / pack_factor +
+@@ -203,7 +203,7 @@ struct QuantizedBlockLoader {
+             scales_ + bi * src_ld / group_size +
+             (bj * pack_factor) / group_size) {}
+ 
+-  void load_unsafe() const {
++  void load_unsafe() const thread {
+     if (BCOLS_PACKED * BROWS < tgp_size && bi >= BROWS) {
+       return;
+     }
+@@ -215,7 +215,7 @@ struct QuantizedBlockLoader {
+     }
+   }
+ 
+-  void load_safe(short2 src_tile_dim) const {
++  void load_safe(short2 src_tile_dim) const thread {
+     if (BCOLS_PACKED * BROWS < tgp_size && bi >= BROWS) {
+       return;
+     }
+@@ -241,7 +241,7 @@ struct QuantizedBlockLoader {
+     }
+   }
+ 
+-  void next() {
++  void next() thread {
+     src += tile_stride;
+     if (reduction_dim == 1) {
+       if (group_steps > 1) {
+diff --git a/mlx/backend/metal/kernels/fp_quantized_nax.h b/mlx/backend/metal/kernels/fp_quantized_nax.h
+index 0ea6af168e..7c452e6a64 100644
+--- a/mlx/backend/metal/kernels/fp_quantized_nax.h
++++ b/mlx/backend/metal/kernels/fp_quantized_nax.h
+@@ -39,7 +39,7 @@ static inline T dequantize_scale(uint8_t s) {
+ 
+ template <int bits>
+ struct Quantize {
+-  uint8_t operator()(float x) {
++  uint8_t operator()(float x) thread {
+     if (bits == 8) {
+       return fp8_e4m3(x).bits;
+     } else {
+@@ -50,7 +50,7 @@ struct Quantize {
+ 
+ template <int bits, typename U = float>
+ struct Dequantize {
+-  U operator()(uint8_t x) {
++  U operator()(uint8_t x) thread {
+     if constexpr (bits == 8) {
+       return U(*(thread fp8_e4m3*)(&x));
+     } else {
+@@ -112,14 +112,14 @@ struct QuantizedBlockLoader {
+       const int src_ld_,
+       threadgroup T* dst_,
+       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+-      ushort simd_lane_id [[thread_index_in_simdgroup]])
++      ushort simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(src_ld_),
+         tile_stride(
+-            reduction_dim ? BCOLS_PACKED * bytes_per_pack
++            reduction_dim ? BCOLS_PACKED* bytes_per_pack
+                           : BROWS * src_ld * bytes_per_pack / pack_factor),
+-        group_stride(BROWS * src_ld / group_size),
++        group_stride(BROWS* src_ld / group_size),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+-        bi(n_reads * thread_idx / BCOLS_PACKED),
++        bi(n_reads* thread_idx / BCOLS_PACKED),
+         bj((n_reads * thread_idx) % BCOLS_PACKED),
+         group_id((bj * pack_factor) / group_size),
+         dst(dst_ + bi * dst_ld + bj * pack_factor),
+@@ -127,7 +127,7 @@ struct QuantizedBlockLoader {
+             bj * bytes_per_pack),
+         scales(scales_ + bi * src_ld / group_size + group_id) {}
+ 
+-  void load_unsafe() const {
++  void load_unsafe() const thread {
+     if (BCOLS_PACKED * BROWS < tgp_size && bi >= BROWS) {
+       return;
+     }
+@@ -143,7 +143,7 @@ struct QuantizedBlockLoader {
+     }
+   }
+ 
+-  void load_safe(short2 src_tile_dim) const {
++  void load_safe(short2 src_tile_dim) const thread {
+     if (BCOLS_PACKED * BROWS < tgp_size && bi >= BROWS) {
+       return;
+     }
+@@ -173,7 +173,7 @@ struct QuantizedBlockLoader {
+     }
+   }
+ 
+-  void next() {
++  void next() thread {
+     src += tile_stride;
+     if (reduction_dim == 1) {
+       scales += n_groups;
+diff --git a/mlx/backend/metal/kernels/gemv_masked.h b/mlx/backend/metal/kernels/gemv_masked.h
+index 407d14bb4b..58ab744050 100644
+--- a/mlx/backend/metal/kernels/gemv_masked.h
++++ b/mlx/backend/metal/kernels/gemv_masked.h
+@@ -10,7 +10,7 @@ using namespace metal;
+ struct _NoMask {
+   char x;
+ 
+-  constexpr METAL_FUNC operator bool() {
++  constexpr METAL_FUNC operator bool() thread {
+     return true;
+   }
+   constexpr METAL_FUNC operator bool() const threadgroup {
+@@ -30,7 +30,7 @@ template <typename OutT, typename InT = OutT>
+ struct ScaleOp {
+   OutT scale;
+ 
+-  METAL_FUNC OutT apply(InT x) const {
++  METAL_FUNC OutT apply(InT x) const thread {
+     return static_cast<OutT>(x) * scale;
+   }
+ };
+diff --git a/mlx/backend/metal/kernels/logging.h b/mlx/backend/metal/kernels/logging.h
+index 7b3ee04674..d7446c7222 100644
+--- a/mlx/backend/metal/kernels/logging.h
++++ b/mlx/backend/metal/kernels/logging.h
+@@ -16,7 +16,7 @@ struct os_log {
+   constexpr os_log(constant char*, constant char*) constant {}
+ 
+   template <typename... Args>
+-  void log_debug(constant char*, Args...) const {}
++  void log_debug(constant char*, Args...) const thread {}
+ 
+   template <typename... Args>
+   void log_debug(constant char*, Args...) const constant {}
+diff --git a/mlx/backend/metal/kernels/quantized.h b/mlx/backend/metal/kernels/quantized.h
+index 345dfc711e..1820ce3423 100644
+--- a/mlx/backend/metal/kernels/quantized.h
++++ b/mlx/backend/metal/kernels/quantized.h
+@@ -610,15 +610,15 @@ struct QuantizedBlockLoader {
+       const int src_ld_,
+       threadgroup T* dst_,
+       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+-      ushort simd_lane_id [[thread_index_in_simdgroup]])
++      ushort simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(src_ld_),
+         tile_stride(
+-            reduction_dim ? BCOLS_PACKED * bytes_per_pack
++            reduction_dim ? BCOLS_PACKED* bytes_per_pack
+                           : BROWS * src_ld * bytes_per_pack / pack_factor),
+         group_step_cnt(0),
+-        group_stride(BROWS * src_ld / group_size),
++        group_stride(BROWS* src_ld / group_size),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+-        bi(n_reads * thread_idx / BCOLS_PACKED),
++        bi(n_reads* thread_idx / BCOLS_PACKED),
+         bj((n_reads * thread_idx) % BCOLS_PACKED),
+         dst(dst_ + bi * dst_ld + bj * pack_factor),
+         src(src_ + bi * src_ld * bytes_per_pack / pack_factor +
+@@ -626,7 +626,7 @@ struct QuantizedBlockLoader {
+         scales(scales_ + bi * src_ld / group_size),
+         biases(biases_ + bi * src_ld / group_size) {}
+ 
+-  void load_unsafe() const {
++  void load_unsafe() const thread {
+     if (BCOLS_PACKED * BROWS < tgp_size && bi >= BROWS) {
+       return;
+     }
+@@ -639,7 +639,7 @@ struct QuantizedBlockLoader {
+     }
+   }
+ 
+-  void load_safe(short2 src_tile_dim) const {
++  void load_safe(short2 src_tile_dim) const thread {
+     if (BCOLS_PACKED * BROWS < tgp_size && bi >= BROWS) {
+       return;
+     }
+@@ -669,7 +669,7 @@ struct QuantizedBlockLoader {
+     }
+   }
+ 
+-  void next() {
++  void next() thread {
+     src += tile_stride;
+     if (reduction_dim == 1) {
+       if (group_steps > 1) {
+diff --git a/mlx/backend/metal/kernels/quantized_nax.h b/mlx/backend/metal/kernels/quantized_nax.h
+index d50af8679a..e67be9a06d 100644
+--- a/mlx/backend/metal/kernels/quantized_nax.h
++++ b/mlx/backend/metal/kernels/quantized_nax.h
+@@ -612,15 +612,15 @@ struct QuantizedBlockLoader {
+       const int src_ld_,
+       threadgroup T* dst_,
+       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+-      ushort simd_lane_id [[thread_index_in_simdgroup]])
++      ushort simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(src_ld_),
+         tile_stride(
+-            reduction_dim ? BCOLS_PACKED * bytes_per_pack
++            reduction_dim ? BCOLS_PACKED* bytes_per_pack
+                           : BROWS * src_ld * bytes_per_pack / pack_factor),
+         group_step_cnt(0),
+-        group_stride(BROWS * src_ld / group_size),
++        group_stride(BROWS* src_ld / group_size),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+-        bi(n_reads * thread_idx / BCOLS_PACKED),
++        bi(n_reads* thread_idx / BCOLS_PACKED),
+         bj((n_reads * thread_idx) % BCOLS_PACKED),
+         dst(dst_ + bi * dst_ld + bj * pack_factor),
+         src(src_ + bi * src_ld * bytes_per_pack / pack_factor +
+@@ -628,7 +628,7 @@ struct QuantizedBlockLoader {
+         scales(scales_ + bi * src_ld / group_size),
+         biases(biases_ + bi * src_ld / group_size) {}
+ 
+-  void load_unsafe() const {
++  void load_unsafe() const thread {
+     if (BCOLS_PACKED * BROWS < tgp_size && bi >= BROWS) {
+       return;
+     }
+@@ -641,7 +641,7 @@ struct QuantizedBlockLoader {
+     }
+   }
+ 
+-  void load_safe(short2 src_tile_dim) const {
++  void load_safe(short2 src_tile_dim) const thread {
+     if (BCOLS_PACKED * BROWS < tgp_size && bi >= BROWS) {
+       return;
+     }
+@@ -671,7 +671,7 @@ struct QuantizedBlockLoader {
+     }
+   }
+ 
+-  void next() {
++  void next() thread {
+     src += tile_stride;
+     if (reduction_dim == 1) {
+       if (group_steps > 1) {
+@@ -752,14 +752,14 @@ struct QuantizedBlockLoader<
+       const int src_ld_,
+       threadgroup T* dst_,
+       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+-      ushort simd_lane_id [[thread_index_in_simdgroup]])
++      ushort simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(src_ld_),
+         tile_stride(
+-            reduction_dim ? BCOLS_PACKED * bytes_per_pack
++            reduction_dim ? BCOLS_PACKED* bytes_per_pack
+                           : BROWS * src_ld * bytes_per_pack / pack_factor),
+-        group_stride(BROWS * src_ld / group_size),
++        group_stride(BROWS* src_ld / group_size),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+-        bi(n_reads * thread_idx / BCOLS_PACKED),
++        bi(n_reads* thread_idx / BCOLS_PACKED),
+         bj((n_reads * thread_idx) % BCOLS_PACKED),
+         group_id((bj * pack_factor) / group_size),
+         dst(dst_ + bi * dst_ld + bj * pack_factor),
+@@ -768,7 +768,7 @@ struct QuantizedBlockLoader<
+         scales(scales_ + bi * src_ld / group_size + group_id),
+         biases(biases_ + bi * src_ld / group_size + group_id) {}
+ 
+-  void load_unsafe() const {
++  void load_unsafe() const thread {
+     if (BCOLS_PACKED * BROWS < tgp_size && bi >= BROWS) {
+       return;
+     }
+@@ -781,7 +781,7 @@ struct QuantizedBlockLoader<
+     }
+   }
+ 
+-  void load_safe(short2 src_tile_dim) const {
++  void load_safe(short2 src_tile_dim) const thread {
+     if (BCOLS_PACKED * BROWS < tgp_size && bi >= BROWS) {
+       return;
+     }
+@@ -811,7 +811,7 @@ struct QuantizedBlockLoader<
+     }
+   }
+ 
+-  void next() {
++  void next() thread {
+     src += tile_stride;
+     if (reduction_dim == 1) {
+       // if (group_steps > 1) {
+diff --git a/mlx/backend/metal/kernels/reduction/ops.h b/mlx/backend/metal/kernels/reduction/ops.h
+index 11d8e83ac6..b7a9cacb39 100644
+--- a/mlx/backend/metal/kernels/reduction/ops.h
++++ b/mlx/backend/metal/kernels/reduction/ops.h
+@@ -7,12 +7,12 @@
+ 
+ #define DEFINE_SIMD_REDUCE()                                             \
+   template <typename T, metal::enable_if_t<sizeof(T) < 8, bool> = true>  \
+-  T simd_reduce(T val) {                                                 \
++  T simd_reduce(T val) thread {                                          \
+     return simd_reduce_impl(val);                                        \
+   }                                                                      \
+                                                                          \
+   template <typename T, metal::enable_if_t<sizeof(T) == 8, bool> = true> \
+-  T simd_reduce(T val) {                                                 \
++  T simd_reduce(T val) thread {                                          \
+     for (short i = simd_size / 2; i > 0; i /= 2) {                       \
+       val = operator()(val, simd_shuffle_down(val, i));                  \
+     }                                                                    \
+@@ -28,7 +28,8 @@ union bool4_or_uint {
+ 
+ struct None {
+   template <typename T>
+-  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0) {
++  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0)
++      thread {
+     mlx_atomic_store_explicit(out, val, offset);
+   }
+ };
+@@ -37,7 +38,7 @@ template <typename U = bool>
+ struct And {
+   DEFINE_SIMD_REDUCE()
+ 
+-  bool simd_reduce_impl(bool val) {
++  bool simd_reduce_impl(bool val) thread {
+     return simd_all(val);
+   }
+ 
+@@ -47,7 +48,7 @@ struct And {
+       device mlx_atomic<unsigned int>* out,
+       bool val,
+       int elem_idx,
+-      size_t offset = 0) {
++      size_t offset = 0) thread {
+     if (!val) {
+       bool4_or_uint update;
+       update.b = {true, true, true, true};
+@@ -56,20 +57,20 @@ struct And {
+     }
+   }
+ 
+-  void
+-  atomic_update(device mlx_atomic<bool>* out, bool val, size_t offset = 0) {
++  void atomic_update(device mlx_atomic<bool>* out, bool val, size_t offset = 0)
++      thread {
+     if (!val) {
+       mlx_atomic_store_explicit(out, val, offset);
+     }
+   }
+ 
+   // Non atomic update
+-  void update(device bool* out, bool val) {
++  void update(device bool* out, bool val) thread {
+     *out &= val;
+   }
+ 
+   // Operator
+-  bool operator()(bool a, bool b) {
++  bool operator()(bool a, bool b) thread {
+     return a && b;
+   }
+ };
+@@ -78,7 +79,7 @@ template <typename U = bool>
+ struct Or {
+   DEFINE_SIMD_REDUCE()
+ 
+-  bool simd_reduce_impl(bool val) {
++  bool simd_reduce_impl(bool val) thread {
+     return simd_any(val);
+   }
+ 
+@@ -88,7 +89,7 @@ struct Or {
+       device mlx_atomic<unsigned int>* out,
+       bool val,
+       int elem_idx,
+-      size_t offset = 0) {
++      size_t offset = 0) thread {
+     if (val) {
+       bool4_or_uint update;
+       update.b = {false, false, false, false};
+@@ -97,20 +98,20 @@ struct Or {
+     }
+   }
+ 
+-  void
+-  atomic_update(device mlx_atomic<bool>* out, bool val, size_t offset = 0) {
++  void atomic_update(device mlx_atomic<bool>* out, bool val, size_t offset = 0)
++      thread {
+     if (val) {
+       mlx_atomic_store_explicit(out, val, offset);
+     }
+   }
+ 
+   // Non atomic update
+-  void update(device bool* out, bool val) {
++  void update(device bool* out, bool val) thread {
+     *out |= val;
+   }
+ 
+   // Operator
+-  bool operator()(bool a, bool b) {
++  bool operator()(bool a, bool b) thread {
+     return a || b;
+   }
+ };
+@@ -120,19 +121,20 @@ struct Sum {
+   DEFINE_SIMD_REDUCE()
+ 
+   template <typename T>
+-  T simd_reduce_impl(T val) {
++  T simd_reduce_impl(T val) thread {
+     return simd_sum(val);
+   }
+ 
+   static constexpr constant U init = U(0);
+ 
+   template <typename T>
+-  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0) {
++  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0)
++      thread {
+     mlx_atomic_fetch_add_explicit(out, val, offset);
+   }
+ 
+   // Operator
+-  U operator()(U a, U b) {
++  U operator()(U a, U b) thread {
+     return a + b;
+   }
+ };
+@@ -142,19 +144,20 @@ struct Prod {
+   DEFINE_SIMD_REDUCE()
+ 
+   template <typename T>
+-  T simd_reduce_impl(T val) {
++  T simd_reduce_impl(T val) thread {
+     return simd_product(val);
+   }
+ 
+   static constexpr constant U init = U(1);
+ 
+   template <typename T>
+-  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0) {
++  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0)
++      thread {
+     mlx_atomic_fetch_mul_explicit(out, val, offset);
+   }
+ 
+   // Operator
+-  U operator()(U a, U b) {
++  U operator()(U a, U b) thread {
+     return a * b;
+   }
+ };
+@@ -164,12 +167,14 @@ struct Min {
+   DEFINE_SIMD_REDUCE()
+ 
+   template <typename T>
+-  metal::enable_if_t<metal::is_integral_v<T>, T> simd_reduce_impl(T val) {
++  metal::enable_if_t<metal::is_integral_v<T>, T> simd_reduce_impl(
++      T val) thread {
+     return simd_min(val);
+   }
+ 
+   template <typename T>
+-  metal::enable_if_t<!metal::is_integral_v<T>, T> simd_reduce_impl(T val) {
++  metal::enable_if_t<!metal::is_integral_v<T>, T> simd_reduce_impl(
++      T val) thread {
+     if (simd_any(val != val)) {
+       return static_cast<T>(NAN);
+     }
+@@ -179,18 +184,19 @@ struct Min {
+   static constexpr constant U init = Limits<U>::max;
+ 
+   template <typename T>
+-  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0) {
++  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0)
++      thread {
+     mlx_atomic_fetch_min_explicit(out, val, offset);
+   }
+ 
+   // Operator
+   template <typename T>
+-  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T a, T b) {
++  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T a, T b) thread {
+     return a < b ? a : b;
+   }
+ 
+   template <typename T>
+-  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T a, T b) {
++  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T a, T b) thread {
+     if (metal::isnan(a) || metal::isnan(b)) {
+       return static_cast<T>(NAN);
+     } else {
+@@ -199,7 +205,7 @@ struct Min {
+   }
+ 
+   template <>
+-  complex64_t operator()(complex64_t a, complex64_t b) {
++  complex64_t operator()(complex64_t a, complex64_t b) thread {
+     bool real_is_nan = metal::isnan(a.real) || metal::isnan(b.real);
+     bool imag_is_nan = metal::isnan(a.imag) || metal::isnan(b.imag);
+ 
+@@ -221,12 +227,14 @@ struct Max {
+   DEFINE_SIMD_REDUCE()
+ 
+   template <typename T>
+-  metal::enable_if_t<metal::is_integral_v<T>, T> simd_reduce_impl(T val) {
++  metal::enable_if_t<metal::is_integral_v<T>, T> simd_reduce_impl(
++      T val) thread {
+     return simd_max(val);
+   }
+ 
+   template <typename T>
+-  metal::enable_if_t<!metal::is_integral_v<T>, T> simd_reduce_impl(T val) {
++  metal::enable_if_t<!metal::is_integral_v<T>, T> simd_reduce_impl(
++      T val) thread {
+     if (simd_any(val != val)) {
+       return static_cast<T>(NAN);
+     }
+@@ -236,18 +244,19 @@ struct Max {
+   static constexpr constant U init = Limits<U>::min;
+ 
+   template <typename T>
+-  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0) {
++  void atomic_update(device mlx_atomic<T>* out, T val, size_t offset = 0)
++      thread {
+     mlx_atomic_fetch_max_explicit(out, val, offset);
+   }
+ 
+   // Operator
+   template <typename T>
+-  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T a, T b) {
++  metal::enable_if_t<metal::is_integral_v<T>, T> operator()(T a, T b) thread {
+     return a > b ? a : b;
+   }
+ 
+   template <typename T>
+-  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T a, T b) {
++  metal::enable_if_t<!metal::is_integral_v<T>, T> operator()(T a, T b) thread {
+     if (metal::isnan(a) || metal::isnan(b)) {
+       return static_cast<T>(NAN);
+     } else {
+@@ -256,7 +265,7 @@ struct Max {
+   }
+ 
+   template <>
+-  complex64_t operator()(complex64_t a, complex64_t b) {
++  complex64_t operator()(complex64_t a, complex64_t b) thread {
+     bool real_is_nan = metal::isnan(a.real) || metal::isnan(b.real);
+     bool imag_is_nan = metal::isnan(a.imag) || metal::isnan(b.imag);
+ 
+diff --git a/mlx/backend/metal/kernels/scan.h b/mlx/backend/metal/kernels/scan.h
+index 16682613b9..a6bfde0018 100644
+--- a/mlx/backend/metal/kernels/scan.h
++++ b/mlx/backend/metal/kernels/scan.h
+@@ -6,12 +6,12 @@
+ 
+ #define DEFINE_SIMD_SCAN()                                               \
+   template <typename T, metal::enable_if_t<sizeof(T) < 8, bool> = true>  \
+-  T simd_scan(T val) {                                                   \
++  T simd_scan(T val) thread {                                            \
+     return simd_scan_impl(val);                                          \
+   }                                                                      \
+                                                                          \
+   template <typename T, metal::enable_if_t<sizeof(T) == 8, bool> = true> \
+-  T simd_scan(T val) {                                                   \
++  T simd_scan(T val) thread {                                            \
+     for (int i = 1; i <= 16; i *= 2) {                                   \
+       val = operator()(val, simd_shuffle_and_fill_up(val, init, i));     \
+     }                                                                    \
+@@ -20,12 +20,12 @@
+ 
+ #define DEFINE_SIMD_EXCLUSIVE_SCAN()                                     \
+   template <typename T, metal::enable_if_t<sizeof(T) < 8, bool> = true>  \
+-  T simd_exclusive_scan(T val) {                                         \
++  T simd_exclusive_scan(T val) thread {                                  \
+     return simd_exclusive_scan_impl(val);                                \
+   }                                                                      \
+                                                                          \
+   template <typename T, metal::enable_if_t<sizeof(T) == 8, bool> = true> \
+-  T simd_exclusive_scan(T val) {                                         \
++  T simd_exclusive_scan(T val) thread {                                  \
+     val = simd_scan(val);                                                \
+     return simd_shuffle_and_fill_up(val, init, 1);                       \
+   }
+@@ -38,15 +38,15 @@ struct CumSum {
+   static constexpr constant U init = static_cast<U>(0);
+ 
+   template <typename T>
+-  U operator()(U a, T b) {
++  U operator()(U a, T b) thread {
+     return a + b;
+   }
+ 
+-  U simd_scan_impl(U x) {
++  U simd_scan_impl(U x) thread {
+     return simd_prefix_inclusive_sum(x);
+   }
+ 
+-  U simd_exclusive_scan_impl(U x) {
++  U simd_exclusive_scan_impl(U x) thread {
+     return simd_prefix_exclusive_sum(x);
+   }
+ };
+@@ -59,15 +59,15 @@ struct CumProd {
+   static constexpr constant U init = static_cast<U>(1.0f);
+ 
+   template <typename T>
+-  U operator()(U a, T b) {
++  U operator()(U a, T b) thread {
+     return a * b;
+   }
+ 
+-  U simd_scan_impl(U x) {
++  U simd_scan_impl(U x) thread {
+     return simd_prefix_inclusive_product(x);
+   }
+ 
+-  U simd_exclusive_scan_impl(U x) {
++  U simd_exclusive_scan_impl(U x) thread {
+     return simd_prefix_exclusive_product(x);
+   }
+ };
+@@ -77,11 +77,11 @@ struct CumProd<bool> {
+   static constexpr constant bool init = true;
+ 
+   template <typename T>
+-  bool operator()(bool a, T b) {
++  bool operator()(bool a, T b) thread {
+     return a & static_cast<bool>(b);
+   }
+ 
+-  bool simd_scan(bool x) {
++  bool simd_scan(bool x) thread {
+     for (int i = 1; i <= 16; i *= 2) {
+       bool other = simd_shuffle_and_fill_up(x, init, i);
+       x &= other;
+@@ -89,7 +89,7 @@ struct CumProd<bool> {
+     return x;
+   }
+ 
+-  bool simd_exclusive_scan(bool x) {
++  bool simd_exclusive_scan(bool x) thread {
+     x = simd_scan(x);
+     return simd_shuffle_and_fill_up(x, init, 1);
+   }
+@@ -100,11 +100,11 @@ struct CumMax {
+   static constexpr constant U init = Limits<U>::min;
+ 
+   template <typename T>
+-  U operator()(U a, T b) {
++  U operator()(U a, T b) thread {
+     return (a >= b) ? a : b;
+   }
+ 
+-  U simd_scan(U x) {
++  U simd_scan(U x) thread {
+     for (int i = 1; i <= 16; i *= 2) {
+       U other = simd_shuffle_and_fill_up(x, init, i);
+       x = (x >= other) ? x : other;
+@@ -112,7 +112,7 @@ struct CumMax {
+     return x;
+   }
+ 
+-  U simd_exclusive_scan(U x) {
++  U simd_exclusive_scan(U x) thread {
+     x = simd_scan(x);
+     return simd_shuffle_and_fill_up(x, init, 1);
+   }
+@@ -123,11 +123,11 @@ struct CumMin {
+   static constexpr constant U init = Limits<U>::max;
+ 
+   template <typename T>
+-  U operator()(U a, T b) {
++  U operator()(U a, T b) thread {
+     return (a <= b) ? a : b;
+   }
+ 
+-  U simd_scan(U x) {
++  U simd_scan(U x) thread {
+     for (int i = 1; i <= 16; i *= 2) {
+       U other = simd_shuffle_and_fill_up(x, init, i);
+       x = (x <= other) ? x : other;
+@@ -135,7 +135,7 @@ struct CumMin {
+     return x;
+   }
+ 
+-  U simd_exclusive_scan(U x) {
++  U simd_exclusive_scan(U x) thread {
+     x = simd_scan(x);
+     return simd_shuffle_and_fill_up(x, init, 1);
+   }
+@@ -146,11 +146,11 @@ struct CumLogaddexp {
+   static constexpr constant U init = Limits<U>::min;
+ 
+   template <typename T>
+-  U operator()(U a, T b) {
++  U operator()(U a, T b) thread {
+     return LogAddExp{}(a, static_cast<U>(b));
+   }
+ 
+-  U simd_scan(U x) {
++  U simd_scan(U x) thread {
+     for (int i = 1; i <= 16; i *= 2) {
+       U other = simd_shuffle_and_fill_up(x, init, i);
+       x = LogAddExp{}(x, other);
+@@ -158,7 +158,7 @@ struct CumLogaddexp {
+     return x;
+   }
+ 
+-  U simd_exclusive_scan(U x) {
++  U simd_exclusive_scan(U x) thread {
+     x = simd_scan(x);
+     return simd_shuffle_and_fill_up(x, init, 1);
+   }
+diff --git a/mlx/backend/metal/kernels/sort.h b/mlx/backend/metal/kernels/sort.h
+index 7d7fab0f9a..068d43d126 100644
+--- a/mlx/backend/metal/kernels/sort.h
++++ b/mlx/backend/metal/kernels/sort.h
+@@ -39,7 +39,7 @@ struct Init<complex64_t> {
+ template <typename T>
+ struct LessThan {
+   static constexpr constant T init = Init<T>::v;
+-  METAL_FUNC bool operator()(T a, T b) const {
++  METAL_FUNC bool operator()(T a, T b) const thread {
+     if constexpr (metal::is_floating_point_v<T>) {
+       bool an = metal::isnan(a);
+       bool bn = metal::isnan(b);
+diff --git a/mlx/backend/metal/kernels/steel/attn/kernels/steel_attention_nax.h b/mlx/backend/metal/kernels/steel/attn/kernels/steel_attention_nax.h
+index 6c85da64f6..b48a9a942d 100644
+--- a/mlx/backend/metal/kernels/steel/attn/kernels/steel_attention_nax.h
++++ b/mlx/backend/metal/kernels/steel/attn/kernels/steel_attention_nax.h
+@@ -21,9 +21,9 @@ constant bool has_sinks [[function_constant(302)]];
+ template <typename T>
+ struct TransformScale {
+   T scale;
+-  METAL_FUNC TransformScale(T scale_) : scale(scale_) {}
++  METAL_FUNC TransformScale(T scale_) thread : scale(scale_) {}
+ 
+-  METAL_FUNC T apply(T x) const {
++  METAL_FUNC T apply(T x) const thread {
+     return scale * x;
+   }
+ };
+diff --git a/mlx/backend/metal/kernels/steel/attn/loader.h b/mlx/backend/metal/kernels/steel/attn/loader.h
+index 7ec798146b..a2bdb0e46b 100644
+--- a/mlx/backend/metal/kernels/steel/attn/loader.h
++++ b/mlx/backend/metal/kernels/steel/attn/loader.h
+@@ -49,18 +49,18 @@ struct BlockLoader {
+       const int src_ld_,
+       threadgroup T* dst_,
+       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+-      ushort simd_lane_id [[thread_index_in_simdgroup]])
++      ushort simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(src_ld_),
+-        tile_stride(reduction_dim ? BCOLS : BROWS * src_ld),
++        tile_stride(reduction_dim ? BCOLS : BROWS* src_ld),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         src(src_ + bi * src_ld + bj) {}
+ 
+   /* Apply operation to threadgroup without bound checking */
+   template <typename UnaryOp>
+-  METAL_FUNC void apply_inplace_op(thread const UnaryOp& op) const {
++  METAL_FUNC void apply_inplace_op(thread const UnaryOp& op) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < BROWS; i += TROWS) {
+       STEEL_PRAGMA_UNROLL
+@@ -71,7 +71,7 @@ struct BlockLoader {
+   }
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < BROWS; i += TROWS) {
+       *((threadgroup ReadVector*)(&dst[i * dst_ld])) =
+@@ -80,7 +80,7 @@ struct BlockLoader {
+   }
+ 
+   /* Load from device memory into threadgroup memory - with bound checking */
+-  METAL_FUNC void load_safe(short2 src_tile_dim) const {
++  METAL_FUNC void load_safe(short2 src_tile_dim) const thread {
+     src_tile_dim = src_tile_dim - short2(bj, bi);
+ 
+     // Skip loading if thread has no valid reads
+@@ -128,7 +128,7 @@ struct BlockLoader {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     src += tile_stride;
+   }
+ };
+@@ -173,18 +173,18 @@ struct BlockLoaderT {
+       const int src_ld_,
+       threadgroup T* dst_,
+       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+-      ushort simd_lane_id [[thread_index_in_simdgroup]])
++      ushort simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(src_ld_),
+-        tile_stride(reduction_dim ? BCOLS : BROWS * src_ld),
++        tile_stride(reduction_dim ? BCOLS : BROWS* src_ld),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * kDstStrRow + bj * kDstStrCol),
+         src(src_ + bi * src_ld + bj) {}
+ 
+   /* Apply operation to threadgroup without bound checking */
+   template <typename UnaryOp>
+-  METAL_FUNC void apply_inplace_op(thread const UnaryOp& op) const {
++  METAL_FUNC void apply_inplace_op(thread const UnaryOp& op) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < BROWS; i += TROWS) {
+       STEEL_PRAGMA_UNROLL
+@@ -196,7 +196,7 @@ struct BlockLoaderT {
+   }
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < BROWS; i += TROWS) {
+       STEEL_PRAGMA_UNROLL
+@@ -207,7 +207,7 @@ struct BlockLoaderT {
+   }
+ 
+   /* Load from device memory into threadgroup memory - with bound checking */
+-  METAL_FUNC void load_safe(short2 src_tile_dim) const {
++  METAL_FUNC void load_safe(short2 src_tile_dim) const thread {
+     src_tile_dim = src_tile_dim - short2(bj, bi);
+ 
+     // Skip loading if thread has no valid reads
+@@ -255,7 +255,7 @@ struct BlockLoaderT {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     src += tile_stride;
+   }
+ };
+diff --git a/mlx/backend/metal/kernels/steel/attn/mma.h b/mlx/backend/metal/kernels/steel/attn/mma.h
+index 737e930d8e..f5b775cfb1 100644
+--- a/mlx/backend/metal/kernels/steel/attn/mma.h
++++ b/mlx/backend/metal/kernels/steel/attn/mma.h
+@@ -24,7 +24,7 @@ struct Shape2D {
+   RInt r;
+   CInt c;
+ 
+-  Shape2D(RInt r_, CInt c_) : r(r_), c(c_) {}
++  Shape2D(RInt r_, CInt c_) thread : r(r_), c(c_) {}
+ };
+ 
+ template <typename Shape, typename Layout>
+@@ -257,24 +257,25 @@ struct MMATile {
+ 
+   METAL_FUNC MMATile() thread {}
+ 
+-  METAL_FUNC constexpr void clear() {
++  METAL_FUNC constexpr void clear() thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kNumFrags; ++i) {
+       val_frags[i] = frag_type(0);
+     }
+   }
+ 
+-  METAL_FUNC constexpr thread frag_type& frag_at(const short i, const short j) {
++  METAL_FUNC constexpr thread frag_type& frag_at(const short i, const short j)
++      thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+   METAL_FUNC constexpr const thread frag_type& frag_at(
+       const short i,
+-      const short j) const {
++      const short j) const thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+-  METAL_FUNC mat_type mat_at(const short i, const short j) {
++  METAL_FUNC mat_type mat_at(const short i, const short j) thread {
+     mat_type val_mat;
+     STEEL_PRAGMA_UNROLL
+     for (short ii = 0; ii < kElemsPerFrag; ++ii) {
+@@ -283,16 +284,16 @@ struct MMATile {
+     return val_mat;
+   }
+ 
+-  METAL_FUNC thread elem_type* elems() {
++  METAL_FUNC thread elem_type* elems() thread {
+     return reinterpret_cast<thread elem_type*>(val_frags);
+   }
+ 
+-  METAL_FUNC const thread elem_type* elems() const {
++  METAL_FUNC const thread elem_type* elems() const thread {
+     return reinterpret_cast<const thread elem_type*>(val_frags);
+   }
+ 
+   template <typename Op>
+-  METAL_FUNC void row_reduce(thread T vals[kRowsPerThread]) const {
++  METAL_FUNC void row_reduce(thread T vals[kRowsPerThread]) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -304,7 +305,7 @@ struct MMATile {
+   }
+ 
+   template <typename Op>
+-  METAL_FUNC void row_bin_op(thread T vals[kRowsPerThread]) {
++  METAL_FUNC void row_bin_op(thread T vals[kRowsPerThread]) thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -316,7 +317,7 @@ struct MMATile {
+   }
+ 
+   template <typename U, int w_x, int w_y, int str_x, int str_y>
+-  METAL_FUNC void load(const threadgroup U* src) {
++  METAL_FUNC void load(const threadgroup U* src) thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -333,7 +334,7 @@ struct MMATile {
+   }
+ 
+   template <typename U, int w_x, int w_y, int str_x, int str_y>
+-  METAL_FUNC void store(threadgroup U* dst) const {
++  METAL_FUNC void store(threadgroup U* dst) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -350,7 +351,7 @@ struct MMATile {
+   }
+ 
+   template <typename U, int w_x, int w_y>
+-  METAL_FUNC void load(const device U* src, const int ld) {
++  METAL_FUNC void load(const device U* src, const int ld) thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -365,7 +366,7 @@ struct MMATile {
+   }
+ 
+   template <typename U, int w_x, int w_y>
+-  METAL_FUNC void store(device U* dst, const int ld) const {
++  METAL_FUNC void store(device U* dst, const int ld) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -380,8 +381,10 @@ struct MMATile {
+   }
+ 
+   template <typename U, int w_x, int w_y>
+-  METAL_FUNC void
+-  load_safe(const device U* src, const int ld, const short2 src_tile_dims) {
++  METAL_FUNC void load_safe(
++      const device U* src,
++      const int ld,
++      const short2 src_tile_dims) thread {
+     STEEL_PRAGMA_UNROLL
+     for (int i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -400,8 +403,10 @@ struct MMATile {
+   }
+ 
+   template <typename U, int w_x, int w_y>
+-  METAL_FUNC void
+-  store_safe(device U* dst, const int ld, const short2 dst_tile_dims) const {
++  METAL_FUNC void store_safe(
++      device U* dst,
++      const int ld,
++      const short2 dst_tile_dims) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (int i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -512,7 +517,7 @@ struct BlockMMA {
+   /* Constructor */
+   METAL_FUNC BlockMMA(
+       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+-      ushort simd_lane_id [[thread_index_in_simdgroup]]) {
++      ushort simd_lane_id [[thread_index_in_simdgroup]]) thread {
+     // Determine thread position in simdgroup matrix
+     short tm = kFragSize * (simd_group_id / WN);
+     short tn = kFragSize * (simd_group_id % WN);
+@@ -530,7 +535,7 @@ struct BlockMMA {
+   }
+ 
+   /* (BM, BK) X (BK, BN) multiply accumulate function */
+-  METAL_FUNC void mma(const threadgroup T* As, const threadgroup T* Bs) {
++  METAL_FUNC void mma(const threadgroup T* As, const threadgroup T* Bs) thread {
+     // Adjust for simdgroup and thread location
+     As += As_offset;
+     Bs += Bs_offset;
+@@ -557,7 +562,7 @@ struct BlockMMA {
+   }
+ 
+   /* Store results from simdgroup_matrix results into device memory */
+-  METAL_FUNC void store_result(device U* D, const int ldd) {
++  METAL_FUNC void store_result(device U* D, const int ldd) thread {
+     // Apply epilogue
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < decltype(Ctile)::kElemsPerTile; i++) {
+@@ -571,7 +576,7 @@ struct BlockMMA {
+   }
+ 
+   METAL_FUNC void
+-  store_result_safe(device U* D, const int ldd, short2 dst_tile_dims) {
++  store_result_safe(device U* D, const int ldd, short2 dst_tile_dims) thread {
+     // Apply epilogue
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < decltype(Ctile)::kElemsPerTile; i++) {
+@@ -590,7 +595,8 @@ struct BlockMMA {
+ 
+   /* Apply epilogue */
+   template <typename UnaryEpilogue>
+-  METAL_FUNC void apply_epilogue(thread const UnaryEpilogue& epilogue_op) {
++  METAL_FUNC void apply_epilogue(
++      thread const UnaryEpilogue& epilogue_op) thread {
+     // Loop over all simdgroup tiles
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < decltype(Ctile)::kElemsPerTile; i++) {
+@@ -604,7 +610,7 @@ struct BlockMMA {
+       const device U* C,
+       const int ldc,
+       const int fdc,
+-      thread const BinaryEpilogue& epilogue_op) {
++      thread const BinaryEpilogue& epilogue_op) thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+ 
+@@ -633,7 +639,7 @@ struct BlockMMA {
+       const int ldc,
+       const int fdc,
+       short2 dst_tile_dims,
+-      thread const BinaryEpilogue& epilogue_op) {
++      thread const BinaryEpilogue& epilogue_op) thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+     dst_tile_dims -= short2(sn, sm);
+@@ -678,7 +684,7 @@ struct BlockMMA {
+       const device U* C,
+       const int ldc,
+       const int fdc,
+-      thread const Epilogue& epilogue_op) const {
++      thread const Epilogue& epilogue_op) const thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+     D += (sm)*ldd + sn;
+@@ -711,7 +717,7 @@ struct BlockMMA {
+       const int ldc,
+       const int fdc,
+       short2 dst_tile_dims,
+-      thread const Epilogue& epilogue_op) const {
++      thread const Epilogue& epilogue_op) const thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+     D += (sm)*ldd + sn;
+diff --git a/mlx/backend/metal/kernels/steel/attn/nax.h b/mlx/backend/metal/kernels/steel/attn/nax.h
+index 072afe3ba3..6d978ebfb6 100644
+--- a/mlx/backend/metal/kernels/steel/attn/nax.h
++++ b/mlx/backend/metal/kernels/steel/attn/nax.h
+@@ -420,8 +420,8 @@ struct BaseNAXFrag {
+ 
+     // Create matmul output in register
+     auto ct_c = gemm_op.template get_destination_cooperative_tensor<
+-        decltype(ct_a),
+-        decltype(ct_b),
++        metal::remove_addrspace_t<decltype(ct_a)>,
++        metal::remove_addrspace_t<decltype(ct_b)>,
+         CType>();
+ 
+     // Load A in to left operand registers
+@@ -492,8 +492,8 @@ struct BaseNAXFrag {
+ 
+     // Create matmul output in register
+     auto ct_c = gemm_op.template get_destination_cooperative_tensor<
+-        decltype(ct_a),
+-        decltype(ct_b),
++        metal::remove_addrspace_t<decltype(ct_a)>,
++        metal::remove_addrspace_t<decltype(ct_b)>,
+         CType>();
+ 
+     // Load A in to left operand registers
+@@ -563,36 +563,39 @@ struct NAXTile {
+ 
+   METAL_FUNC NAXTile() thread {}
+ 
+-  METAL_FUNC constexpr void clear() {
++  METAL_FUNC constexpr void clear() thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kNumFrags; ++i) {
+       val_frags[i] = frag_type(0);
+     }
+   }
+ 
+-  METAL_FUNC constexpr thread frag_type& frag_at(const short i, const short j) {
++  METAL_FUNC constexpr thread frag_type& frag_at(const short i, const short j)
++      thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+   METAL_FUNC constexpr const thread frag_type& frag_at(
+       const short i,
+-      const short j) const {
++      const short j) const thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+   template <int i, int j>
+-  METAL_FUNC constexpr thread frag_type& frag_at() {
++  METAL_FUNC constexpr thread frag_type& frag_at() thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+   template <int i, int j>
+-  METAL_FUNC constexpr const thread frag_type& frag_at() const {
++  METAL_FUNC constexpr const thread frag_type& frag_at() const thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+   template <bool transpose>
+-  METAL_FUNC constexpr thread frag_type&
+-  frag_at(const short i, const short j, metal::bool_constant<transpose>) {
++  METAL_FUNC constexpr thread frag_type& frag_at(
++      const short i,
++      const short j,
++      metal::bool_constant<transpose>) thread {
+     if constexpr (transpose) {
+       return frag_at(j, i);
+     } else {
+@@ -601,8 +604,10 @@ struct NAXTile {
+   }
+ 
+   template <bool transpose>
+-  METAL_FUNC constexpr const thread frag_type&
+-  frag_at(const short i, const short j, metal::bool_constant<transpose>) const {
++  METAL_FUNC constexpr const thread frag_type& frag_at(
++      const short i,
++      const short j,
++      metal::bool_constant<transpose>) const thread {
+     if constexpr (transpose) {
+       return frag_at(j, i);
+     } else {
+@@ -611,7 +616,7 @@ struct NAXTile {
+   }
+ 
+   template <int i, int j, bool transpose>
+-  METAL_FUNC constexpr thread frag_type& frag_at() {
++  METAL_FUNC constexpr thread frag_type& frag_at() thread {
+     if constexpr (transpose) {
+       return frag_at<j, i>();
+     } else {
+@@ -620,7 +625,7 @@ struct NAXTile {
+   }
+ 
+   template <int i, int j, bool transpose>
+-  METAL_FUNC constexpr const thread frag_type& frag_at() const {
++  METAL_FUNC constexpr const thread frag_type& frag_at() const thread {
+     if constexpr (transpose) {
+       return frag_at<j, i>();
+     } else {
+@@ -628,16 +633,17 @@ struct NAXTile {
+     }
+   }
+ 
+-  METAL_FUNC thread elem_type* elems() {
++  METAL_FUNC thread elem_type* elems() thread {
+     return reinterpret_cast<thread elem_type*>(val_frags);
+   }
+ 
+-  METAL_FUNC const thread elem_type* elems() const {
++  METAL_FUNC const thread elem_type* elems() const thread {
+     return reinterpret_cast<const thread elem_type*>(val_frags);
+   }
+ 
+   template <typename Op>
+-  METAL_FUNC void row_reduce(thread metal::vec<T, kRowsPerThread>& vals) const {
++  METAL_FUNC void row_reduce(
++      thread metal::vec<T, kRowsPerThread>& vals) const thread {
+     auto vptr = (thread T*)(&vals);
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+@@ -650,7 +656,8 @@ struct NAXTile {
+   }
+ 
+   template <typename Op>
+-  METAL_FUNC void row_bin_op(thread metal::vec<T, kRowsPerThread>& vals) {
++  METAL_FUNC void row_bin_op(
++      thread metal::vec<T, kRowsPerThread>& vals) thread {
+     auto vptr = (thread T*)(&vals);
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+@@ -663,7 +670,7 @@ struct NAXTile {
+   }
+ 
+   template <typename U, int str_x, int str_y>
+-  METAL_FUNC void load(const threadgroup U* src) {
++  METAL_FUNC void load(const threadgroup U* src) thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::load(
+@@ -678,7 +685,7 @@ struct NAXTile {
+   }
+ 
+   template <typename U, int str_x, int str_y>
+-  METAL_FUNC void store(threadgroup U* dst) const {
++  METAL_FUNC void store(threadgroup U* dst) const thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::store(
+@@ -693,7 +700,7 @@ struct NAXTile {
+   }
+ 
+   template <typename U>
+-  METAL_FUNC void load(const device U* src, const int ld) {
++  METAL_FUNC void load(const device U* src, const int ld) thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::load(
+@@ -708,7 +715,7 @@ struct NAXTile {
+   }
+ 
+   template <typename U>
+-  METAL_FUNC void store(device U* dst, const int ld) const {
++  METAL_FUNC void store(device U* dst, const int ld) const thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::store(
+@@ -724,7 +731,7 @@ struct NAXTile {
+ 
+   template <typename U>
+   METAL_FUNC void
+-  load_rows(const device U* src, const int ld, const short n_rows) {
++  load_rows(const device U* src, const int ld, const short n_rows) thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::load_rows(
+@@ -740,8 +747,10 @@ struct NAXTile {
+   }
+ 
+   template <typename U>
+-  METAL_FUNC void
+-  load_safe(const device U* src, const int ld, const short2 src_tile_dims) {
++  METAL_FUNC void load_safe(
++      const device U* src,
++      const int ld,
++      const short2 src_tile_dims) thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::load_safe(
+@@ -759,7 +768,7 @@ struct NAXTile {
+ 
+   template <typename U>
+   METAL_FUNC void store_rows(device U* dst, const int ld, const short n_rows)
+-      const {
++      const thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::store_rows(
+@@ -775,8 +784,10 @@ struct NAXTile {
+   }
+ 
+   template <typename U>
+-  METAL_FUNC void
+-  store_safe(device U* dst, const int ld, const short2 dst_tile_dims) const {
++  METAL_FUNC void store_safe(
++      device U* dst,
++      const int ld,
++      const short2 dst_tile_dims) const thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::store_safe(
+@@ -797,7 +808,7 @@ struct NAXTile {
+       device U* dst,
+       const int ld,
+       const short2 start,
+-      const short2 stop) const {
++      const short2 stop) const thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::store_slice(
+diff --git a/mlx/backend/metal/kernels/steel/attn/transforms.h b/mlx/backend/metal/kernels/steel/attn/transforms.h
+index c0624d21b9..6878448bc0 100644
+--- a/mlx/backend/metal/kernels/steel/attn/transforms.h
++++ b/mlx/backend/metal/kernels/steel/attn/transforms.h
+@@ -24,7 +24,7 @@ struct TransformNone {
+ 
+ template <typename OutT, typename InT>
+ struct TransformAdd {
+-  TransformAdd(const float, const float) {}
++  TransformAdd(const float, const float) thread {}
+ 
+   static METAL_FUNC OutT apply(InT x) {
+     return static_cast<OutT>(x);
+@@ -40,14 +40,14 @@ struct TransformAxpby {
+   const float alpha;
+   const float beta;
+ 
+-  TransformAxpby(const float alpha_, const float beta_)
+-      : alpha(alpha_), beta(beta_) {}
++  TransformAxpby(const float alpha_, const float beta_) thread : alpha(alpha_),
++                                                                 beta(beta_) {}
+ 
+   static METAL_FUNC OutT apply(InT x) {
+     return static_cast<OutT>(x);
+   }
+ 
+-  METAL_FUNC OutT apply(InT x, OutT c) const {
++  METAL_FUNC OutT apply(InT x, OutT c) const thread {
+     return static_cast<OutT>(x * alpha + (beta * c));
+   }
+ };
+diff --git a/mlx/backend/metal/kernels/steel/conv/loaders/loader_channel_l.h b/mlx/backend/metal/kernels/steel/conv/loaders/loader_channel_l.h
+index 9124e30459..15dc13cccf 100644
+--- a/mlx/backend/metal/kernels/steel/conv/loaders/loader_channel_l.h
++++ b/mlx/backend/metal/kernels/steel/conv/loaders/loader_channel_l.h
+@@ -64,10 +64,10 @@ struct Conv2DInputBlockLoaderLargeFilter {
+       const constant MLXConvParams<2>* params_,
+       const constant ImplicitGemmConv2DParams* gemm_params_,
+       uint simd_group_id [[simdgroup_index_in_threadgroup]],
+-      uint simd_lane_id [[thread_index_in_simdgroup]])
++      uint simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         params(params_),
+         gemm_params(gemm_params_),
+@@ -103,7 +103,7 @@ struct Conv2DInputBlockLoaderLargeFilter {
+   }
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0, is = 0; i < n_rows; ++i, is += TROWS) {
+       // Find bounds
+@@ -131,7 +131,7 @@ struct Conv2DInputBlockLoaderLargeFilter {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     if (++weight_w < params->wS[1]) {
+       STEEL_PRAGMA_UNROLL
+       for (short i = 0; i < n_rows; i++) {
+@@ -213,10 +213,10 @@ struct Conv2DInputBlockLoaderSmallFilter {
+       const constant MLXConvParams<2>* params_,
+       const constant ImplicitGemmConv2DParams* gemm_params_,
+       uint simd_group_id [[simdgroup_index_in_threadgroup]],
+-      uint simd_lane_id [[thread_index_in_simdgroup]])
++      uint simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         params(params_),
+         gemm_params(gemm_params_),
+@@ -287,7 +287,7 @@ struct Conv2DInputBlockLoaderSmallFilter {
+   }
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     mask_t h_mask = mask_t(1) << weight_h;
+     mask_t w_mask = mask_t(1) << weight_w;
+ 
+@@ -312,7 +312,7 @@ struct Conv2DInputBlockLoaderSmallFilter {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     if (++weight_w < params->wS[1]) {
+       STEEL_PRAGMA_UNROLL
+       for (short i = 0; i < n_rows; i++) {
+@@ -394,11 +394,11 @@ struct Conv2DWeightBlockLoader {
+       const constant MLXConvParams<2>* params_,
+       const constant ImplicitGemmConv2DParams* gemm_params_,
+       uint simd_group_id [[simdgroup_index_in_threadgroup]],
+-      uint simd_lane_id [[thread_index_in_simdgroup]])
++      uint simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(params_->wt_strides[0]),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         src(src_ + bi * src_ld + bj),
+         params(params_),
+@@ -408,7 +408,7 @@ struct Conv2DWeightBlockLoader {
+         do_read(read_n + n_rows * TROWS <= gemm_params_->N) {}
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     if (BN != 8 || do_read) {
+       STEEL_PRAGMA_UNROLL
+       for (short i = 0; i < BN; i += TROWS) {
+@@ -435,7 +435,7 @@ struct Conv2DWeightBlockLoader {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     if (++weight_hw < (params->wS[1] * params->wS[0])) {
+       src += weight_step;
+       return;
+@@ -504,10 +504,10 @@ struct Conv3DInputBlockLoaderLargeFilter {
+       const constant MLXConvParams<3>* params_,
+       const constant ImplicitGemmConv3DParams* gemm_params_,
+       uint simd_group_id [[simdgroup_index_in_threadgroup]],
+-      uint simd_lane_id [[thread_index_in_simdgroup]])
++      uint simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         params(params_),
+         gemm_params(gemm_params_),
+@@ -559,7 +559,7 @@ struct Conv3DInputBlockLoaderLargeFilter {
+   }
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0, is = 0; i < n_rows; ++i, is += TROWS) {
+       // Find bounds
+@@ -588,7 +588,7 @@ struct Conv3DInputBlockLoaderLargeFilter {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     if (++weight_w < params->wS[2]) {
+       STEEL_PRAGMA_UNROLL
+       for (short i = 0; i < n_rows; i++) {
+@@ -683,10 +683,10 @@ struct Conv3DInputBlockLoaderSmallFilter {
+       const constant MLXConvParams<3>* params_,
+       const constant ImplicitGemmConv3DParams* gemm_params_,
+       uint simd_group_id [[simdgroup_index_in_threadgroup]],
+-      uint simd_lane_id [[thread_index_in_simdgroup]])
++      uint simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         params(params_),
+         gemm_params(gemm_params_),
+@@ -777,7 +777,7 @@ struct Conv3DInputBlockLoaderSmallFilter {
+   }
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     mask_t d_mask = mask_t(1) << weight_d;
+     mask_t h_mask = mask_t(1) << weight_h;
+     mask_t w_mask = mask_t(1) << weight_w;
+@@ -804,7 +804,7 @@ struct Conv3DInputBlockLoaderSmallFilter {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     if (++weight_w < params->wS[2]) {
+       STEEL_PRAGMA_UNROLL
+       for (short i = 0; i < n_rows; i++) {
+@@ -897,11 +897,11 @@ struct Conv3DWeightBlockLoader {
+       const constant MLXConvParams<3>* params_,
+       const constant ImplicitGemmConv3DParams* gemm_params_,
+       uint simd_group_id [[simdgroup_index_in_threadgroup]],
+-      uint simd_lane_id [[thread_index_in_simdgroup]])
++      uint simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(params_->wt_strides[0]),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         src(src_ + bi * src_ld + bj),
+         params(params_),
+@@ -911,7 +911,7 @@ struct Conv3DWeightBlockLoader {
+         do_read(read_n + n_rows * TROWS <= gemm_params_->N) {}
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     if (BN != 8 || do_read) {
+       STEEL_PRAGMA_UNROLL
+       for (short i = 0; i < BN; i += TROWS) {
+@@ -938,7 +938,7 @@ struct Conv3DWeightBlockLoader {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     if (++weight_dhw < (params->wS[0] * params->wS[1] * params->wS[2])) {
+       src += weight_step;
+       return;
+diff --git a/mlx/backend/metal/kernels/steel/conv/loaders/loader_channel_n.h b/mlx/backend/metal/kernels/steel/conv/loaders/loader_channel_n.h
+index 2312e1ca6e..6a6c16daf0 100644
+--- a/mlx/backend/metal/kernels/steel/conv/loaders/loader_channel_n.h
++++ b/mlx/backend/metal/kernels/steel/conv/loaders/loader_channel_n.h
+@@ -99,10 +99,10 @@ struct Conv2DInputBlockLoaderSmallChannels {
+       const constant MLXConvParams<2>* params_,
+       const constant ImplicitGemmConv2DParams* gemm_params_,
+       uint simd_group_id [[simdgroup_index_in_threadgroup]],
+-      uint simd_lane_id [[thread_index_in_simdgroup]])
++      uint simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         params(params_),
+         gemm_params(gemm_params_),
+@@ -131,7 +131,7 @@ struct Conv2DInputBlockLoaderSmallChannels {
+   }
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     if (weight_hw >= params->wS[1] * params->wS[0]) {
+       STEEL_PRAGMA_UNROLL
+       for (short i = 0; i < BROWS; i += TROWS) {
+@@ -187,7 +187,7 @@ struct Conv2DInputBlockLoaderSmallChannels {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     weight_hw += TCOLS;
+   }
+ };
+@@ -243,11 +243,11 @@ struct Conv2DWeightBlockLoaderSmallChannels {
+       const constant MLXConvParams<2>* params_,
+       const constant ImplicitGemmConv2DParams* gemm_params_,
+       uint simd_group_id [[simdgroup_index_in_threadgroup]],
+-      uint simd_lane_id [[thread_index_in_simdgroup]])
++      uint simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(params_->wt_strides[0]),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         src(src_ + bi * src_ld),
+         params(params_),
+@@ -256,7 +256,7 @@ struct Conv2DWeightBlockLoaderSmallChannels {
+         do_read(read_n + BN <= gemm_params_->N) {}
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     if (bi >= BROWS || bj >= BCOLS)
+       return;
+ 
+@@ -310,7 +310,7 @@ struct Conv2DWeightBlockLoaderSmallChannels {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     weight_hw += TCOLS;
+   }
+ };
+diff --git a/mlx/backend/metal/kernels/steel/conv/loaders/loader_general.h b/mlx/backend/metal/kernels/steel/conv/loaders/loader_general.h
+index 9b7ddc2eec..cf7794235d 100644
+--- a/mlx/backend/metal/kernels/steel/conv/loaders/loader_general.h
++++ b/mlx/backend/metal/kernels/steel/conv/loaders/loader_general.h
+@@ -67,10 +67,10 @@ struct Conv2DInputBlockLoaderGeneral {
+       const short base_wh_,
+       const short base_ww_,
+       uint simd_group_id [[simdgroup_index_in_threadgroup]],
+-      uint simd_lane_id [[thread_index_in_simdgroup]])
++      uint simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         params(params_),
+         jump_params(jump_params_),
+@@ -101,7 +101,7 @@ struct Conv2DInputBlockLoaderGeneral {
+   }
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0, is = 0; i < n_rows; ++i, is += TROWS) {
+       // Find bounds
+@@ -137,7 +137,7 @@ struct Conv2DInputBlockLoaderGeneral {
+     }
+   }
+ 
+-  METAL_FUNC void load_safe(const short remaining_k) const {
++  METAL_FUNC void load_safe(const short remaining_k) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0, is = 0; i < n_rows; ++i, is += TROWS) {
+       // Find bounds
+@@ -184,7 +184,7 @@ struct Conv2DInputBlockLoaderGeneral {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     weight_w += jump_params->f_wgt_jump_w;
+     if (weight_w < params->wS[1]) {
+       return;
+@@ -263,11 +263,11 @@ struct Conv2DWeightBlockLoaderGeneral {
+       const short base_wh_,
+       const short base_ww_,
+       uint simd_group_id [[simdgroup_index_in_threadgroup]],
+-      uint simd_lane_id [[thread_index_in_simdgroup]])
++      uint simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(params_->wt_strides[0]),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         src(src_ + bi * src_ld + bj),
+         params(params_),
+@@ -279,7 +279,7 @@ struct Conv2DWeightBlockLoaderGeneral {
+         start_row(offsets.y + bi) {}
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     const device T* curr_src = src + weight_h * params->wt_strides[1] +
+         weight_w * params->wt_strides[2];
+ 
+@@ -308,7 +308,7 @@ struct Conv2DWeightBlockLoaderGeneral {
+     }
+   }
+ 
+-  METAL_FUNC void load_safe(const short remaining_k) const {
++  METAL_FUNC void load_safe(const short remaining_k) const thread {
+     const device T* curr_src = src + weight_h * params->wt_strides[1] +
+         weight_w * params->wt_strides[2];
+ 
+@@ -358,7 +358,7 @@ struct Conv2DWeightBlockLoaderGeneral {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     weight_w += jump_params->f_wgt_jump_w;
+     if (weight_w < params->wS[1]) {
+       return;
+diff --git a/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_masked.h b/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_masked.h
+index cc3ddd930b..bdf92cf485 100644
+--- a/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_masked.h
++++ b/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_masked.h
+@@ -11,7 +11,7 @@ using namespace mlx::steel;
+ struct _NoMask {
+   char x;
+ 
+-  constexpr METAL_FUNC operator bool() {
++  constexpr METAL_FUNC operator bool() thread {
+     return true;
+   }
+   constexpr METAL_FUNC operator bool() const threadgroup {
+@@ -29,7 +29,7 @@ template <typename OutT, typename InT = OutT>
+ struct ScaleOp {
+   OutT scale;
+ 
+-  METAL_FUNC OutT apply(InT x) const {
++  METAL_FUNC OutT apply(InT x) const thread {
+     return static_cast<OutT>(x) * scale;
+   }
+ };
+diff --git a/mlx/backend/metal/kernels/steel/gemm/loader.h b/mlx/backend/metal/kernels/steel/gemm/loader.h
+index d421b2d1f9..c999fdc91a 100644
+--- a/mlx/backend/metal/kernels/steel/gemm/loader.h
++++ b/mlx/backend/metal/kernels/steel/gemm/loader.h
+@@ -49,18 +49,18 @@ struct BlockLoader {
+       const int src_ld_,
+       threadgroup T* dst_,
+       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+-      ushort simd_lane_id [[thread_index_in_simdgroup]])
++      ushort simd_lane_id [[thread_index_in_simdgroup]]) thread
+       : src_ld(src_ld_),
+-        tile_stride(reduction_dim ? BCOLS : BROWS * src_ld),
++        tile_stride(reduction_dim ? BCOLS : BROWS* src_ld),
+         thread_idx(simd_group_id * 32 + simd_lane_id),
+         bi(thread_idx / TCOLS),
+-        bj(vec_size * (thread_idx % TCOLS)),
++        bj(vec_size*(thread_idx % TCOLS)),
+         dst(dst_ + bi * dst_ld + bj),
+         src(src_ + bi * src_ld + bj) {}
+ 
+   /* Apply operation to threadgroup without bound checking */
+   template <typename UnaryOp>
+-  METAL_FUNC void apply_inplace_op(thread const UnaryOp& op) const {
++  METAL_FUNC void apply_inplace_op(thread const UnaryOp& op) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < BROWS; i += TROWS) {
+       STEEL_PRAGMA_UNROLL
+@@ -71,7 +71,7 @@ struct BlockLoader {
+   }
+ 
+   /* Load from device memory into threadgroup memory - without bound checking */
+-  METAL_FUNC void load_unsafe() const {
++  METAL_FUNC void load_unsafe() const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < BROWS; i += TROWS) {
+       *((threadgroup ReadVector*)(&dst[i * dst_ld])) =
+@@ -80,7 +80,7 @@ struct BlockLoader {
+   }
+ 
+   /* Load from device memory into threadgroup memory - with bound checking */
+-  METAL_FUNC void load_safe(short2 src_tile_dim) const {
++  METAL_FUNC void load_safe(short2 src_tile_dim) const thread {
+     src_tile_dim = src_tile_dim - short2(bj, bi);
+ 
+     // Skip loading if thread has no valid reads
+@@ -128,7 +128,7 @@ struct BlockLoader {
+   }
+ 
+   /* Iteration helper */
+-  METAL_FUNC void next() {
++  METAL_FUNC void next() thread {
+     src += tile_stride;
+   }
+ };
+diff --git a/mlx/backend/metal/kernels/steel/gemm/mma.h b/mlx/backend/metal/kernels/steel/gemm/mma.h
+index 809b38d0af..1d9e0a7820 100644
+--- a/mlx/backend/metal/kernels/steel/gemm/mma.h
++++ b/mlx/backend/metal/kernels/steel/gemm/mma.h
+@@ -234,24 +234,25 @@ struct MMATile {
+ 
+   METAL_FUNC MMATile() thread {}
+ 
+-  METAL_FUNC constexpr void clear() {
++  METAL_FUNC constexpr void clear() thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kNumFrags; ++i) {
+       val_frags[i] = frag_type(0);
+     }
+   }
+ 
+-  METAL_FUNC constexpr thread frag_type& frag_at(const short i, const short j) {
++  METAL_FUNC constexpr thread frag_type& frag_at(const short i, const short j)
++      thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+   METAL_FUNC constexpr const thread frag_type& frag_at(
+       const short i,
+-      const short j) const {
++      const short j) const thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+-  METAL_FUNC mat_type mat_at(const short i, const short j) {
++  METAL_FUNC mat_type mat_at(const short i, const short j) thread {
+     mat_type val_mat;
+     STEEL_PRAGMA_UNROLL
+     for (short ii = 0; ii < kElemsPerFrag; ++ii) {
+@@ -260,16 +261,16 @@ struct MMATile {
+     return val_mat;
+   }
+ 
+-  METAL_FUNC thread elem_type* elems() {
++  METAL_FUNC thread elem_type* elems() thread {
+     return reinterpret_cast<thread elem_type*>(val_frags);
+   }
+ 
+-  METAL_FUNC const thread elem_type* elems() const {
++  METAL_FUNC const thread elem_type* elems() const thread {
+     return reinterpret_cast<const thread elem_type*>(val_frags);
+   }
+ 
+   template <typename U, int w_x, int w_y, int str_x, int str_y>
+-  METAL_FUNC void load(const threadgroup U* src) {
++  METAL_FUNC void load(const threadgroup U* src) thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -286,7 +287,7 @@ struct MMATile {
+   }
+ 
+   template <typename U, int w_x, int w_y, int str_x, int str_y>
+-  METAL_FUNC void store(threadgroup U* dst) const {
++  METAL_FUNC void store(threadgroup U* dst) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -303,7 +304,7 @@ struct MMATile {
+   }
+ 
+   template <typename U, int w_x, int w_y>
+-  METAL_FUNC void load(const device U* src, const int ld) {
++  METAL_FUNC void load(const device U* src, const int ld) thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -318,7 +319,7 @@ struct MMATile {
+   }
+ 
+   template <typename U, int w_x, int w_y>
+-  METAL_FUNC void store(device U* dst, const int ld) const {
++  METAL_FUNC void store(device U* dst, const int ld) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -333,8 +334,10 @@ struct MMATile {
+   }
+ 
+   template <typename U, int w_x, int w_y>
+-  METAL_FUNC void
+-  load_safe(const device U* src, const int ld, const short2 src_tile_dims) {
++  METAL_FUNC void load_safe(
++      const device U* src,
++      const int ld,
++      const short2 src_tile_dims) thread {
+     STEEL_PRAGMA_UNROLL
+     for (int i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -353,8 +356,10 @@ struct MMATile {
+   }
+ 
+   template <typename U, int w_x, int w_y>
+-  METAL_FUNC void
+-  store_safe(device U* dst, const int ld, const short2 dst_tile_dims) const {
++  METAL_FUNC void store_safe(
++      device U* dst,
++      const int ld,
++      const short2 dst_tile_dims) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (int i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -377,7 +382,7 @@ struct MMATile {
+       device U* dst,
+       const int ld,
+       const short2 start,
+-      const short2 stop) const {
++      const short2 stop) const thread {
+     STEEL_PRAGMA_UNROLL
+     for (int i = 0; i < kTileRows; ++i) {
+       STEEL_PRAGMA_UNROLL
+@@ -487,7 +492,7 @@ struct BlockMMA {
+   /* Constructor */
+   METAL_FUNC BlockMMA(
+       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+-      ushort simd_lane_id [[thread_index_in_simdgroup]]) {
++      ushort simd_lane_id [[thread_index_in_simdgroup]]) thread {
+     // Determine thread position in simdgroup matrix
+     short tm = kFragSize * (simd_group_id / WN);
+     short tn = kFragSize * (simd_group_id % WN);
+@@ -505,7 +510,7 @@ struct BlockMMA {
+   }
+ 
+   /* (BM, BK) X (BK, BN) multiply accumulate function */
+-  METAL_FUNC void mma(const threadgroup T* As, const threadgroup T* Bs) {
++  METAL_FUNC void mma(const threadgroup T* As, const threadgroup T* Bs) thread {
+     // Adjust for simdgroup and thread location
+     As += As_offset;
+     Bs += Bs_offset;
+@@ -532,7 +537,7 @@ struct BlockMMA {
+   }
+ 
+   /* Store results from simdgroup_matrix results into device memory */
+-  METAL_FUNC void store_result(device U* D, const int ldd) {
++  METAL_FUNC void store_result(device U* D, const int ldd) thread {
+     // Apply epilogue
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < decltype(Ctile)::kElemsPerTile; i++) {
+@@ -545,8 +550,11 @@ struct BlockMMA {
+     Ctile.template store<U, WM, WN>(D, ldd);
+   }
+ 
+-  METAL_FUNC void
+-  store_result_slice(device U* D, const int ldd, short2 start, short2 stop) {
++  METAL_FUNC void store_result_slice(
++      device U* D,
++      const int ldd,
++      short2 start,
++      short2 stop) thread {
+     // Apply epilogue
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < decltype(Ctile)::kElemsPerTile; i++) {
+@@ -566,7 +574,7 @@ struct BlockMMA {
+   }
+ 
+   METAL_FUNC void
+-  store_result_safe(device U* D, const int ldd, short2 dst_tile_dims) {
++  store_result_safe(device U* D, const int ldd, short2 dst_tile_dims) thread {
+     // Apply epilogue
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < decltype(Ctile)::kElemsPerTile; i++) {
+@@ -585,7 +593,8 @@ struct BlockMMA {
+ 
+   /* Apply epilogue */
+   template <typename UnaryEpilogue>
+-  METAL_FUNC void apply_epilogue(thread const UnaryEpilogue& epilogue_op) {
++  METAL_FUNC void apply_epilogue(
++      thread const UnaryEpilogue& epilogue_op) thread {
+     // Loop over all simdgroup tiles
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < decltype(Ctile)::kElemsPerTile; i++) {
+@@ -599,7 +608,7 @@ struct BlockMMA {
+       const device U* C,
+       const int ldc,
+       const int fdc,
+-      thread const BinaryEpilogue& epilogue_op) {
++      thread const BinaryEpilogue& epilogue_op) thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+ 
+@@ -628,7 +637,7 @@ struct BlockMMA {
+       const int ldc,
+       const int fdc,
+       short2 dst_tile_dims,
+-      thread const BinaryEpilogue& epilogue_op) {
++      thread const BinaryEpilogue& epilogue_op) thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+     dst_tile_dims -= short2(sn, sm);
+@@ -673,7 +682,7 @@ struct BlockMMA {
+       const device U* C,
+       const int ldc,
+       const int fdc,
+-      thread const Epilogue& epilogue_op) const {
++      thread const Epilogue& epilogue_op) const thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+     D += (sm)*ldd + sn;
+@@ -706,7 +715,7 @@ struct BlockMMA {
+       const int ldc,
+       const int fdc,
+       short2 dst_tile_dims,
+-      thread const Epilogue& epilogue_op) const {
++      thread const Epilogue& epilogue_op) const thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+     D += (sm)*ldd + sn;
+@@ -819,7 +828,7 @@ struct BlockMMA<
+   /* Constructor */
+   METAL_FUNC BlockMMA(
+       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+-      ushort simd_lane_id [[thread_index_in_simdgroup]]) {
++      ushort simd_lane_id [[thread_index_in_simdgroup]]) thread {
+     // Determine thread position in simdgroup matrix
+     short tm = kFragSize * (simd_group_id / WN);
+     short tn = kFragSize * (simd_group_id % WN);
+@@ -839,7 +848,7 @@ struct BlockMMA<
+   /* Karatsuba MMA: 3 real MMAs per K-chunk */
+   METAL_FUNC void mma(
+       const threadgroup complex64_t* As,
+-      const threadgroup complex64_t* Bs) {
++      const threadgroup complex64_t* Bs) thread {
+     // Adjust for simdgroup and thread location
+     As += As_offset;
+     Bs += Bs_offset;
+@@ -897,7 +906,7 @@ struct BlockMMA<
+   }
+ 
+   /* Store results from simdgroup_matrix results into device memory */
+-  METAL_FUNC void store_result(device U* D, const int ldd) {
++  METAL_FUNC void store_result(device U* D, const int ldd) thread {
+     // Adjust for simdgroup and thread location
+     D += sm * ldd + sn;
+ 
+@@ -916,8 +925,11 @@ struct BlockMMA<
+     }
+   }
+ 
+-  METAL_FUNC void
+-  store_result_slice(device U* D, const int ldd, short2 start, short2 stop) {
++  METAL_FUNC void store_result_slice(
++      device U* D,
++      const int ldd,
++      short2 start,
++      short2 stop) thread {
+     D += sm * ldd + sn;
+     start -= short2(sn, sm);
+     stop -= short2(sn, sm);
+@@ -948,7 +960,7 @@ struct BlockMMA<
+   }
+ 
+   METAL_FUNC void
+-  store_result_safe(device U* D, const int ldd, short2 dst_tile_dims) {
++  store_result_safe(device U* D, const int ldd, short2 dst_tile_dims) thread {
+     D += sm * ldd + sn;
+     dst_tile_dims -= short2(sn, sm);
+     if (dst_tile_dims.x <= 0 || dst_tile_dims.y <= 0)
+@@ -974,7 +986,8 @@ struct BlockMMA<
+ 
+   /* Apply epilogue */
+   template <typename UnaryEpilogue>
+-  METAL_FUNC void apply_epilogue(thread const UnaryEpilogue& epilogue_op) {
++  METAL_FUNC void apply_epilogue(
++      thread const UnaryEpilogue& epilogue_op) thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < decltype(Ctile_r)::kElemsPerTile; i++) {
+       complex64_t out = epilogue_op.apply(
+@@ -990,7 +1003,7 @@ struct BlockMMA<
+       const device U* C,
+       const int ldc,
+       const int fdc,
+-      thread const BinaryEpilogue& epilogue_op) {
++      thread const BinaryEpilogue& epilogue_op) thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+ 
+@@ -1022,7 +1035,7 @@ struct BlockMMA<
+       const int ldc,
+       const int fdc,
+       short2 dst_tile_dims,
+-      thread const BinaryEpilogue& epilogue_op) {
++      thread const BinaryEpilogue& epilogue_op) thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+     dst_tile_dims -= short2(sn, sm);
+@@ -1071,7 +1084,7 @@ struct BlockMMA<
+       const device U* C,
+       const int ldc,
+       const int fdc,
+-      thread const Epilogue& epilogue_op) const {
++      thread const Epilogue& epilogue_op) const thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+     D += (sm)*ldd + sn;
+@@ -1106,7 +1119,7 @@ struct BlockMMA<
+       const int ldc,
+       const int fdc,
+       short2 dst_tile_dims,
+-      thread const Epilogue& epilogue_op) const {
++      thread const Epilogue& epilogue_op) const thread {
+     // Adjust for simdgroup and thread location
+     C += (sm)*ldc + (sn)*fdc;
+     D += (sm)*ldd + sn;
+diff --git a/mlx/backend/metal/kernels/steel/gemm/nax.h b/mlx/backend/metal/kernels/steel/gemm/nax.h
+index 072afe3ba3..6d978ebfb6 100644
+--- a/mlx/backend/metal/kernels/steel/gemm/nax.h
++++ b/mlx/backend/metal/kernels/steel/gemm/nax.h
+@@ -420,8 +420,8 @@ struct BaseNAXFrag {
+ 
+     // Create matmul output in register
+     auto ct_c = gemm_op.template get_destination_cooperative_tensor<
+-        decltype(ct_a),
+-        decltype(ct_b),
++        metal::remove_addrspace_t<decltype(ct_a)>,
++        metal::remove_addrspace_t<decltype(ct_b)>,
+         CType>();
+ 
+     // Load A in to left operand registers
+@@ -492,8 +492,8 @@ struct BaseNAXFrag {
+ 
+     // Create matmul output in register
+     auto ct_c = gemm_op.template get_destination_cooperative_tensor<
+-        decltype(ct_a),
+-        decltype(ct_b),
++        metal::remove_addrspace_t<decltype(ct_a)>,
++        metal::remove_addrspace_t<decltype(ct_b)>,
+         CType>();
+ 
+     // Load A in to left operand registers
+@@ -563,36 +563,39 @@ struct NAXTile {
+ 
+   METAL_FUNC NAXTile() thread {}
+ 
+-  METAL_FUNC constexpr void clear() {
++  METAL_FUNC constexpr void clear() thread {
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kNumFrags; ++i) {
+       val_frags[i] = frag_type(0);
+     }
+   }
+ 
+-  METAL_FUNC constexpr thread frag_type& frag_at(const short i, const short j) {
++  METAL_FUNC constexpr thread frag_type& frag_at(const short i, const short j)
++      thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+   METAL_FUNC constexpr const thread frag_type& frag_at(
+       const short i,
+-      const short j) const {
++      const short j) const thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+   template <int i, int j>
+-  METAL_FUNC constexpr thread frag_type& frag_at() {
++  METAL_FUNC constexpr thread frag_type& frag_at() thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+   template <int i, int j>
+-  METAL_FUNC constexpr const thread frag_type& frag_at() const {
++  METAL_FUNC constexpr const thread frag_type& frag_at() const thread {
+     return val_frags[i * kTileCols + j];
+   }
+ 
+   template <bool transpose>
+-  METAL_FUNC constexpr thread frag_type&
+-  frag_at(const short i, const short j, metal::bool_constant<transpose>) {
++  METAL_FUNC constexpr thread frag_type& frag_at(
++      const short i,
++      const short j,
++      metal::bool_constant<transpose>) thread {
+     if constexpr (transpose) {
+       return frag_at(j, i);
+     } else {
+@@ -601,8 +604,10 @@ struct NAXTile {
+   }
+ 
+   template <bool transpose>
+-  METAL_FUNC constexpr const thread frag_type&
+-  frag_at(const short i, const short j, metal::bool_constant<transpose>) const {
++  METAL_FUNC constexpr const thread frag_type& frag_at(
++      const short i,
++      const short j,
++      metal::bool_constant<transpose>) const thread {
+     if constexpr (transpose) {
+       return frag_at(j, i);
+     } else {
+@@ -611,7 +616,7 @@ struct NAXTile {
+   }
+ 
+   template <int i, int j, bool transpose>
+-  METAL_FUNC constexpr thread frag_type& frag_at() {
++  METAL_FUNC constexpr thread frag_type& frag_at() thread {
+     if constexpr (transpose) {
+       return frag_at<j, i>();
+     } else {
+@@ -620,7 +625,7 @@ struct NAXTile {
+   }
+ 
+   template <int i, int j, bool transpose>
+-  METAL_FUNC constexpr const thread frag_type& frag_at() const {
++  METAL_FUNC constexpr const thread frag_type& frag_at() const thread {
+     if constexpr (transpose) {
+       return frag_at<j, i>();
+     } else {
+@@ -628,16 +633,17 @@ struct NAXTile {
+     }
+   }
+ 
+-  METAL_FUNC thread elem_type* elems() {
++  METAL_FUNC thread elem_type* elems() thread {
+     return reinterpret_cast<thread elem_type*>(val_frags);
+   }
+ 
+-  METAL_FUNC const thread elem_type* elems() const {
++  METAL_FUNC const thread elem_type* elems() const thread {
+     return reinterpret_cast<const thread elem_type*>(val_frags);
+   }
+ 
+   template <typename Op>
+-  METAL_FUNC void row_reduce(thread metal::vec<T, kRowsPerThread>& vals) const {
++  METAL_FUNC void row_reduce(
++      thread metal::vec<T, kRowsPerThread>& vals) const thread {
+     auto vptr = (thread T*)(&vals);
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+@@ -650,7 +656,8 @@ struct NAXTile {
+   }
+ 
+   template <typename Op>
+-  METAL_FUNC void row_bin_op(thread metal::vec<T, kRowsPerThread>& vals) {
++  METAL_FUNC void row_bin_op(
++      thread metal::vec<T, kRowsPerThread>& vals) thread {
+     auto vptr = (thread T*)(&vals);
+     STEEL_PRAGMA_UNROLL
+     for (short i = 0; i < kTileRows; ++i) {
+@@ -663,7 +670,7 @@ struct NAXTile {
+   }
+ 
+   template <typename U, int str_x, int str_y>
+-  METAL_FUNC void load(const threadgroup U* src) {
++  METAL_FUNC void load(const threadgroup U* src) thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::load(
+@@ -678,7 +685,7 @@ struct NAXTile {
+   }
+ 
+   template <typename U, int str_x, int str_y>
+-  METAL_FUNC void store(threadgroup U* dst) const {
++  METAL_FUNC void store(threadgroup U* dst) const thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::store(
+@@ -693,7 +700,7 @@ struct NAXTile {
+   }
+ 
+   template <typename U>
+-  METAL_FUNC void load(const device U* src, const int ld) {
++  METAL_FUNC void load(const device U* src, const int ld) thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::load(
+@@ -708,7 +715,7 @@ struct NAXTile {
+   }
+ 
+   template <typename U>
+-  METAL_FUNC void store(device U* dst, const int ld) const {
++  METAL_FUNC void store(device U* dst, const int ld) const thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::store(
+@@ -724,7 +731,7 @@ struct NAXTile {
+ 
+   template <typename U>
+   METAL_FUNC void
+-  load_rows(const device U* src, const int ld, const short n_rows) {
++  load_rows(const device U* src, const int ld, const short n_rows) thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::load_rows(
+@@ -740,8 +747,10 @@ struct NAXTile {
+   }
+ 
+   template <typename U>
+-  METAL_FUNC void
+-  load_safe(const device U* src, const int ld, const short2 src_tile_dims) {
++  METAL_FUNC void load_safe(
++      const device U* src,
++      const int ld,
++      const short2 src_tile_dims) thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::load_safe(
+@@ -759,7 +768,7 @@ struct NAXTile {
+ 
+   template <typename U>
+   METAL_FUNC void store_rows(device U* dst, const int ld, const short n_rows)
+-      const {
++      const thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::store_rows(
+@@ -775,8 +784,10 @@ struct NAXTile {
+   }
+ 
+   template <typename U>
+-  METAL_FUNC void
+-  store_safe(device U* dst, const int ld, const short2 dst_tile_dims) const {
++  METAL_FUNC void store_safe(
++      device U* dst,
++      const int ld,
++      const short2 dst_tile_dims) const thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::store_safe(
+@@ -797,7 +808,7 @@ struct NAXTile {
+       device U* dst,
+       const int ld,
+       const short2 start,
+-      const short2 stop) const {
++      const short2 stop) const thread {
+     const_for_loop<0, kTileRows, 1>([&](auto idx_row) {
+       const_for_loop<0, kTileCols, 1>([&](auto idx_col) {
+         NAXFrag_t::store_slice(
+diff --git a/mlx/backend/metal/kernels/steel/gemm/transforms.h b/mlx/backend/metal/kernels/steel/gemm/transforms.h
+index 0282a1223f..14e94e480a 100644
+--- a/mlx/backend/metal/kernels/steel/gemm/transforms.h
++++ b/mlx/backend/metal/kernels/steel/gemm/transforms.h
+@@ -24,7 +24,7 @@ struct TransformNone {
+ 
+ template <typename OutT, typename InT>
+ struct TransformAdd {
+-  TransformAdd(const float, const float) {}
++  TransformAdd(const float, const float) thread {}
+ 
+   static METAL_FUNC OutT apply(InT x) {
+     return static_cast<OutT>(x);
+@@ -40,14 +40,14 @@ struct TransformAxpby {
+   const float alpha;
+   const float beta;
+ 
+-  TransformAxpby(const float alpha_, const float beta_)
+-      : alpha(alpha_), beta(beta_) {}
++  TransformAxpby(const float alpha_, const float beta_) thread : alpha(alpha_),
++                                                                 beta(beta_) {}
+ 
+   static METAL_FUNC OutT apply(InT x) {
+     return static_cast<OutT>(x);
+   }
+ 
+-  METAL_FUNC OutT apply(InT x, OutT c) const {
++  METAL_FUNC OutT apply(InT x, OutT c) const thread {
+     return static_cast<OutT>(
+         x * static_cast<InT>(alpha) + (static_cast<OutT>(beta) * c));
+   }
+diff --git a/mlx/backend/metal/kernels/steel/utils/integral_constant.h b/mlx/backend/metal/kernels/steel/utils/integral_constant.h
+index fa7b39986f..2f153f482f 100644
+--- a/mlx/backend/metal/kernels/steel/utils/integral_constant.h
++++ b/mlx/backend/metal/kernels/steel/utils/integral_constant.h
+@@ -20,7 +20,7 @@ struct integral_constant {
+   using value_type = T;
+   using type = integral_constant;
+ 
+-  METAL_FUNC constexpr operator value_type() const noexcept {
++  METAL_FUNC constexpr operator value_type() const thread noexcept {
+     return value;
+   }
+ };
+@@ -52,7 +52,8 @@ using Int = integral_constant<int, val>;
+   METAL_FUNC constexpr auto __operator__(                   \
+       integral_constant<T, tv>, integral_constant<U, uv>) { \
+     constexpr auto res = tv __op__ uv;                      \
+-    return integral_constant<decltype(res), res>{};         \
++    using res_t = metal::remove_addrspace_t<decltype(res)>; \
++    return integral_constant<res_t, res>{};                 \
+   }
+ 
+ integral_const_binop(+, operator+);
+diff --git a/mlx/backend/metal/kernels/ternary_ops.h b/mlx/backend/metal/kernels/ternary_ops.h
+index e0235d9dd3..d97e238c69 100644
+--- a/mlx/backend/metal/kernels/ternary_ops.h
++++ b/mlx/backend/metal/kernels/ternary_ops.h
+@@ -4,7 +4,7 @@
+ 
+ struct Select {
+   template <typename T>
+-  T operator()(bool condition, T x, T y) {
++  T operator()(bool condition, T x, T y) thread {
+     return condition ? x : y;
+   }
+ };
+diff --git a/mlx/backend/metal/kernels/unary_ops.h b/mlx/backend/metal/kernels/unary_ops.h
+index 327bb5a940..1337f6b52e 100644
+--- a/mlx/backend/metal/kernels/unary_ops.h
++++ b/mlx/backend/metal/kernels/unary_ops.h
+@@ -16,125 +16,125 @@ constant float inf = metal::numeric_limits<float>::infinity();
+ 
+ struct Abs {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::abs(x);
+   };
+-  uint8_t operator()(uint8_t x) {
++  uint8_t operator()(uint8_t x) thread {
+     return x;
+   };
+-  uint16_t operator()(uint16_t x) {
++  uint16_t operator()(uint16_t x) thread {
+     return x;
+   };
+-  uint32_t operator()(uint32_t x) {
++  uint32_t operator()(uint32_t x) thread {
+     return x;
+   };
+-  uint64_t operator()(uint64_t x) {
++  uint64_t operator()(uint64_t x) thread {
+     return x;
+   };
+-  bool operator()(bool x) {
++  bool operator()(bool x) thread {
+     return x;
+   };
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     return {metal::precise::sqrt(x.real * x.real + x.imag * x.imag), 0};
+   };
+ };
+ 
+ struct ArcCos {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::acos(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x);
++  complex64_t operator()(complex64_t x) thread;
+ };
+ 
+ struct ArcCosh {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::acosh(x);
+   };
+ };
+ 
+ struct ArcSin {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::asin(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x);
++  complex64_t operator()(complex64_t x) thread;
+ };
+ 
+ struct ArcSinh {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::asinh(x);
+   };
+ };
+ 
+ struct ArcTan {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::atan(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x);
++  complex64_t operator()(complex64_t x) thread;
+ };
+ 
+ struct ArcTanh {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::atanh(x);
+   };
+ };
+ 
+ struct BitwiseInvert {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return ~x;
+   };
+ };
+ 
+ struct Ceil {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::ceil(x);
+   };
+-  int8_t operator()(int8_t x) {
++  int8_t operator()(int8_t x) thread {
+     return x;
+   };
+-  int16_t operator()(int16_t x) {
++  int16_t operator()(int16_t x) thread {
+     return x;
+   };
+-  int32_t operator()(int32_t x) {
++  int32_t operator()(int32_t x) thread {
+     return x;
+   };
+-  int64_t operator()(int64_t x) {
++  int64_t operator()(int64_t x) thread {
+     return x;
+   };
+-  uint8_t operator()(uint8_t x) {
++  uint8_t operator()(uint8_t x) thread {
+     return x;
+   };
+-  uint16_t operator()(uint16_t x) {
++  uint16_t operator()(uint16_t x) thread {
+     return x;
+   };
+-  uint32_t operator()(uint32_t x) {
++  uint32_t operator()(uint32_t x) thread {
+     return x;
+   };
+-  uint64_t operator()(uint64_t x) {
++  uint64_t operator()(uint64_t x) thread {
+     return x;
+   };
+-  bool operator()(bool x) {
++  bool operator()(bool x) thread {
+     return x;
+   };
+ };
+ 
+ struct Cos {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::cos(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     return {
+         metal::precise::cos(x.real) * metal::precise::cosh(x.imag),
+         -metal::precise::sin(x.real) * metal::precise::sinh(x.imag)};
+@@ -143,11 +143,11 @@ struct Cos {
+ 
+ struct Cosh {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::cosh(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     return {
+         metal::precise::cosh(x.real) * metal::precise::cos(x.imag),
+         metal::precise::sinh(x.real) * metal::precise::sin(x.imag)};
+@@ -155,89 +155,89 @@ struct Cosh {
+ };
+ 
+ struct Conjugate {
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     return complex64_t{x.real, -x.imag};
+   }
+ };
+ 
+ struct Erf {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return static_cast<T>(erf(static_cast<float>(x)));
+   };
+ };
+ 
+ struct ErfInv {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return static_cast<T>(erfinv(static_cast<float>(x)));
+   };
+ };
+ 
+ struct Exp {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::exp(x);
+   };
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     return cexpf(x);
+   }
+ };
+ 
+ struct Expm1 {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return static_cast<T>(expm1f(static_cast<float>(x)));
+   };
+ };
+ 
+ struct Floor {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::floor(x);
+   };
+-  int8_t operator()(int8_t x) {
++  int8_t operator()(int8_t x) thread {
+     return x;
+   };
+-  int16_t operator()(int16_t x) {
++  int16_t operator()(int16_t x) thread {
+     return x;
+   };
+-  int32_t operator()(int32_t x) {
++  int32_t operator()(int32_t x) thread {
+     return x;
+   };
+-  int64_t operator()(int64_t x) {
++  int64_t operator()(int64_t x) thread {
+     return x;
+   };
+-  uint8_t operator()(uint8_t x) {
++  uint8_t operator()(uint8_t x) thread {
+     return x;
+   };
+-  uint16_t operator()(uint16_t x) {
++  uint16_t operator()(uint16_t x) thread {
+     return x;
+   };
+-  uint32_t operator()(uint32_t x) {
++  uint32_t operator()(uint32_t x) thread {
+     return x;
+   };
+-  uint64_t operator()(uint64_t x) {
++  uint64_t operator()(uint64_t x) thread {
+     return x;
+   };
+-  bool operator()(bool x) {
++  bool operator()(bool x) thread {
+     return x;
+   };
+ };
+ 
+ struct Imag {
+-  float operator()(complex64_t x) {
++  float operator()(complex64_t x) thread {
+     return x.imag;
+   };
+ };
+ 
+ struct Log {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::log(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     auto r = metal::precise::log(Abs{}(x).real);
+     auto i = metal::precise::atan2(x.imag, x.real);
+     return {r, i};
+@@ -246,11 +246,11 @@ struct Log {
+ 
+ struct Log2 {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::log2(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     auto y = Log{}(x);
+     return {y.real / M_LN2_F, y.imag / M_LN2_F};
+   };
+@@ -258,11 +258,11 @@ struct Log2 {
+ 
+ struct Log10 {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::log10(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     auto y = Log{}(x);
+     return {y.real / M_LN10_F, y.imag / M_LN10_F};
+   };
+@@ -270,44 +270,44 @@ struct Log10 {
+ 
+ struct Log1p {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return log1p(x);
+   };
+ };
+ 
+ struct LogicalNot {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return !x;
+   };
+ };
+ 
+ struct Negative {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return -x;
+   };
+ };
+ 
+ struct Real {
+-  float operator()(complex64_t x) {
++  float operator()(complex64_t x) thread {
+     return x.real;
+   };
+ };
+ 
+ struct Round {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::rint(x);
+   };
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     return {metal::rint(x.real), metal::rint(x.imag)};
+   };
+ };
+ 
+ struct Sigmoid {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     auto y = 1 / (1 + metal::exp(metal::abs(x)));
+     return (x < 0) ? y : 1 - y;
+   }
+@@ -315,13 +315,13 @@ struct Sigmoid {
+ 
+ struct Sign {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return (x > T(0)) - (x < T(0));
+   };
+-  uint32_t operator()(uint32_t x) {
++  uint32_t operator()(uint32_t x) thread {
+     return x != 0;
+   };
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     if (x == complex64_t(0)) {
+       return x;
+     }
+@@ -332,11 +332,11 @@ struct Sign {
+ 
+ struct Sin {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::sin(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     return {
+         metal::precise::sin(x.real) * metal::precise::cosh(x.imag),
+         metal::precise::cos(x.real) * metal::precise::sinh(x.imag)};
+@@ -345,11 +345,11 @@ struct Sin {
+ 
+ struct Sinh {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::sinh(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     return {
+         metal::precise::sinh(x.real) * metal::precise::cos(x.imag),
+         metal::precise::cosh(x.real) * metal::precise::sin(x.imag)};
+@@ -358,18 +358,18 @@ struct Sinh {
+ 
+ struct Square {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return x * x;
+   };
+ };
+ 
+ struct Sqrt {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::sqrt(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     if (x.real == 0.0 && x.imag == 0.0) {
+       return {0.0, 0.0};
+     }
+@@ -383,22 +383,22 @@ struct Sqrt {
+ 
+ struct Rsqrt {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::rsqrt(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     return 1.0 / Sqrt{}(x);
+   }
+ };
+ 
+ struct Tan {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::tan(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     float tan_a = metal::precise::tan(x.real);
+     float tanh_b = metal::precise::tanh(x.imag);
+     float t1 = tan_a * tanh_b;
+@@ -409,11 +409,11 @@ struct Tan {
+ 
+ struct Tanh {
+   template <typename T>
+-  T operator()(T x) {
++  T operator()(T x) thread {
+     return metal::precise::tanh(x);
+   };
+ 
+-  complex64_t operator()(complex64_t x) {
++  complex64_t operator()(complex64_t x) thread {
+     float tanh_a = metal::precise::tanh(x.real);
+     float tan_b = metal::precise::tan(x.imag);
+     float t1 = tanh_a * tan_b;
+@@ -422,19 +422,19 @@ struct Tanh {
+   };
+ };
+ 
+-complex64_t ArcCos::operator()(complex64_t x) {
++complex64_t ArcCos::operator()(complex64_t x) thread {
+   auto i = complex64_t{0.0, 1.0};
+   auto y = Log{}(x + i * Sqrt{}(1.0 - x * x));
+   return {y.imag, -y.real};
+ };
+ 
+-complex64_t ArcSin::operator()(complex64_t x) {
++complex64_t ArcSin::operator()(complex64_t x) thread {
+   auto i = complex64_t{0.0, 1.0};
+   auto y = Log{}(i * x + Sqrt{}(1.0 - x * x));
+   return {y.imag, -y.real};
+ };
+ 
+-complex64_t ArcTan::operator()(complex64_t x) {
++complex64_t ArcTan::operator()(complex64_t x) thread {
+   auto i = complex64_t{0.0, 1.0};
+   auto ix = i * x;
+   return (1.0 / complex64_t{0.0, 2.0}) * Log{}((1.0 + ix) / (1.0 - ix));
+@@ -442,13 +442,13 @@ complex64_t ArcTan::operator()(complex64_t x) {
+ 
+ struct ToFP8 {
+   template <typename T>
+-  uint8_t operator()(T f) {
++  uint8_t operator()(T f) thread {
+     return fp8_e4m3(f).bits;
+   }
+ };
+ 
+ struct FromFP8 {
+-  float operator()(uint8_t x) {
++  float operator()(uint8_t x) thread {
+     return float(*(thread fp8_e4m3*)(&x));
+   }
+ };
+diff --git a/mlx/backend/metal/kernels/utils.h b/mlx/backend/metal/kernels/utils.h
+index d356450101..f2a8362ae2 100644
+--- a/mlx/backend/metal/kernels/utils.h
++++ b/mlx/backend/metal/kernels/utils.h
+@@ -205,9 +205,9 @@ struct LoopedElemToLoc {
+   OffsetT offset{0};
+   int index{0};
+ 
+-  LoopedElemToLoc(int dim) : dim(dim), inner_looper(dim - 1) {}
++  LoopedElemToLoc(int dim) thread : dim(dim), inner_looper(dim - 1) {}
+ 
+-  void next(const constant int* shape, const constant int64_t* strides) {
++  void next(const constant int* shape, const constant int64_t* strides) thread {
+     if (dim == 0) {
+       return;
+     }
+@@ -220,7 +220,8 @@ struct LoopedElemToLoc {
+     }
+   }
+ 
+-  void next(int n, const constant int* shape, const constant int64_t* strides) {
++  void next(int n, const constant int* shape, const constant int64_t* strides)
++      thread {
+     if (dim == 0) {
+       return;
+     }
+@@ -243,7 +244,7 @@ struct LoopedElemToLoc {
+     }
+   }
+ 
+-  OffsetT location() {
++  OffsetT location() thread {
+     return offset;
+   }
+ };
+@@ -254,9 +255,9 @@ struct LoopedElemToLoc<1, OffsetT, true> {
+   OffsetT offset{0};
+   uint index{0};
+ 
+-  LoopedElemToLoc(int dim) : dim(dim) {}
++  LoopedElemToLoc(int dim) thread : dim(dim) {}
+ 
+-  void next(const constant int* shape, const constant int64_t* strides) {
++  void next(const constant int* shape, const constant int64_t* strides) thread {
+     index++;
+     if (dim > 1) {
+       offset = elem_to_loc<OffsetT>(index, shape, strides, dim);
+@@ -265,7 +266,8 @@ struct LoopedElemToLoc<1, OffsetT, true> {
+     }
+   }
+ 
+-  void next(int n, const constant int* shape, const constant int64_t* strides) {
++  void next(int n, const constant int* shape, const constant int64_t* strides)
++      thread {
+     index += n;
+     if (dim > 1) {
+       offset = elem_to_loc<OffsetT>(index, shape, strides, dim);
+@@ -274,7 +276,7 @@ struct LoopedElemToLoc<1, OffsetT, true> {
+     }
+   }
+ 
+-  OffsetT location() {
++  OffsetT location() thread {
+     return offset;
+   }
+ };
+@@ -283,17 +285,18 @@ template <typename OffsetT>
+ struct LoopedElemToLoc<1, OffsetT, false> {
+   OffsetT offset{0};
+ 
+-  LoopedElemToLoc(int) {}
++  LoopedElemToLoc(int) thread {}
+ 
+-  void next(const constant int*, const constant int64_t* strides) {
++  void next(const constant int*, const constant int64_t* strides) thread {
+     offset += OffsetT(strides[0]);
+   }
+ 
+-  void next(int n, const constant int*, const constant int64_t* strides) {
++  void next(int n, const constant int*, const constant int64_t* strides)
++      thread {
+     offset += n * OffsetT(strides[0]);
+   }
+ 
+-  OffsetT location() {
++  OffsetT location() thread {
+     return offset;
+   }
+ };
