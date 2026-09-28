@@ -77,22 +77,35 @@ FetchContent_MakeAvailable(mlx_c)
 if(TARGET mlxc)
     get_target_property(LLM_MLXC_SRC_DIR mlxc SOURCE_DIR)
     if(LLM_MLXC_SRC_DIR AND EXISTS "${LLM_MLXC_SRC_DIR}/mlx/c/ops.cpp")
-        execute_process(
-            COMMAND patch -p1 --forward --dry-run --silent -i
-                    "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_c_inplace_slice_update.patch"
-            WORKING_DIRECTORY "${LLM_MLXC_SRC_DIR}"
-            RESULT_VARIABLE LLM_MLXC_PATCH_DRYRUN
-            OUTPUT_QUIET ERROR_QUIET)
-        if(LLM_MLXC_PATCH_DRYRUN EQUAL 0)
+        # Guardia idempotente robusta al rename (2026-09-28): il `--forward --dry-run`
+        # NON riconosce piu' la patch come "gia' applicata" se la cache locale e' stata
+        # patchata con una variante il cui commento differisce (il rename GMBasic->LLMEnv
+        # cambia le righe aggiunte), quindi la patch si riapplicava producendo una
+        # DEFINIZIONE DUPLICATA di mlx_slice_update_inplace (redefinition a compile).
+        # Si salta in base alla presenza REALE del simbolo nel sorgente, non al testo
+        # delle righe aggiunte dal patch.
+        file(READ "${LLM_MLXC_SRC_DIR}/mlx/c/ops.cpp" LLM_MLXC_OPS_CPP)
+        string(FIND "${LLM_MLXC_OPS_CPP}" "mlx_slice_update_inplace" LLM_MLXC_ALREADY)
+        if(NOT LLM_MLXC_ALREADY EQUAL -1)
+            message(STATUS "llmengine_mlx: mlx_slice_update_inplace gia' presente in ${LLM_MLXC_SRC_DIR} (patch saltata)")
+        else()
             execute_process(
-                COMMAND patch -p1 --forward -i
+                COMMAND patch -p1 --forward --dry-run --silent -i
                         "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_c_inplace_slice_update.patch"
                 WORKING_DIRECTORY "${LLM_MLXC_SRC_DIR}"
-                RESULT_VARIABLE LLM_MLXC_PATCH_APPLY)
-            if(LLM_MLXC_PATCH_APPLY EQUAL 0)
-                message(STATUS "llmengine_mlx: applicata patch mlx-c slice_update_inplace")
-            else()
-                message(WARNING "llmengine_mlx: patch mlx-c slice_update_inplace FALLITA (rc=${LLM_MLXC_PATCH_APPLY})")
+                RESULT_VARIABLE LLM_MLXC_PATCH_DRYRUN
+                OUTPUT_QUIET ERROR_QUIET)
+            if(LLM_MLXC_PATCH_DRYRUN EQUAL 0)
+                execute_process(
+                    COMMAND patch -p1 --forward -i
+                            "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_c_inplace_slice_update.patch"
+                    WORKING_DIRECTORY "${LLM_MLXC_SRC_DIR}"
+                    RESULT_VARIABLE LLM_MLXC_PATCH_APPLY)
+                if(LLM_MLXC_PATCH_APPLY EQUAL 0)
+                    message(STATUS "llmengine_mlx: applicata patch mlx-c slice_update_inplace")
+                else()
+                    message(WARNING "llmengine_mlx: patch mlx-c slice_update_inplace FALLITA (rc=${LLM_MLXC_PATCH_APPLY})")
+                endif()
             endif()
         endif()
     endif()
