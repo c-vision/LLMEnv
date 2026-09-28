@@ -79,8 +79,9 @@ if(TARGET mlxc)
     if(LLM_MLXC_SRC_DIR AND EXISTS "${LLM_MLXC_SRC_DIR}/mlx/c/ops.cpp")
         # Guardia idempotente robusta al rename (2026-09-28): il `--forward --dry-run`
         # NON riconosce piu' la patch come "gia' applicata" se la cache locale e' stata
-        # patchata con una variante il cui commento differisce (il rename GMBasic->LLMEnv
-        # cambia le righe aggiunte), quindi la patch si riapplicava producendo una
+        # patchata con una variante il cui commento differisce (il rename dei simboli
+        # verso il namespace llm/llmengine cambia le righe aggiunte), quindi la patch
+        # si riapplicava producendo una
         # DEFINIZIONE DUPLICATA di mlx_slice_update_inplace (redefinition a compile).
         # Si salta in base alla presenza REALE del simbolo nel sorgente, non al testo
         # delle righe aggiunte dal patch.
