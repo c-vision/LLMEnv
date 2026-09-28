@@ -10,6 +10,7 @@
 #include "llmcodec_quant_gptq.h"
 #include "llmcodec_quant_nf4.h"
 #include "llmcodec_rolemap.h"
+#include "llm_mlx_tq_decode.h"   /* decode TurboQuant CONDIVISO (anche dal path SWAP) */
 #include <cJSON.h>
 
 #include <stdio.h>
@@ -726,6 +727,136 @@ int gptq_nf4_synthesize_weights(MultiShardWeights* weights, mlx_stream stream) {
     return ok ? n_dequant : -1;
 }
 
+/* ── TurboQuant (PolarQuant-MLX) — dequant a load ──────────────────────────────────────────────
+ * I checkpoint `mode:"turboquant"` NON hanno un `.weight` plain: hanno `<base>.weight` U32 (indici)
+ * + `<base>.scales` F16 [.., in/64] + `<base>.signs` F16 [in] + `<base>.codebook` F16 (8 = 3-bit
+ * Lloyd-Max N(0,1), 3 = ternary {-c,0,+c}, c=1.22401). I pesi sono in dominio RUOTATO:
+ * `W_rot = Hadamard(W·signs)`. Qui si DEQUANTIZZA UNA VOLTA (indici→codebook→scala→Hadamard
+ * inversa→signs) in `.weight` F16 [out,in] e si inietta in uno shard SINTETICO in TESTA (come
+ * gptq_nf4) così vince il lookup su `<base>.weight` U32. Formato di
+ * github.com/manjunathshiva/turboquant-mlx (decode validato identico alla libreria). Il decode
+ * per-riga (Hadamard inversa inclusa) vive in `llm_mlx_tq_decode.h`, condiviso col path SWAP. */
+
+int turboquant_synthesize_weights(MultiShardWeights* weights, mlx_stream stream) {
+    if (weights == NULL || weights->count <= 0) return 0;
+    mlx_map_string_to_array synth = mlx_map_string_to_array_new();
+    if (synth.ctx == NULL) return -1;
+    int n_dec = 0; bool ok = true;
+    char base[240], nm[288];
+    for (int si = 0; ok && si < weights->count; si++) {
+        mlx_map_string_to_array map = weights->shards[si];
+        if (map.ctx == NULL) continue;
+        char** bases = NULL; int nb = 0, capb = 0;
+        mlx_map_string_to_array_iterator it = mlx_map_string_to_array_iterator_new(map);
+        if (it.ctx == NULL) continue;
+        const char* key = NULL; mlx_array val = mlx_array_new();
+        while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0) {
+            size_t kl = key ? strlen(key) : 0;
+            if (kl > 9 && strcmp(key + kl - 9, ".codebook") == 0) {
+                /* SWAP esperti ATTIVO (ingest aperto): gli esperti ROUTED (switch_mlp) NON si
+                 * dequantizzano a load (sarebbero tutti residenti -> nessun risparmio); li decodifica
+                 * on-the-fly il path di streaming (`llm_mlx_tq_stack`). shared_expert/attention
+                 * restano dequantizzati. `swap_active` (non `swap_on`) garantisce che se l'ingest
+                 * non apre si resti resident, mai spazzatura. */
+                if (llm_mlx_moe_swap_active() && strstr(key, "switch_mlp") != NULL) {
+                    mlx_array_free(val); val = mlx_array_new();
+                    continue;
+                }
+                if (nb == capb) { capb = capb ? capb * 2 : 16; bases = (char**)realloc(bases, (size_t)capb * sizeof(char*)); }
+                bases[nb++] = strndup(key, kl - 9);
+            }
+            mlx_array_free(val); val = mlx_array_new();
+        }
+        mlx_array_free(val); mlx_map_string_to_array_iterator_free(it);
+        for (int b = 0; ok && b < nb; b++) {
+            snprintf(base, sizeof base, "%s", bases[b]);
+            mlx_array w = mlx_array_new(), sc = mlx_array_new(), sg = mlx_array_new(), cb = mlx_array_new();
+            snprintf(nm, sizeof nm, "%s.weight", base);   bool gw = multishard_get(weights, nm, &w);
+            snprintf(nm, sizeof nm, "%s.scales", base);   bool gs = multishard_get(weights, nm, &sc);
+            snprintf(nm, sizeof nm, "%s.signs", base);    bool gg = multishard_get(weights, nm, &sg);
+            snprintf(nm, sizeof nm, "%s.codebook", base); bool gc = multishard_get(weights, nm, &cb);
+            if (!gw || !gs || !gg || !gc ||
+                mlx_array_eval(w) || mlx_array_eval(sc) || mlx_array_eval(sg) || mlx_array_eval(cb)) {
+                fprintf(stderr, "[turboquant] %s: weight/scales/signs/codebook mancanti o eval fallita (w=%d s=%d g=%d c=%d)\n",
+                        base, (int)gw, (int)gs, (int)gg, (int)gc);
+                ok = false; mlx_array_free(w); mlx_array_free(sc); mlx_array_free(sg); mlx_array_free(cb); break;
+            }
+            int ndw = mlx_array_ndim(w);
+            const int* ws = mlx_array_shape(w);
+            int E = (ndw == 3) ? ws[0] : 1;
+            int rows = (ndw == 3) ? ws[1] : ws[0];
+            int ngrp = mlx_array_shape(sc)[mlx_array_ndim(sc) - 1];
+            int in_dim = ngrp * 64;
+            int cbn = mlx_array_shape(cb)[0];
+            int trit = (cbn == 3);
+            int bits = trit ? 0 : (cbn == 8 ? 3 : (cbn == 4 ? 2 : 4));
+            int perw = trit ? 20 : (32 / bits);
+            int packed = ws[ndw - 1];
+            int need_cols = trit ? (in_dim + 19) / 20 : (in_dim + perw - 1) / perw;
+            if (!llm_mlx_tq_pow2(in_dim) || need_cols > packed) {
+                fprintf(stderr, "[turboquant] %s: shape inattese in_dim=%d packed=%d cbn=%d\n", base, in_dim, packed, cbn);
+                ok = false; mlx_array_free(w); mlx_array_free(sc); mlx_array_free(sg); mlx_array_free(cb); break;
+            }
+            const uint32_t* wd = mlx_array_data_uint32(w);
+            const uint16_t* scd = (const uint16_t*)(const void*)mlx_array_data_float16(sc);
+            const uint16_t* sgd = (const uint16_t*)(const void*)mlx_array_data_float16(sg);
+            const uint16_t* cbd = (const uint16_t*)(const void*)mlx_array_data_float16(cb);
+            if (!wd || !scd || !sgd || !cbd) { fprintf(stderr, "[turboquant] %s: data NULL\n", base); ok = false; mlx_array_free(w); mlx_array_free(sc); mlx_array_free(sg); mlx_array_free(cb); break; }
+            /* Hoist F32 di codebook/signs: nel decode per-riga evita la conversione f16 per elemento. */
+            float cbf[16];
+            if (cbn < 1 || cbn > 16) { fprintf(stderr, "[turboquant] %s: cbn=%d inatteso\n", base, cbn); ok = false; mlx_array_free(w); mlx_array_free(sc); mlx_array_free(sg); mlx_array_free(cb); break; }
+            for (int i = 0; i < cbn; i++) cbf[i] = llmcodec_f16_to_f32(cbd[i]);
+            float* sgf = (float*)malloc((size_t)in_dim * sizeof(float));
+            if (!sgf) { ok = false; mlx_array_free(w); mlx_array_free(sc); mlx_array_free(sg); mlx_array_free(cb); break; }
+            for (int i = 0; i < in_dim; i++) sgf[i] = llmcodec_f16_to_f32(sgd[i]);
+            float* ob = (float*)malloc((size_t)E * rows * in_dim * sizeof(float));
+            if (!ob) { free(sgf); ok = false; mlx_array_free(w); mlx_array_free(sc); mlx_array_free(sg); mlx_array_free(cb); break; }
+            for (int e = 0; e < E; e++) {
+                for (int r = 0; r < rows; r++) {
+                    const uint32_t* wrow = wd + ((size_t)e * rows + r) * packed;
+                    float* orow = ob + ((size_t)e * rows + r) * in_dim;
+                    const uint16_t* scrow = scd + ((size_t)e * rows + r) * ngrp;
+                    llm_mlx_tq_decode_row(wrow, scrow, cbf, sgf, in_dim, ngrp, trit, bits, orow);
+                }
+            }
+            free(sgf);
+            int oshape3[3] = { E, rows, in_dim }, oshape2[2] = { rows, in_dim };
+            mlx_array of = mlx_array_new_data(ob, ndw == 3 ? oshape3 : oshape2, ndw, MLX_FLOAT32); free(ob);
+            mlx_array o16 = mlx_array_new();
+            /* Nel dtype di ATTIVAZIONE (come i synth AWQ/GPTQ sopra): evita l'AsType per-token dei
+             * pesi tq nel path lineare (attention/shared), che oggi dominava il decode. */
+            const mlx_dtype odt = g_bf16_all ? g_act16 : MLX_FLOAT16;
+            bool aok = of.ctx && mlx_astype(&o16, of, odt, stream) == 0 && mlx_array_eval(o16) == 0;
+            mlx_array_free(of);
+            if (llm_mlx_tq_enabled() && ndw == 2) {
+                /* Path TQ dense (opzione 2): `.weight` resta PACKED (u32); i signs vanno in `.biases`
+                 * (il fetch get_triple li consegna a quantized_linear_cfg). Codebook dal config. */
+                snprintf(nm, sizeof nm, "%s.biases", base);
+                aok = aok && mlx_map_string_to_array_insert(synth, nm, sg) == 0;
+            } else {
+                snprintf(nm, sizeof nm, "%s.weight", base);
+                if (aok) aok = mlx_map_string_to_array_insert(synth, nm, o16) == 0;
+            }
+            if (!aok) { fprintf(stderr, "[turboquant] %s: insert fallita\n", base); ok = false; }
+            mlx_array_free(o16);
+            mlx_array_free(w); mlx_array_free(sc); mlx_array_free(sg); mlx_array_free(cb);
+            if (ok) n_dec++;
+        }
+        for (int b = 0; b < nb; b++) free(bases[b]);
+        free(bases);
+    }
+    if (ok && n_dec > 0) {
+        mlx_map_string_to_array* ns = (mlx_map_string_to_array*)malloc((size_t)(weights->count + 1) * sizeof(mlx_map_string_to_array));
+        if (ns == NULL) { mlx_map_string_to_array_free(synth); return -1; }
+        memmove(ns + 1, weights->shards, (size_t)weights->count * sizeof(mlx_map_string_to_array));
+        ns[0] = synth;
+        weights->shards = ns; weights->count += 1; weights->cap = weights->count;
+    } else {
+        mlx_map_string_to_array_free(synth);
+    }
+    return ok ? n_dec : -1;
+}
+
 /* LLM_PRETOUCH_WEIGHTS (2026-09-07, default ON dal 2026-09-07 pomeriggio -- misurato su
  * GLM-4.5-Air reale a macchina idle: decode 24 token 9.264s (2.6 tok/s) -> 3.354s (7.2 tok/s,
  * 2.76x), tempo totale processo 31.21s -> 23.63s (il pretouch stesso costa solo 4.156s per
@@ -757,7 +888,14 @@ bool llm_mlx_pretouch_weights_enabled(void) {
     /* NIENTE cache statica: l'env e' letto ad OGNI load, cosi' l'opzione BASIC "swap" per-modello
      * (che setta LLM_NO_PRETOUCH_WEIGHTS) ha effetto anche se nel processo sono stati caricati
      * altri modelli prima. Con LLM_NO_PRETOUCH_WEIGHTS set, i pesi restano LAZY/file-backed
-     * (mmap) -> paginati dal SO da disco = swap dei pesi su disco. */
+     * (mmap) -> paginati dal SO da disco = swap dei pesi su disco.
+     *
+     * Auto-OFF sotto streaming esperti (offload): pretouchare TUTTI i
+     * tensori dello shard (inclusi gli switch_mlp.* degli esperti) vanifica lo SWAP —
+     * materializza le decine di GB di esperti in RAM, cioe' esattamente ciò che lo streaming
+     * evita (OOM/lockup su modelli >wired-limit tipo Qwen3.8-Flash-Next 104GB). Port del fix
+     * GMBasic 87e75432b. */
+    if (llm_mlx_moe_swap_on()) return false;
     return getenv("LLM_NO_PRETOUCH_WEIGHTS") == NULL;
 }
 
@@ -867,7 +1005,7 @@ void llm_mlx_pretouch_weights(const MultiShardWeights* weights) {
         while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0 && key != NULL) {
             /* Streaming esperti: NON pretouchare gli esperti (switch_mlp.*) -> restano lazy e
              * vengono letti on-demand dallo store; il resto (attn/embed/norm/lm_head) va residente. */
-            if (getenv("LLMENGINE_MOE_MLX_MOE_SWAP_DIR") != NULL && strstr(key, "switch_mlp")) continue;
+            if (llm_mlx_moe_swap_on() && strstr(key, "switch_mlp")) continue;
             mlx_vector_array_append_value(all, val);
             n_tensors++;
         }

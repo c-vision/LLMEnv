@@ -771,6 +771,10 @@ extern int g_df2_n_rounds, g_df2_n_roll;
 bool plain_linear(mlx_array* res, mlx_array x, mlx_array w, mlx_stream stream);
 bool rms_norm_cfg(mlx_array* res, mlx_array x, mlx_array w, float eps, mlx_stream stream);
 bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases, int group_size, int bits, const char* mode, mlx_stream stream);
+/* Codebook TurboQuant GLOBALE (identico in tutti i tensori tq, da config.quantization.codebook). */
+void llm_mlx_tq_set_cb(const float* cb, int n);
+int llm_mlx_tq_get_cb(float* out, int cap);
+int llm_mlx_tq_enabled(void);   /* true se il modello e' TurboQuant (codebook dal config) */
 int llm_mlx_derive_bits(mlx_array w, mlx_array scales, int group_size, int fallback);
 /* --- dominio sensitivity/quantize (llm_mlx_sensitivity.c) --- */
 /* Definito in llm_mlx_sensitivity.c, usato dal monolite (model_build). */
@@ -910,6 +914,20 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
                                 const char* mode, bool sorted, mlx_stream st);
 /* Byte totali degli esperti (dall'ingest SWAP attivo), da sottrarre all'active memory. */
 uint64_t llm_mlx_moe_swap_expert_bytes(void);
+/* Offload esperti (streaming da disco): stato impostato via API `llm_ai_mlx_set_moe_swap_dir`. */
+int llm_mlx_moe_swap_on(void);
+/* true se l'ingest SWAP e' realmente aperto (streaming utilizzabile). Condizione per saltare la
+ * materializzazione degli esperti nel synth (`turboquant_synthesize_weights`), a differenza di
+ * `swap_on` che riflette solo la dir impostata. */
+int llm_mlx_moe_swap_active(void);
+const char* llm_mlx_moe_swap_dir(void);
+/* Kernel MoE-fuso stream-aware: OFF usa i tensori completi, ON gli stacked degli esperti attivi
+ * (indici locali) — stesso kernel, nessuna divergenza per-modello. */
+bool llm_mlx_moe_fused_stream_aware(const ModelConfig* cfg, int layer, mlx_array x1,
+    mlx_array top_inds_arr, mlx_array gw, mlx_array gs, mlx_array gb,
+    mlx_array uw, mlx_array us, mlx_array ub, mlx_array dw, mlx_array ds, mlx_array db,
+    int gu_bits, int gu_group, int d_bits, int d_group, int act,
+    mlx_array scores_flat, mlx_array* out_summed, mlx_stream st);
 bool qwen3_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 bool llm_mlx_reshape_canonical_enabled(void);
 GmoeFfnQuant* llm_mlx_moe_ffn_quant(LlmMlxModel* m, int layer_idx);
@@ -1013,6 +1031,7 @@ void multishard_free_all(MultiShardWeights* mw);
 bool load_all_shards(const char* model_dir, mlx_stream stream, MultiShardWeights* weights);
 int awq_synthesize_weights(MultiShardWeights* weights, mlx_stream stream);
 int gptq_nf4_synthesize_weights(MultiShardWeights* weights, mlx_stream stream);
+int turboquant_synthesize_weights(MultiShardWeights* weights, mlx_stream stream);
 bool llm_mlx_pretouch_weights_enabled(void);
 bool kimi_linear_synthesize_absorbed_mla(const ModelConfig* cfg, MultiShardWeights* weights, mlx_stream stream);
 void llm_mlx_pretouch_weights(const MultiShardWeights* weights);

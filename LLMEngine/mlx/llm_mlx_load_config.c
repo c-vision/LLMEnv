@@ -605,6 +605,30 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cJSON* qmode = quant ? cJSON_GetObjectItemCaseSensitive(quant, "mode") : NULL;
         snprintf(cfg->quant_mode, sizeof(cfg->quant_mode), "%s",
                  (cJSON_IsString(qmode) && qmode->valuestring) ? qmode->valuestring : "affine");
+        /* TurboQuant (PolarQuant-MLX): NON è un modo di MLX quantized_matmul. I pesi vengono
+         * dequantizzati a load da turboquant_synthesize_weights in `.weight` F16 plain ->
+         * il percorso caldo deve essere plain_linear, quindi quant_mode = "none". */
+        if (strcmp(cfg->quant_mode, "turboquant") == 0) {
+            llm_mlx_mode_set(cfg->quant_mode, sizeof(cfg->quant_mode), "none");
+            cfg->quant_group_size = 0;
+            cfg->quant_bits = 0;
+            /* AUTO-SWAP (config-driven, nessun flag/env): gli esperti tq sono packed (ternary
+             * {'-c,0,+c}) e non stanno in RAM materializzati. Se il modello è MoE (n_experts>0) si
+             * abilita lo streaming degli esperti dalla dir del modello: il synth salta `switch_mlp`
+             * (`turboquant_synthesize_weights`) e il path esperto li converte on-the-fly in affine
+             * 2-bit (gather_qmm GPU). Un modello DENSE tq non passa da llm_mlx_moe_gather_streamed,
+             * quindi non si abilita. Se l'ingest non apre, `llm_mlx_moe_swap_active()` resta falso e
+             * il synth materializza comunque (resident F16): mai spazzatura. */
+            if (cfg->n_experts > 0) llm_ai_mlx_set_moe_swap_dir(model_dir);
+            /* Codebook GLOBALE TurboQuant (`quantization.codebook`, identico in tutti i tensori tq):
+             * serve al path TQ dense (opzione 2). Config-driven. */
+            cJSON* tqcb = quant ? cJSON_GetObjectItemCaseSensitive(quant, "codebook") : NULL;
+            if (cJSON_IsArray(tqcb)) {
+                float cb[16]; int n = 0; cJSON* it = NULL;
+                cJSON_ArrayForEach(it, tqcb) { if (n < 16 && cJSON_IsNumber(it)) cb[n++] = (float)it->valuedouble; }
+                llm_mlx_tq_set_cb(cb, n);
+            }
+        }
         /* override per-tensore presenti? (chiavi figlie di "quantization" contenenti un punto,
          * es. "model.embed_tokens", "model.layers.0.mlp.experts...") */
         cfg->per_tensor_quant = 0;

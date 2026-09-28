@@ -44,10 +44,22 @@ typedef struct {
     int dtype;        /* 0=U32 1=BF16 (convenzione del formato) */
 } LlmEngineMoeTsSlice;
 
+/* Tensore AUSILIARIO TurboQuant (`.signs` / `.codebook`): 1-D e CONDIVISO per proiezione
+ * (un solo vettore per (layer,proj), non uno per-esperto). Vive in un ramo SEPARATO dal
+ * modello per-esperto (kind 0/1/2) e NON lo altera. */
+typedef struct {
+    int map;        /* indice in .maps (valido solo se n>0) */
+    uint64_t off;   /* offset ASSOLUTO del tensore (data_start + data_offsets[0]) */
+    uint32_t bytes; /* byte totali del tensore */
+    int n;          /* elementi F16: signs = `in`, codebook = voci (3 o 8); 0 = assente */
+} LlmEngineMoeTsAux;
+
 typedef struct {
     LlmEngineMoeTsMap maps[LLMENGINE_MOE_TS_MAXMAP];
     int nmaps;
     LlmEngineMoeTsSlice slice[LLMENGINE_MOE_TS_MAXLAYER][LLMENGINE_MOE_TS_NPROJ][LLMENGINE_MOE_TS_NKIND];
+    LlmEngineMoeTsAux tq_signs[LLMENGINE_MOE_TS_MAXLAYER][LLMENGINE_MOE_TS_NPROJ];
+    LlmEngineMoeTsAux tq_codebook[LLMENGINE_MOE_TS_MAXLAYER][LLMENGINE_MOE_TS_NPROJ];
     int present[LLMENGINE_MOE_TS_MAXLAYER];
 } LlmEngineMoeTsIngest;
 
@@ -62,7 +74,7 @@ static inline int llmengine_moe_ts_map(LlmEngineMoeTsIngest* s, const char* path
     return s->nmaps++;
 }
 
-static inline void llmengine_moe_ts_put(LlmEngineMoeTsIngest* s, int map, const char* name, const char* obj) {
+static inline void llmengine_moe_ts_put(LlmEngineMoeTsIngest* s, int map, const char* name, const char* obj, uint64_t data_start) {
     const char* k = strstr(name, ".layers."); if (!k) return;
     int layer = atoi(k + 8);
     if (layer < 0 || layer >= LLMENGINE_MOE_TS_MAXLAYER) return;
@@ -75,10 +87,44 @@ static inline void llmengine_moe_ts_put(LlmEngineMoeTsIngest* s, int map, const 
     if (of) sscanf(of, "\"data_offsets\":[%lld,%lld", &o0, &o1);
     if (e <= 0 || o0 < 0 || o1 <= o0) return;
     LlmEngineMoeTsSlice* t = &s->slice[layer][proj][kind];
-    t->map = map; t->off = (uint64_t)o0; t->stride = (uint32_t)((o1 - o0) / e);
+    /* "data_offsets" nel formato safetensors sono relativi all'INIZIO DELLA SEZIONE DATI (dopo
+     * gli 8 byte di lunghezza header + l'header JSON), NON all'inizio del file — bug
+     * "MLX-Streaming-Esperti-SWAP-Regressione" §Bug 3: senza +data_start ogni lettura finiva
+     * `data_start` byte troppo PRESTO nel file (dentro l'header JSON o un tensore precedente),
+     * producendo dati apparentemente plausibili ma con bit pattern NaN occasionali (output
+     * degenere, es. token costante). Port del fix GMBasic (gmb_moe_safetensors_ingest.h). */
+    t->map = map; t->off = (uint64_t)o0 + data_start; t->stride = (uint32_t)((o1 - o0) / e);
     t->bytes = t->stride; t->n = (int)e; t->d1 = (int)d1; t->d2 = (int)d2;
     t->dtype = (kind == 0) ? 0 : 1;
     s->present[layer] = 1;
+}
+
+/* Ramo SEPARATO per i tensori ausiliari TurboQuant (`.signs` / `.codebook`). Ritorna 1 se il nome
+ * e' un ausiliario tq (GESTITO: il chiamante NON deve passarlo a llmengine_moe_ts_put), 0 altrimenti.
+ *
+ * CRITICO: un nome `.signs`/`.codebook` non contiene ne' `.scales` ne' `.biases` -> in
+ * llmengine_moe_ts_put cadrebbe in kind 0 (weight) e SOVRASCRIVEREBBE lo slice weight vero con una
+ * shape 1-D (d1=d2=0), rompendo il path affine per-esperto ("sorted MoE branch failed"). Per questo
+ * i due tensori non passano MAI dal descrittore per-esperto. */
+static inline int llmengine_moe_ts_aux(LlmEngineMoeTsIngest* s, int map, const char* name, const char* obj, uint64_t data_start) {
+    if (!strstr(name, "switch_mlp")) return 0;
+    int is_cb = 0;
+    const char* suf = strstr(name, ".signs");
+    if (!suf) { suf = strstr(name, ".codebook"); is_cb = 1; }
+    if (!suf) return 0;
+    const char* k = strstr(name, ".layers."); if (!k) return 0;
+    int layer = atoi(k + 8);
+    if (layer < 0 || layer >= LLMENGINE_MOE_TS_MAXLAYER) return 0;
+    int proj = strstr(name, "gate_proj") ? 0 : strstr(name, "up_proj") ? 1 : strstr(name, "down_proj") ? 2 : -1;
+    if (proj < 0) return 0;
+    const char* sh = strstr(obj, "\"shape\":["); const char* of = strstr(obj, "\"data_offsets\":[");
+    long long n = -1, o0 = -1, o1 = -1;
+    if (sh) sscanf(sh, "\"shape\":[%lld", &n);
+    if (of) sscanf(of, "\"data_offsets\":[%lld,%lld", &o0, &o1);
+    if (n <= 0 || o0 < 0 || o1 <= o0) return 1; /* ausiliario riconosciuto ma malformato: non inoltrarlo */
+    LlmEngineMoeTsAux* a = is_cb ? &s->tq_codebook[layer][proj] : &s->tq_signs[layer][proj];
+    a->map = map; a->off = (uint64_t)o0 + data_start; a->bytes = (uint32_t)(o1 - o0); a->n = (int)n;
+    return 1;
 }
 
 /* Indicizza tutti i *.safetensors della dir. Ritorna n file mappati, o -1. */
@@ -94,6 +140,7 @@ static inline int llmengine_moe_ts_open(LlmEngineMoeTsIngest* s, const char* dir
         if (map < 0) { closedir(d); return -1; }
         const uint8_t* b = s->maps[map].base;
         uint64_t hn = 0; memcpy(&hn, b, 8);
+        const uint64_t data_start = 8 + hn;   /* inizio sezione dati: 8 byte lunghezza + header JSON */
         char* h = (char*)malloc((size_t)hn + 1); if (!h) { closedir(d); return -1; }
         memcpy(h, b + 8, (size_t)hn); h[hn] = 0;
         char* p = h;
@@ -101,7 +148,9 @@ static inline int llmengine_moe_ts_open(LlmEngineMoeTsIngest* s, const char* dir
             char* ne = strchr(p + 1, '"'); if (!ne) break;
             size_t nl = (size_t)(ne - p - 1);
             if (nl < 500) { char name[512]; memcpy(name, p + 1, nl); name[nl] = 0;
-                llmengine_moe_ts_put(s, map, name, ne + 1); }
+                /* Ausiliari tq (signs/codebook): ramo separato, mai nel descrittore per-esperto. */
+                if (!llmengine_moe_ts_aux(s, map, name, ne + 1, data_start))
+                    llmengine_moe_ts_put(s, map, name, ne + 1, data_start); }
             p = (ne > p) ? ne + 1 : p + 1;
         }
         free(h);
@@ -124,6 +173,23 @@ static inline const LlmEngineMoeTsSlice* llmengine_moe_ts_slice(const LlmEngineM
     if (layer < 0 || layer >= LLMENGINE_MOE_TS_MAXLAYER || proj < 0 || proj >= LLMENGINE_MOE_TS_NPROJ || kind < 0 || kind >= LLMENGINE_MOE_TS_NKIND) return NULL;
     const LlmEngineMoeTsSlice* t = &s->slice[layer][proj][kind];
     return t->map < 0 ? NULL : t;
+}
+
+/* Ausiliario tq per (layer,proj): puntatore mmap + byte/numero elementi, o NULL. */
+static inline const uint8_t* llmengine_moe_ts_aux_get(const LlmEngineMoeTsIngest* s, int layer, int proj,
+                                                      int is_codebook, uint32_t* bytes, int* n) {
+    if (layer < 0 || layer >= LLMENGINE_MOE_TS_MAXLAYER || proj < 0 || proj >= LLMENGINE_MOE_TS_NPROJ) return NULL;
+    const LlmEngineMoeTsAux* a = is_codebook ? &s->tq_codebook[layer][proj] : &s->tq_signs[layer][proj];
+    if (a->n <= 0) return NULL;
+    if (bytes) *bytes = a->bytes;
+    if (n) *n = a->n;
+    return s->maps[a->map].base + a->off;
+}
+
+/* true se (layer,proj) ha ENTRAMBI signs e codebook (proiezione TurboQuant). */
+static inline int llmengine_moe_ts_is_tq(const LlmEngineMoeTsIngest* s, int layer, int proj) {
+    if (layer < 0 || layer >= LLMENGINE_MOE_TS_MAXLAYER || proj < 0 || proj >= LLMENGINE_MOE_TS_NPROJ) return 0;
+    return s->tq_signs[layer][proj].n > 0 && s->tq_codebook[layer][proj].n > 0;
 }
 
 static inline void llmengine_moe_ts_close(LlmEngineMoeTsIngest* s) {

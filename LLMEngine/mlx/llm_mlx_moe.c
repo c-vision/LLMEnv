@@ -12,6 +12,15 @@
 #include <string.h>
 #include <math.h>
 
+/* ── SWAP/offload esperti (streaming da disco) ─────────────────────────────────────────────────
+ * Prima era un env (`LLM_MOE_SWAP_DIR`); ora è una SCELTA del consumer via API (nessun env):
+ * `llm_ai_mlx_set_moe_swap_dir(dir)` imposta la dir del modello da cui streamare gli esperti,
+ * chiamata PRIMA del load. Con dir non vuota lo streaming è ATTIVO. `llm_mlx_moe_swap_on()` è il
+ * gate letto da tutti i path (fused, pretouch, gather_streamed). */
+static char g_moe_swap_dir[1024];
+int llm_mlx_moe_swap_on(void) { return g_moe_swap_dir[0] != '\0'; }
+const char* llm_mlx_moe_swap_dir(void) { return g_moe_swap_dir; }
+
 /* LLMENGINE_MOE_GATEUP_FUSE (default OFF): stessa tecnica di rapidMLX vllm_mlx/moe_fusion.py
  * (+7.0% decode misurato DA LORO su Qwen3.6-35B-A3B) -- un gather_qmm sul peso gate+up
  * concatenato (fq->guw/gus/gub, calcolato una volta al caricamento, vedi GmoeFfnQuant) invece
@@ -40,7 +49,7 @@ bool llm_mlx_moe_gateup_gather(GmoeFfnQuant* fq, mlx_array x, mlx_array lhs_indi
                                        const char* mode,
                                        mlx_array* out_gate, mlx_array* out_up, mlx_stream stream) {
     if (fq == NULL || !fq->has_gate_up_fused || !llm_mlx_moe_gateup_fuse_enabled()) return false;
-    if (getenv("LLMENGINE_MOE_MLX_MOE_SWAP_DIR") != NULL) return false; /* streaming esperti: niente fused (peso pieno) */
+    if (llm_mlx_moe_swap_on()) return false; /* streaming esperti: niente fused (peso pieno) */
     mlx_array gate_up = mlx_array_new();
     bool ok = mlx_gather_qmm(&gate_up, x, fq->guw, fq->gus, fq->gub, lhs_indices, rhs_indices,
                              /*transpose=*/true, gsz_opt, bts_opt, mode, sorted_indices, stream) == 0;
@@ -79,7 +88,7 @@ int llm_mlx_moe_gather_mm(const ModelConfig* cfg, mlx_array* res, mlx_array x, m
                                  mlx_array scales, mlx_array biases, mlx_array lhs, mlx_array idxs,
                                  bool transpose, mlx_optional_int gsz, mlx_optional_int bts,
                                  const char* mode, bool sorted, mlx_stream s) {
-    if (cfg->quant_mode[0] == 0 || scales.ctx == NULL) {
+    if (cfg->quant_mode[0] == 0 || strcmp(cfg->quant_mode, "none") == 0 || scales.ctx == NULL) {
         /* gather_mm calcola a @ b con b = (E, K, N): il peso (E, out, in) va trasposto (ultimi 2 assi). */
         (void)transpose; (void)gsz; (void)bts; (void)mode;
         int nd = mlx_array_ndim(w);
@@ -96,18 +105,38 @@ int llm_mlx_moe_gather_mm(const ModelConfig* cfg, mlx_array* res, mlx_array x, m
     return mlx_gather_qmm(res, x, w, scales, biases, lhs, idxs, transpose, gsz, bts, mode, sorted, s);
 }
 /* ── SWAP esperti (streaming): ingest safetensors + remap + builder. Env-gated, default OFF
- * (LLMENGINE_MOE_MLX_MOE_SWAP_DIR = dir modello). Include relativo: nessuna modifica al CMakeLists. ── */
+ * offload esperti (dir via API). Include relativo: nessuna modifica al CMakeLists. ── */
 #include "llm_mlx_moe_stream.h"
 #include "llm_mlx_moe_stream_build.h"
+
 static LlmEngineMoeTsIngest g_moe_ts;
 static int g_moe_ts_state = -1; /* -1 non init, 0 off, 1 ok */
+
+/* API del consumer (nessun env): imposta la dir degli esperti da streamare. Va chiamata PRIMA
+ * del load del modello. `dir` NULL/vuota disattiva. Resetta lo stato dell'ingest così una nuova
+ * dir viene riaperta alla prima chiamata. */
+void llm_ai_mlx_set_moe_swap_dir(const char* dir) {
+    if (dir) {
+        snprintf(g_moe_swap_dir, sizeof g_moe_swap_dir, "%s", dir);
+    } else {
+        g_moe_swap_dir[0] = '\0';
+    }
+    g_moe_ts_state = -1;
+}
+
 static const LlmEngineMoeTsIngest* llm_moe_swap_ingest(void) {
     if (g_moe_ts_state < 0) {
-        const char* d = getenv("LLMENGINE_MOE_MLX_MOE_SWAP_DIR");
+        const char* d = llm_mlx_moe_swap_dir();
         g_moe_ts_state = (d && *d && llmengine_moe_ts_open(&g_moe_ts, d) > 0) ? 1 : 0;
     }
     return g_moe_ts_state == 1 ? &g_moe_ts : NULL;
 }
+/* true solo se lo streaming e' DAVVERO utilizzabile (ingest aperto con successo). Diverso da
+ * `llm_mlx_moe_swap_on()` (solo dir impostata): e' la condizione da usare per decidere se il synth
+ * puo' SALTARE la materializzazione degli esperti. Se l'ingest non apre (dir errata), si resta
+ * resident F16 e il modello NON produce spazzatura. */
+int llm_mlx_moe_swap_active(void) { return llm_moe_swap_ingest() != NULL; }
+
 /* Byte TOTALI degli esperti (weight+scales+biases di tutti i layer) dall'ingest attivo.
  * Serve a sottrarli dal conto dell'active memory: con lo streaming gli esperti NON sono
  * materializzati -> il budget KV non deve contarli (altrimenti 0 su modelli >wired-limit). */
@@ -133,9 +162,61 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
     const LlmEngineMoeTsIngest* ing = llm_moe_swap_ingest();
     if (ing == NULL)
         return llm_mlx_moe_gather_mm(cfg, res, x, w, s, b, lhs, idxs, transpose, gsz, bts, mode, sorted, st);
+    /* TurboQuant TERNARY: array pieni RESIDENTI + indici GLOBALI. Niente remap (`unique`/`pos`),
+     * niente `mlx_array_eval(idxs)` (sync per-layer) e niente memcpy di stacking: stesso percorso
+     * del resident affine (95 tok/s) + rotazione online dell'input. */
+    if (llmengine_moe_ts_is_tq(ing, layer, proj)) {
+        uint32_t cbb = 0; int cbn = 0;
+        llmengine_moe_ts_aux_get(ing, layer, proj, 1, &cbb, &cbn);
+        if (cbn == 3) {
+            if (getenv("LLM_TQ_QMV_TEST") != NULL) llm_mlx_tq_qmv_selftest(ing, layer, proj, st);
+            /* DECODE (T==1): gather FUSO a UN launch (mode kg). OPT-IN (`LLM_TQ_QMV=1`): il kernel
+             * naïf (32 thread/riga scalare) e' 13 tok/s vs 22 del `gather_qmm` MLX -> il default
+             * resta il path affine. Utile solo come base per un kernel ottimizzato (tile/MIA). */
+            const int xnd = (int)mlx_array_ndim(x);
+            if (getenv("LLM_TQ_QMV") != NULL && xnd >= 1 && (int)mlx_array_dim(x, 0) == 1) {
+                mlx_array pw, sc, cb; int E, O, PW, NG, grp, trit, bits;
+                if (llm_mlx_tq_packed_full(ing, layer, proj, &pw, &sc, &cb, &E, &O, &PW, &NG, &grp, &trit, &bits) == 0) {
+                    const mlx_dtype cdt0 = mlx_array_dtype(x);
+                    mlx_array x_rot = mlx_array_new();
+                    if (llm_mlx_tq_rotate_input(ing, layer, proj, x, st, cdt0, &x_rot) == 0) {
+                        int rcq = llm_mlx_tq_gather_qmv(res, pw, sc, cb, x_rot, idxs, O, PW, NG, grp, trit, bits, st);
+                        mlx_array_free(x_rot);
+                        if (rcq == 0) return 0;
+                    } else { mlx_array_free(x_rot); }
+                }
+            }
+            /* PREFILL / fallback: array pieni affine-2bit residenti + gather_qmm. */
+            const mlx_dtype cdt = mlx_array_dtype(x);
+            mlx_array fw, fs, fb;
+            if (llm_mlx_tq_affine_full(ing, layer, proj, cdt, &fw, &fs, &fb) == 0) {
+                int grp = 64;
+                const LlmEngineMoeTsSlice* sts = llmengine_moe_ts_slice(ing, layer, proj, 1);
+                uint32_t sb2 = 0; int in2 = 0;
+                llmengine_moe_ts_aux_get(ing, layer, proj, 0, &sb2, &in2);
+                if (sts && sts->d2 > 0 && in2 > 0 && in2 % sts->d2 == 0) grp = in2 / sts->d2;
+                mlx_array x_rot = mlx_array_new();
+                mlx_array x_use = x;
+                if (llm_mlx_tq_rotate_input(ing, layer, proj, x, st, cdt, &x_rot) == 0) x_use = x_rot;
+                int rc = mlx_gather_qmm(res, x_use, fw, fs, fb, lhs, idxs, transpose,
+                                        (mlx_optional_int){grp, true}, (mlx_optional_int){2, true},
+                                        "affine", sorted, st);
+                mlx_array_free(x_rot);
+                return rc;
+            }
+        }
+    }
     if (mlx_array_eval(idxs) != 0) return -1;
     const uint32_t* idp = mlx_array_data_uint32(idxs);
     if (idp == NULL) return -1;
+    /* Forma ORIGINALE di idxs (es. [n_tokens, top_k] nel ramo unsorted, dove x ha batch shape
+     * (n_tokens, top_k, ...)): va preservata su pos_arr, altrimenti mlx_gather_qmm broadcasta x
+     * contro un pos_arr 1-D [M] invece che contro la forma [n_tokens, top_k], producendo un
+     * output di batch shape SBAGLIATA (silenzioso su gate/up, esplode in broadcast_shapes al
+     * down). Port del fix GMBasic acacd768a. */
+    const int idxs_nd = (int)mlx_array_ndim(idxs);
+    int idxs_shape[8];
+    for (int i = 0; i < idxs_nd && i < 8; i++) idxs_shape[i] = (int)mlx_array_dim(idxs, i);
     const int M = (int)mlx_array_size(idxs);
     int* ids  = (int*)malloc((size_t)M * sizeof(int));
     int* pos  = (int*)malloc((size_t)M * sizeof(int));
@@ -148,15 +229,75 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
     int rc = -1;
     LlmMlxStreamTriples tr;
     mlx_array pos_arr = mlx_array_new();
-    if (nu > 0 && llm_mlx_moe_swap_prepare(ing, layer, uniq, nu, st, &tr) == 0) {
-        const int ps[1] = { M };
-        if (mlx_array_set(&pos_arr, mlx_array_new_data(pos, ps, 1, MLX_UINT32)) == 0)
+    if (nu > 0 && llm_mlx_moe_swap_prepare(ing, layer, proj, uniq, nu, st, &tr) == 0) {
+        if (mlx_array_set(&pos_arr, mlx_array_new_data(pos, idxs_shape, idxs_nd, MLX_UINT32)) == 0)
             rc = llm_mlx_moe_gather_mm(cfg, res, x, tr.w[proj], tr.s[proj], tr.b[proj], lhs, pos_arr,
                                        transpose, gsz, bts, mode, /*sorted=*/false, st);
+        /* Libera i 3 tensori del proj corrente (gli altri slot sono array vuoti). */
+        for (int pj = 0; pj < LLMENGINE_MOE_TS_NPROJ; pj++) {
+            mlx_array_free(tr.w[pj]);
+            mlx_array_free(tr.s[pj]);
+            mlx_array_free(tr.b[pj]);
+        }
     }
     mlx_array_free(pos_arr);
     free(ids); free(uniq); /* pos vivo: referenziato da pos_arr (new_data no-copy) */
     return rc;
+}
+
+/* ── Kernel MoE-fuso STREAM-AWARE (unifica ON/OFF) ─────────────────────────────────────────────
+ * Il kernel fuso (llm_mlx_moe_fused_decode) indicizza i tensori COMPLETI [E,...]. Con lo swap i
+ * tensori completi NON sono caricati: invece di DISATTIVARE il fuso (guardia per-modello), si
+ * costruiscono gli stacked [nu,...] dei soli esperti attivi e si rimappano gli indici a LOCALI
+ * (pos), poi si chiama LO STESSO kernel. Cosi' ON e OFF condividono il percorso: nessuna
+ * divergenza per-modello, un solo kernel. OFF: pesi completi + indici globali (identico a prima). */
+bool llm_mlx_moe_fused_stream_aware(
+    const ModelConfig* cfg, int layer, mlx_array x1, mlx_array top_inds_arr,
+    mlx_array gw, mlx_array gs, mlx_array gb,
+    mlx_array uw, mlx_array us, mlx_array ub,
+    mlx_array dw, mlx_array ds, mlx_array db,
+    int gu_bits, int gu_group, int d_bits, int d_group, int act,
+    mlx_array scores_flat, mlx_array* out_summed, mlx_stream st) {
+    const int din = cfg->hidden_size, dff = cfg->moe_intermediate_size, k = cfg->top_k;
+    const LlmEngineMoeTsIngest* ing = llm_moe_swap_ingest();
+    if (ing == NULL) /* OFF: percorso identico a prima */
+        return llm_mlx_moe_fused_decode(out_summed, x1, top_inds_arr, gw, gs, gb, uw, us, ub,
+                                        dw, ds, db, scores_flat, din, dff, k, gu_bits, gu_group,
+                                        d_bits, d_group, act, st);
+    if (mlx_array_eval(top_inds_arr) != 0) return false;
+    const uint32_t* idp = mlx_array_data_uint32(top_inds_arr);
+    if (idp == NULL) return false;
+    int* ids = (int*)malloc((size_t)k * sizeof(int));
+    int* pos = (int*)malloc((size_t)k * sizeof(int));
+    int* uniq = (int*)malloc((size_t)k * sizeof(int));
+    uint32_t* posu = (uint32_t*)malloc((size_t)k * sizeof(uint32_t));
+    if (!ids || !pos || !uniq || !posu) { free(ids); free(pos); free(uniq); free(posu); return false; }
+    static int seen[8192];
+    for (int i = 0; i < 8192; i++) seen[i] = -1;
+    for (int i = 0; i < k; i++) ids[i] = (int)idp[i];
+    int nu = llm_mlx_stream_unique(ids, k, cfg->n_experts, seen, pos, uniq);
+    bool ok = false;
+    if (nu > 0) {
+        mlx_array sw[3][3]; /* [proj][kind] */
+        for (int p = 0; p < 3; p++) for (int kd = 0; kd < 3; kd++) sw[p][kd] = mlx_array_new();
+        int built = 0;
+        for (int p = 0; p < 3 && built >= 0; p++)
+            for (int kd = 0; kd < 3; kd++)
+                if (llm_mlx_xs_stack(ing, layer, p, kd, uniq, nu, st, &sw[p][kd]) != 0) { built = -1; break; }
+        if (built == 0) {
+            for (int i = 0; i < k; i++) posu[i] = (uint32_t)pos[i];
+            const int shp[1] = { k };
+            mlx_array lidx = mlx_array_new_data(posu, shp, 1, MLX_UINT32); /* copia */
+            ok = llm_mlx_moe_fused_decode(out_summed, x1, lidx,
+                    sw[0][0], sw[0][1], sw[0][2], sw[1][0], sw[1][1], sw[1][2],
+                    sw[2][0], sw[2][1], sw[2][2], scores_flat,
+                    din, dff, k, gu_bits, gu_group, d_bits, d_group, act, st);
+            mlx_array_free(lidx);
+        }
+        for (int p = 0; p < 3; p++) for (int kd = 0; kd < 3; kd++) mlx_array_free(sw[p][kd]);
+    }
+    free(ids); free(pos); free(uniq); free(posu);
+    return ok;
 }
 
 bool qwen3_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out) {
@@ -413,7 +554,12 @@ bool qwen3_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
      * Fallback silenzioso al path esistente sotto se una condizione non e' soddisfatta o il
      * kernel stesso fallisce -- mai un errore bloccante. Vedi llm_mlx_moe_fused_kernel.h. */
     bool moe_fused_done = false;
-    if (ok && n_tokens == 1 && (bts == 4 || bts == 8) && llm_mlx_fuse_moe_decode_enabled()) {
+    /* Streaming esperti (offload): il kernel fuso usa DIRETTAMENTE i
+     * tensori COMPLETI gate/up/down, non gli stacked locali di llm_mlx_moe_gather_streamed ->
+     * sotto SWAP non sono i pesi giusti. Stessa guardia gia' in llm_mlx_moe_gateup_gather
+     * (altra fusione, stesso motivo). Port del fix GMBasic acacd768a. */
+    if (ok && n_tokens == 1 && (bts == 4 || bts == 8) && llm_mlx_fuse_moe_decode_enabled() &&
+        !llm_mlx_moe_swap_on()) {
         const int din = m->cfg.hidden_size, dff = m->cfg.moe_intermediate_size;
         const int k = m->cfg.top_k;
         mlx_array x_flat = mlx_array_new(), idx_flat = mlx_array_new();
@@ -603,7 +749,7 @@ GmoeFfnQuant* llm_mlx_moe_ffn_quant(LlmMlxModel* m, int layer_idx) {
     if (m == NULL || !llm_mlx_wcache_enabled()) return NULL;
     /* Streaming esperti: la cache per-layer materializza gli esperti FULL -> la disattivo, cosi'
      * la ffn usa il lookup lazy (mai eval-ato) e il wrapper streamed la rimpiazza. */
-    if (getenv("LLMENGINE_MOE_MLX_MOE_SWAP_DIR") != NULL) return NULL;
+    if (llm_mlx_moe_swap_on()) return NULL;
     /* Percorso GGUF: pesi dequantizzati F16 (quant_mode="") senza scales -> la cache affine
      * (llm_mlx_quant_derive) non e' applicabile; il ffn usa il lookup inline + llm_mlx_moe_gather_mm. */
     if (m->cfg.quant_mode[0] == 0) return NULL;

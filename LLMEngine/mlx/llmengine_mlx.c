@@ -1232,7 +1232,103 @@ static bool llm_mpp_q4_tile_try(mlx_array* res, mlx_array x, mlx_array w, mlx_ar
     return true;
 }
 
+#include "llm_mlx_tq_qmv_kernel.h"
+
+/* Codebook TurboQuant GLOBALE (identico in tutti i tensori tq): `quantization.codebook` del config. */
+static float g_tq_cb[16];
+static int g_tq_cb_n = 0;
+void llm_mlx_tq_set_cb(const float* cb, int n) {
+    if (n < 0) n = 0; if (n > 16) n = 16;
+    for (int i = 0; i < n; i++) g_tq_cb[i] = cb[i];
+    g_tq_cb_n = n;
+}
+int llm_mlx_tq_get_cb(float* out, int cap) {
+    int n = g_tq_cb_n < cap ? g_tq_cb_n : cap;
+    for (int i = 0; i < n; i++) out[i] = g_tq_cb[i];
+    return g_tq_cb_n;
+}
+int llm_mlx_tq_enabled(void) { return g_tq_cb_n > 0; }
+
 bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases, int group_size, int bits, const char* mode, mlx_stream stream) {
+    /* TQ dense (opzione 2, LLM_TQ_DENSE=1): w UINT32 packed + biases=signs (già forniti dal fetch),
+     * codebook GLOBALE. Decode: kernel TQ che legge packed (meno traffico memoria del bf16 plain).
+     * Prefill (T>1): loop per riga (una volta, correttezza prima). */
+    if (llm_mlx_tq_enabled() && mlx_array_dtype(w) == MLX_UINT32 && biases.ctx != NULL) {
+        float cb[16]; const int cbn = llm_mlx_tq_get_cb(cb, 16);
+        const int xnd = (int)mlx_array_ndim(x);
+        const int K = (xnd >= 1) ? (int)mlx_array_shape(x)[xnd - 1] : 0;
+        const int cw = mlx_array_ndim(w) >= 2 ? (int)mlx_array_shape(w)[1] : 0;
+        const int O = mlx_array_ndim(w) >= 2 ? (int)mlx_array_shape(w)[0] : 0;
+        const int NG = mlx_array_ndim(scales) >= 2 ? (int)mlx_array_shape(scales)[mlx_array_ndim(scales) - 1] : 0;
+        const int grp = (NG > 0 && K > 0 && K % NG == 0) ? K / NG : 64;
+        const size_t tot = mlx_array_size(x);
+        if (cbn >= 3 && K > 0 && O > 0 && NG > 0 && mlx_array_shape(biases)[mlx_array_ndim(biases) - 1] == K) {
+            /* signs = biases; codebook globale [cbn]; trit = (cbn==3). */
+            int trit = (cbn == 3), bits3 = trit ? 3 : (cbn == 8 ? 3 : (cbn == 4 ? 2 : 4));
+            int csh[1] = { cbn };
+            mlx_array CB = mlx_array_new_data(cb, csh, 1, MLX_FLOAT32);
+            const int rows = (K > 0) ? (int)(tot / (size_t)K) : 1;
+            mlx_array X2 = mlx_array_new(); int s2[2] = { rows, K };
+            if (mlx_reshape(&X2, x, s2, 2, stream) == 0) {
+                mlx_array Xr = mlx_array_new();
+                if (mlx_multiply(&Xr, X2, biases, stream) == 0) {
+                    mlx_array Xh = mlx_array_new();
+                    mlx_optional_float hsc = { 1.0f / sqrtf((float)K), true };
+                    if (mlx_hadamard_transform(&Xh, Xr, hsc, stream) == 0) {
+                        mlx_vector_array ys = mlx_vector_array_new();
+                        int ok = 1;
+                        for (int r = 0; r < rows && ok; r++) {
+                            mlx_array a = mlx_array_new_data(&r, (const int[]){1}, 1, MLX_INT32);
+                            mlx_array row = mlx_array_new();
+                            if (mlx_take_axis(&row, Xh, a, 0, stream) != 0) ok = 0;
+                            mlx_array_free(a);
+                            if (ok) {
+                                int s1[1] = { K };
+                                mlx_array rv = mlx_array_new();
+                                if (mlx_reshape(&rv, row, s1, 1, stream) != 0) ok = 0;
+                                mlx_array pk3 = mlx_array_new(); int p3[3] = { 1, O, cw };
+                                mlx_array sc3 = mlx_array_new(); int s3[3] = { 1, O, NG };
+                                mlx_array y = mlx_array_new();
+                                if (ok && mlx_reshape(&pk3, w, p3, 3, stream) == 0 &&
+                                    mlx_reshape(&sc3, scales, s3, 3, stream) == 0 &&
+                                    llm_mlx_tq_qmv(&y, pk3, sc3, CB, rv, 0, K, O, NG, cw, bits3, grp, trit, stream) == 0)
+                                    mlx_vector_array_append_value(ys, y);
+                                else ok = 0;
+                                mlx_array_free(y); mlx_array_free(sc3); mlx_array_free(pk3); mlx_array_free(rv);
+                            }
+                            mlx_array_free(row);
+                        }
+                        if (ok && mlx_vector_array_size(ys) == rows) {
+                            mlx_array stk = mlx_array_new();
+                            if (mlx_stack(&stk, ys, stream) == 0) {
+                                mlx_array yc = mlx_array_new();
+                                if (mlx_astype(&yc, stk, mlx_array_dtype(x), stream) == 0) {
+                                    int shp[8]; int nd = xnd;
+                                    for (int i = 0; i < nd && i < 8; i++) shp[i] = mlx_array_shape(x)[i];
+                                    shp[nd - 1] = O;
+                                    mlx_array yr = mlx_array_new();
+                                    if (mlx_reshape(&yr, yc, shp, nd, stream) == 0) {
+                                        mlx_array_set(res, yr); mlx_array_free(yr);
+                                        mlx_array_free(yc); mlx_array_free(stk);
+                                        mlx_vector_array_free(ys); mlx_array_free(Xh); mlx_array_free(Xr);
+                                        mlx_array_free(X2); mlx_array_free(CB);
+                                        return true;
+                                    }
+                                    mlx_array_free(yr);
+                                }
+                                mlx_array_free(yc);
+                            }
+                            mlx_array_free(stk);
+                        }
+                        mlx_vector_array_free(ys);
+                    }
+                    mlx_array_free(Xh);
+                }
+                mlx_array_free(Xr);
+            }
+            mlx_array_free(X2); mlx_array_free(CB);
+        }
+    }
     /* MPP q4 (tensor unit Apple) — LLMMETAL_MPP_Q4=1: x [1,T,K] affine g64 b4 -> tensor-op MPP.
      * `=0` e' un vero kill-switch. Group/bits/mode sono derivati dalle shape del tensore:
      * un trunk affine g32-b4 deve ricadere sempre nella qmm generica. */
