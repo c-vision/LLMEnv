@@ -48,6 +48,35 @@ if(EXISTS "${LLM_MLX_LOCAL_DEPS}/mlx-src/CMakeLists.txt")
     set(FETCHCONTENT_SOURCE_DIR_MLX "${LLM_MLX_LOCAL_DEPS}/mlx-src" CACHE PATH "" FORCE)
 endif()
 
+# MLX Metal-4.1 NAX fix (2026-09-28, idempotente). I kernel NAX (tensor unit M5) di MLX 0.32.x
+# NON compilano col compilatore Metal 4.1 (`32023.921`): rende ESPLICITO il qualificatore
+# implicito `thread` -> errori address-space in `steel/{attn,gemm}/nax.h`. Fix upstream
+# ml-explore/mlx #3963 (presente in 0.32.1+), ma 0.32.1+ cambia l'API `compile` (rompe
+# mlx-c v0.6.0): si applica SOLO il fix Metal, mantenendo l'API 0.32.0.
+# Va applicato PRIMA di FetchContent_MakeAvailable(mlx_c) perche' tocca anche
+# `mlx/backend/metal/kernels/CMakeLists.txt` (aggiunge il flag `-Wmetal-addr-spaces`).
+if(EXISTS "${LLM_MLX_LOCAL_DEPS}/mlx-src/mlx/backend/metal/kernels")
+    execute_process(
+        COMMAND patch -p1 --forward --dry-run --silent -i
+                ${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_metal41_nax.patch
+        WORKING_DIRECTORY "${LLM_MLX_LOCAL_DEPS}/mlx-src"
+        RESULT_VARIABLE LLM_MLX_NAX_DRYRUN OUTPUT_QUIET ERROR_QUIET)
+    if(LLM_MLX_NAX_DRYRUN EQUAL 0)
+        execute_process(
+            COMMAND patch -p1 --forward -i
+                    ${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_metal41_nax.patch
+            WORKING_DIRECTORY "${LLM_MLX_LOCAL_DEPS}/mlx-src"
+            RESULT_VARIABLE LLM_MLX_NAX_APPLY OUTPUT_QUIET ERROR_QUIET)
+        if(LLM_MLX_NAX_APPLY EQUAL 0)
+            message(STATUS "llmengine_mlx: applicata patch MLX Metal-4.1 NAX")
+        else()
+            message(WARNING "llmengine_mlx: patch MLX Metal-4.1 NAX FALLITA (rc=${LLM_MLX_NAX_APPLY})")
+        endif()
+    else()
+        message(STATUS "llmengine_mlx: patch MLX Metal-4.1 NAX gia' applicata")
+    endif()
+endif()
+
 FetchContent_Declare(
     mlx_c
     GIT_REPOSITORY https://github.com/ml-explore/mlx-c.git
