@@ -830,9 +830,15 @@ int turboquant_synthesize_weights(MultiShardWeights* weights, mlx_stream stream)
             mlx_array_free(of);
             if (llm_mlx_tq_enabled() && ndw == 2) {
                 /* Path TQ dense (opzione 2): `.weight` resta PACKED (u32); i signs vanno in `.biases`
-                 * (il fetch get_triple li consegna a quantized_linear_cfg). Codebook dal config. */
-                snprintf(nm, sizeof nm, "%s.biases", base);
-                aok = aok && mlx_map_string_to_array_insert(synth, nm, sg) == 0;
+                 * (il fetch get_triple li consegna a quantized_linear_cfg). Signs nel dtype di
+                 * attivazione (±1, cast esatto): multiply+hadamard restano nel dtype di attivazione nel
+                 * decode (niente roundtrip f32 + niente astype finale). */
+                mlx_array sgo = mlx_array_new();
+                if (mlx_array_dtype(sg) == odt) { mlx_array_set(&sgo, sg); }
+                else if (mlx_astype(&sgo, sg, odt, stream) != 0) { mlx_array_free(sgo); aok = false; }
+                if (aok) { snprintf(nm, sizeof nm, "%s.biases", base);
+                           aok = mlx_map_string_to_array_insert(synth, nm, sgo) == 0; }
+                mlx_array_free(sgo);
             } else {
                 snprintf(nm, sizeof nm, "%s.weight", base);
                 if (aok) aok = mlx_map_string_to_array_insert(synth, nm, o16) == 0;

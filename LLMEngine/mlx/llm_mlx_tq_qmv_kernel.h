@@ -178,6 +178,7 @@ static int llm_tq_qmv_apply(mlx_array* y, llm_tq_qmv_cache* c, mlx_array packed,
     return ok ? 0 : -1;
 }
 
+static mlx_array g_tq_zero;   /* scalare e=0 cachato (mode 0: quasi sempre 0) */
 /* mode 0: y [O] = sum dequant(W[e])·x  (x [K]). K/O/NG/PW dalle shape. */
 static int llm_mlx_tq_qmv(mlx_array* y, mlx_array packed, mlx_array scales, mlx_array codebook,
                           mlx_array x, int e, int K, int O, int NG, int PW, int bits, int group, int trit,
@@ -185,10 +186,13 @@ static int llm_mlx_tq_qmv(mlx_array* y, mlx_array packed, mlx_array scales, mlx_
     (void)K; (void)NG; (void)PW;
     llm_tq_qmv_cache* c = llm_tq_qmv_get(bits, group, trit, 0);
     if (c == NULL || c->rc != 0) return -1;
-    int e_i = e;
-    mlx_array earr = mlx_array_new_data(&e_i, NULL, 0, MLX_INT32);
+    mlx_array earr; int own = 0;
+    if (e == 0) {
+        if (g_tq_zero.ctx == NULL) { int z = 0; g_tq_zero = mlx_array_new_data(&z, NULL, 0, MLX_INT32); }
+        earr = g_tq_zero;
+    } else { int e_i = e; earr = mlx_array_new_data(&e_i, NULL, 0, MLX_INT32); own = 1; }
     int rc = llm_tq_qmv_apply(y, c, packed, scales, codebook, x, earr, O, O * 32, stream);
-    mlx_array_free(earr);
+    if (own) mlx_array_free(earr);
     return rc;
 }
 
