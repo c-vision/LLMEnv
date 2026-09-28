@@ -79,9 +79,7 @@ found=0
 while IFS= read -r f; do
     cp -f "$f" "$DIST/" && { echo "  stage: $(basename "$f")"; found=1; }
 done < <(find "$BUILD_DIR" -type f \( \
-    -name "libllm_ai_mlx.$EXT" -o -name "libllm_ai_llamacpp.$EXT" -o \
-    -name "libllm_vision_apple.$EXT" -o -name "libllmengine_moe_stream.$EXT" -o \
-    -name "libllmcodec_*.$EXT" -o \
+    -name "libllm*.$EXT" -o \
     -name "libllama*.$EXT" -o -name "libggml*.$EXT" -o -name "libmtmd*.$EXT" \) | sort)
 
 if [ "$found" = "0" ]; then
