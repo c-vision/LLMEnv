@@ -1,0 +1,26 @@
+--- a/mlx/backend/metal/quantized.cpp
++++ b/mlx/backend/metal/quantized.cpp
+@@ -11,6 +11,7 @@
+ #include "mlx/fast_primitives.h"
+ #include "mlx/primitives.h"
+ #include "mlx/utils.h"
++#include <cstdlib>
+ 
+ namespace mlx::core {
+ 
+@@ -297,6 +298,15 @@
+ 
+ // affine qmv_wide only beats qmv on gen-15+; fp benefits on every gen.
+ inline bool use_qmv_wide(const std::string& mode, metal::Device& d) {
++  // LLMEnv patch (2026-09-12, patches/mlx_disable_qmv_wide.patch): il kernel
++  // qmv_wide (usato per M>=2) NON e' bit-identico al qmv (M==1) -- riduzione a
++  // shuffle-ladder su k_lanes=8 invece del simd_sum su 32. Sul decode batch
++  // (n_sess>=2) questo fa divergere di ~1 ulp la matmul quantizzata e rompe la
++  // bit-parity batch-vs-sequenziale di gpt-oss (bf16). Il costo del passthrough
++  // a qmv e' nel rumore. DEFAULT OFF; opt-in con MLX_QMV_WIDE_OPT per A/B.
++  if (std::getenv("MLX_QMV_WIDE_OPT") == nullptr) {
++    return false;
++  }
+   return mode != "affine" || d.get_architecture_gen() >= 15;
+ }
+ 

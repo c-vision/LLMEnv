@@ -1,0 +1,63 @@
+--- a/mlx/c/ops.h
++++ b/mlx/c/ops.h
+@@ -1004,6 +1004,21 @@
+     const int* axes,
+     size_t axes_num,
+     const mlx_stream s);
++/* LLMEnv (2026-09-13): slice-update IN-PLACE. Replica `arr[..., a:b, ...] = update`
++ * di mlx_lm (python/src/indexing.cpp mlx_set_item):
++ * overwrite_descriptor(slice_update(arr, ...)). L'handle resta lo stesso ma il descrittore
++ * punta al risultato; la base e' referenziata solo dalla SliceUpdate -> append O(1),
++ * nessuna ricopia O(cap) del concatenate. Serve per la KV-cache a contesto lungo. */
++int mlx_slice_update_inplace(
++    mlx_array* arr,
++    const mlx_array update,
++    const int* start,
++    size_t start_num,
++    const int* stop,
++    size_t stop_num,
++    const int* strides,
++    size_t strides_num,
++    const mlx_stream s);
+ int mlx_softmax_axes(
+     mlx_array* res,
+     const mlx_array a,
+--- a/mlx/c/ops.cpp
++++ b/mlx/c/ops.cpp
+@@ -3215,6 +3215,36 @@
+             mlx_array_get_(start),
+             std::vector<int>(axes, axes + axes_num),
+             mlx_stream_get_(s)));
++  } catch (std::exception& e) {
++    mlx_error(e.what());
++    return 1;
++  }
++  return 0;
++}
++extern "C" int mlx_slice_update_inplace(
++    mlx_array* arr,
++    const mlx_array update,
++    const int* start,
++    size_t start_num,
++    const int* stop,
++    size_t stop_num,
++    const int* strides,
++    size_t strides_num,
++    const mlx_stream s) {
++  if (arr == nullptr || arr->ctx == nullptr) {
++    mlx_error("mlx_slice_update_inplace: empty destination array");
++    return 1;
++  }
++  try {
++    auto& a = mlx_array_get_(*arr);
++    auto res = mlx::core::slice_update(
++        a,
++        mlx_array_get_(update),
++        mlx::core::Shape(start, start + start_num),
++        mlx::core::Shape(stop, stop + stop_num),
++        mlx::core::Shape(strides, strides + strides_num),
++        mlx_stream_get_(s));
++    a.overwrite_descriptor(res);
+   } catch (std::exception& e) {
+     mlx_error(e.what());
+     return 1;

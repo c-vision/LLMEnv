@@ -1,0 +1,308 @@
+cmake_minimum_required(VERSION 3.16)
+# C E CXX entrambi abilitati: llmengine_mlx.c e' C puro (riscritto 2026-08-24,
+# vedi Fase0b-LlamaCpp-Wrapper-C-Rewrite-Plan.md), ma mlx-c stessa e' C++
+# internamente (Metal/C++, esposta via API C) -- il linker finale deve usare
+# il driver C++ per risolvere i simboli libstdc++/libc++ di libmlxc.a, quindi
+# CXX resta necessario come linguaggio del progetto anche se nessun file .cpp
+# e' compilato qui.
+# OBJC aggiunto (2026-09-06) per llm_kvmetal_bridge.m -- bridge ABI-C verso
+# native/llmmetal_kv/llmmetal_kv.h (Objective-C puro, usa <Metal/Metal.h> direttamente,
+# non incluibile da llmengine_mlx.c che resta C). Vedi llm_kvmetal_bridge.h.
+project(llmengine_mlx C CXX OBJC OBJCXX)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Vendoring mlx-c via FetchContent -- stesso approccio "no submodule, nessun
+# checkout manuale" già usato per llama.cpp in native/llm_host_ai/. Pin a un
+# tag di release, mai a `master`, per build riproducibili.
+include(FetchContent)
+
+set(MLX_C_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)  # mlx-c statico, il nostro
+                                                  # wrapper è l'unica SHARED
+
+# Xcode completo installato e attivato (xcode-select -s .../Xcode.app/...)
+# il 2026-08-16 -- Metal ripristinato. Se questa build fallisce di nuovo
+# con "unable to find utility metal", verificare `xcrun --find metal`.
+set(MLX_BUILD_METAL ON CACHE BOOL "" FORCE)
+
+# Cache locale persistente (2026-09-07): la sorgente patchata di mlx-c/mlx veniva
+# prima cacheata in /tmp (FETCHCONTENT_SOURCE_DIR_MLX), effimero per natura -- una
+# pulizia di sistema a mezzanotte l'ha svuotata e ha bloccato la build (vedi Todo
+# C17 e Knowledge Base MLX-Architetture). Ora la cache vive in <root>/libs/mlx-deps/
+# (fuori da git, vedi .gitignore e Infrastruttura-LLMEnv.md §libs/) e sopravvive a
+# pulizie di /tmp e a build/ cancellate. Se presente, FetchContent la usa DIRETTAMENTE
+# (nessun fetch di rete, nessuna ri-applicazione della patch -- gia' applicata alla
+# copia salvata): rigenerare la cache con `rsync` da build/_deps/{mlx,mlx_c}-src dopo
+# un fetch pulito se la patch cambia. Se assente, fallback INVARIATO al fetch di rete.
+set(LLM_MLX_LOCAL_DEPS "${CMAKE_CURRENT_SOURCE_DIR}/../../libs/mlx-deps")
+if(EXISTS "${LLM_MLX_LOCAL_DEPS}/mlx-c-src/CMakeLists.txt")
+    message(STATUS "llmengine_mlx: uso la cache locale ${LLM_MLX_LOCAL_DEPS}/mlx-c-src (niente fetch di rete)")
+    set(FETCHCONTENT_SOURCE_DIR_MLX_C "${LLM_MLX_LOCAL_DEPS}/mlx-c-src" CACHE PATH "" FORCE)
+endif()
+if(EXISTS "${LLM_MLX_LOCAL_DEPS}/mlx-src/CMakeLists.txt")
+    message(STATUS "llmengine_mlx: uso la cache locale ${LLM_MLX_LOCAL_DEPS}/mlx-src (niente fetch di rete)")
+    set(FETCHCONTENT_SOURCE_DIR_MLX "${LLM_MLX_LOCAL_DEPS}/mlx-src" CACHE PATH "" FORCE)
+endif()
+
+FetchContent_Declare(
+    mlx_c
+    GIT_REPOSITORY https://github.com/ml-explore/mlx-c.git
+    GIT_TAG v0.6.0  # PIN ESPLICITO -- verificato reale (tag GitHub più recente
+                     # al 2026-08-16, https://github.com/ml-explore/mlx-c/tags,
+                     # commit 0726ca922fc902c4c61ef9c27d94132be418e945).
+                     # mlx-c a sua volta vendorizza mlx via il proprio
+                     # FetchContent -- vedi il suo CMakeLists.txt.
+    GIT_SHALLOW TRUE
+    # UPGRADE MLX 0.31.1 -> 0.32.0 (2026-09-02): la patch forza il GIT_TAG di mlx a
+    # v0.32.0 (dentro il CMakeLists di mlx-c) e adatta il wrapper C fft.cpp all'API
+    # 0.32 (parametro FFTNorm). Migliora il decode (misurato ~1.9x su gpt-oss-20b).
+    # Rigenerare la patch con: diff -u <mlx_c-src> <mlx_c-32 patched>.
+    # NON applicata se FETCHCONTENT_SOURCE_DIR_MLX_C punta alla cache locale sopra
+    # (gia' patchata li' dentro) -- FetchContent salta il PATCH_COMMAND quando la
+    # sorgente e' gia' popolata da un SOURCE_DIR esplicito.
+    PATCH_COMMAND patch -p1 -i ${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_c_mlx032.patch
+)
+FetchContent_MakeAvailable(mlx_c)
+
+# ── LLMEnv patch mlx-c (2026-09-13) — slice-update IN-PLACE ───────────────────
+# Aggiunge `mlx_slice_update_inplace` = overwrite_descriptor(slice_update(...)) nel core MLX,
+# la stessa cosa che fa `keys[..., a:b, :] = x` di mlx_lm (python/src/indexing.cpp
+# mlx_set_item). Dà l'append KV O(1) (nessuna ricopia O(cap) del concatenate) -> risolve il
+# crollo del decode a contesto lungo. Applicazione idempotente (dry-run poi apply); la cache
+# locale (libs/mlx-deps/mlx-c-src) è già patchata -> il dry-run fallisce e si salta.
+if(TARGET mlxc)
+    get_target_property(LLM_MLXC_SRC_DIR mlxc SOURCE_DIR)
+    if(LLM_MLXC_SRC_DIR AND EXISTS "${LLM_MLXC_SRC_DIR}/mlx/c/ops.cpp")
+        execute_process(
+            COMMAND patch -p1 --forward --dry-run --silent -i
+                    "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_c_inplace_slice_update.patch"
+            WORKING_DIRECTORY "${LLM_MLXC_SRC_DIR}"
+            RESULT_VARIABLE LLM_MLXC_PATCH_DRYRUN
+            OUTPUT_QUIET ERROR_QUIET)
+        if(LLM_MLXC_PATCH_DRYRUN EQUAL 0)
+            execute_process(
+                COMMAND patch -p1 --forward -i
+                        "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_c_inplace_slice_update.patch"
+                WORKING_DIRECTORY "${LLM_MLXC_SRC_DIR}"
+                RESULT_VARIABLE LLM_MLXC_PATCH_APPLY)
+            if(LLM_MLXC_PATCH_APPLY EQUAL 0)
+                message(STATUS "llmengine_mlx: applicata patch mlx-c slice_update_inplace")
+            else()
+                message(WARNING "llmengine_mlx: patch mlx-c slice_update_inplace FALLITA (rc=${LLM_MLXC_PATCH_APPLY})")
+            endif()
+        endif()
+    endif()
+endif()
+
+# ── LLMEnv patch MLX (2026-09-12) ─────────────────────────────────────────────
+# Il kernel `qmv_wide` di MLX (usato per M>=2) NON e' bit-identico al `qmv`
+# (M==1): riduzione a shuffle-ladder su k_lanes=8 invece del simd_sum su 32.
+# Sul decode batch (n_sess>=2) la matmul quantizzata differisce di ~1 ulp e
+# rompe la bit-parity batch-vs-sequenziale (misurato su gpt-oss bf16: diverge
+# al token 8). patches/mlx_disable_qmv_wide.patch disabilita qmv_wide di
+# default (opt-in con MLX_QMV_WIDE_OPT); il costo del passthrough a qmv e' nel
+# rumore. Si applica idempotentemente alla sorgente MLX effettiva (cache locale
+# libs/mlx-deps/mlx-src o fetch di rete), cosi' un wipe della cache non perde
+# il fix. Se gia' applicata il dry-run fallisce e si salta.
+if(TARGET mlx)
+    get_target_property(LLM_MLX_SRC_DIR mlx SOURCE_DIR)
+    if(LLM_MLX_SRC_DIR AND EXISTS "${LLM_MLX_SRC_DIR}/mlx/backend/metal/quantized.cpp")
+        execute_process(
+            COMMAND patch -p1 --forward --dry-run --silent -i
+                    "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_disable_qmv_wide.patch"
+            WORKING_DIRECTORY "${LLM_MLX_SRC_DIR}"
+            RESULT_VARIABLE LLM_MLX_PATCH_DRYRUN
+            OUTPUT_QUIET ERROR_QUIET)
+        if(LLM_MLX_PATCH_DRYRUN EQUAL 0)
+            execute_process(
+                COMMAND patch -p1 --forward -i
+                        "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_disable_qmv_wide.patch"
+                WORKING_DIRECTORY "${LLM_MLX_SRC_DIR}"
+                RESULT_VARIABLE LLM_MLX_PATCH_APPLY)
+            if(LLM_MLX_PATCH_APPLY EQUAL 0)
+                message(STATUS "llmengine_mlx: applicata patch MLX disable qmv_wide")
+            else()
+                message(WARNING "llmengine_mlx: patch MLX disable qmv_wide FALLITA (rc=${LLM_MLX_PATCH_APPLY})")
+            endif()
+        endif()
+    endif()
+endif()
+
+# ── LLMEnv patch MLX (2026-09-12) — SDPA vector head_dim=512 ──────────────────
+# MLX supporta la sdpa_vector solo per head_dim {64,96,128,256} (e 192/128); per
+# gemma-4 (global_head_dim=512, 10/60 layer full) cade nel path unfused (materializza
+# Broadcast GQA O(N)). patches/mlx_sdpa_hd512.patch istanzia il kernel (512,512)
+# (qk_per_thread=16, register-fittable) + lo abilita nel check. Misurato su gemma-4:
+# decode +5% (bit-identico, IDS 64/64), prefill neutro. Idempotente (dry-run -> skip
+# se gia' applicata). Vedi Todo/(open) - MLX-Leve-Model-Dependent-Fine-Tuning.md.
+if(TARGET mlx)
+    get_target_property(LLM_MLX_SRC_DIR mlx SOURCE_DIR)
+    if(LLM_MLX_SRC_DIR AND EXISTS "${LLM_MLX_SRC_DIR}/mlx/backend/metal/scaled_dot_product_attention.cpp")
+        execute_process(
+            COMMAND patch -p1 --forward --dry-run --silent -i
+                    "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_sdpa_hd512.patch"
+            WORKING_DIRECTORY "${LLM_MLX_SRC_DIR}"
+            RESULT_VARIABLE LLM_MLX_PATCH512_DRYRUN
+            OUTPUT_QUIET ERROR_QUIET)
+        if(LLM_MLX_PATCH512_DRYRUN EQUAL 0)
+            execute_process(
+                COMMAND patch -p1 --forward -i
+                        "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_sdpa_hd512.patch"
+                WORKING_DIRECTORY "${LLM_MLX_SRC_DIR}"
+                RESULT_VARIABLE LLM_MLX_PATCH512_APPLY)
+            if(LLM_MLX_PATCH512_APPLY EQUAL 0)
+                message(STATUS "llmengine_mlx: applicata patch MLX sdpa hd512")
+            else()
+                message(WARNING "llmengine_mlx: patch MLX sdpa hd512 FALLITA (rc=${LLM_MLX_PATCH512_APPLY})")
+            endif()
+        endif()
+    endif()
+endif()
+
+# cJSON: parser JSON C puro, per config.json e model.safetensors.index.json.
+# Sostituisce nlohmann/json (C++ header-only) nella riscrittura in C puro del
+# 2026-08-24 -- stesso pin gia' usato in native/llmtoken/CMakeLists.txt.
+set(ENABLE_CJSON_TEST OFF CACHE BOOL "" FORCE)
+set(ENABLE_CJSON_UTILS OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_AND_STATIC_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    cjson
+    GIT_REPOSITORY https://github.com/DaveGamble/cJSON.git
+    GIT_TAG v1.7.19  # PIN ESPLICITO -- stesso di native/llmtoken/CMakeLists.txt
+    GIT_SHALLOW TRUE
+)
+# v1.7.19 dichiara cmake_minimum_required troppo vecchio per CMake attuale.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+FetchContent_MakeAvailable(cjson)
+
+add_library(llm_ai_mlx SHARED
+    llmengine_mlx.c
+    llm_mlx_p4.c
+    llm_mlx_cb.c
+    llm_mlx_lora.c
+    llm_mlx_prefix.c
+    llm_mlx_dflash2.c
+    llm_mlx_kvcompress.c
+    llm_mlx_api.c
+    llm_mlx_mtp.c
+    llm_mlx_selftest.c
+    llm_mlx_train.c
+    llm_mlx_stats.c
+    llm_mlx_rope.c
+    llm_mlx_gptoss.c
+    llm_mlx_bf16.c
+    llm_mlx_gdn_cache.c
+    llm_mlx_activation.c
+    llm_mlx_moe.c
+    llm_mlx_kimi.c
+    llm_mlx_qwen4exp_ops.c
+    llm_mlx_mixtral.c
+    llm_mlx_glm_ds_ffn.c
+    llm_mlx_gptoss_ffn.c
+    llm_mlx_selftest_eval.c
+    llm_mlx_sensitivity.c
+    llm_mlx_model_ops.c
+    llm_mlx_model_config.c
+    llm_mlx_session_swap.c
+    llm_mlx_gguf_io.c
+    llm_mlx_session_spec.c
+    llm_mlx_session_generate.c
+    llm_mlx_attn_batch.c
+    llm_mlx_gdn.c
+    llm_mlx_qwen35.c
+    llm_mlx_llama.c
+    llm_mlx_gemma_mixtral.c
+    llm_mlx_mla_glm4.c
+    llm_mlx_layer_forward.c
+    llm_mlx_qwen3_attn.c
+    llm_mlx_weights_io.c
+    llm_mlx_session_append.c
+    llm_mlx_final_step.c
+    llm_mlx_gdn_compiled.c
+    llm_mlx_dense_geglu.c
+    llm_mlx_dense_swiglu.c
+    llm_mlx_kvmetal.c
+    llm_mlx_session_lifecycle.c
+    llm_mlx_model_io.c
+    llm_mlx_compiled_decode.c
+    llm_mlx_qwen35_moe_ffn.c
+    llm_mlx_qwen2_attn.c
+    llm_mlx_load_config.c
+    llm_mlx_imatrix.c
+    llm_mlx_model_lifecycle.c
+    llm_kvmetal_bridge.m
+    llm_gemvq4_bridge.m
+    # P10: GEMM int8-activation x Q4/Q5 sui tensor unit M5 (port oMLX; bridge ABI-C, ObjC/Metal)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8/llmmetal_oq_a8_bridge.mm
+    # MPP q4 affine (tensor unit Apple): bridge ObjC++ zero-copy sui buffer MLX (metallib build-time).
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4/llmmetal_mpp_q4_bridge.mm
+    # Kernel Metal fuso layout+RoPE per il decode (G1 piano antigravity 2026-09-08).
+    # E' C++ perche' usa l'API C++ di mlx (mlx::core::fast) attraverso mlx-c: la
+    # API e' comunque esposta extern "C" (llm_mlx_fused_rope_append.h), quindi
+    # llmengine_mlx.c resta C puro. Adaptato da mlxcel (Apache-2.0).
+    llm_mlx_fused_rope_append.cpp
+    # Kernel Metal custom per il decode SDPA a head_dim che fora il fused MLX (gemma4 hd=512).
+    # C++ perche' usa mlx_fast_metal_kernel (API C++ di mlx via mlx-c); ABI esportata C
+    # (llm_mlx_flash_decode_kernel.h) cosi' llmengine_mlx.c resta C puro.
+    llm_mlx_flash_decode_kernel.cpp
+    # G0 (Todo L3/L26): contatore deterministico dei nodi di dispatch del passo di decode.
+    # E' C++ perche' il grafo MLX (array::inputs/primitive_id) non ha alcun binding in ABI C;
+    # l'ABI esportata resta C (llm_mlx_dispatch_profile.h). Serve gli header C++ di mlx, quindi
+    # sotto viene propagato il loro include dir.
+    llm_mlx_dispatch_profile.cpp
+    # ABI plugin + descrizione .llmarch: progetti autonomi (non piu' nel runtime).
+    ${CMAKE_CURRENT_SOURCE_DIR}/../plugin/llmengine_plugin.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMDesc/llmdesc.c
+    # ENGINE container reader: container `GGUF` -> f32 (denso + esperti GMQF) per il forward.
+    # Delega i DEQUANT di formato al codec (§0bis); il container runtime dà record+byte.
+    llm_engine_container.c
+    # Adapter all'ABI comune llmengine (vtable llmengine_llm_engine_mlx).
+    llm_engine_mlx.c
+)
+
+# Gli header C++ di mlx NON sono reachabili via `mlxc` (che li linka PRIVATE), ma il target
+# `mlx` esiste nel grafo di build (FetchContent dentro mlx-c) e la sua include dir di build e'
+# letta dalla proprieta'. Lettura da proprieta' invece di un path hardcoded: funziona sia con
+# la cache locale libs/mlx-deps/mlx-src sia con un fetch di rete fresco in build/_deps.
+if(TARGET mlx)
+    target_include_directories(llm_ai_mlx PRIVATE $<TARGET_PROPERTY:mlx,INTERFACE_INCLUDE_DIRECTORIES> ${CMAKE_CURRENT_SOURCE_DIR}/../plugin ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMDesc ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+endif()
+
+find_library(METAL_FRAMEWORK Metal REQUIRED)
+find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+
+target_link_libraries(llm_ai_mlx PRIVATE mlxc cjson ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
+target_include_directories(llm_ai_mlx PRIVATE "${cjson_SOURCE_DIR}")
+target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8")
+target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
+target_include_directories(llm_ai_mlx PUBLIC .)
+
+# ENGINE container reader (llm_engine_container.c): include + link del container runtime (GGUF) e del
+# codec (dequant di formato). Modifica di infrastruttura autorizzata dall'utente 2026-09-24.
+target_include_directories(llm_ai_mlx PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../moe/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include)
+# Dipendenze come target CMake (build autonomo, niente path a .a/.dylib prebuildati).
+if(NOT TARGET llmcodec)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec llmcodec_mlx_build)
+endif()
+if(NOT TARGET llmengine_moe)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../moe llmengine_moe_mlx_build)
+endif()
+target_link_libraries(llm_ai_mlx PRIVATE
+    llmengine_moe llmcodec
+    # i DEQUANT di formato (llmcodec_dsv41_dequant_fp8_block/_fp8_row/_fp4_expert) vivono nel plugIN fp8;
+    # il layer ggml-type (llmcodec_ggml_dequant_row/block_vals/type_name/q*_value) nel plugIN ggml.
+    llmcodec_fp8 llmcodec_ggml
+    -lcompression)   # llmengine_moe_compress (llmengine_moe) usa libcompression macOS
+set_source_files_properties(llm_kvmetal_bridge.m llm_gemvq4_bridge.m ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8/llmmetal_oq_a8_bridge.mm ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4/llmmetal_mpp_q4_bridge.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+
+set_target_properties(llm_ai_mlx PROPERTIES
+    OUTPUT_NAME "llm_ai_mlx"
+    POSITION_INDEPENDENT_CODE ON
+    LINKER_LANGUAGE CXX
+)

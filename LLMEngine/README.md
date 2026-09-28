@@ -1,4 +1,8 @@
 # LLMEngine
 
-Progetto C di LLMEnv. **Scheletro** — il codice va estratto da GMBasic (vedi
-`AiWiki/01-Projects/LLMEnv/Piani/`). Confini: non cita GMBasic né FastLLM.
+Progetto C di LLMEnv: ABI comune (`include/llmengine.h`) + runner (`mlx/`, `llama/`, `moe/`)
++ registry plugin (`plugin/`).
+
+- Dipendenza a senso unico: i consumatori usano LLMEnv, mai il contrario.
+- Sub-target: LLMEngineMLX (`mlx/`), LLMEngineLlama (`llama/`), LLMEngineMoE (`moe/`).
+- La `.llmarch` descrive i modelli; il motore carica i plugin a runtime (`dlopen`).

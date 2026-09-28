@@ -1,0 +1,27 @@
+--- a/mlx/backend/metal/kernels/scaled_dot_product_attention.metal
++++ b/mlx/backend/metal/kernels/scaled_dot_product_attention.metal
+@@ -34,10 +34,12 @@
+   instantiate_sdpa_vector(type, 128, 128)        \
+   instantiate_sdpa_vector(type, 192, 128)        \
+   instantiate_sdpa_vector(type, 256, 256)        \
++  instantiate_sdpa_vector(type, 512, 512)        \
+   instantiate_sdpa_vector_aggregation(type, 64)  \
+   instantiate_sdpa_vector_aggregation(type, 96)  \
+   instantiate_sdpa_vector_aggregation(type, 128) \
+-  instantiate_sdpa_vector_aggregation(type, 256)
++  instantiate_sdpa_vector_aggregation(type, 256) \
++  instantiate_sdpa_vector_aggregation(type, 512)
+ 
+ instantiate_sdpa_vector_heads(float)
+ instantiate_sdpa_vector_heads(bfloat16_t)
+--- a/mlx/backend/metal/scaled_dot_product_attention.cpp
++++ b/mlx/backend/metal/scaled_dot_product_attention.cpp
+@@ -621,7 +621,7 @@
+   const bool sdpa_vector_supported_head_dim =
+       (query_head_dim == value_head_dim &&
+        (query_head_dim == 64 || query_head_dim == 96 || query_head_dim == 128 ||
+-        query_head_dim == 256)) ||
++        query_head_dim == 256 || query_head_dim == 512)) ||
+       (query_head_dim == 192 && value_head_dim == 128);
+   const bool sdpa_full_supported_head_dim = query_head_dim == value_head_dim &&
+       (query_head_dim == 64 || query_head_dim == 80 || query_head_dim == 128);

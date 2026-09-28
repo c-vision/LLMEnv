@@ -1,0 +1,186 @@
+{
+ "prompt": "The capital of France is",
+ "prompt_ids": [
+  760,
+  6511,
+  314,
+  9338,
+  369
+ ],
+ "target": "/Users/gaetano/ai/Models/Qwen3.8-27B-8bit",
+ "draft": "/Users/gaetano/ai/Models/Qwen3.8-27B-DFlash2",
+ "block_size": 8,
+ "max_tokens": 20,
+ "rounds": [
+  {
+   "anchor": 11751,
+   "ctxS": 5,
+   "snaps": [
+    "layer0",
+    "layer1",
+    "layer2",
+    "layer3",
+    "layer4",
+    "final_norm"
+   ],
+   "block_size": 8,
+   "draft_tokens": [
+    13,
+    271,
+    22916,
+    6970,
+    279,
+    6511,
+    314
+   ]
+  },
+  {
+   "anchor": 198,
+   "ctxS": 2,
+   "snaps": [
+    "layer0",
+    "layer1",
+    "layer2",
+    "layer3",
+    "layer4",
+    "final_norm"
+   ],
+   "block_size": 4,
+   "draft_tokens": [
+    248069,
+    271,
+    760
+   ]
+  },
+  {
+   "anchor": 760,
+   "ctxS": 1,
+   "snaps": [
+    "layer0",
+    "layer1",
+    "layer2",
+    "layer3",
+    "layer4",
+    "final_norm"
+   ],
+   "block_size": 4,
+   "draft_tokens": [
+    6511,
+    314,
+    9338
+   ]
+  },
+  {
+   "anchor": 9564,
+   "ctxS": 3,
+   "snaps": [
+    "layer0",
+    "layer1",
+    "layer2",
+    "layer3",
+    "layer4",
+    "final_norm"
+   ],
+   "block_size": 4,
+   "draft_tokens": [
+    369,
+    78229,
+    13
+   ]
+  },
+  {
+   "anchor": 19241,
+   "ctxS": 2,
+   "snaps": [
+    "layer0",
+    "layer1",
+    "layer2",
+    "layer3",
+    "layer4",
+    "final_norm"
+   ],
+   "block_size": 4,
+   "draft_tokens": [
+    13,
+    198,
+    760
+   ]
+  },
+  {
+   "anchor": 6511,
+   "ctxS": 4,
+   "snaps": [
+    "layer0",
+    "layer1",
+    "layer2",
+    "layer3",
+    "layer4",
+    "final_norm"
+   ],
+   "block_size": 4,
+   "draft_tokens": [
+    314,
+    9338,
+    369
+   ]
+  },
+  {
+   "anchor": 14898,
+   "ctxS": 2,
+   "snaps": [
+    "layer0",
+    "layer1",
+    "layer2",
+    "layer3",
+    "layer4",
+    "final_norm"
+   ],
+   "block_size": 4,
+   "draft_tokens": [
+    369,
+    23327,
+    13
+   ]
+  },
+  {
+   "anchor": 21047,
+   "ctxS": 2,
+   "snaps": [
+    "layer0",
+    "layer1",
+    "layer2",
+    "layer3",
+    "layer4",
+    "final_norm"
+   ],
+   "block_size": 4,
+   "draft_tokens": [
+    13,
+    198,
+    760
+   ]
+  }
+ ],
+ "transcript": [
+  11751,
+  13,
+  198,
+  760,
+  6511,
+  314,
+  9564,
+  369,
+  19241,
+  13,
+  198,
+  760,
+  6511,
+  314,
+  14898,
+  369,
+  21047,
+  13,
+  198,
+  760
+ ]
+}
