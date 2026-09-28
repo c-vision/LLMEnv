@@ -1237,10 +1237,13 @@ static bool llm_mpp_q4_tile_try(mlx_array* res, mlx_array x, mlx_array w, mlx_ar
 /* Codebook TurboQuant GLOBALE (identico in tutti i tensori tq): `quantization.codebook` del config. */
 static float g_tq_cb[16];
 static int g_tq_cb_n = 0;
+static mlx_array g_tq_cb_arr;   /* codebook come array MLX, costruito una volta (evita 1 array/call) */
 void llm_mlx_tq_set_cb(const float* cb, int n) {
     if (n < 0) n = 0; if (n > 16) n = 16;
     for (int i = 0; i < n; i++) g_tq_cb[i] = cb[i];
     g_tq_cb_n = n;
+    if (g_tq_cb_arr.ctx != NULL) { mlx_array_free(g_tq_cb_arr); g_tq_cb_arr = mlx_array_new(); }
+    if (n > 0) { int sh[1] = { n }; g_tq_cb_arr = mlx_array_new_data(g_tq_cb, sh, 1, MLX_FLOAT32); }
 }
 int llm_mlx_tq_get_cb(float* out, int cap) {
     int n = g_tq_cb_n < cap ? g_tq_cb_n : cap;
@@ -1263,10 +1266,9 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
         const int grp = (NG > 0 && K > 0 && K % NG == 0) ? K / NG : 64;
         const size_t tot = mlx_array_size(x);
         if (cbn >= 3 && K > 0 && O > 0 && NG > 0 && mlx_array_shape(biases)[mlx_array_ndim(biases) - 1] == K) {
-            /* signs = biases; codebook globale [cbn]; trit = (cbn==3). */
+            /* signs = biases; codebook globale [cbn] (array cachato); trit = (cbn==3). */
             int trit = (cbn == 3), bits3 = trit ? 3 : (cbn == 8 ? 3 : (cbn == 4 ? 2 : 4));
-            int csh[1] = { cbn };
-            mlx_array CB = mlx_array_new_data(cb, csh, 1, MLX_FLOAT32);
+            mlx_array CB = g_tq_cb_arr;
             const int rows = (K > 0) ? (int)(tot / (size_t)K) : 1;
             mlx_array X2 = mlx_array_new(); int s2[2] = { rows, K };
             if (mlx_reshape(&X2, x, s2, 2, stream) == 0) {
@@ -1275,6 +1277,35 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
                     mlx_array Xh = mlx_array_new();
                     mlx_optional_float hsc = { 1.0f / sqrtf((float)K), true };
                     if (mlx_hadamard_transform(&Xh, Xr, hsc, stream) == 0) {
+                        if (rows == 1) {
+                            /* DECODE (1 vettore): niente take_axis/stack — 1 kernel, reshape out. */
+                            int s1[1] = { K };
+                            mlx_array rv = mlx_array_new(), pk3 = mlx_array_new(), sc3 = mlx_array_new(), y = mlx_array_new();
+                            int p3[3] = { 1, O, cw }, s3[3] = { 1, O, NG };
+                            if (mlx_reshape(&rv, Xh, s1, 1, stream) == 0 &&
+                                mlx_reshape(&pk3, w, p3, 3, stream) == 0 &&
+                                mlx_reshape(&sc3, scales, s3, 3, stream) == 0 &&
+                                llm_mlx_tq_qmv(&y, pk3, sc3, CB, rv, 0, K, O, NG, cw, bits3, grp, trit, stream) == 0) {
+                                mlx_array yc = mlx_array_new();
+                                bool aokc = (mlx_array_dtype(y) == mlx_array_dtype(x)) ? (mlx_array_set(&yc, y) == 0) : (mlx_astype(&yc, y, mlx_array_dtype(x), stream) == 0);
+                                if (aokc) {
+                                    int shp[8]; int nd = xnd;
+                                    for (int i = 0; i < nd && i < 8; i++) shp[i] = mlx_array_shape(x)[i];
+                                    shp[nd - 1] = O;
+                                    mlx_array yr = mlx_array_new();
+                                    if (mlx_reshape(&yr, yc, shp, nd, stream) == 0) {
+                                        mlx_array_set(res, yr); mlx_array_free(yr);
+                                        mlx_array_free(yc);
+                                        mlx_array_free(y); mlx_array_free(sc3); mlx_array_free(pk3); mlx_array_free(rv);
+                                        mlx_array_free(Xh); mlx_array_free(Xr); mlx_array_free(X2);
+                                        return true;
+                                    }
+                                    mlx_array_free(yr);
+                                }
+                                mlx_array_free(yc);
+                            }
+                            mlx_array_free(y); mlx_array_free(sc3); mlx_array_free(pk3); mlx_array_free(rv);
+                        } else {
                         mlx_vector_array ys = mlx_vector_array_new();
                         int ok = 1;
                         for (int r = 0; r < rows && ok; r++) {
@@ -1301,8 +1332,9 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
                         if (ok && mlx_vector_array_size(ys) == rows) {
                             mlx_array stk = mlx_array_new();
                             if (mlx_stack(&stk, ys, stream) == 0) {
-                                mlx_array yc = mlx_array_new();
-                                if (mlx_astype(&yc, stk, mlx_array_dtype(x), stream) == 0) {
+                                    mlx_array yc = mlx_array_new();
+                                    bool aokc = (mlx_array_dtype(stk) == mlx_array_dtype(x)) ? (mlx_array_set(&yc, stk) == 0) : (mlx_astype(&yc, stk, mlx_array_dtype(x), stream) == 0);
+                                    if (aokc) {
                                     int shp[8]; int nd = xnd;
                                     for (int i = 0; i < nd && i < 8; i++) shp[i] = mlx_array_shape(x)[i];
                                     shp[nd - 1] = O;
@@ -1311,7 +1343,7 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
                                         mlx_array_set(res, yr); mlx_array_free(yr);
                                         mlx_array_free(yc); mlx_array_free(stk);
                                         mlx_vector_array_free(ys); mlx_array_free(Xh); mlx_array_free(Xr);
-                                        mlx_array_free(X2); mlx_array_free(CB);
+                                        mlx_array_free(X2);
                                         return true;
                                     }
                                     mlx_array_free(yr);
@@ -1321,12 +1353,13 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
                             mlx_array_free(stk);
                         }
                         mlx_vector_array_free(ys);
+                        }
                     }
                     mlx_array_free(Xh);
                 }
                 mlx_array_free(Xr);
             }
-            mlx_array_free(X2); mlx_array_free(CB);
+            mlx_array_free(X2);
         }
     }
     /* MPP q4 (tensor unit Apple) — LLMMETAL_MPP_Q4=1: x [1,T,K] affine g64 b4 -> tensor-op MPP.
