@@ -22,7 +22,7 @@ common/  → include/build/helper CONDIVISI fra i layer
 |---|---|---|---|
 | 1 | **LLMToken** | lettore tokenizer.json/tiktoken/WordPiece; encode/decode + export | cJSON, PCRE2, sds |
 | 2 | **LLMCodec** | formati GGUF/safetensors + codec quant (plugin). Non legge tokenizer. | solo formato |
-| 3 | **LLMDesc** | role-map `.llmarch` (era `.gmbarch`) + descrizione modello | — |
+| 3 | **LLMDesc** | role-map `.llmarch` + descrizione modello | — |
 | 4 | **LLMMetal** | kernel Metal (GEMV/KV/MPP/OQ) | Metal |
 | 5 | **LLMEngine** (ABI) | interfaccia common runner: load/prefill/decode/KV/sampling | 2,3,4 |
 | 5a/b/c | **LLMEngineMLX / Llama / MoE** | i runner | 5 |
@@ -30,16 +30,17 @@ common/  → include/build/helper CONDIVISI fra i layer
 
 ## Confini (vincolanti)
 
-- **Mai `gmb_`** nei nomi del motore (usare `llm`/`LLM`); `.gmbarch` → `.llmarch`; env del motore `LLM_*`.
-- `LLMEngine`/`LLMCodec` **non citano** GMBasic né FastLLM. Dipendenza a senso unico:
+- Nomi del motore in `llm`/`LLM`; role-map `.llmarch`; env del motore `LLM_*`.
+- `LLMEngine`/`LLMCodec` **non dipendono** dai consumatori. Dipendenza a senso unico:
   **GMBasic → LLMEnv**, **FastLLM → LLMEnv**.
-- **GMBasic** possiede il runtime BASIC + agenti + compilatore; **FastLLM** possiede tutto il suo serving.
 
 ## Stato
 
-**Scheletro.** La scomposizione è **già stata implementata dentro GMBasic** (con nomi `gmb_*`):
-`gmb_model_desc`, `gmb_metal`, `gmb_llm_engine`, `gmb_model_io`, `gmb_plugin`. Il residuo è:
-**rename `gmb_*`→`llm*`**, **esternalizzazione** qui, **split del runner MLX** (`gmb_host_ai_mlx`, 30.883
-righe).
+Layer rinominati ed esternalizzati: `LLMCodec` (`llmcodec`), `LLMDesc` (`llmdesc`), `LLMToken`
+(`llmtoken`), `LLMMetal` (`llmmetal`), `LLMEngine` (`llmengine`/`llmengine_mlx`/`llmengine_moe`/
+`llmengine_llama`/`llmengine_plugin`), `LLMModelIO` (`llmmodelio`).
+
+Ogni progetto compila **standalone** (`cmake -S LLMxxx -B build`). Il superbuild root aggancia i layer
+sempre costruibili e, con `-DLLMENV_BUILD_ENGINE=ON`, anche i runner (richiedono MLX/llama.cpp).
 
 Piano e prove: `AiWiki/01-Projects/LLMEnv/` (`Piani/`, `Knowledge/`, `Todo/(open) - Decisioni-Aperte-LLMEnv.md`).

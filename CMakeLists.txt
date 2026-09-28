@@ -1,8 +1,7 @@
-# LLMEnv — superbuild (SCHELETRO). Un progetto CMake per layer, grafo aciclico (vedi README).
-# Stato: la scomposizione e' gia' implementata DENTRO GMBasic (nomi gmb_*); qui i layer arriveranno
-# dopo rename + esternalizzazione. Fino ad allora NESSUN add_subdirectory (le cartelle sono vuote).
-cmake_minimum_required(VERSION 3.16)
-project(LLMEnv C)
+# LLMEnv — superbuild. Un progetto CMake per layer, grafo aciclico (vedi README).
+# Ogni layer compila anche STANDALONE (`cmake -S LLMxxx -B build`); qui li si aggancia in ordine.
+cmake_minimum_required(VERSION 3.20)
+project(LLMEnv C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -10,13 +9,19 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-message(STATUS "LLMEnv: scheletro — i layer (LLMToken/LLMCodec/LLMDesc/LLMMetal/LLMEngine/LLMModelIO)")
-message(STATUS "verranno agganciati qui dopo il rename gmb_*->llm* e l'esternalizzazione da GMBasic.")
+# Layer sempre costruibili (nessuna dipendenza da framework LLM pesanti).
+add_subdirectory(LLMToken)    # 1
+add_subdirectory(LLMCodec)    # 2
+add_subdirectory(LLMDesc)     # 3
+add_subdirectory(LLMMetal)    # 4
+add_subdirectory(LLMModelIO)  # 6 (usa 1,2,3 + il plugin engine)
 
-# TODO(estrazione): un add_subdirectory per layer, in ordine di dipendenza:
-#   add_subdirectory(LLMToken)   # 1 (cJSON, PCRE2, sds)
-#   add_subdirectory(LLMCodec)   # 2 (solo formato)
-#   add_subdirectory(LLMDesc)    # 3
-#   add_subdirectory(LLMMetal)   # 4 (Metal)
-#   add_subdirectory(LLMEngine)  # 5 (ABI) + 5a/b/c (mlx/llama/moe)
-#   add_subdirectory(LLMModelIO) # 6 (1,2,3)
+# LLMEngine richiede MLX (mlx-c) e/o llama.cpp via FetchContent: pesante e opzionale.
+# Attivare con -DLLMENV_BUILD_ENGINE=ON (sub-layer: plugin, moe, llama, mlx).
+option(LLMENV_BUILD_ENGINE "Build LLMEngine (mlx/llama/moe/plugin)" OFF)
+if(LLMENV_BUILD_ENGINE)
+  add_subdirectory(LLMEngine/plugin)
+  add_subdirectory(LLMEngine/moe)
+  add_subdirectory(LLMEngine/llama)
+  add_subdirectory(LLMEngine/mlx)
+endif()
