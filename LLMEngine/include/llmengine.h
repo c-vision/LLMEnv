@@ -16,6 +16,12 @@
 
 #include <stdint.h>
 
+/* Versione dell'ABI. Incrementata quando la vtable cambia in modo osservabile dal consumatore
+ * (nuovi metodi/capabilities in coda, semantica di quelli esistenti). I consumatori possono
+ * confrontarla a runtime via `llmengine_abi_version()` per decidere se una voce opzionale e'
+ * disponibile, PRIMA di dereferenziarla. v2 = logprobs + constrained + kv_stats/kv_clear (MLX). */
+#define LLMENGINE_ABI_VERSION 2u
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,6 +38,8 @@ enum {
     LLMMODELIO_CAP_EMBED    = 1 << 7,   /* emb_dim / embed_text */
     LLMMODELIO_CAP_VISION   = 1 << 8,   /* vision_load / vision_read_image / vision_read_audio / vision_unload */
     LLMMODELIO_CAP_LORA     = 1 << 9,   /* lora_* / capture_hidden (training; oggi solo MLX) */
+    LLMMODELIO_CAP_LOGPROBS = 1 << 10,  /* token_logprob / last_logprob / generate_ids_probs */
+    LLMMODELIO_CAP_CONSTRAINED = 1 << 11, /* generate_id_constrained (argmax ristretto) */
 };
 
 /* Parametri di sampling (sottoinsieme comune). I campi non supportati sono ignorati. */
@@ -97,7 +105,39 @@ typedef struct LlmEngineLlmEngine {
     int   (*capture_hidden)(LlmEngineLlmSession s, const int32_t* ids, int n, float* out, int cap);
 
     void  (*free_str)(char* p);
+
+    /* ── ABI v2 — campi NUOVI in coda: NULL/0 se il motore non li implementa. ──────────────────
+     * Compatibilita': i campi esistenti sopra restano nella stessa posizione; questi si
+     * appendono DOPO `free_str`, quindi una vtable costruita con un header piu' vecchio resta
+     * leggibile (i campi nuovi sono NULL). Un motore v1 e' comunque utilizzabile da un consumer
+     * v2: basta controllare `caps` / `llmengine_abi_version()` prima di usare un metodo. */
+
+    /* LOGPROBS (CAP_LOGPROBS). Tutte operano sulla posizione "pending" della sessione (quella
+     * che il prossimo step emetterebbe):
+     *   token_logprob(s, id, out)       logprob naturale di `id` in quella distribuzione;
+     *   last_logprob(s, out)            logprob del token greedy pending (pending_next_id);
+     *   generate_ids_probs(s, n, eos, out_ids, out_logprobs)
+     *                                   genera come generate_ids ma scrive per OGNI token emesso
+     *                                   la sua logprob, catturata PRIMA di avanzare (esatta anche
+     *                                   con sampling, perche' la distribuzione e' quella del
+     *                                   modello alla posizione di partenza). Ritorna il conteggio
+     *                                   reale (~generate_ids) o -1.                                        */
+    int   (*token_logprob)(LlmEngineLlmSession s, int32_t token_id, float* out_logprob);
+    int   (*last_logprob)(LlmEngineLlmSession s, float* out_logprob);
+    int   (*generate_ids_probs)(LlmEngineLlmSession s, int max_new, int32_t eos,
+                                int32_t* out_ids, float* out_logprobs);
+
+    /* CONSTRAINED (CAP_CONSTRAINED): decide UN token alla posizione pending con argmax ristretto
+     * ad `allowed_ids` (n_allowed id), poi avanza. L'insieme ammesso e' responsabilita' del
+     * chiamante, che lo ricalcola a ogni passo (grammatica/JSON). NON usa parentesi-sintassi:
+     * e' la controparte ABI di `llm_ai_mlx_session_generate_constrained`. Ritorna 0 / -1. */
+    int   (*generate_id_constrained)(LlmEngineLlmSession s, const int32_t* allowed_ids, int n_allowed,
+                                     int32_t* out_token_id);
 } LlmEngineLlmEngine;
+
+/* Versione dell'ABI esportata dal runner (== LLMENGINE_ABI_VERSION dell'header con cui e' stato
+ * compilato). Confrontala con la macro dell'header del consumatore per rilevare disallineamenti. */
+unsigned llmengine_abi_version(void);
 
 /* Accessor per-runner: una vtable per motore (implementata nel progetto del motore). */
 const LlmEngineLlmEngine* llmengine_llm_engine_mlx(void);      /* llmengine_mlx */

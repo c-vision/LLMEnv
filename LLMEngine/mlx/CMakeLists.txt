@@ -224,6 +224,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_session_swap.c
     llm_mlx_gguf_io.c
     llm_mlx_session_spec.c
+    llm_mlx_session_logprob.c
     llm_mlx_session_generate.c
     llm_mlx_attn_batch.c
     llm_mlx_gdn.c

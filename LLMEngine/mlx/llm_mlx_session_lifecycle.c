@@ -476,6 +476,63 @@ void llm_mlx_session_destroy(LlmMlxSession* s) {
     free(s);
 }
 
+/* ABI v2 — kv_clear: azzera la KV-cache IN-PLACE (stesso handle), riportando la sessione allo
+ * stato di una appena creata. Il modello NON viene toccato. Rispetta la disciplina di create:
+ * ogni slot e' liberato e ricreato con una PROPRIA mlx_array_new() (mai un fill con lo stesso
+ * valore). Gestisce i casi parked (KV su disco: si scarta, parked=false) e dsv41 (cache liberata
+ * e ricreata lazy). history/n-gram/pagesel resettati perche' descrivono la sequenza cancellata. */
+int llm_ai_mlx_session_reset(llm_ai_mlx_session_handle handle) {
+    if (handle == NULL) return -1;
+    LlmMlxSession* s = (LlmMlxSession*)handle;
+    /* DeepSeek V4.1 whole-model: libera la cache (ricreata lazy al prossimo append/prefill). */
+    if (s->dsv41) { llm_dsv41_cache_free((LlmDsv41Cache*)s->dsv41); free(s->dsv41); s->dsv41 = NULL; }
+    /* KV quant: azzera i contatori cold (i buffer quantizzati restano allocati, riusati). */
+    if (s->kvq_len)   for (int l = 0; l < s->n_layers; l++) s->kvq_len[l] = 0;
+    if (s->kvq_v_len) for (int l = 0; l < s->n_layers; l++) s->kvq_v_len[l] = 0;
+    /* KV principale: libera e ricrea vuota per layer. */
+    for (int l = 0; l < s->n_layers; l++) {
+        mlx_array_free(s->k_cache[l]); s->k_cache[l] = mlx_array_new();
+        mlx_array_free(s->v_cache[l]); s->v_cache[l] = mlx_array_new();
+        if (s->aux_cache) { mlx_array_free(s->aux_cache[l]); s->aux_cache[l] = mlx_array_new(); }
+        s->has_cache[l] = false;
+    }
+    /* Pagesel summary: libera se allocato (indice di una sequenza cancellata). */
+    if (s->ps_mean) {
+        for (int l = 0; l < s->n_layers; l++) mlx_array_free(s->ps_mean[l]);
+        free(s->ps_mean); s->ps_mean = NULL;
+    }
+    free(s->ps_done); s->ps_done = NULL; s->ps_cap = 0;
+    mlx_array_free(s->pending_h); s->pending_h = mlx_array_new();
+    s->cache_offset = 0;
+    s->has_pending = false;
+    s->pending_next_id = 0;
+    s->history_len = 0;
+    s->ngram_built = false;
+    s->pinned_tokens = 0;
+    s->parked = false;
+    return 0;
+}
+
+/* ABI v2 — kv_stats: token usati e capacita' della KV. used = cache_offset (nativo). cap = il
+ * limite configurato (cfg.kv_max_tokens) se > 0, altrimenti la lunghezza ALLOCATA della cache
+ * del layer 0 (per la KV dinamica corrente coincide con l'uso: nessun headroom configurato).
+ * Non inventa numeri: se la cache non e' ancora stata allocata, cap = 0. */
+int llm_ai_mlx_session_kv_stats(llm_ai_mlx_session_handle handle, int* out_used, int* out_cap) {
+    if (handle == NULL) return -1;
+    LlmMlxSession* s = (LlmMlxSession*)handle;
+    LlmMlxModel* m = s->model;
+    if (out_used) *out_used = s->cache_offset;
+    int cap = 0;
+    if (m && m->cfg.kv_max_tokens > 0) {
+        cap = m->cfg.kv_max_tokens;
+    } else if (s->has_cache && s->k_cache && s->k_cache[0].ctx != NULL) {
+        const int* shp = mlx_array_shape(s->k_cache[0]);
+        if (shp != NULL && mlx_array_ndim(s->k_cache[0]) == 4) cap = shp[2];
+    }
+    if (out_cap) *out_cap = cap;
+    return 0;
+}
+
 /* Appende token alla history della sessione (per la tabella n-gram). */
 void session_history_append(LlmMlxSession* s, const int32_t* tok, int n) {
     if (!s || n <= 0 || !tok) return;

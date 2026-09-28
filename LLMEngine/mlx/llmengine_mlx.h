@@ -311,6 +311,38 @@ int llm_ai_mlx_session_truncate(llm_ai_mlx_session_handle handle, int n_tokens);
  * [0,1]), -1 su errore/sessione senza pending. */
 int llm_ai_mlx_session_greedy_prob(llm_ai_mlx_session_handle handle, float* out_prob);
 
+/* LOGPROBS (ABI v2): logprob naturale del token `token_id` nella distribuzione del modello alla
+ * posizione "pending" (pending_h). Calcola la stessa distribuzione di final_step (final_norm +
+ * lm_head + softcap) e la normalizza in log-softmax: log p(id) = logit(id) - logsumexp(logits).
+ * Esatta per qualunque id (greedy o campionato), non tocca lo stato della sessione. Per i modelli
+ * DSV4.1 whole-model usa i logits gia' in host (`last_logits`). Ritorna 0 e scrive *out_logprob
+ * (<0), oppure -1 (handle/stato invalido, id fuori vocabolario, nessun pending). */
+int llm_ai_mlx_session_logprob_of(llm_ai_mlx_session_handle handle, int32_t token_id, float* out_logprob);
+
+/* Logprob del token greedy corrente (pending_next_id) alla posizione pending. Scorciatoia di
+ * logprob_of(pending_next_id): "confidenza del modello" sul prossimo token. 0 / -1. */
+int llm_ai_mlx_session_last_logprob(llm_ai_mlx_session_handle handle, float* out_logprob);
+
+/* Genera fino a max_new token come llm_ai_mlx_session_generate(max_new) ma, per OGNI token emesso,
+ * scrive la sua logprob (out_logprobs[i]). La logprob e' catturata dalla distribuzione del modello
+ * alla posizione di PARTENZA di quello step, PRIMA che il token avanzi: esatta anche con sampling
+ * (si guarda up l'id effettivamente emesso nella distribuzione pre-step). Si ferma su EOS come
+ * generate. out_ids/out_logprobs hanno almeno max_new elementi. Ritorna il conteggio reale (>=0)
+ * o -1. Costo: un lm_head + read del vocabolario in host per token (oltre al decode). */
+int llm_ai_mlx_session_generate_probs(llm_ai_mlx_session_handle handle, int max_new, int32_t eos,
+                                      int32_t* out_ids, float* out_logprobs);
+
+/* KV (ABI v2): azzera la KV-cache della sessione IN-PLACE (stesso handle), riportandola allo
+ * stato di una sessione appena creata: cache k/v/aux liberate e ricreate vuote, cache_offset=0,
+ * pending azzerato, history/n-gram azzerati, stato kvq/pagesel/park resettato. Il modello NON
+ * viene toccato. 0 / -1. */
+int llm_ai_mlx_session_reset(llm_ai_mlx_session_handle handle);
+
+/* KV (ABI v2): token usati (cache_offset) e capacita' della KV. La capacita' e' il limite
+ * configurato (cfg.kv_max_tokens > 0), altrimenti la lunghezza ALLOCATA della cache del layer 0
+ * (per la KV dinamica corrente coincide con l'uso). Scrive i due valori non-NULL. 0 / -1. */
+int llm_ai_mlx_session_kv_stats(llm_ai_mlx_session_handle handle, int* out_used, int* out_cap);
+
 /* FASE 3: native tool dispatch -- decides exactly ONE token at the session's current
  * (already-pending, undecided) position via an argmax restricted to allowed_ids, instead of
  * the ordinary unrestricted argmax llm_ai_mlx_session_generate uses. No JSON, no grammar text:
