@@ -1303,49 +1303,30 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
                             }
                             mlx_array_free(y); mlx_array_free(rv);
                         } else {
-                        mlx_vector_array ys = mlx_vector_array_new();
-                        int ok = 1;
-                        for (int r = 0; r < rows && ok; r++) {
-                            mlx_array a = mlx_array_new_data(&r, (const int[]){1}, 1, MLX_INT32);
-                            mlx_array row = mlx_array_new();
-                            if (mlx_take_axis(&row, Xh, a, 0, stream) != 0) ok = 0;
-                            mlx_array_free(a);
-                            if (ok) {
-                                int s1[1] = { K };
-                                mlx_array rv = mlx_array_new();
-                                if (mlx_reshape(&rv, row, s1, 1, stream) != 0) ok = 0;
-                                mlx_array y = mlx_array_new();
-                                if (ok && llm_mlx_tq_qmv(&y, w, scales, CB, rv, 0, K, O, NG, cw, bits3, grp, trit, stream) == 0)
-                                    mlx_vector_array_append_value(ys, y);
-                                else ok = 0;
-                                mlx_array_free(y); mlx_array_free(rv);
-                            }
-                            mlx_array_free(row);
-                        }
-                        if (ok && mlx_vector_array_size(ys) == rows) {
-                            mlx_array stk = mlx_array_new();
-                            if (mlx_stack(&stk, ys, stream) == 0) {
-                                    mlx_array yc = mlx_array_new();
-                                    bool aokc = (mlx_array_dtype(stk) == mlx_array_dtype(x)) ? (mlx_array_set(&yc, stk) == 0) : (mlx_astype(&yc, stk, mlx_array_dtype(x), stream) == 0);
-                                    if (aokc) {
-                                    int shp[8]; int nd = xnd;
-                                    for (int i = 0; i < nd && i < 8; i++) shp[i] = mlx_array_shape(x)[i];
-                                    shp[nd - 1] = O;
-                                    mlx_array yr = mlx_array_new();
-                                    if (mlx_reshape(&yr, yc, shp, nd, stream) == 0) {
-                                        mlx_array_set(res, yr); mlx_array_free(yr);
-                                        mlx_array_free(yc); mlx_array_free(stk);
-                                        mlx_vector_array_free(ys); mlx_array_free(Xh); mlx_array_free(Xr);
-                                        mlx_array_free(X2);
-                                        return true;
-                                    }
-                                    mlx_array_free(yr);
+                        /* PREFILL (T>1): UN solo launch batched — mode kg con indici=0 (esperto 0),
+                         * x [T,K] -> y [T,O]. Prima era 1 launch PER RIGA (~440×T per prefill). */
+                        mlx_array idxz = mlx_array_new(), y = mlx_array_new();
+                        int iz[1] = { rows };
+                        if (mlx_zeros(&idxz, iz, 1, MLX_UINT32, stream) == 0 &&
+                            llm_mlx_tq_qmv_kg(&y, w, scales, CB, Xh, idxz, rows, K, O, NG, cw, bits3, grp, trit, stream) == 0) {
+                            mlx_array yc = mlx_array_new();
+                            bool aokc = (mlx_array_dtype(y) == mlx_array_dtype(x)) ? (mlx_array_set(&yc, y) == 0) : (mlx_astype(&yc, y, mlx_array_dtype(x), stream) == 0);
+                            if (aokc) {
+                                int shp[8]; int nd = xnd;
+                                for (int i = 0; i < nd && i < 8; i++) shp[i] = mlx_array_shape(x)[i];
+                                shp[nd - 1] = O;
+                                mlx_array yr = mlx_array_new();
+                                if (mlx_reshape(&yr, yc, shp, nd, stream) == 0) {
+                                    mlx_array_set(res, yr); mlx_array_free(yr);
+                                    mlx_array_free(yc); mlx_array_free(y); mlx_array_free(idxz);
+                                    mlx_array_free(Xh); mlx_array_free(Xr); mlx_array_free(X2);
+                                    return true;
                                 }
-                                mlx_array_free(yc);
+                                mlx_array_free(yr);
                             }
-                            mlx_array_free(stk);
+                            mlx_array_free(yc);
                         }
-                        mlx_vector_array_free(ys);
+                        mlx_array_free(y); mlx_array_free(idxz);
                         }
                     }
                     mlx_array_free(Xh);
