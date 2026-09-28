@@ -1,0 +1,8 @@
+{
+ "codec": "turboquant",
+ "weight": "U32[2,320]",
+ "codebook": "F16[16]",
+ "scales": "F16[2,40]",
+ "signs": "F16[2560]",
+ "sha256": "4d7312e54865d6258c88c63e959e0243dbdde42b370bd5e94486c7e2092580bc"
+}

@@ -1,0 +1,20 @@
+{
+ "dir": "samples/Fixtures/codec/mxfp4",
+ "source_file": "source.bin",
+ "bytes": 4096,
+ "sha256": "6417defe43b1a7038f51a6f5fe4b78701c520693985e7c879819c80f3ad1ff9f",
+ "checksum": 482150,
+ "expected": {
+  "numel": 5760,
+  "min": -0.125,
+  "max": 0.09375,
+  "mean": 0.00035536024370230734,
+  "rms": 0.024163207894110642,
+  "sha256": "1fd77cca1a3cfb21e36b7596f958e1a1e50b53e421e9daf3f116c804d992c78a"
+ },
+ "error_vs_decode": {
+  "max_abs_error": 0.0,
+  "mean_abs_error": 0.0,
+  "max_rel_error": 0.0
+ }
+}

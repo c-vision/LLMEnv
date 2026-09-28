@@ -1,0 +1,11 @@
+{
+ "dir": "samples/Fixtures/codec/awq_real",
+ "expected": {
+  "numel": 16384,
+  "min": -0.09331512451171875,
+  "max": 0.105712890625,
+  "mean": -1.102476380765438e-05,
+  "rms": 0.014144116599247882,
+  "sha256": "5bf331ae7a6dae1b00b9543db52e90f5541af6acfe4fba52b228e2790c6c7bba"
+ }
+}

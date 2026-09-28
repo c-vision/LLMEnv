@@ -1,0 +1,9 @@
+{
+ "codec": "mxfp8",
+ "tensor": "language_model.lm_head.weight",
+ "rows": 2,
+ "cols": 5120,
+ "scale_cols": 160,
+ "group": 32,
+ "sha256": "7cc9dd7deedbce5e5d0d07f143790edd8b2de32aa3a71ea1648a7853aef6ba7c"
+}

@@ -1,0 +1,10 @@
+{
+ "i": 1,
+ "tensor": "layers.6.ffn.shared_experts.w1.weight",
+ "dtype": "F8_E4M3",
+ "shape": [
+  2304,
+  5120
+ ],
+ "scale": "layers.6.ffn.shared_experts.w1.scale"
+}

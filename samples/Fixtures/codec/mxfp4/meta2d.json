@@ -1,0 +1,9 @@
+{
+ "codec": "mxfp4",
+ "tensor": "model.layers.0.mlp.experts.down_proj.weight",
+ "rows": 2,
+ "cols": 2880,
+ "w_bytes": 2880,
+ "s_bytes": 180,
+ "sha256": "28a39d92aa33759c396df8b60ddc16340321c8679ac9dd22be403ea6dabaa28f"
+}

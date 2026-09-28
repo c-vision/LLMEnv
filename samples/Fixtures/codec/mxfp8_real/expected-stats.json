@@ -1,0 +1,20 @@
+{
+ "dir": "samples/Fixtures/codec/mxfp8_real",
+ "source_file": "weight2d.bin",
+ "bytes": 10240,
+ "sha256": "bd7cea5132fb322cdf071e91c92c672c13dc23899f0eadc818be1748afadae32",
+ "checksum": 1707674,
+ "expected": {
+  "numel": 10240,
+  "min": -0.03125,
+  "max": 0.0234375,
+  "mean": -1.4933839338482358e-05,
+  "rms": 0.0023063434774190073,
+  "sha256": "42342f8f0650a17f69ca3edea00a1449eb477ef379830aa3efe281d9d6affc61"
+ },
+ "error_vs_decode": {
+  "max_abs_error": 0.0,
+  "mean_abs_error": 0.0,
+  "max_rel_error": 0.0
+ }
+}

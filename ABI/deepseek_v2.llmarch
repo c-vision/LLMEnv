@@ -1,0 +1,187 @@
+{
+  "arch": "deepseek_v2",
+  "source": {
+    "format": "safetensors",
+    "config": "config.json",
+    "index": "model.safetensors.index.json"
+  },
+  "config_map": {
+    "n_layers": "num_hidden_layers",
+    "hidden": "hidden_size",
+    "n_heads": "num_attention_heads",
+    "n_kv": "num_key_value_heads",
+    "vocab": "vocab_size",
+    "rope_theta": "rope_theta",
+    "dense_inter": "intermediate_size",
+    "experts": "n_routed_experts",
+    "top_k": "num_experts_per_tok",
+    "shared": "n_shared_experts",
+    "moe_inter": "moe_intermediate_size"
+  },
+  "roles": [
+    {
+      "match": "lm_head",
+      "role": "OUTPUT"
+    },
+    {
+      "match": "embed_tokens",
+      "role": "EMBEDDING"
+    },
+    {
+      "match": "norm",
+      "role": "NORM"
+    },
+    {
+      "match": "down_proj",
+      "role": "FFN"
+    },
+    {
+      "match": "mlp.gate.weight",
+      "role": "ROUTER"
+    },
+    {
+      "match": "gate_proj",
+      "role": "FFN"
+    },
+    {
+      "match": "experts.",
+      "role": "ROUTED_EXPERT"
+    },
+    {
+      "match": "switch_mlp",
+      "role": "ROUTED_EXPERT"
+    },
+    {
+      "match": "up_proj",
+      "role": "FFN"
+    },
+    {
+      "match": "kv_a_layernorm",
+      "role": "NORM"
+    },
+    {
+      "match": "kv_a_proj",
+      "role": "ATTN_KV"
+    },
+    {
+      "match": "kv_b_proj",
+      "role": "ATTN_KV"
+    },
+    {
+      "match": "o_proj",
+      "role": "ATTN_WO"
+    },
+    {
+      "match": "q_proj",
+      "role": "ATTN_Q"
+    }
+  ],
+  "quant": {
+    "NORM": "f32",
+    "EMBEDDING": "f16",
+    "OUTPUT": "q6_k",
+    "recipe": "_M",
+    "recipe_boost": [
+      "attn_v",
+      "ffn_down"
+    ],
+    "recipe_boost_fmt": "q6_k"
+  },
+  "structures": {
+    "layer": {
+      "type": "transformer_layer",
+      "steps": [
+        { "op": "attention", "prim": "" },
+        { "op": "ffn",       "prim": "" }
+      ]
+    },
+    "norm": {
+      "type": "rmsnorm",
+      "prim": "rmsnorm"
+    },
+    "attention": {
+      "type": "mla",
+      "steps": [
+        {
+          "op": "q_lora",
+          "prim": ""
+        },
+        {
+          "op": "kv_lora",
+          "prim": ""
+        },
+        {
+          "op": "rope",
+          "prim": ""
+        },
+        {
+          "op": "sdpa",
+          "prim": ""
+        },
+        {
+          "op": "sink",
+          "prim": ""
+        }
+      ]
+    },
+    "moe": {
+      "experts": "cfg:experts",
+      "top_k": "cfg:top_k",
+      "steps": [
+        {
+          "op": "router_topk",
+          "prim": ""
+        },
+        {
+          "op": "experts",
+          "prim": ""
+        },
+        {
+          "op": "shared",
+          "prim": ""
+        }
+      ]
+    }
+  },
+  "codecs": {
+    "mlx_affine": "mlx_affine",
+    "plain": "plain",
+    "fp8_block": "fp8_block",
+    "fp4_expert": "fp4_expert",
+    "f16": "f16"
+  },
+  "weight_source": {
+    "mlx_affine": {
+      "dtype": "U32",
+      "codec": "mlx_affine",
+      "scale_suffix": ".scales",
+      "bias_suffix": ".biases"
+    },
+    "plain_f16": {
+      "dtype": "F16",
+      "codec": "plain",
+      "fmt": 1
+    },
+    "plain_bf16": {
+      "dtype": "BF16",
+      "codec": "plain",
+      "fmt": 2
+    },
+    "plain_f32": {
+      "dtype": "F32",
+      "codec": "plain",
+      "fmt": 0
+    }
+  },
+  "quant_params": {
+    "group": 32,
+    "bits": 4
+  },
+  "convert_target": {
+    "default": {
+      "codec": "mlx_affine",
+      "p0": 32,
+      "p1": 4
+    }
+  }
+}

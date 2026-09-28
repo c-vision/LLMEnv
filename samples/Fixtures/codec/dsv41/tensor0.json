@@ -1,0 +1,10 @@
+{
+ "i": 0,
+ "tensor": "layers.6.attn.wq_a.weight",
+ "dtype": "F8_E4M3",
+ "shape": [
+  1280,
+  5120
+ ],
+ "scale": "layers.6.attn.wq_a.scale"
+}

@@ -1,0 +1,5 @@
+{
+ "codec": "bnb_nf4_dq",
+ "numel": 128,
+ "blocks": 1
+}

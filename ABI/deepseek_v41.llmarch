@@ -1,0 +1,421 @@
+{
+  "_comment": ".llmarch — DESCRIZIONE d'architettura (data-driven). Un modello = una descrizione.",
+  "arch": "deepseek_v41",
+  "source": {
+    "format": "safetensors",
+    "config": "config.json",
+    "index": "model.safetensors.index.json"
+  },
+  "config_map": {
+    "n_layers": "num_hidden_layers",
+    "hidden": "hidden_size",
+    "n_heads": "num_attention_heads",
+    "n_kv": "num_key_value_heads",
+    "head_dim": "head_dim",
+    "qk_rope": "qk_rope_head_dim",
+    "q_lora": "q_lora_rank",
+    "o_lora": "o_lora_rank",
+    "experts": "n_routed_experts",
+    "top_k": "num_experts_per_tok",
+    "shared": "n_shared_experts",
+    "moe_inter": "moe_intermediate_size",
+    "dense_inter": "intermediate_size",
+    "vocab": "vocab_size",
+    "rope_theta": "rope_theta",
+    "compress_rope_theta": "compress_rope_theta",
+    "index_topk": "index_topk",
+    "index_dim": "index_head_dim",
+    "index_heads": "index_n_heads",
+    "compress_ratios": "compress_ratios",
+    "index_layers": "index_source_layer_ids",
+    "engram_vocab": "engram_compressed_vocab_size",
+    "engram_dim": "engram_head_dim"
+  },
+  "roles": [
+    {
+      "match": "image_",
+      "role": "VISION"
+    },
+    {
+      "match": "main_proj",
+      "role": "MTP"
+    },
+    {
+      "match": "confidence_head",
+      "role": "MTP"
+    },
+    {
+      "match": "hc_attn_base",
+      "role": "MHC",
+      "gguf": "blk.%d.hc_attn_base.weight"
+    },
+    {
+      "match": "hc_attn_fn",
+      "role": "MHC",
+      "gguf": "blk.%d.hc_attn_fn.weight"
+    },
+    {
+      "match": "hc_attn_scale",
+      "role": "MHC",
+      "gguf": "blk.%d.hc_attn_scale.weight"
+    },
+    {
+      "match": "hc_ffn_base",
+      "role": "MHC",
+      "gguf": "blk.%d.hc_ffn_base.weight"
+    },
+    {
+      "match": "hc_ffn_fn",
+      "role": "MHC",
+      "gguf": "blk.%d.hc_ffn_fn.weight"
+    },
+    {
+      "match": "hc_ffn_scale",
+      "role": "MHC",
+      "gguf": "blk.%d.hc_ffn_scale.weight"
+    },
+    {
+      "match": "attn_norm",
+      "role": "NORM",
+      "gguf": "blk.%d.attn_norm.weight"
+    },
+    {
+      "match": "ffn_norm",
+      "role": "NORM",
+      "gguf": "blk.%d.ffn_norm.weight"
+    },
+    {
+      "match": "hc_",
+      "role": "MHC"
+    },
+    {
+      "match": "vision",
+      "role": "VISION",
+      "submodel": "vision"
+    },
+    {
+      "match": "aligner",
+      "role": "VISION_ALIGNER",
+      "submodel": "vision"
+    },
+    {
+      "match": "ffn.gate.bias_vl",
+      "role": "FFN",
+      "gguf": "blk.%d.ffn_gate_inp.bias_vl"
+    },
+    {
+      "match": "ffn.gate.bias",
+      "role": "FFN",
+      "gguf": "blk.%d.ffn_gate_inp.bias"
+    },
+    {
+      "match": "ffn.gate.weight",
+      "role": "FFN",
+      "gguf": "blk.%d.ffn_gate_inp.weight"
+    },
+    {
+      "match": "attn_sink",
+      "role": "ATTN_SINK",
+      "gguf": "blk.%d.attn_sinks.weight"
+    },
+    {
+      "match": "attn.wq_a",
+      "role": "ATTN_Q_A",
+      "gguf": "blk.%d.attn_q_a.weight"
+    },
+    {
+      "match": "attn.wq_b",
+      "role": "ATTN_Q_B",
+      "gguf": "blk.%d.attn_q_b.weight"
+    },
+    {
+      "match": "attn.wkv",
+      "role": "ATTN_KV",
+      "gguf": "blk.%d.attn_kv.weight"
+    },
+    {
+      "match": "attn.wo_a",
+      "role": "ATTN_O_A",
+      "gguf": "blk.%d.attn_output_a.weight"
+    },
+    {
+      "match": "attn.wo_b",
+      "role": "ATTN_O_B",
+      "gguf": "blk.%d.attn_output_b.weight"
+    },
+    {
+      "match": "attn.q_norm",
+      "role": "NORM",
+      "gguf": "blk.%d.attn_q_a_norm.weight"
+    },
+    {
+      "match": "attn.kv_norm",
+      "role": "NORM",
+      "gguf": "blk.%d.attn_kv_a_norm.weight"
+    },
+    {
+      "match": "attn.compressor",
+      "role": "ATTN_COMPRESSOR"
+    },
+    {
+      "match": "attn.indexer",
+      "role": "ATTN_INDEXER"
+    },
+    {
+      "match": "engram",
+      "role": "ENGRAM"
+    },
+    {
+      "match": "ffn.experts.",
+      "role": "ROUTED_EXPERT",
+      "gguf": "blk.%d.ffn_%s_exps.weight",
+      "stack": true
+    },
+    {
+      "match": "ffn.shared",
+      "role": "SHARED_EXPERT",
+      "gguf": "blk.%d.ffn_%s_shexp.weight"
+    },
+    {
+      "match": "ffn.",
+      "role": "FFN"
+    },
+    {
+      "match": "embed",
+      "role": "EMBEDDING",
+      "gguf": "token_embd.weight"
+    },
+    {
+      "match": "head.weight",
+      "role": "OUTPUT",
+      "gguf": "output.weight"
+    },
+    {
+      "match": "norm.weight",
+      "role": "NORM",
+      "gguf": "output_norm.weight"
+    }
+  ],
+  "scale_suffix": ".scale",
+  "quant": {
+    "NORM": "f32",
+    "EMBEDDING": "f16",
+    "OUTPUT": "q6_k",
+    "ROUTED_EXPERT": "q2_k",
+    "SHARED_EXPERT": "q4_k",
+    "ATTN_KV": "q4_k",
+    "ATTN_Q_A": "q4_k",
+    "ATTN_Q_B": "q4_k",
+    "ATTN_O_A": "q4_k",
+    "ATTN_O_B": "q4_k",
+    "ATTN_COMPRESSOR": "q4_k",
+    "ATTN_INDEXER": "q4_k",
+    "recipe": "_M",
+    "recipe_boost": [
+      "attn_v",
+      "ffn_down"
+    ],
+    "recipe_boost_fmt": "q6_k",
+    "MHC": "f32",
+    "MTP": "f16"
+  },
+  "codecs": {
+    "f16": "f16",
+    "mlx_affine": "mlx_affine",
+    "plain": "plain",
+    "fp8_block": "fp8_block",
+    "fp4_expert": "fp4_expert"
+  },
+  "structures": {
+    "layer": {
+      "type": "transformer_layer",
+      "steps": [
+        { "op": "attention", "prim": "" },
+        { "op": "ffn",       "prim": "" }
+      ]
+    },
+    "attention": {
+      "type": "mla",
+      "q_lora": "cfg:q_lora",
+      "o_lora": "cfg:o_lora",
+      "kv_lora": "cfg:head_dim",
+      "rope": "yarn",
+      "rope_factor": "cfg:factor",
+      "steps": [
+        {
+          "op": "q_lora",
+          "prim": "mlx_attn_q_lora"
+        },
+        {
+          "op": "kv_lora",
+          "prim": "mlx_attn_kv_lora"
+        },
+        {
+          "op": "rope_compress",
+          "prim": "mlx_rope_compress"
+        },
+        {
+          "op": "sdpa",
+          "prim": ""
+        },
+        {
+          "op": "sink",
+          "prim": ""
+        }
+      ]
+    },
+    "compression": {
+      "type": "csa",
+      "ratios": "cfg:compress_ratios",
+      "rope_theta": "cfg:compress_rope_theta"
+    },
+    "indexer": {
+      "type": "indexer",
+      "topk": "cfg:index_topk",
+      "dim": "cfg:index_dim",
+      "heads": "cfg:index_heads",
+      "layers": "cfg:index_layers"
+    },
+    "engram": {
+      "type": "engram",
+      "vocab": "cfg:engram_vocab",
+      "dim": "cfg:engram_dim"
+    },
+    "moe": {
+      "experts": "cfg:experts",
+      "top_k": "cfg:top_k",
+      "shared": "cfg:shared",
+      "inter": "cfg:moe_inter",
+      "expert_axis": 3,
+      "steps": [
+        {
+          "op": "router_topk",
+          "prim": ""
+        },
+        {
+          "op": "experts",
+          "prim": ""
+        },
+        {
+          "op": "shared",
+          "prim": ""
+        }
+      ]
+    },
+    "vision": {
+      "type": "vit",
+      "present": true
+    }
+  },
+  "weight_source": {
+    "fp8_e4m3": {
+      "block": "scale_shape",
+      "scale_suffix": ".scale",
+      "dtype": "F8_E4M3",
+      "codec": "fp8",
+      "fmt": 0,
+      "p0": 32,
+      "p1": 32
+    },
+    "fp4_i8": {
+      "block": "scale_shape",
+      "scale_suffix": ".scale",
+      "expert_axis": 3,
+      "dtype": "I8",
+      "codec": "fp4",
+      "fmt": 0,
+      "p0": 1,
+      "p1": 32
+    },
+    "mlx_affine": {
+      "dtype": "U32",
+      "codec": "mlx_affine",
+      "scale_suffix": ".scales",
+      "bias_suffix": ".biases"
+    },
+    "plain_f16": {
+      "dtype": "F16",
+      "codec": "plain",
+      "fmt": 1
+    },
+    "plain_bf16": {
+      "dtype": "BF16",
+      "codec": "plain",
+      "fmt": 2
+    },
+    "plain_f32": {
+      "dtype": "F32",
+      "codec": "plain",
+      "fmt": 0
+    },
+    "engram_table": {
+      "dtype": "F8_E4M3",
+      "codec": "fp8",
+      "role": "ENGRAM",
+      "scale_suffix": ".scale",
+      "fmt": 2,
+      "p0": 1,
+      "p1": 32
+    }
+  },
+  "quant_params": {
+    "group": 32,
+    "bits": 4
+  },
+  "convert_target": {
+    "default": {
+      "codec": "mlx_affine",
+      "p0": 32,
+      "p1": 4
+    }
+  },
+  "runtime": {
+    "_comment": "Metadati RUNTIME (engine): NON sono codec di checkpoint. Vedi Knowledge/Encoder-Decoder-Modelli.md §19.",
+    "activation": {
+      "dtype": "fp8_e4m3",
+      "scheme": "dynamic"
+    },
+    "kv": {
+      "dtype": "fp4",
+      "group": 16,
+      "index_k": "fp4_gs32",
+      "window": "fp8_swa128",
+      "compressed": true,
+      "cross_layer": [
+        2,
+        8,
+        14,
+        20
+      ]
+    },
+    "state": "csa2",
+    "prefill": {
+      "ced": true,
+      "skip": true
+    },
+    "decode": {
+      "mtp": true,
+      "dspark": true
+    },
+    "generation": {
+      "speculative": "dspark"
+    },
+    "tokenizer": {
+      "kind": "bpe"
+    },
+    "multimodal": {
+      "vision": "vit",
+      "aligner": true,
+      "present": true
+    },
+    "engram": {
+      "layers": [
+        1,
+        14
+      ],
+      "ngram": 4,
+      "heads": 8,
+      "head_dim": 256
+    }
+  }
+}

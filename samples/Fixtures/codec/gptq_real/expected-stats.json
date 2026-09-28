@@ -1,0 +1,11 @@
+{
+ "dir": "samples/Fixtures/codec/gptq_real",
+ "expected": {
+  "numel": 16384,
+  "min": -0.0921783447265625,
+  "max": 0.1510009765625,
+  "mean": 0.007372651714831591,
+  "rms": 0.01958436300714995,
+  "sha256": "d177f4385426060ba94bddbe4a2feb17ee9769585724e9edd0baee2e3fdeb9b3"
+ }
+}

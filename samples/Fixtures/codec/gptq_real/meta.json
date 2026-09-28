@@ -1,0 +1,7 @@
+{
+ "codec": "gptq",
+ "in": 256,
+ "out": 64,
+ "group": 128,
+ "gidx": true
+}
