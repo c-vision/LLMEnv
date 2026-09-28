@@ -1,0 +1,1023 @@
+{
+  "generated_by": "tools/gen_tokenizer_golden.py",
+  "oracle": "HF tokenizers (WordPiece + BertNormalizer(lowercase, strip_accents) + BertPreTokenizer + TemplateProcessing)",
+  "tokenizers_version": "0.23.2",
+  "vocabs": {
+    "en_uncased": {
+      "path": "vocab_en_uncased.txt",
+      "size": 40,
+      "cls_id": 2,
+      "sep_id": 3,
+      "unk_id": 1,
+      "pad_id": 0
+    },
+    "multilingual": {
+      "path": "vocab_multilingual.txt",
+      "size": 72,
+      "cls_id": 2,
+      "sep_id": 3,
+      "unk_id": 1,
+      "pad_id": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "en_uncased:hello-world",
+      "vocab": "en_uncased",
+      "text": "Hello world",
+      "basic_tokens": [
+        "hello",
+        "world"
+      ],
+      "tokens": [
+        "[CLS]",
+        "hello",
+        "world",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        5,
+        6,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:ascii-punct",
+      "vocab": "en_uncased",
+      "text": "The quick brown fox jumps!",
+      "basic_tokens": [
+        "the",
+        "quick",
+        "brown",
+        "fox",
+        "jumps",
+        "!"
+      ],
+      "tokens": [
+        "[CLS]",
+        "the",
+        "quick",
+        "brown",
+        "fox",
+        "jump",
+        "##s",
+        "!",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:latin-accents",
+      "vocab": "en_uncased",
+      "text": "résumé naïve café",
+      "basic_tokens": [
+        "resume",
+        "naive",
+        "cafe"
+      ],
+      "tokens": [
+        "[CLS]",
+        "res",
+        "##ume",
+        "naive",
+        "cafe",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        14,
+        15,
+        16,
+        17,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:cyrillic",
+      "vocab": "en_uncased",
+      "text": "Привет мир",
+      "basic_tokens": [
+        "привет",
+        "мир"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:arabic",
+      "vocab": "en_uncased",
+      "text": "مرحبا بالعالم",
+      "basic_tokens": [
+        "مرحبا",
+        "بالعالم"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:hindi",
+      "vocab": "en_uncased",
+      "text": "नमस्ते दुनिया",
+      "basic_tokens": [
+        "नमसत",
+        "दनिया"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:chinese-cjk",
+      "vocab": "en_uncased",
+      "text": "人工智能",
+      "basic_tokens": [
+        "人",
+        "工",
+        "智",
+        "能"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "[UNK]",
+        "[UNK]",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        1,
+        1,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:japanese-mix",
+      "vocab": "en_uncased",
+      "text": "東京タワー",
+      "basic_tokens": [
+        "東",
+        "京",
+        "タワー"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "[UNK]",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        1,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:korean",
+      "vocab": "en_uncased",
+      "text": "서울특별시",
+      "basic_tokens": [
+        "서울특별시"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:typo-punct",
+      "vocab": "en_uncased",
+      "text": "«Guillemets» — em-dash … ellipsis · middle",
+      "basic_tokens": [
+        "«",
+        "guillemets",
+        "»",
+        "—",
+        "em",
+        "-",
+        "dash",
+        "…",
+        "ellipsis",
+        "·",
+        "middle"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "guillemets",
+        "[UNK]",
+        "[UNK]",
+        "em",
+        "-",
+        "dash",
+        "[UNK]",
+        "ellipsis",
+        "[UNK]",
+        "middle",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        32,
+        1,
+        1,
+        33,
+        36,
+        34,
+        1,
+        35,
+        1,
+        31,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:control-chars",
+      "vocab": "en_uncased",
+      "text": "tab\tand\u0001control\u001fchars",
+      "basic_tokens": [
+        "tab",
+        "andcontrolchars"
+      ],
+      "tokens": [
+        "[CLS]",
+        "tab",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        26,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:long-word-101",
+      "vocab": "en_uncased",
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "basic_tokens": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:empty",
+      "vocab": "en_uncased",
+      "text": "",
+      "basic_tokens": [],
+      "tokens": [
+        "[CLS]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:emoji",
+      "vocab": "en_uncased",
+      "text": "🚀 rocket launch",
+      "basic_tokens": [
+        "🚀",
+        "rocket",
+        "launch"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "rocket",
+        "launch",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        29,
+        30,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:underscore-pc",
+      "vocab": "en_uncased",
+      "text": "snake_case_test",
+      "basic_tokens": [
+        "snake",
+        "_",
+        "case",
+        "_",
+        "test"
+      ],
+      "tokens": [
+        "[CLS]",
+        "snake",
+        "_",
+        "case",
+        "_",
+        "test",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        18,
+        19,
+        20,
+        19,
+        21,
+        3
+      ]
+    },
+    {
+      "id": "en_uncased:mixed-case",
+      "vocab": "en_uncased",
+      "text": "Mixed CASE Lowering",
+      "basic_tokens": [
+        "mixed",
+        "case",
+        "lowering"
+      ],
+      "tokens": [
+        "[CLS]",
+        "mixed",
+        "case",
+        "lower",
+        "##ing",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        22,
+        20,
+        23,
+        24,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:hello-world",
+      "vocab": "multilingual",
+      "text": "Hello world",
+      "basic_tokens": [
+        "hello",
+        "world"
+      ],
+      "tokens": [
+        "[CLS]",
+        "hello",
+        "world",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        5,
+        6,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:ascii-punct",
+      "vocab": "multilingual",
+      "text": "The quick brown fox jumps!",
+      "basic_tokens": [
+        "the",
+        "quick",
+        "brown",
+        "fox",
+        "jumps",
+        "!"
+      ],
+      "tokens": [
+        "[CLS]",
+        "the",
+        "quick",
+        "brown",
+        "fox",
+        "jump",
+        "##s",
+        "!",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:latin-accents",
+      "vocab": "multilingual",
+      "text": "résumé naïve café",
+      "basic_tokens": [
+        "resume",
+        "naive",
+        "cafe"
+      ],
+      "tokens": [
+        "[CLS]",
+        "res",
+        "##ume",
+        "naive",
+        "cafe",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        14,
+        15,
+        16,
+        17,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:cyrillic",
+      "vocab": "multilingual",
+      "text": "Привет мир",
+      "basic_tokens": [
+        "привет",
+        "мир"
+      ],
+      "tokens": [
+        "[CLS]",
+        "при",
+        "##вет",
+        "мир",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        40,
+        41,
+        42,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:arabic",
+      "vocab": "multilingual",
+      "text": "مرحبا بالعالم",
+      "basic_tokens": [
+        "مرحبا",
+        "بالعالم"
+      ],
+      "tokens": [
+        "[CLS]",
+        "مر",
+        "##حبا",
+        "با",
+        "##لعالم",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        43,
+        44,
+        45,
+        46,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:hindi",
+      "vocab": "multilingual",
+      "text": "नमस्ते दुनिया",
+      "basic_tokens": [
+        "नमसत",
+        "दनिया"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:chinese-cjk",
+      "vocab": "multilingual",
+      "text": "人工智能",
+      "basic_tokens": [
+        "人",
+        "工",
+        "智",
+        "能"
+      ],
+      "tokens": [
+        "[CLS]",
+        "人",
+        "工",
+        "智",
+        "能",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        51,
+        52,
+        53,
+        54,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:japanese-mix",
+      "vocab": "multilingual",
+      "text": "東京タワー",
+      "basic_tokens": [
+        "東",
+        "京",
+        "タワー"
+      ],
+      "tokens": [
+        "[CLS]",
+        "東",
+        "京",
+        "タ",
+        "##ワ",
+        "##ー",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        55,
+        56,
+        57,
+        58,
+        59,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:korean",
+      "vocab": "multilingual",
+      "text": "서울특별시",
+      "basic_tokens": [
+        "서울특별시"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:typo-punct",
+      "vocab": "multilingual",
+      "text": "«Guillemets» — em-dash … ellipsis · middle",
+      "basic_tokens": [
+        "«",
+        "guillemets",
+        "»",
+        "—",
+        "em",
+        "-",
+        "dash",
+        "…",
+        "ellipsis",
+        "·",
+        "middle"
+      ],
+      "tokens": [
+        "[CLS]",
+        "«",
+        "guillemets",
+        "»",
+        "—",
+        "em",
+        "-",
+        "dash",
+        "…",
+        "ellipsis",
+        "·",
+        "middle",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        65,
+        32,
+        66,
+        67,
+        33,
+        36,
+        34,
+        68,
+        35,
+        69,
+        31,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:control-chars",
+      "vocab": "multilingual",
+      "text": "tab\tand\u0001control\u001fchars",
+      "basic_tokens": [
+        "tab",
+        "andcontrolchars"
+      ],
+      "tokens": [
+        "[CLS]",
+        "tab",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        26,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:long-word-101",
+      "vocab": "multilingual",
+      "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "basic_tokens": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:empty",
+      "vocab": "multilingual",
+      "text": "",
+      "basic_tokens": [],
+      "tokens": [
+        "[CLS]",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:emoji",
+      "vocab": "multilingual",
+      "text": "🚀 rocket launch",
+      "basic_tokens": [
+        "🚀",
+        "rocket",
+        "launch"
+      ],
+      "tokens": [
+        "[CLS]",
+        "[UNK]",
+        "rocket",
+        "launch",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        1,
+        29,
+        30,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:underscore-pc",
+      "vocab": "multilingual",
+      "text": "snake_case_test",
+      "basic_tokens": [
+        "snake",
+        "_",
+        "case",
+        "_",
+        "test"
+      ],
+      "tokens": [
+        "[CLS]",
+        "snake",
+        "_",
+        "case",
+        "_",
+        "test",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        18,
+        19,
+        20,
+        19,
+        21,
+        3
+      ]
+    },
+    {
+      "id": "multilingual:mixed-case",
+      "vocab": "multilingual",
+      "text": "Mixed CASE Lowering",
+      "basic_tokens": [
+        "mixed",
+        "case",
+        "lowering"
+      ],
+      "tokens": [
+        "[CLS]",
+        "mixed",
+        "case",
+        "lower",
+        "##ing",
+        "[SEP]"
+      ],
+      "ids": [
+        2,
+        22,
+        20,
+        23,
+        24,
+        3
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "id": "pair-en-short",
+      "vocab": "en_uncased",
+      "query": "the quick brown fox",
+      "document": "hello world rocket launch",
+      "max_length": null,
+      "ids": [
+        2,
+        7,
+        8,
+        9,
+        10,
+        3,
+        5,
+        6,
+        29,
+        30,
+        3
+      ],
+      "token_type_ids": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "tokens": [
+        "[CLS]",
+        "the",
+        "quick",
+        "brown",
+        "fox",
+        "[SEP]",
+        "hello",
+        "world",
+        "rocket",
+        "launch",
+        "[SEP]"
+      ]
+    },
+    {
+      "id": "pair-mlt-cross-script",
+      "vocab": "multilingual",
+      "query": "Привет мир",
+      "document": "人工智能 서울특별시",
+      "max_length": null,
+      "ids": [
+        2,
+        40,
+        41,
+        42,
+        3,
+        51,
+        52,
+        53,
+        54,
+        1,
+        3
+      ],
+      "token_type_ids": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "tokens": [
+        "[CLS]",
+        "при",
+        "##вет",
+        "мир",
+        "[SEP]",
+        "人",
+        "工",
+        "智",
+        "能",
+        "[UNK]",
+        "[SEP]"
+      ]
+    },
+    {
+      "id": "pair-trunc-doc",
+      "vocab": "en_uncased",
+      "query": "the quick brown fox",
+      "document": "hello world hello world hello world hello world hello world hello world hello world hello world hello world hello world hello world hello world hello world hello world hello world hello world hello world hello world hello world hello world",
+      "max_length": 16,
+      "ids": [
+        2,
+        7,
+        8,
+        9,
+        10,
+        3,
+        5,
+        6,
+        5,
+        6,
+        5,
+        6,
+        5,
+        6,
+        5,
+        3
+      ],
+      "token_type_ids": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    }
+  ],
+  "truncation": [
+    {
+      "id": "trunc-single-en",
+      "vocab": "en_uncased",
+      "text": "the quick brown fox the quick brown fox the quick brown fox the quick brown fox the quick brown fox",
+      "max_length": 16,
+      "untruncated_len": 22,
+      "ids": [
+        2,
+        7,
+        8,
+        9,
+        10,
+        7,
+        8,
+        9,
+        10,
+        7,
+        8,
+        9,
+        10,
+        7,
+        8,
+        3
+      ]
+    },
+    {
+      "id": "trunc-single-mlt",
+      "vocab": "multilingual",
+      "text": "人 工 智 能 人 工 智 能 人 工 智 能 人 工 智 能 人 工 智 能 人 工 智 能",
+      "max_length": 12,
+      "untruncated_len": 26,
+      "ids": [
+        2,
+        51,
+        52,
+        53,
+        54,
+        51,
+        52,
+        53,
+        54,
+        51,
+        52,
+        3
+      ]
+    },
+    {
+      "id": "trunc-single-min",
+      "vocab": "en_uncased",
+      "text": "hello world rocket launch",
+      "max_length": 4,
+      "untruncated_len": 6,
+      "ids": [
+        2,
+        5,
+        6,
+        3
+      ]
+    }
+  ]
+}
