@@ -5,6 +5,7 @@
 #define LLMCODEC_GGUF_READ_H
 #include <stdint.h>
 #include <stddef.h>
+#include "llmcodec_gguf_status.h"   /* TASSONOMIA D'ERRORE (contratto stabile): LlmCodecGgufStatus */
 
 /* Tipi valore metadata GGUF (sottoinsieme; numerazione = GGUF spec). */
 enum {
@@ -54,6 +55,10 @@ typedef struct {
 
 /* Legge metadata(scan)+tensor-infos. 0 ok / -1. Alloca out->tensors. */
 int llmcodec_gguf_read_info(const char* path, LlmCodecGgufFileInfo* out);
+/* Variante con TASSONOMIA d'errore: 0 = LLMCODEC_GGUF_STATUS_OK, altrimenti un codice
+ * distinto (vedi llmcodec_gguf_status.h). I fallimenti di I/O/parse sono codificati, non
+ * appiattiti su -1. */
+LlmCodecGgufStatus llmcodec_gguf_read_info_status(const char* path, LlmCodecGgufFileInfo* out);
 void llmcodec_gguf_free_info(LlmCodecGgufFileInfo* info);
 
 typedef struct {
@@ -68,10 +73,17 @@ typedef struct {
 /* PARSER canonico buffer-based (UNA SORGENTE): read_meta/read_info lo chiamano su mmap. */
 int llmcodec_gguf_parse_mem(const uint8_t* buf, size_t size, LlmCodecGgufMetaKVOwned** out_kv, int* out_n,
                        LlmCodecGgufFileInfo* out_info);
+/* Variante con TASSONOMIA d'errore (stesso parser): ritorna LLMCODEC_GGUF_STATUS_*, 0 = OK.
+ * È la porta che espone i codici distinti (TRUNCATED/OVERLAP/NAME_DUP/DATA_SHORT/...). */
+LlmCodecGgufStatus llmcodec_gguf_parse_mem_status(const uint8_t* buf, size_t size,
+                       LlmCodecGgufMetaKVOwned** out_kv, int* out_n, LlmCodecGgufFileInfo* out_info);
 
 /* Legge i KV + le tensor-info (out_info opzionale). 0 ok / -1. */
 int llmcodec_gguf_read_meta(const char* path, LlmCodecGgufMetaKVOwned** out_kv, int* out_n,
                        LlmCodecGgufFileInfo* out_info);
+/* Variante con TASSONOMIA d'errore (mmappa il file e chiama parse_mem_status). */
+LlmCodecGgufStatus llmcodec_gguf_read_meta_status(const char* path,
+                       LlmCodecGgufMetaKVOwned** out_kv, int* out_n, LlmCodecGgufFileInfo* out_info);
 void llmcodec_gguf_meta_free(LlmCodecGgufMetaKVOwned* kv, int n);
 
 /* Serializza i KV posseduti nel formato del writer (per il round-trip/template). */

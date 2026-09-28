@@ -13,6 +13,7 @@ add_library(llmcodec STATIC
     src/llmcodec_safetensors.c     # contenitore safetensors (I/O)
     src/llmcodec_gguf_mlx.c        # converter (orchestrazione via registry)
     src/llmcodec_gguf_parse.c      # PARSER GGUF canonico buffer-based (reader unico)
+    src/llmcodec_gguf_status.c     # TASSONOMIA D'ERRORE GGUF (asset assorbito da lane_gguf)
     src/llmcodec_gguf_meta.c       # METADATA GGUF (hyperparametri + tokenizer) per il converter
     src/llmcodec_rolemap.c         # descrizione .llmarch
     src/llmcodec.c           # registry PLUGIN (dlopen + cache)
@@ -143,6 +144,11 @@ if(LLMCODEC_TESTS)
     target_link_libraries(llmcodec_real_fixtures_selfcheck PRIVATE llmcodec)
     target_compile_definitions(llmcodec_real_fixtures_selfcheck PRIVATE LLMCODEC_FIX_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../samples/Fixtures/codec")
     add_test(NAME llmcodec_real_fixtures_selfcheck COMMAND llmcodec_real_fixtures_selfcheck)
+
+    # TASSONOMIA D'ERRORE GGUF: ogni corruzione porta il SUO codice (asset assorbito da lane_gguf).
+    add_executable(llmcodec_gguf_status_selfcheck tests/test_gguf_status.c)
+    target_link_libraries(llmcodec_gguf_status_selfcheck PRIVATE llmcodec)
+    add_test(NAME llmcodec_gguf_status_selfcheck COMMAND llmcodec_gguf_status_selfcheck)
 endif()
 
 # I test esercitano le funzioni dei codec: linkano i PLUGIN (le impl non sono piu' nel core).
@@ -150,7 +156,8 @@ set(LLMCODEC_CODEC_PLUGIN_LINK llmcodec_ggml llmcodec_mlx_affine llmcodec_fp8 ll
 foreach(t llmcodec_ggml_quants_selfcheck llmcodec_conv_gguf_mlx_selfcheck llmcodec_conv_sharded_selfcheck
         llmcodec_rolemap_selfcheck llmcodec_recipe_selfcheck llmcodec_expert3d_selfcheck llmcodec_structs_selfcheck
         llmcodec_fp8_fp4_selfcheck llmcodec_dsv41_source_selfcheck llmcodec_abi_all_selfcheck llmcodec_engram_selfcheck
-        llmcodec_plugin_selfcheck llmcodec_a1_fp8_selfcheck llmcodec_mlx_mxfp4_selfcheck llmcodec_quantcfg_selfcheck llmcodec_formats_p0_selfcheck llmcodec_real_fixtures_selfcheck)
+        llmcodec_plugin_selfcheck llmcodec_a1_fp8_selfcheck llmcodec_mlx_mxfp4_selfcheck llmcodec_quantcfg_selfcheck llmcodec_formats_p0_selfcheck llmcodec_real_fixtures_selfcheck
+        llmcodec_gguf_status_selfcheck)
     if(TARGET ${t})
         target_link_libraries(${t} PRIVATE ${LLMCODEC_CODEC_PLUGIN_LINK})
     endif()
