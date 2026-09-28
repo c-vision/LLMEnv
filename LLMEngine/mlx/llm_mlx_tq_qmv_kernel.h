@@ -18,7 +18,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { mlx_fast_metal_kernel k; int bits, group, trit, mode, built, rc; } llm_tq_qmv_cache;
+typedef struct { int O, grid; mlx_dtype dt; mlx_fast_metal_kernel_config cfg; } llm_tq_qmv_cfg;
+#define LLM_TQ_CFG_MAX 512
+typedef struct {
+    mlx_fast_metal_kernel k; int bits, group, trit, mode, built, rc;
+    llm_tq_qmv_cfg cfgs[LLM_TQ_CFG_MAX]; int ncfg;   /* config riusabili per (O,grid,dtype) */
+} llm_tq_qmv_cache;
 #define LLM_TQ_QMV_NCACHE 16
 static llm_tq_qmv_cache g_tq_qmv[LLM_TQ_QMV_NCACHE];
 static int g_tq_qmv_ncache = 0;
@@ -130,6 +135,24 @@ static llm_tq_qmv_cache* llm_tq_qmv_get(int bits, int group, int trit, int mode)
     return c;
 }
 
+/* Config del kernel per (O, grid, dtype): si RIPETE a ogni token -> cache (altrimenti config
+ * new/add_output/set_grid/free a ogni chiamata = centinaia per token nel path denso). */
+static mlx_fast_metal_kernel_config llm_tq_qmv_cfg_get(llm_tq_qmv_cache* c, int O, int grid, mlx_dtype dt, int* is_temp) {
+    for (int i = 0; i < c->ncfg; i++)
+        if (c->cfgs[i].O == O && c->cfgs[i].grid == grid && c->cfgs[i].dt == dt) { *is_temp = 0; return c->cfgs[i].cfg; }
+    mlx_fast_metal_kernel_config cf = mlx_fast_metal_kernel_config_new();
+    mlx_fast_metal_kernel_config_add_template_arg_dtype(cf, "T", dt);
+    const int osh[1] = { O };
+    mlx_fast_metal_kernel_config_add_output_arg(cf, osh, 1, dt);
+    mlx_fast_metal_kernel_config_set_grid(cf, grid, 1, 1);
+    mlx_fast_metal_kernel_config_set_thread_group(cf, 32, 1, 1);
+    if (c->ncfg < LLM_TQ_CFG_MAX) {
+        c->cfgs[c->ncfg].O = O; c->cfgs[c->ncfg].grid = grid; c->cfgs[c->ncfg].dt = dt; c->cfgs[c->ncfg].cfg = cf; c->ncfg++;
+        *is_temp = 0;
+    } else *is_temp = 1;
+    return cf;
+}
+
 static int llm_tq_qmv_apply(mlx_array* y, llm_tq_qmv_cache* c, mlx_array packed, mlx_array scales,
                             mlx_array codebook, mlx_array x, mlx_array arg5, int O, int grid_extra,
                             mlx_stream stream) {
@@ -139,12 +162,8 @@ static int llm_tq_qmv_apply(mlx_array* y, llm_tq_qmv_cache* c, mlx_array packed,
     mlx_vector_array_append_value(in, codebook);
     mlx_vector_array_append_value(in, x);
     mlx_vector_array_append_value(in, arg5);
-    mlx_fast_metal_kernel_config cfg = mlx_fast_metal_kernel_config_new();
-    mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, "T", mlx_array_dtype(x));
-    const int osh[1] = { O };
-    mlx_fast_metal_kernel_config_add_output_arg(cfg, osh, 1, mlx_array_dtype(x));
-    mlx_fast_metal_kernel_config_set_grid(cfg, grid_extra, 1, 1);
-    mlx_fast_metal_kernel_config_set_thread_group(cfg, 32, 1, 1);
+    int is_temp = 0;
+    mlx_fast_metal_kernel_config cfg = llm_tq_qmv_cfg_get(c, O, grid_extra, mlx_array_dtype(x), &is_temp);
     mlx_vector_array outs = mlx_vector_array_new();
     int rc = mlx_fast_metal_kernel_apply(&outs, c->k, in, cfg, stream);
     bool ok = (rc == 0) && mlx_vector_array_size(outs) == 1;
@@ -154,7 +173,7 @@ static int llm_tq_qmv_apply(mlx_array* y, llm_tq_qmv_cache* c, mlx_array packed,
         mlx_array_free(a0);
     }
     if (!ok) fprintf(stderr, "[tq-qmv] apply rc=%d err=%s\n", rc, g_tq_qmv_err);
-    mlx_fast_metal_kernel_config_free(cfg);
+    if (is_temp) mlx_fast_metal_kernel_config_free(cfg);
     mlx_vector_array_free(outs); mlx_vector_array_free(in);
     return ok ? 0 : -1;
 }
