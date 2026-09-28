@@ -2,7 +2,7 @@
  *
  * Il converter GGUF<->MLX e' GENERICO (basato sui nomi): questa mappa gli da' la
  * SEMANTICA (ruolo di ogni tensore + suffisso della scala) senza dipendere dal
- * runtime. Stessa semantica di `llmdesc_arch_role()` (prima regola che combacia vince),
+ * runtime. Stessa semantica di `llmdesc_role()` (prima regola che combacia vince),
  * ma self-contained: il codec resta autonomo.
  */
 #ifndef LLMCODEC_ROLEMAP_H
