@@ -73,13 +73,20 @@ echo "== LLMEnv build_ai_libs: rid=$RID  build=$BUILD_DIR  dist=$DIST"
 # richiede Metal. Build dell'intero grafo.
 cmake -S "$ROOT" -B "$BUILD_DIR" -DLLMENV_BUILD_ENGINE=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build "$BUILD_DIR" -j4
+# MLX Metal: la `mlx.metallib` (kernels Metal AOT) è un artefatto runtime necessario
+# all'engine MLX (MLX la cerca colocated accanto alla libreria, o al METAL_PATH del build).
+# Costruiscila esplicitamente se il target esiste (non è nel grafo di default).
+if cmake --build "$BUILD_DIR" --target help 2>/dev/null | grep -q '^\.\.\. mlx-metallib'; then
+    cmake --build "$BUILD_DIR" --target mlx-metallib -j4 || \
+        echo "WARN: build di mlx-metallib fallita — l'engine MLX non potrà caricare la metallib" >&2
+fi
 
 mkdir -p "$DIST"
 found=0
 while IFS= read -r f; do
     cp -f "$f" "$DIST/" && { echo "  stage: $(basename "$f")"; found=1; }
 done < <(find "$BUILD_DIR" -type f \( \
-    -name "libllm*.$EXT" -o \
+    -name "libllm*.$EXT" -o -name "mlx.metallib" -o \
     -name "libllama*.$EXT" -o -name "libggml*.$EXT" -o -name "libmtmd*.$EXT" \) | sort)
 
 if [ "$found" = "0" ]; then
