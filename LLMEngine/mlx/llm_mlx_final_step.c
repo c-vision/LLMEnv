@@ -463,6 +463,41 @@ bool final_step(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
     return ok;
 }
 
+/* Batch greedy (verify spec n-gram): come il path greedy di final_step ma su h `[1,nd,H]`
+ * -> `nd` id. UNA sola final_norm + UNA sola matmul lm_head per tutti i draft (invece di `nd`).
+ * Bit-identico al greedy per-posizione (l'argmax e' indipendente per posizione). */
+bool final_step_greedy_batch(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
+                             mlx_array out_w, mlx_array out_s, mlx_array out_b,
+                             int32_t* out_ids, int n_out) {
+    mlx_array normed = mlx_array_new();
+    bool ok = llm_mlx_final_norm(m, h, norm_w, &normed);
+    mlx_array logits = mlx_array_new();
+    /* Ternary-Bonsai: lm_head e' elencato -> si ruota il suo ingresso. */
+    if (ok) ok = llm_bonsai_rotate(&normed, m, -1, "lm_head.weight", false);
+    if (ok) ok = quantized_linear_cfg(&logits, normed, out_w, out_s, out_b, m->cfg.quant_group_size, m->cfg.quant_bits, m->cfg.quant_mode, m->stream);
+    mlx_array capped = mlx_array_new();
+    if (ok && m->cfg.final_logit_softcap > 0.0f) {
+        ok = llm_mlx_logit_softcap(&capped, logits, m->cfg.final_logit_softcap, m->stream);
+    } else if (ok) {
+        ok = mlx_array_set(&capped, logits) == 0;
+    }
+    if (ok) {
+        mlx_array am = mlx_array_new();
+        if (ok) ok = mlx_argmax_axis(&am, capped, -1, /*keepdims=*/false, m->stream) == 0;
+        if (ok) ok = mlx_array_eval(am) == 0;
+        if (ok) {
+            const uint32_t* d = mlx_array_data_uint32(am);
+            size_t n = mlx_array_size(am);
+            ok = (d != NULL && (int)n == n_out);
+            if (ok) for (int i = 0; i < n_out; i++) out_ids[i] = (int32_t)d[i];
+        }
+        mlx_array_free(am);
+    }
+    if (!ok) fprintf(stderr, "final_step_greedy_batch: fallito\n");
+    mlx_array_free(normed); mlx_array_free(logits); mlx_array_free(capped);
+    return ok;
+}
+
 /* D16bis (2026-09-06, LLM_ASYNC_DECODE): variante greedy di final_step che NON valuta
  * ne' legge l'id in host -- ritorna l'argmax come mlx_array lazy (int32). Serve a
  * costruire il grafo del passo N+1 usando l'id del passo N come mlx_array simbolico,

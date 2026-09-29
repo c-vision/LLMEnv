@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_array_count.h"
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
@@ -369,6 +370,36 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
         if ((au == NULL || au[0] != '0') && (!sm0.active || sm0.temperature <= 0.0f)) {
             int n = llm_ai_mlx_session_generate_mtp(handle, max_new_tokens, eos_token_id, out_ids);
             if (n >= 0) return n;   /* fallback alla AR se il path MTP fallisce */
+        }
+    }
+    /* N-GRAM self-speculative GENERALE (tutti i modelli, greedy): draft dalla tabella n-gram del
+     * contesto, verificati dal modello con UN forward batch -> output IDENTICO al greedy AR.
+     * Config-driven (opzione di registro `spec_ngram`, nessuna env). Default 0 = off. */
+    if (!m->dsv4 && !m->dsv41 && m->cfg.n_experts == 0) {
+        int ord = 0;
+        if (llm_ai_mlx_opt_get_int("spec_ngram", &ord) == 0 && ord >= 2) {
+            llm_mlx_sampling_t smn = llm_mlx_session_sampling(s);
+            if (!smn.active || smn.temperature <= 0.0f) {
+                if (!s->ngram_built) llm_ai_mlx_session_build_ngram(handle, ord);
+                /* Speculative streaming: il consumer (es. CLI/server) chiama generate(1) per
+                 * token; il motore genera in anticipo un chunk con generate_ngram e lo bufferizza.
+                 * Output IDENTICO al greedy AR. */
+                int cnt = 0;
+                while (cnt < max_new_tokens) {
+                    if (s->spec_buf_pos >= s->spec_buf_len) {
+                        int chunk = ord + 2; if (chunk < 2) chunk = 2; if (chunk > 60) chunk = 60;
+                        llm_mlx_session_spec_begin(s);
+                        int got = llm_ai_mlx_session_generate_ngram(handle, chunk, eos_token_id, s->spec_buf, ord);
+                        if (got < 0) break;
+                        s->spec_buf_len = got; s->spec_buf_pos = 0;
+                        if (got == 0) break;
+                    }
+                    int32_t tok = s->spec_buf[s->spec_buf_pos++];
+                    out_ids[cnt++] = tok;
+                    if (eos_token_id >= 0 && tok == eos_token_id) break;
+                }
+                if (cnt > 0) return cnt;
+            }
         }
     }
     /* DeepSeek V4.1 whole-model: loop sul proprio forward/cache (greedy o sampling). */

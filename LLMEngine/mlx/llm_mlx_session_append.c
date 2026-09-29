@@ -23,6 +23,9 @@ static int llm_ai_mlx_session_append_impl(llm_ai_mlx_session_handle handle, cons
     if (handle == NULL || token_ids == NULL || n_ids <= 0) return -1;
     LlmMlxSession* s = (LlmMlxSession*)handle;
     LlmMlxModel* m = s->model;
+    /* Append esterno (nuovo turno/prompt): i token draftati in anticipo e non ancora consumati
+     * dallo spec streaming vengono scartati (cache riportata al chunk-start + history troncata). */
+    llm_mlx_session_spec_discard(s);
     /* DeepSeek V4.1 whole-model: prefill/decode del chunk + set del prossimo token (greedy o
      * sampling secondo la sessione). */
     if (m->dsv4) {

@@ -840,23 +840,25 @@ int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_
     int32_t current = s->pending_next_id;
     while (ok && generated < max_new_tokens) {
         if (eos_token_id >= 0 && current == eos_token_id) break;
+        const int remaining = max_new_tokens - generated;
+        int dl = draft_len; if (dl > remaining) dl = remaining;
 
         int32_t draft[16];
         int nd = 0;
         int32_t ctx[65536 + 16];
         int ctx_len = s->history_len > 65536 ? 65536 : s->history_len;
         for (int i = 0; i < ctx_len; i++) ctx[i] = s->history[i];
-        for (int i = 0; i < draft_len; i++) {
+        for (int i = 0; i < dl; i++) {
             int32_t d = llm_mlx_ngram_predict(&s->ngram, ctx, ctx_len + i);
             if (d < 0) break;
             draft[i] = d; ctx[ctx_len + i] = d; nd++;
         }
 
-        /* Primo draft != greedy noto -> emetti current col forward normale. */
-        if (nd < 1 || draft[0] != current) {
+        /* Nessuno spec possibile (draft < 2 o primo != pending): forward AR di `current`.
+           SEMPRE il forward: senza di esso il pending non avanza -> token costante. */
+        if (dl < 2 || nd < 2 || draft[0] != current) {
             out_ids[generated++] = current;
             session_history_append(s, &current, 1);
-            if (generated >= max_new_tokens) { current = -1; break; }
             mlx_array h = mlx_array_new();
             bool ok2 = forward_one_token(m, s, t.embed_w, t.embed_s, t.embed_b, current, s->cache_offset,
                                          s->k_cache, s->v_cache, s->has_cache, &h);
@@ -885,7 +887,12 @@ int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_
         bool okb = forward_tokens_batch(m, s, t.embed_w, t.embed_s, t.embed_b, draft, nd, co_orig,
                                         s->k_cache, s->v_cache, s->has_cache, &hb);
         int32_t greedy[16];
-        if (okb) {
+        llm_mlx_sampling_t smpg = llm_mlx_session_sampling(s);
+        const bool greedy_mode = (!smpg.active || smpg.temperature <= 0.0f);
+        if (okb && greedy_mode) {
+            /* Batch: una final_norm + UNA matmul lm_head per tutti i draft. */
+            okb = final_step_greedy_batch(m, hb, t.final_norm_w, t.out_w, t.out_s, t.out_b, greedy, nd);
+        } else if (okb) {
             for (int i = 0; i < nd && okb; i++) {
                 mlx_array h_i = mlx_array_new();
                 const int start[3] = {0, i, 0};
@@ -893,11 +900,10 @@ int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_
                 const int strides[3] = {1, 1, 1};
                 okb = mlx_slice(&h_i, hb, start, 3, stop, 3, strides, 3, m->stream) == 0;
                 if (okb) okb = final_step(m, h_i, t.final_norm_w, t.out_w, t.out_s, t.out_b,
-                                          llm_mlx_session_sampling(s), &greedy[i]);
+                                          smpg, &greedy[i]);
                 mlx_array_free(h_i);
             }
         }
-        mlx_array_free(hb);
 
         int M = 1;
         if (okb) { for (int i = 1; i < nd; i++) { if (greedy[i - 1] == draft[i]) M++; else break; } }
@@ -907,6 +913,14 @@ int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_
             for (int i = 0; i < s->n_layers; i++) llm_mlx_cache_commit(&ckpt_k[i], m->stream);
             for (int i = 0; i < s->n_layers; i++) llm_mlx_cache_commit(&ckpt_v[i], m->stream);
             s->cache_offset = co_orig + nd;
+            mlx_array h_last = mlx_array_new();
+            const int start[3] = {0, nd - 1, 0};
+            const int stop[3] = {1, nd, mlx_array_dim(hb, 2)}; /* vedi nota hc_width sopra */
+            const int strides[3] = {1, 1, 1};
+            if (mlx_slice(&h_last, hb, start, 3, stop, 3, strides, 3, m->stream) == 0) {
+                mlx_array_free(s->pending_h); s->pending_h = mlx_array_new(); mlx_array_set(&s->pending_h, h_last);
+            }
+            mlx_array_free(h_last);
             for (int i = 0; i < nd && generated < max_new_tokens; i++) {
                 out_ids[generated++] = draft[i];
                 session_history_append(s, &draft[i], 1);
@@ -936,6 +950,7 @@ int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_
                 session_history_append(s, &draft[i], 1);
             }
         }
+        mlx_array_free(hb);
         for (int i = 0; i < s->n_layers; i++) { mlx_array_free(ckpt_k[i]); mlx_array_free(ckpt_v[i]); }
         free(ckpt_k); free(ckpt_v);
         if (!okb) break;
@@ -945,4 +960,78 @@ int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_
 
     free_output_tensors(&t);
     return generated;
+}
+
+/* ─── Speculative streaming (spec_ngram): supporto al buffering del chunk ───────────────────
+ * Vedi i campi `spec_*` in llm_mlx_internal.h. Il consumer streaming chiama generate(1) per
+ * token; qui il motore drafta in anticipo un chunk (generate_ngram) e lo bufferizza. */
+
+/* Salva i checkpoint K/V (alias O(1), nessuna copia) all'inizio del chunk corrente. Rilascia
+ * eventuali alias precedenti sovrascrivendoli con mlx_array_set. */
+void llm_mlx_session_spec_begin(LlmMlxSession* s) {
+    if (s == NULL) return;
+    if (s->spec_ckpt_k == NULL) {
+        s->spec_ckpt_k = (mlx_array*)malloc((size_t)s->n_layers * sizeof(mlx_array));
+        s->spec_ckpt_v = (mlx_array*)malloc((size_t)s->n_layers * sizeof(mlx_array));
+        if (s->spec_ckpt_k == NULL || s->spec_ckpt_v == NULL) return;
+        for (int i = 0; i < s->n_layers; i++) { s->spec_ckpt_k[i] = mlx_array_new(); s->spec_ckpt_v[i] = mlx_array_new(); }
+    }
+    for (int i = 0; i < s->n_layers; i++) {
+        llm_mlx_cache_checkpoint(&s->spec_ckpt_k[i], s->k_cache[i], s->model->stream);
+        llm_mlx_cache_checkpoint(&s->spec_ckpt_v[i], s->v_cache[i], s->model->stream);
+    }
+    s->spec_ctx_len = s->history_len;
+    s->spec_ctx_off = s->cache_offset;
+    s->spec_ckpt_valid = true;
+}
+
+void llm_mlx_session_spec_free(LlmMlxSession* s) {
+    if (s == NULL) return;
+    if (s->spec_ckpt_k) {
+        for (int i = 0; i < s->n_layers; i++) mlx_array_free(s->spec_ckpt_k[i]);
+        free(s->spec_ckpt_k); s->spec_ckpt_k = NULL;
+    }
+    if (s->spec_ckpt_v) {
+        for (int i = 0; i < s->n_layers; i++) mlx_array_free(s->spec_ckpt_v[i]);
+        free(s->spec_ckpt_v); s->spec_ckpt_v = NULL;
+    }
+    s->spec_ckpt_valid = false; s->spec_buf_len = 0; s->spec_buf_pos = 0;
+}
+
+/* Scarta i token del chunk non consumati (append esterno, nuovo turno). Riporta la cache al
+ * chunk-start e ri-avanza i soli token consumati (riproduce esattamente lo stato greedy), poi
+ * tronca la history. No-op se il buffer e' esaurito. */
+void llm_mlx_session_spec_discard(LlmMlxSession* s) {
+    if (s == NULL) return;
+    if (s->spec_ckpt_valid && s->spec_ckpt_k != NULL) {
+        if (!s->parked && s->spec_buf_pos < s->spec_buf_len) {
+            const int consumed = s->spec_buf_pos;
+            LlmMlxModel* m = s->model;
+            for (int i = 0; i < s->n_layers; i++) {
+                llm_mlx_cache_rollback(&s->k_cache[i], s->spec_ckpt_k[i], m->stream);
+                llm_mlx_cache_rollback(&s->v_cache[i], s->spec_ckpt_v[i], m->stream);
+            }
+            s->cache_offset = s->spec_ctx_off;
+            OutputTensors t;
+            if (load_output_tensors(m, &t)) {
+                for (int i = 0; i < consumed; i++) {
+                    mlx_array h = mlx_array_new();
+                    bool okr = forward_one_token(m, s, t.embed_w, t.embed_s, t.embed_b, s->spec_buf[i],
+                                                 s->cache_offset, s->k_cache, s->v_cache, s->has_cache, &h);
+                    mlx_array_free(h);
+                    if (!okr) break;
+                    s->cache_offset++;
+                }
+                free_output_tensors(&t);
+            }
+            if (s->history_len > s->spec_ctx_len + consumed) s->history_len = s->spec_ctx_len + consumed;
+        }
+        /* rilascia gli alias dei checkpoint (senza free dell'array handle) */
+        for (int i = 0; i < s->n_layers; i++) {
+            llm_mlx_cache_commit(&s->spec_ckpt_k[i], s->model->stream);
+            llm_mlx_cache_commit(&s->spec_ckpt_v[i], s->model->stream);
+        }
+        s->spec_ckpt_valid = false;
+    }
+    s->spec_buf_len = 0; s->spec_buf_pos = 0;
 }

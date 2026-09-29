@@ -270,6 +270,23 @@ typedef struct LlmMlxSession {
     NGramTable ngram;
     bool ngram_built;
     int ngram_order;
+    /* ── Speculative streaming (spec_ngram, §8.4) ──────────────────────────────
+     * Il consumer streaming (FastLLM CLI/server) chiama generate(max_new_tokens=1) per
+     * token: lo spec self-speculativo (draft n-gram verificato con UN forward batch) non
+     * si ingaggerebbe. Qui il motore genera in ANTICIPO un chunk di token con
+     * llm_ai_mlx_session_generate_ngram e li bufferizza; ogni generate(1) del consumer
+     * pesca dal buffer. L'output resta IDENTICO al greedy AR (i draft sono verificati).
+     * Se il consumer fa un append esterno (nuovo turno) con token non consumati, la cache
+     * K/V viene riportata al chunk-start via checkpoint (alias O(1), nessuna copia) e
+     * ri-avanzata dei soli consumati, poi la history viene troncata (spec_discard). */
+    int32_t spec_buf[64];
+    int spec_buf_len;   /* token validi in spec_buf */
+    int spec_buf_pos;   /* prossimo da consumare */
+    int spec_ctx_len;   /* history_len all'inizio del chunk corrente */
+    int spec_ctx_off;   /* cache_offset all'inizio del chunk corrente */
+    mlx_array* spec_ckpt_k;  /* per-layer checkpoint K del chunk-start (alias O(1)) */
+    mlx_array* spec_ckpt_v;  /* per-layer checkpoint V del chunk-start */
+    bool spec_ckpt_valid;
     /* RMLX10 Fase B (2026-09-03): decode-step compilato (mlx_compile). La
      * closure e' creata lazy al primo step compilato e VIVE per tutta la
      * sessione (la cache di compile di mlx core e' keyed per fun_id: riusare
@@ -1060,6 +1077,10 @@ bool forward_one_token(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array embed_
 bool final_step(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
                 mlx_array out_w, mlx_array out_s, mlx_array out_b,
                 llm_mlx_sampling_t sampling, int32_t* out_id);
+/* Batch greedy (verify spec n-gram): h `[1,nd,H]` -> nd id, una norm + una matmul lm_head. */
+bool final_step_greedy_batch(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
+                             mlx_array out_w, mlx_array out_s, mlx_array out_b,
+                             int32_t* out_ids, int n_out);
 extern mlx_array g_spec_snap_k[];
 extern mlx_array g_spec_snap_v[];
 extern int g_spec_capture;

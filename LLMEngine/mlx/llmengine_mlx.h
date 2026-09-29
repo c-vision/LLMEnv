@@ -183,6 +183,22 @@ int llm_ai_mlx_session_append(llm_ai_mlx_session_handle handle, const int32_t* t
 int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_tokens,
                                 int32_t eos_token_id, int32_t* out_ids);
 
+/* Self-speculative n-gram (GENERALE, tutti i modelli, greedy): costruisce la tabella n-gram dal
+ * contesto (`build_ngram`) e genera con draft multipli verificati dal modello (`generate_ngram`,
+ * output IDENTICO al greedy autoregressivo). Opzione di registro `spec_ngram` (0=off, N>=2=ordine). */
+int llm_ai_mlx_session_build_ngram(llm_ai_mlx_session_handle handle, int order);
+int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_new_tokens,
+                                      int32_t eos_token_id, int32_t* out_ids, int draft_len);
+
+/* Speculative streaming (spec_ngram): helper di supporto al buffering del chunk. `spec_begin`
+ * salva i checkpoint K/V (alias O(1)) del chunk-start; `spec_discard` scarta i token non
+ * consumati (rollback cache al chunk-start + ri-forward dei consumati + tronca la history) e va
+ * chiamato su ogni append esterno; `spec_free` libera i checkpoint alla distruzione. */
+struct LlmMlxSession;
+void llm_mlx_session_spec_begin(struct LlmMlxSession* s);
+void llm_mlx_session_spec_discard(struct LlmMlxSession* s);
+void llm_mlx_session_spec_free(struct LlmMlxSession* s);
+
 /* Fase 3 continuous batching (default OFF via LLM_BATCH_DECODE): genera fino a max_new_tokens
  * per N sessioni (stesso modello) in UN forward BATCHED per step (attention per-sessione +
  * FFN/proiezioni batched). out_ids: n*max_new_tokens, row-major (sessione i -> out_ids[i*max_new+t]).
