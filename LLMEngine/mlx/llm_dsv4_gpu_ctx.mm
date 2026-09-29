@@ -32,13 +32,11 @@ static const uint64_t* dsv4_addr_table(const LlmDsv4PackedExperts* pe, int il, i
     size_t nbu = (size_t)llm_ggml_nbytes(pe->up_type,   pe->in_dim);
     size_t nbd = (size_t)llm_ggml_nbytes(pe->down_type, pe->ff_dim);
     for (int e = 0; e < n_expert; e++) {
-        const uint8_t *g = NULL, *u = NULL, *d = NULL;
-        if (pe->store && pe->store_get) pe->store_get(pe->store, il, e, &g, &u, &d);
-        else {
-            g = pe->gate + (size_t)e * (size_t)pe->ff_dim * nbg;
-            u = pe->up   + (size_t)e * (size_t)pe->ff_dim * nbu;
-            d = pe->down + (size_t)e * (size_t)embd * nbd;
-        }
+        /* Puntatori del MMAP: stabili e sempre validi (mai sfrattati/riusati come i buffer
+         * dello store). La GPU li indirizza direttamente (memoria unificata). */
+        const uint8_t* g = pe->gate + (size_t)e * (size_t)pe->ff_dim * nbg;
+        const uint8_t* u = pe->up   + (size_t)e * (size_t)pe->ff_dim * nbu;
+        const uint8_t* d = pe->down + (size_t)e * (size_t)embd * nbd;
         t[e] = (uint64_t)(uintptr_t)g;
         t[n_expert + e] = (uint64_t)(uintptr_t)u;
         t[2*n_expert + e] = (uint64_t)(uintptr_t)d;
@@ -53,6 +51,7 @@ int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights
     if (!g_on || !g_be || !g_attn.inited || !c || !L || !pe) return 0;
     if (il < c->n_hash_layer) return 0;                          /* hash routing: path C */
     if (g_attn.outa[il].type != 8 || g_attn.outb[il].type != 8) return 0;
+    if (g_moe.gate[il].type != 16 || g_moe.up[il].type != 16 || g_moe.down[il].type != 10) return 0; /* pair IQ2 + down Q2_K */
     int n_expert = c->n_expert;
     const uint64_t* tbl = dsv4_addr_table(pe, il, n_expert, c->n_embd);
     if (!tbl) return 0;
