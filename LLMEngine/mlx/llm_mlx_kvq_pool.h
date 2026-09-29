@@ -68,7 +68,7 @@ static inline bool llm_kvq_pool_init(llm_kvq_pool* p, int layers, int kv_heads, 
     const mlx_dtype edt = (fmt == LLM_KVQ_FMT_INT8) ? MLX_INT8 : MLX_BFLOAT16;
     for (int l = 0; l < layers; l++) {
         int ksh[3] = {kv_heads, cap_tokens, head_dim};
-        int vsh[3] = {kv_heads, head_dim, cap_tokens};
+        int vsh[3] = {kv_heads, cap_tokens, head_dim};   /* token-major come il kernel read */
         int ssh[2] = {kv_heads, cap_tokens};
         p->keyData[l]   = mlx_array_new(); p->valueData[l]   = mlx_array_new();
         p->keyScales[l] = mlx_array_new(); p->valueScales[l] = mlx_array_new();
@@ -86,7 +86,7 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
     const mlx_dtype edt = (p->fmt == LLM_KVQ_FMT_INT8) ? MLX_INT8 : MLX_BFLOAT16;
     for (int l = 0; l < p->layers; l++) {
         int ksh[3] = {p->kv_heads, ncap, p->head_dim};
-        int vsh[3] = {p->kv_heads, p->head_dim, ncap};
+        int vsh[3] = {p->kv_heads, ncap, p->head_dim};
         int ssh[2] = {p->kv_heads, ncap};
         mlx_array nk = mlx_array_new(), nv = mlx_array_new(), nks = mlx_array_new(), nvs = mlx_array_new();
         bool ok = mlx_zeros(&nk, ksh, 3, edt, s) == 0 &&
@@ -96,7 +96,7 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
         if (ok && p->committed > 0) {
             /* copia il prefisso scritto: K [nkv, committed, hd], V [nkv, hd, committed] */
             int ks0[3] = {0,0,0}, ks1[3] = {p->kv_heads, p->committed, p->head_dim}, kst[3] = {1,1,1};
-            int vs0[3] = {0,0,0}, vs1[3] = {p->kv_heads, p->head_dim, p->committed}, vst[3] = {1,1,1};
+            int vs0[3] = {0,0,0}, vs1[3] = {p->kv_heads, p->committed, p->head_dim}, vst[3] = {1,1,1};
             mlx_array ksrc = mlx_array_new(), vsrc = mlx_array_new();
             mlx_array kssrc = mlx_array_new(), vssrc = mlx_array_new();
             ok = ok && mlx_slice(&ksrc, p->keyData[l], ks0, 3, ks1, 3, kst, 3, s) == 0 &&
@@ -107,7 +107,7 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
             if (ok) { /* scrivi il prefisso in testa ai nuovi buffer */
                 mlx_array ku = mlx_array_new(), vu = mlx_array_new(), ksu = mlx_array_new(), vsu = mlx_array_new();
                 int ku0[3] = {0,0,0}, ku1[3] = {p->kv_heads, p->committed, p->head_dim}, ust[3] = {1,1,1};
-                int vu0[3] = {0,0,0}, vu1[3] = {p->kv_heads, p->head_dim, p->committed};
+                int vu0[3] = {0,0,0}, vu1[3] = {p->kv_heads, p->committed, p->head_dim};
                 ok = mlx_slice_update(&ku, nk, ksrc, ku0, 3, ku1, 3, ust, 3, s) == 0 &&
                      mlx_slice_update(&vu, nv, vsrc, vu0, 3, vu1, 3, ust, 3, s) == 0;
                 if (ok) mlx_array_set(&nk, ku);
@@ -144,11 +144,11 @@ static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
     mlx_array_free(k3); mlx_array_free(v3);
     mlx_array sc2 = mlx_array_new(), vqt = mlx_array_new();
     if (ok) { int sh2[2] = {p->kv_heads, n}; ok = mlx_reshape(&sc2, sc, sh2, 2, s) == 0; }
-    if (ok) { int perm[3] = {0,2,1}; ok = mlx_transpose_axes(&vqt, vq, perm, 3, s) == 0; }  /* V dim-major */
+    if (ok) ok = mlx_array_set(&vqt, vq) == 0;   /* V token-major (il kernel read lo legge cosi) */
     if (ok) {
         mlx_array nk = mlx_array_new(), nv = mlx_array_new(), nks = mlx_array_new(), nvs = mlx_array_new();
         int k0[3] = {0,pos,0},  k1[3] = {p->kv_heads,pos+n,p->head_dim}, kst[3] = {1,1,1};
-        int v0[3] = {0,0,pos},  v1[3] = {p->kv_heads,p->head_dim,pos+n}, vst[3] = {1,1,1};
+        int v0[3] = {0,pos,0},  v1[3] = {p->kv_heads,pos+n,p->head_dim}, vst[3] = {1,1,1};
         int s0[2] = {0,pos},    s1[2] = {p->kv_heads,pos+n}, sst[2] = {1,1};
         ok = mlx_slice_update(&nk, p->keyData[layer], kq, k0,3,k1,3,kst,3, s) == 0 &&
              mlx_slice_update(&nv, p->valueData[layer], vqt, v0,3,v1,3,vst,3, s) == 0 &&
