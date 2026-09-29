@@ -15,36 +15,6 @@ static LlmDsv4AttnGpu g_attn;
 static int g_on = 0;
 static int g_ref = 0;
 
-/* Tabella indirizzi esperti per layer (gate|up|down), riusata finche' lo store non sfratta. */
-static uint64_t* g_addr_tbl[LLM_DSV4_MAX_LAYER];
-static uint64_t  g_addr_ep[LLM_DSV4_MAX_LAYER];
-static int       g_addr_ne = -1;
-
-static const uint64_t* dsv4_addr_table(const LlmDsv4PackedExperts* pe, int il, int n_expert, int embd) {
-    LlmDsv4Store* st = (LlmDsv4Store*)pe->store;
-    uint64_t ep = st ? st->evictions : 0;
-    if (il < 0 || il >= LLM_DSV4_MAX_LAYER) return NULL;
-    if (g_addr_tbl[il] && g_addr_ep[il] == ep && g_addr_ne == n_expert) return g_addr_tbl[il];
-    free(g_addr_tbl[il]);
-    uint64_t* t = (uint64_t*)malloc(3 * (size_t)n_expert * sizeof(uint64_t));
-    if (!t) return NULL;
-    size_t nbg = (size_t)llm_ggml_nbytes(pe->gate_type, pe->in_dim);
-    size_t nbu = (size_t)llm_ggml_nbytes(pe->up_type,   pe->in_dim);
-    size_t nbd = (size_t)llm_ggml_nbytes(pe->down_type, pe->ff_dim);
-    for (int e = 0; e < n_expert; e++) {
-        /* Puntatori del MMAP: stabili e sempre validi (mai sfrattati/riusati come i buffer
-         * dello store). La GPU li indirizza direttamente (memoria unificata). */
-        const uint8_t* g = pe->gate + (size_t)e * (size_t)pe->ff_dim * nbg;
-        const uint8_t* u = pe->up   + (size_t)e * (size_t)pe->ff_dim * nbu;
-        const uint8_t* d = pe->down + (size_t)e * (size_t)embd * nbd;
-        t[e] = (uint64_t)(uintptr_t)g;
-        t[n_expert + e] = (uint64_t)(uintptr_t)u;
-        t[2*n_expert + e] = (uint64_t)(uintptr_t)d;
-    }
-    g_addr_tbl[il] = t; g_addr_ep[il] = ep; g_addr_ne = n_expert;
-    return t;
-}
-
 int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
         const LlmDsv4PackedExperts* pe, int il, const float* heads, const float* saved_attn,
         const float* post_attn, const float* comb_attn, int pos, float* out_hc) {
@@ -53,8 +23,8 @@ int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights
     if (g_attn.outa[il].type != 8 || g_attn.outb[il].type != 8) return 0;
     if (g_moe.gate[il].type != 16 || g_moe.up[il].type != 16 || g_moe.down[il].type != 10) return 0; /* pair IQ2 + down Q2_K */
     int n_expert = c->n_expert;
-    const uint64_t* tbl = dsv4_addr_table(pe, il, n_expert, c->n_embd);
-    if (!tbl) return 0;
+    size_t nbg = (size_t)llm_ggml_nbytes(pe->gate_type, pe->in_dim);
+    size_t nbd = (size_t)llm_ggml_nbytes(pe->down_type, pe->ff_dim);
     const int ng = c->n_out_group, rank = c->n_lora_o, embd = c->n_embd, HC = c->n_hc;
     const int gd = c->n_head_dim * (c->n_head / ng), ol = ng * rank;
     int compressed = llm_dsv4_layer_compress_ratio(c, il) != 0;
@@ -74,7 +44,6 @@ int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights
     q.fn = L->hc_ffn_fn; q.scale = L->hc_ffn_scale; q.base = L->hc_ffn_base; q.norm_w = L->ffn_norm;
     q.router_w = L->ffn_gate_inp; q.exp_probs_b = L->exp_probs_b;
     q.n_expert = n_expert; q.used = c->n_expert_used; q.expert_scale = c->expert_weight_scale;
-    q.gaddr = tbl; q.uaddr = tbl + n_expert; q.daddr = tbl + 2*n_expert;
     q.clamp = c->swiglu_clamp_exp;
     q.gu_nb01 = (uint32_t)llm_ggml_nbytes(pe->gate_type, pe->in_dim);
     q.ff = (uint32_t)c->n_ff_exp;
@@ -85,7 +54,11 @@ int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights
     q.HC = HC; q.D = embd; q.SIZE = (2 + HC) * HC; q.HCD = HC * embd;
     q.sinkhorn_iters = c->n_hc_sinkhorn_iter; q.hc_eps = c->hc_eps; q.rms_eps = c->rms_eps;
     q.heads = heads; q.out_hc = out_hc;
-    return llm_dsv4_metal_layer_tail(g_be, &q) == 0;
+    q.gate_base = pe->gate; q.up_base = pe->up; q.down_base = pe->down;
+    q.gate_stride = (size_t)pe->ff_dim * nbg; q.up_stride = (size_t)pe->ff_dim * nbg;
+    q.down_stride = (size_t)c->n_embd * nbd;
+    int rc = llm_dsv4_metal_layer_tail(g_be, &q) == 0;
+    return rc;
 }
 
 int llm_dsv4_gpu_ctx_active(void) { return g_on; }
