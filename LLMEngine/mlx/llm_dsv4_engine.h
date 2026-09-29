@@ -11,6 +11,8 @@
 #include "llm_dsv4_gpu_ctx.h"
 #include "llm_gguf.h"
 
+#define LLM_DSV4_PREFILL_CHUNK 64
+
 typedef struct {
     LlmDsv4Weights w;
     LlmDsv4Caches caches;
@@ -96,7 +98,11 @@ static inline void llm_dsv4_engine_generate(LlmDsv4Engine* e, int* tokens, int n
 static inline void llm_dsv4_engine_append(LlmDsv4Engine* e, const int* ids, int n) {
     int HC = e->w.cfg.n_hc, D = e->w.cfg.n_embd;
     float* hc = (float*)malloc(sizeof(float) * (size_t)HC * D);
-    for (int i = 0; i < n; i++) llm_dsv4_forward_step(&e->w.cfg, &e->w, &e->caches, ids[i], e->pos++, hc);
+    for (int i = 0; i < n; ) {   /* chunk layer-major (LLM_DSV4_PREFILL_CHUNK token) */
+        int m = n - i; if (m > LLM_DSV4_PREFILL_CHUNK) m = LLM_DSV4_PREFILL_CHUNK;
+        llm_dsv4_forward_batch(&e->w.cfg, &e->w, &e->caches, ids + i, e->pos, m, hc);
+        e->pos += m; i += m;
+    }
     if (!e->logits) e->logits = (float*)malloc(sizeof(float) * (size_t)e->w.cfg.n_vocab);
     llm_dsv4_output_logits(&e->w.cfg, &e->w, hc, e->logits);
     e->pending = llm_dsv4_argmax(e->logits, e->w.cfg.n_vocab);

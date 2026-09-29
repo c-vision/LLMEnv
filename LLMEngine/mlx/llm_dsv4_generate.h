@@ -44,6 +44,30 @@ static inline void llm_dsv4_forward_step(const LlmDsv4Config* c, const LlmDsv4We
     free(nxt); free(cur);
 }
 
+/* Prefill a CHUNK layer-major: N token consecutivi (pos0..) attraversano il layer l prima del layer l+1.
+ * Equivalente a N forward_step (le cache di ogni layer vedono i token nello stesso ordine). Se la pipeline
+ * dichiarata non e' la canonica ricade sul percorso token-per-token. `out_hc_last` = stato mHC dell'ultimo
+ * token (per i logit). */
+static inline void llm_dsv4_forward_batch(const LlmDsv4Config* c, const LlmDsv4Weights* w,
+        LlmDsv4Caches* cs, const int* tokens, int pos0, int N, float* out_hc_last) {
+    const int HC = c->n_hc, D = c->n_embd; const size_t hcn = (size_t)HC * D;
+    if (N <= 0) return;
+    if (g_dsv4_layer_nops > 0 || N == 1) {
+        for (int t = 0; t < N; t++) llm_dsv4_forward_step(c, w, cs, tokens[t], pos0 + t, out_hc_last);
+        return;
+    }
+    float* cur = (float*)malloc(sizeof(float) * hcn * (size_t)N);
+    float* nxt = (float*)malloc(sizeof(float) * hcn * (size_t)N);
+    for (int t = 0; t < N; t++) llm_dsv4_hc_from_embedding(c, w->token_embd + (long)tokens[t] * D, cur + hcn * t);
+    for (int il = 0; il < c->n_layer; il++) {
+        const LlmDsv4PackedExperts* pe = w->exps ? &w->exps[il] : NULL;
+        llm_dsv4_layer_forward_batch(c, &w->layers[il], pe, &cs->layers[il], cur, tokens, pos0, N, il, nxt);
+        float* tmp = cur; cur = nxt; nxt = tmp;
+    }
+    memcpy(out_hc_last, cur + hcn * (size_t)(N - 1), sizeof(float) * hcn);
+    free(nxt); free(cur);
+}
+
 /* Genera n_new token da un prompt di token ids (greedy). out_tokens [pos0+n_new].
  * Ritorna i logits dell'ultimo passo in logits_out [n_vocab] se non NULL. */
 static inline void llm_dsv4_generate(const LlmDsv4Config* c, const LlmDsv4Weights* w,
