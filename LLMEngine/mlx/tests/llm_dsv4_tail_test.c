@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 #include "llm_dsv4_layer.h"
 #include "llm_dsv4_weights.h"
 #include "llm_dsv4_gpu_ctx.h"
@@ -93,13 +94,17 @@ int main(int argc, char** argv) {
         e->shexp_down=llm_dsv4_bind_packed(&g,il2,"ffn_down_shexp",&e->shexp_down_type,&ok2);
         if (!ok2) fprintf(stderr, "bind layer %d fallito (ok parziale)\n", il2);
     }
-    pe = exps[IL];   /* il tail e il riferimento usano lo stesso layer reale */
     { /* Store streaming attivo (come in produzione): il ramo residente di gpu_moe_try e' rotto. */
-      LlmDsv4Store* st = llm_dsv4_store_open(path, &g, &c, LLM_DSV4_STORE_SWAP, 0);
+      LlmDsv4Store* st = llm_dsv4_store_open(path, &g, &c, LLM_DSV4_STORE_SWAP, 4096);
       if (st) for (int i = 0; i < c.n_layer; i++) { exps[i].store = st;
         exps[i].store_get = (const uint8_t* (*)(void*,int,int,const uint8_t**,const uint8_t**,const uint8_t**))llm_dsv4_store_expert; }
       fprintf(stderr, "[TAIL] store=%p\n", (void*)st); }
+    pe = exps[IL];   /* tail e riferimento devono usare lo stesso store, non una copia precedente */
     if (!llm_dsv4_gpu_ctx_init(&c, exps)) { fprintf(stderr, "ctx GPU init fallito\n"); return 3; }
+    { const char* names[] = { "heads", "attn", "nxt", "nrm", "sel", "rw", "mid", "rout", "outc" };
+      for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
+          char p[64]; snprintf(p, sizeof p, "/tmp/d4_%s.bin", names[i]); remove(p);
+      } }
     llm_dsv4_metal_tail_set_dump("/tmp");
 
     LlmDsv4LayerCache k; llm_dsv4_cache_init(&k, &c, IL, 128, 8);
@@ -116,8 +121,17 @@ int main(int argc, char** argv) {
     if (!llm_dsv4_attn_cached_mid(&c, &L, &pe, &k, normed, POS, IL, heads)) { fprintf(stderr,"mid fallita\n"); return 3; }
 
     float* out_tail = (float*)malloc(sizeof(float)*HC*D);
+    struct timespec t0, t1, t2;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     int tok = llm_dsv4_gpu_attn_tail_try(&c, &L, &pe, IL, heads, saved, post, comb, POS, out_tail);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
     if (!tok) { fprintf(stderr, "tail NON eseguito (fallback)\n"); return 3; }
+    tok = llm_dsv4_gpu_attn_tail_try(&c, &L, &pe, IL, heads, saved, post, comb, POS, out_tail);
+    clock_gettime(CLOCK_MONOTONIC, &t2);
+    if (!tok) { fprintf(stderr, "tail secondo pass NON eseguito\n"); return 3; }
+    fprintf(stderr, "[TAIL] tempo primo=%.3f ms caldo=%.3f ms\n",
+            (t1.tv_sec-t0.tv_sec)*1000.0+(t1.tv_nsec-t0.tv_nsec)*1e-6,
+            (t2.tv_sec-t1.tv_sec)*1000.0+(t2.tv_nsec-t1.tv_nsec)*1e-6);
 
     /* Riferimento CPU dagli STESSI input (base = attn-out del tail, bit-exact). */
     float* rattn = rdbin("/tmp", "attn", D);
@@ -143,7 +157,7 @@ int main(int argc, char** argv) {
         if (!a || md>(thr)) fails++; free(a); } while(0)
     CMPT("nxt", rnxt, HC*D, 1e-4);
     CMPT("nrm", rnrm, D, 1e-5);
-    CMPT("rout", rrout, D, 5.0);   /* f32(GPU) vs Q8_K(CPU): differenza attesa */
+    CMPT("rout", rrout, D, 1e-4);  /* tail e riferimento usano entrambi gli stessi kernel GPU */
     /* Isola hc_post_ffn: outc del tail vs block_post sul SUO STESSO rout. */
     { float* tr = rdbin("/tmp","rout",D); float* rc = (float*)malloc(sizeof(float)*HC*D);
       if (tr) llm_dsv4_block_post(&c, tr, rnxt, p2, c2, rc);
@@ -157,6 +171,7 @@ int main(int argc, char** argv) {
       size_t got=f?fread(a,sizeof(float),(size_t)c.n_expert_used*c.n_ff_exp,f):0; if(f)fclose(f);
       double mx=0, ss=0; for(size_t i=0;i<got;i++){ double v=fabs(a[i]); if(v>mx)mx=v; ss+=v*v; }
       fprintf(stderr,"[TAIL] mid    n=%zu max|.|=%.4g rms=%.4g%s\n", got, mx, got?sqrt(ss/(double)got):0.0, (mx>1e3)?"  <<< GARBAGE":"");
+      if (got != (size_t)c.n_expert_used*c.n_ff_exp || !isfinite(mx) || mx > 1e3) fails++;
       free(a); }
     { float* a = rdbin("/tmp","rw",c.n_expert_used); if(a){ double mx=0,md=0; for(int i=0;i<c.n_expert_used;i++){double v=fabs(a[i]); if(v>mx)mx=v; double w=fabs(a[i]-rw[i]); if(w>md)md=w;} fprintf(stderr,"[TAIL] rw     |gpu|max=%.4g |gpu-cpu|max=%.4g (cpu0=%.4g)\n", mx, md, rw[0]); free(a);} }
     { float* t = rdbin("/tmp","rout",D); double mxt=0; if(t){ for(int i=0;i<D;i++){double v=fabs(t[i]); if(v>mxt)mxt=v;} free(t);} double mxr=0; for(int i=0;i<D;i++){double v=fabs(rrout[i]); if(v>mxr)mxr=v;}

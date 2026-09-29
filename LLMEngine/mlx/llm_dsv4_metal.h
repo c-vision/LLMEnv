@@ -99,7 +99,7 @@ typedef struct {
     const void* router_w;     /* f32 [n_expert, D] (ffn_gate_inp) */
     const float* exp_probs_b; /* [n_expert] o NULL */
     int n_expert, used; float expert_scale;
-    const uint64_t* gaddr; const uint64_t* uaddr; const uint64_t* daddr;  /* [n_expert] gpuAddress */
+    const void* arg_pair; const void* arg_down;  /* argument buffer "table" (ds4) */
     float clamp; uint32_t gu_nb01, ff, down_nb01;
     const void* sg; const void* su; const void* sd; uint32_t s_nb_g, s_nb_d;
     int HC, D, SIZE, HCD, sinkhorn_iters; float hc_eps, rms_eps;
@@ -120,5 +120,12 @@ void  llm_dsv4_metal_register_release(void* h);
 
 /* gpuAddress (buffer per-esperto registrato, persistente) dell'esperto in `ptr`. */
 uint64_t llm_dsv4_metal_expert_gaddr(LlmDsv4Metal* b, const void* ptr, size_t bytes);
+
+/* Argument buffer "table" (ds4): encoda n esperti (view no-copy) e li seleziona per indice. */
+void* llm_dsv4_metal_argbuf_pair(LlmDsv4Metal* b, const void* const* gs, const void* const* us, int n,
+                                 size_t gbytes, size_t ubytes);
+void* llm_dsv4_metal_argbuf_down(LlmDsv4Metal* b, const void* const* ds, int n, size_t dbytes);
+void  llm_dsv4_metal_argbuf_bind(void* enc, void* handle, int index);
+void  llm_dsv4_metal_argbuf_free(void* handle);
 
 #endif /* LLM_DSV4_METAL_H */
