@@ -14,6 +14,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #include "mlx/c/mlx.h"
 #include "llm_mlx_gdn_kernel.h"
@@ -652,9 +653,9 @@ static int test_swiglu_gptoss(mlx_dtype dt, const char* name, double tol) {
     return (rl2<=tol)?0:1;
 }
 
-int main(void) {
+int main(int argc, char** argv) {
     int fail = 0;
-    if (getenv("T1_DIAG_SDPA")) { diag_sdpa(); return 0; }
+    if (argc > 1 && strcmp(argv[1], "sdpa") == 0) { diag_sdpa(); return 0; }
     printf("=== T1 Differential — primitive vs matematica di riferimento ===\n");
     fail += test_rms_norm(MLX_FLOAT32,  "f32",  1e-5);
     fail += test_rms_norm(MLX_FLOAT16,  "f16",  5e-3);

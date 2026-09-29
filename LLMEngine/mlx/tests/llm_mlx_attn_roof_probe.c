@@ -27,6 +27,19 @@
 #include <string.h>
 #include <time.h>
 
+/* Selezione della sub-probe da RIGA DI COMANDO (niente variabili d'ambiente).
+ *   argv[5] = modo: pattern|raw|alias|eq|interf|cold  (assente = suite default)
+ *   flag (ovunque in argv[5..]): aliased, concat, contig, verbose
+ *   parametri: nk/interf/cold = argv[6]; eq_nk/wmb = argv[7]; nwb = argv[8].
+ *   Per pattern/raw: argv[6]=layers, argv[7]=steps, argv[8]=rounds. */
+static const char* g_mode = NULL;
+static int g_f_aliased = 0, g_f_concat = 0, g_f_contig = 0, g_f_verbose = 0;
+static const char* g_nk = NULL, *g_eq_nk = NULL, *g_interf = NULL, *g_wmb = NULL, *g_nwb = NULL, *g_cold = NULL;
+static int arg_has(int argc, char** argv, const char* s) {
+    for (int i = 5; i < argc; i++) if (strcmp(argv[i], s) == 0) return 1;
+    return 0;
+}
+
 static double now_s(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
@@ -411,7 +424,7 @@ static int bench_pattern(int nkv, int nh, int hd, int nk, int steps, int layers,
                 if (mlx_concatenate_axis(&kc[l], kv, 2, st) != 0 ||
                     mlx_concatenate_axis(&vc[l], vv, 2, st) != 0) rc = -1;
                 if (rc == 0 && (mlx_array_eval(kc[l]) != 0 || mlx_array_eval(vc[l]) != 0)) rc = -1;
-                if (l == 0 && getenv("LLM_ATTN_PROBE_CONTIG") != NULL) {
+                if (l == 0 && g_f_contig) {
                     bool zc = false, zr = false, cc = false, cr = false;
                     _mlx_array_is_contiguous(&zc, kp); _mlx_array_is_row_contiguous(&zr, kp);
                     _mlx_array_is_contiguous(&cc, kc[l]); _mlx_array_is_row_contiguous(&cr, kc[l]);
@@ -614,7 +627,7 @@ static bool raw_row_write(mlx_array kcache, mlx_array vcache, mlx_array knew, ml
     mlx_fast_metal_kernel_config_add_output_arg(cfg, osh, 1, MLX_FLOAT32);
     mlx_fast_metal_kernel_config_set_thread_group(cfg, hd < 32 ? hd : 32, nkv < 32 ? nkv : 32, 1);
     mlx_fast_metal_kernel_config_set_grid(cfg, hd, nkv, 1);
-    if (getenv("LLM_ATTN_PROBE_RAW_VERBOSE") != NULL)
+    if (g_f_verbose)
         mlx_fast_metal_kernel_config_set_verbose(cfg, true);
     mlx_vector_array outs = mlx_vector_array_new();
     const int rc = mlx_fast_metal_kernel_apply(&outs, g_raw.k, in, cfg, st);
@@ -1362,9 +1375,15 @@ int main(int argc, char** argv) {
     const int nkv = (argc > 2) ? atoi(argv[2]) : 8;    /*            8 teste KV  (GQA 4x) */
     const int hd  = (argc > 3) ? atoi(argv[3]) : 128;  /*            head_dim 128 */
     int reps      = (argc > 4) ? atoi(argv[4]) : 60;
+    g_mode = (argc > 5) ? argv[5] : NULL;
+    g_f_aliased = arg_has(argc, argv, "aliased"); g_f_concat = arg_has(argc, argv, "concat");
+    g_f_contig = arg_has(argc, argv, "contig"); g_f_verbose = arg_has(argc, argv, "verbose");
+    g_nk = (argc > 6) ? argv[6] : NULL; g_eq_nk = (argc > 7) ? argv[7] : NULL;
+    g_interf = (argc > 6) ? argv[6] : NULL; g_wmb = (argc > 7) ? argv[7] : NULL; g_nwb = (argc > 8) ? argv[8] : NULL;
+    g_cold = (argc > 6) ? argv[6] : NULL;
 
     int nks[16]; int nnk = 0;
-    const char* env = getenv("LLM_ATTN_PROBE_NK");
+    const char* env = g_nk;
     if (env != NULL) {
         char buf[256]; snprintf(buf, sizeof buf, "%s", env);
         for (char* tok = strtok(buf, " ,"); tok != NULL && nnk < 16; tok = strtok(NULL, " ,"))
@@ -1391,11 +1410,11 @@ int main(int argc, char** argv) {
     /* ── MODE P (invocazione separata: LLM_ATTN_PROBE_PATTERN=1) ───────────────
      *.pattern = append in-place + vista + SDPA per layer, UNA eval per token: il costo
      * REALE per (layer, token) a confronto col solo kernel (colonna G sopra). */
-    if (getenv("LLM_ATTN_PROBE_PATTERN") != NULL) {
-        const int layers = (argc > 5) ? atoi(argv[5]) : 4;
-        const int steps  = (argc > 6) ? atoi(argv[6]) : 24;
-        const int aliased = (getenv("LLM_ATTN_PROBE_ALIASED") != NULL);
-        const int concat  = (getenv("LLM_ATTN_PROBE_CONCAT") != NULL);
+    if ((g_mode && strcmp(g_mode, "pattern") == 0)) {
+        const int layers = (argc > 6) ? atoi(argv[6]) : 4;
+        const int steps  = (argc > 7) ? atoi(argv[7]) : 24;
+        const int aliased = (g_f_aliased);
+        const int concat  = (g_f_concat);
         printf("# PATTERN decode (append in-place + vista + SDPA), layers=%d steps=%d  "
                "(memoria ~%.2f GB al massimo Nk)  %s\n", layers, steps,
                (layers * 2.0 * 32768 * nkv * hd * 2) / 1e9,
@@ -1442,10 +1461,10 @@ int main(int argc, char** argv) {
      * Prezzi per (layer,token): nessuna scrittura vs `slice_update` nel regime di copia vs
      * `raw write`. 3 round INTERLACCIATI, si tiene il MIN (robusto alla contesa: mai fidarsi
      * del valore assoluto su questa macchina condivisa). */
-    if (getenv("LLM_ATTN_PROBE_RAW") != NULL) {
-        const int layers = (argc > 5) ? atoi(argv[5]) : 4;
-        const int steps  = (argc > 6) ? atoi(argv[6]) : 24;
-        const int rounds = (argc > 7) ? atoi(argv[7]) : 3;
+    if ((g_mode && strcmp(g_mode, "raw") == 0)) {
+        const int layers = (argc > 6) ? atoi(argv[6]) : 4;
+        const int steps  = (argc > 7) ? atoi(argv[7]) : 24;
+        const int rounds = (argc > 8) ? atoi(argv[8]) : 3;
         const int vw = raw_verify_write(nkv, hd, st);
         printf("# MODE H — append RAW nel buffer ESISTENTE (const_cast nel kernel custom)\n");
         printf("#   layers=%d steps=%d rounds=%d  memoria ~%.2f GB al massimo Nk\n",
@@ -1489,10 +1508,10 @@ int main(int argc, char** argv) {
      * Prezzo dell'append se parte da una FOGLIA ALIAS (stesso buffer MTL, donabile per
      * costruzione): arm 0 = nessuna scrittura, arm 1 = regime di copia (produzione),
      * arm 3 = foglia alias. atteso: arm3 - arm0 ~ 0 (la copia O(cap) sparisce). */
-    if (getenv("LLM_ATTN_PROBE_ALIAS") != NULL) {
-        const int layers = (argc > 5) ? atoi(argv[5]) : 4;
-        const int steps  = (argc > 6) ? atoi(argv[6]) : 24;
-        const int rounds = (argc > 7) ? atoi(argv[7]) : 3;
+    if ((g_mode && strcmp(g_mode, "alias") == 0)) {
+        const int layers = (argc > 6) ? atoi(argv[6]) : 4;
+        const int steps  = (argc > 7) ? atoi(argv[7]) : 24;
+        const int rounds = (argc > 8) ? atoi(argv[8]) : 3;
         const int vw = alias_verify(nkv, hd, st);
         printf("#   VERIFY ALIAS (deterministico, non wall-time) = %s\n",
                vw == 1 ? "OK (scrive nella cache conDIVISA, nessun buffer nuovo)"
@@ -1537,10 +1556,10 @@ int main(int argc, char** argv) {
      * k+1 scrive la riga k+1 nello stesso MTLBuffer che il passo k, ancora in coda, legge
      * nelle righe <=k.  I due CONTROLLI POSITIVI devono cambiare la firma: se non lo
      * fanno lo strumento e' cieco e l'"uguale" non vale nulla. */
-    if (getenv("LLM_ATTN_PROBE_EQ") != NULL) {
-        const int layers = (argc > 5) ? atoi(argv[5]) : 2;
-        const int steps  = (argc > 6) ? atoi(argv[6]) : 8;
-        const char* sne  = getenv("LLM_ATTN_PROBE_EQ_NK");
+    if ((g_mode && strcmp(g_mode, "eq") == 0)) {
+        const int layers = (argc > 6) ? atoi(argv[6]) : 2;
+        const int steps  = (argc > 7) ? atoi(argv[7]) : 8;
+        const char* sne  = g_eq_nk;
         const int nk     = sne ? atoi(sne) : 2048;
         struct { int arm, asy, ctrl; const char* name; } R[] = {
             { 1, 0, 0, "copia  serializzato  (riferimento)" },
@@ -1731,10 +1750,10 @@ int main(int argc, char** argv) {
     /* ── MODE F (invocazione separata: LLM_ATTN_PROBE_INTERF=<nbufs>) ──────────────
      * KV e pesi separatamente e poi insieme, sullo stesso working set freddo: vedi
      * il commento di bench_interf. `x_interf` = both/(sdpa+w): 1,00 = additivo. */
-    if (getenv("LLM_ATTN_PROBE_INTERF") != NULL) {
-        const int nbufs = atoi(getenv("LLM_ATTN_PROBE_INTERF"));
-        const int wmb   = getenv("LLM_ATTN_PROBE_WMB") ? atoi(getenv("LLM_ATTN_PROBE_WMB")) : 82;
-        const int nwb   = getenv("LLM_ATTN_PROBE_NWB") ? atoi(getenv("LLM_ATTN_PROBE_NWB")) : 4;
+    if (g_mode && strcmp(g_mode, "interf") == 0) {
+        const int nbufs = atoi(g_interf);
+        const int wmb   = g_wmb ? atoi(g_wmb) : 82;
+        const int nwb   = g_nwb ? atoi(g_nwb) : 4;
         const int freps = (argc > 7) ? atoi(argv[7]) : 3;
         if (nbufs <= 0) { fprintf(stderr, "FAIL: nbufs\n"); return 1; }
         printf("# INTERFERENZA KV<->pesi: nbufs=%d (=layer), peso %d MB/layer x %d buffer distinti\n",
@@ -1769,8 +1788,8 @@ int main(int argc, char** argv) {
     /* ── MODE C (invocazione separata: LLM_ATTN_PROBE_COLD=<nbufs>) ───────────────
      * Working set = nbufs cache DISTINTE (default 36 = i layer di Qwen3-8B), cosi' il
      * kernel non pu' rileggere dalla L2 come fa il bench warm qui sopra. */
-    if (getenv("LLM_ATTN_PROBE_COLD") != NULL) {
-        const int nbufs = atoi(getenv("LLM_ATTN_PROBE_COLD"));
+    if ((g_mode && strcmp(g_mode, "cold") == 0)) {
+        const int nbufs = atoi(g_cold);
         const int coldreps = (argc > 7) ? atoi(argv[7]) : 4;
         printf("# COLD working set: nbufs=%d (=%.2f GB di KV a Nk=16100), reps=%d\n",
                nbufs, (nbufs * 2.0 * 16100 * nkv * hd * 2) / 1e9, coldreps);

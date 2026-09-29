@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
         sum2 += d * d;
     }
     const double rel_l2 = (yo != NULL) ? sqrt(sum2 / (ref2 > 0 ? ref2 : 1.0)) : -1.0;
-    if (getenv("LLM_OQ_CHECK_DUMP") && yo != NULL) {
+    if (argc > 8 && atoi(argv[8]) != 0 && yo != NULL) {
         fprintf(stderr, "[dump] ref: %.4f %.4f %.4f %.4f\n", yr[0], yr[1], yr[2], yr[3]);
         fprintf(stderr, "[dump] our: %.4f %.4f %.4f %.4f\n", yo[0], yo[1], yo[2], yo[3]);
     }

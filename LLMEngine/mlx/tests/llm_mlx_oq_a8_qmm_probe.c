@@ -20,6 +20,7 @@
 #include "llmmetal_oq_a8_bridge.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
@@ -84,7 +85,7 @@ int main(int argc, char** argv) {
     /* Modalita' batch: R QMM indipendenti in UN grafo = un solo sync -> tempo kernel puro
      * (senza overhead CPU di eval/sync per call). R da env LLM_OQ_PROBE_BATCH (default 32). */
     {
-        const char* be = getenv("LLM_OQ_PROBE_BATCH");
+        const char* be = argc > 6 ? argv[6] : NULL;
         const int R = be ? atoi(be) : 32;
         if (R > 0) {
             for (int M = 1; M <= 16; M *= 2) {
@@ -137,8 +138,9 @@ int main(int argc, char** argv) {
     /* A/B interleaved nello STESSO processo (LLM_OQ_PROBE_AB="1,4" = split da confrontare):
      * ogni ripetizione alterna i due env e prende il MIN per variante -> robusto al carico
      * della macchina condivisa (il min e' il run meno contendato, non la media). */
-    if (const char* ab = getenv("LLM_OQ_PROBE_AB")) {
-        const int R = getenv("LLM_OQ_PROBE_ABREPS") ? atoi(getenv("LLM_OQ_PROBE_ABREPS")) : 15;
+    const char* ab = (argc > 7) ? argv[7] : NULL;
+    if (ab) {
+        const int R = (argc > 8) ? atoi(argv[8]) : 15;
         int splits[8], nsp = 0;
         char tmp[64]; snprintf(tmp, sizeof tmp, "%s", ab);
         for (char* tok = strtok(tmp, ","); tok && nsp < 8; tok = strtok(NULL, ",")) splits[nsp++] = atoi(tok);
