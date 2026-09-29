@@ -290,7 +290,7 @@ bool gemma4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
             mlx_array_free(kp); mlx_array_free(vp);
         }
     } else if (ok) {
-        if (ok && has_cache && n_tokens == 1 && !m->cfg.nsa_sparse && llm_mlx_kv_inplace_enabled() &&
+        if (ok && has_cache && n_tokens == 1 && !m->cfg.nsa_sparse && !m->cfg.kv_quantize && llm_mlx_kv_inplace_enabled() &&
             !is_sliding)
             kv_inplace = llm_mlx_kv_append_inplace(k_cache, v_cache, k_rope, v_t,
                                                    cache_offset, n_tokens, /*step=*/256,
@@ -630,7 +630,7 @@ bool mixtral_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
         bool fixkv = llm_mlx_fixkv_enabled() && n_tokens == 1 && has_cache &&
                      m->cfg.kv_max_tokens <= 0 && !m->cfg.kv_quantize;
         if (!fixkv) {
-            if (ok && has_cache && n_tokens == 1 && !m->cfg.nsa_sparse && llm_mlx_kv_inplace_enabled() &&
+            if (ok && has_cache && n_tokens == 1 && !m->cfg.nsa_sparse && !m->cfg.kv_quantize && llm_mlx_kv_inplace_enabled() &&
                 !(m->cfg.is_sliding_layer != NULL && layer_idx >= 0 && layer_idx < m->cfg.n_layers &&
                   m->cfg.is_sliding_layer[layer_idx]))
                 kv_inplace = llm_mlx_kv_append_inplace(k_cache, v_cache, k_rope, v_t,
