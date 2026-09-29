@@ -93,12 +93,7 @@ static inline bool llm_kvq_pool_init(llm_kvq_pool* p, int layers, int kv_heads, 
     memset(p, 0, sizeof *p);
     p->layers = layers; p->kv_heads = kv_heads; p->head_dim = head_dim; p->fmt = fmt;
     p->page_tokens = (int)LLM_KV_PAGE_TOKENS;
-    p->gov = llm_memgov_default();
-    { int v = 0;
-      if (llm_ai_mlx_opt_get_int("memgov", &v) == 0) p->gov.on = (v != 0);
-      if (llm_ai_mlx_opt_get_int("memgov_reserve_mb", &v) == 0 && v >= 0) p->gov.reserve_bytes = (uint64_t)v * 1024ull * 1024ull;
-      if (llm_ai_mlx_opt_get_int("memgov_grow_min_free_mb", &v) == 0 && v >= 0) p->gov.grow_min_free_bytes = (uint64_t)v * 1024ull * 1024ull;
-      if (llm_ai_mlx_opt_get_int("memgov_timeout_ms", &v) == 0 && v >= 0) p->gov.timeout_ms = v; }
+    p->gov = llm_memgov_from_registry();
     if (cap_tokens < (int)LLM_KVQ_PAGE_TOKENS) cap_tokens = (int)LLM_KVQ_PAGE_TOKENS;
     cap_tokens = ((cap_tokens + (int)LLM_KVQ_PAGE_TOKENS - 1) / (int)LLM_KVQ_PAGE_TOKENS) * (int)LLM_KVQ_PAGE_TOKENS;
     p->cap_tokens = cap_tokens;

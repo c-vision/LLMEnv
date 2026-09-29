@@ -40,6 +40,18 @@ static inline LlmMemGov llm_memgov_default(void) {
     return g;
 }
 
+/* Legge il budget dal registro opzioni (`memgov*`); fallback ai default compilati. */
+#include "llm_engine_opts.h"
+static inline LlmMemGov llm_memgov_from_registry(void) {
+    LlmMemGov g = llm_memgov_default();
+    int v = 0;
+    if (llm_ai_mlx_opt_get_int("memgov", &v) == 0) g.on = (v != 0);
+    if (llm_ai_mlx_opt_get_int("memgov_reserve_mb", &v) == 0 && v >= 0) g.reserve_bytes = (uint64_t)v * 1024ull * 1024ull;
+    if (llm_ai_mlx_opt_get_int("memgov_grow_min_free_mb", &v) == 0 && v >= 0) g.grow_min_free_bytes = (uint64_t)v * 1024ull * 1024ull;
+    if (llm_ai_mlx_opt_get_int("memgov_timeout_ms", &v) == 0 && v >= 0) g.timeout_ms = v;
+    return g;
+}
+
 /* Memoria libera (reclamabile) del sistema. 0 = non misurabile. */
 static inline uint64_t llm_memgov_system_free_bytes(void) {
 #if defined(__APPLE__)

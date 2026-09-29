@@ -2,6 +2,7 @@
  * Dominio model IO: write_mlx_meta_file, read_mlx_meta_file (swap meta), llm_ai_mlx_load_model, llm_ai_mlx_free_model.
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
+#include "llm_mlx_memgov.h"      /* B9: budget memoria (reserve/grow_min) */
 #include "llmengine_mlx.h"
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llmengine_plugin.h"
@@ -185,7 +186,8 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                         int32_t wired = 0; sz = sizeof wired;
                         if (sysctlbyname("iogpu.wired_limit_mb", &wired, &sz, NULL, 0) == 0 && wired > 0)
                             limit = (uint64_t)wired * 1024ull * 1024ull;
-                        uint64_t reserve = 2ull * 1024 * 1024 * 1024;
+                        LlmMemGov _mg = llm_memgov_from_registry();
+                        uint64_t reserve = _mg.reserve_bytes;   /* B9: dal registro (default 2 GiB) */
                         uint64_t avail = (limit > nonexp + reserve) ? (limit - nonexp - reserve) : 0;
                         int b = (int)(avail / (7ull * 1024 * 1024));
                         if (b > 256) bundles = b;
