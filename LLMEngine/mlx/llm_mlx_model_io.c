@@ -690,7 +690,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * (cold block affine) via env, senza editare il config.json dei modelli (nessun config lo
      * imposta oggi). NB: il path e' DEQUANT-ON-READ (layer_forward dequantizza la cold all'inizio
      * e la ri-quantizza alla fine) -> riduce la memoria a contesto lungo ma costa 2xO(pos)/token. */
-    if (!m->cfg.kv_quantize && llm_ai_mlx_opt_env("LLM_KVQUANT") != NULL) {
+    if (!m->cfg.kv_quantize && 0 && llm_ai_mlx_opt_env("LLM_KVQUANT") != NULL) {   /* B7: env disattivata (port Splash incompleto, vedi TODO) */
         const char* b = llm_ai_mlx_opt_env("LLM_KVQUANT_BITS");
         const char* t = llm_ai_mlx_opt_env("LLM_KVQUANT_THRESH");
         m->cfg.kv_quantize = true;
