@@ -400,18 +400,6 @@ bool gpt_oss_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h,
         mlx_array_free(gbb);
         CHK(ok, "router bias add");
     }
-    static int dump_gates_done = 0;
-    if (ok && !dump_gates_done && llm_env_get("LLM_DEBUG_GATES")) {
-        mlx_array gf = mlx_array_new();
-        if (mlx_astype(&gf, gates, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(gf) == 0) {
-            const float* d = mlx_array_data_float32(gf);
-            size_t ne = (size_t)n_tokens * (size_t)m->cfg.n_experts;
-            FILE* f = fopen(llm_env_get("LLM_DEBUG_GATES"), "wb");
-            if (f) { fwrite(d, sizeof(float), ne, f); fclose(f); }
-        }
-        mlx_array_free(gf);
-        dump_gates_done = 1;
-    }
 
     /* top-4: argpartition (indici) -> top_inds; poi top-k VALUES via take_along_axis
      * sui logit -> softmax SOLO sui top-k (reference: mlx_topk + softmax(experts)). */
@@ -755,26 +743,6 @@ bool gpt_oss_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h,
     CHK(ok, "arrange gate/up");
     if (ok && unsort_moe && !moe_fused_done)
         CHK(ok, "expert gate/up linear bias add");
-    static int dump_gu_done = 0;
-    if (ok && !moe_fused_done && !dump_gu_done && llm_env_get("LLM_DEBUG_GATEUP")) {
-        mlx_array gv = mlx_array_new();
-        if (mlx_astype(&gv, gate_out, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(gv) == 0) {
-            const float* d = mlx_array_data_float32(gv);
-            size_t ng = (size_t)n_tokens * (size_t)m->cfg.top_k * (size_t)m->cfg.hidden_size;
-            char p[512]; snprintf(p, sizeof(p), "%s.gate", llm_env_get("LLM_DEBUG_GATEUP"));
-            FILE* f = fopen(p, "wb"); if (f) { fwrite(d, sizeof(float), ng, f); fclose(f); }
-        }
-        mlx_array_free(gv);
-        mlx_array uv = mlx_array_new();
-        if (mlx_astype(&uv, up_out, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(uv) == 0) {
-            const float* d = mlx_array_data_float32(uv);
-            size_t ng = (size_t)n_tokens * (size_t)m->cfg.top_k * (size_t)m->cfg.hidden_size;
-            char p[512]; snprintf(p, sizeof(p), "%s.up", llm_env_get("LLM_DEBUG_GATEUP"));
-            FILE* f = fopen(p, "wb"); if (f) { fwrite(d, sizeof(float), ng, f); fclose(f); }
-        }
-        mlx_array_free(uv);
-        dump_gu_done = 1;
-    }
 
     mlx_array clip_g = mlx_array_new(), clip_u = mlx_array_new();
     mlx_array up1 = mlx_array_new(), alpha_g = mlx_array_new();
@@ -838,18 +806,6 @@ bool gpt_oss_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h,
     }
     if (ok && !moe_fused_done) ok = mlx_add(&down_out, down_out, dn_lb_g, m->stream) == 0;
     CHK(ok, "expert down linear bias add");
-    static int dump_dn_done = 0;
-    if (ok && !moe_fused_done && !dump_dn_done && llm_env_get("LLM_DEBUG_GATEUP")) {
-        mlx_array dv = mlx_array_new();
-        if (mlx_astype(&dv, down_out, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(dv) == 0) {
-            const float* d = mlx_array_data_float32(dv);
-            size_t ng = (size_t)n_tokens * (size_t)m->cfg.top_k * (size_t)m->cfg.hidden_size;
-            char p[512]; snprintf(p, sizeof(p), "%s.down", llm_env_get("LLM_DEBUG_GATEUP"));
-            FILE* f = fopen(p, "wb"); if (f) { fwrite(d, sizeof(float), ng, f); fclose(f); }
-        }
-        mlx_array_free(dv);
-        dump_dn_done = 1;
-    }
 
     /* Q2-b: readback di srt_idx/inv_idx (solo calibrazione) PRIMA che vengano liberati sotto. */
     if (m->im.active && ok && srt_idx.ctx != NULL && inv_idx.ctx != NULL) {
