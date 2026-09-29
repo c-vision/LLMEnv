@@ -654,11 +654,49 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
         setenv("LLM_MXFP4_ACT_F16", "1", 0);     /* +7% prefill (misurato neutro su qwen3_5_moe) */
         fprintf(stderr, "[auto-policy] qwen3_next -> LLM_MXFP4_ACT_F16=1\n");
     }
+    /* B7 (2026-09-29): opzione di REGISTRO `kvquant` = off|8[:finestra]|auto[:soglia]|16.
+     * `16` = KV in bf16 esplicito (nessuna quant). `auto` = attiva l'int8 Splash da sola quando
+     * il contesto supera la soglia (default 8192, il crossover misurato). Default del registro:
+     * `auto`. Precedenza: opzione di registro > env legacy > config.json. */
+    if (!m->cfg.kv_quantize) {
+        char kvs[64];
+        if (llm_ai_mlx_opt_get_str("kvquant", kvs, sizeof kvs) == 0 && kvs[0]) {
+            if (strncmp(kvs, "off", 3) == 0) {
+                /* resta bf16 (default) */
+            } else if (strncmp(kvs, "auto", 4) == 0) {
+                int trig = 8192; const char* c = strchr(kvs, ':');
+                if (c) trig = atoi(c + 1);
+                if (trig < 512) trig = 512;
+                m->cfg.kv_quantize_auto = true;
+                m->cfg.kv_quantize_auto_trigger = trig;
+                fprintf(stderr, "[kvquant] auto: int8 Splash oltre %d token (finestra 2048)\n", trig);
+            } else {
+                int bits = atoi(kvs);
+                int thr = 0;
+                const char* c = strchr(kvs, ':');
+                if (c) thr = atoi(c + 1);
+                if (bits == 16) {
+                    m->cfg.kv_quantize = false; m->cfg.kv_quantize_bits = 16; m->cfg.kv_quantize_threshold = 0;
+                    fprintf(stderr, "[kvquant] bf16 (nessuna quant, opzione di registro)\n");
+                } else if (bits == 8) {
+                    /* B7 (2026-09-29): KV-quant SPLASH int8 (pool int8 storage primario + read fused). */
+                    m->cfg.kv_quantize = true;
+                    m->cfg.kv_quantize_bits = 8;
+                    m->cfg.kv_quantize_threshold = thr > 0 ? thr : 2048;
+                    fprintf(stderr, "[kvquant] int8 Splash attivata threshold=%d\n", m->cfg.kv_quantize_threshold);
+                } else if (bits == 4) {
+                    fprintf(stderr, "[kvquant] bits=4 non supportato dal pool Splash (solo 8)\n");
+                } else {
+                    fprintf(stderr, "[kvquant] valore '%s' non valido (off|8[:finestra]|auto[:soglia]|16)\n", kvs);
+                }
+            }
+        }
+    }
     /* LLM_KVQUANT (=1 attiva; _BITS default 8; _THRESH default 2048): abilita la KV-quant T3.2
      * (cold block affine) via env, senza editare il config.json dei modelli (nessun config lo
      * imposta oggi). NB: il path e' DEQUANT-ON-READ (layer_forward dequantizza la cold all'inizio
      * e la ri-quantizza alla fine) -> riduce la memoria a contesto lungo ma costa 2xO(pos)/token. */
-    if (!m->cfg.kv_quantize && llm_ai_mlx_opt_env("LLM_KVQUANT") != NULL) {
+    if (!m->cfg.kv_quantize && 0 && llm_ai_mlx_opt_env("LLM_KVQUANT") != NULL) {   /* B7: env disattivata (port Splash incompleto, vedi TODO) */
         const char* b = llm_ai_mlx_opt_env("LLM_KVQUANT_BITS");
         const char* t = llm_ai_mlx_opt_env("LLM_KVQUANT_THRESH");
         m->cfg.kv_quantize = true;

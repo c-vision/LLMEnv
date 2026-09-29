@@ -53,7 +53,13 @@
  * prosegue col path normale. */
 typedef bool (*llm_kvq_sdpa_hook_fn)(mlx_array* out, mlx_array q, mlx_array k, mlx_array v,
                                      float scale, void* ctx, mlx_stream stream);
-static struct { llm_kvq_sdpa_hook_fn fn; void* ctx; } llm_kvq_hook = { NULL, NULL };
+/* 2026-09-29: gli hook erano `static` in questo header -> UNA COPIA PER TU; dopo lo split
+ * del monolite il .c che li installa (layer_forward) e i .c delle architetture attention
+ * (llama/qwen/...) sono TU DIVERSE, quindi l'hook installato non era visibile all'arco ->
+ * mai invocato (KV-quant Splash inerte). Ora sono simboli GLOBALI unici (definiti in
+ * llm_mlx_layer_forward.c). */
+typedef struct { llm_kvq_sdpa_hook_fn fn; void* ctx; } llm_sdpa_hook_slot;
+extern llm_sdpa_hook_slot llm_kvq_hook;
 
 /* ── §G-bis leva 1: hook (function-pointer) per l'attenzione decode SPARSA a livello
  * pagina. Stesso meccanismo del kvq hook: il .c installa fn/ctx prima di attn e li azzera
@@ -62,14 +68,14 @@ static struct { llm_kvq_sdpa_hook_fn fn; void* ctx; } llm_kvq_hook = { NULL, NUL
  * ritorna false, si prosegue col path normale (parita'). */
 typedef bool (*llm_pagesel_sdpa_hook_fn)(mlx_array* out, mlx_array q, mlx_array k, mlx_array v,
                                          float scale, void* ctx, mlx_stream stream);
-static struct { llm_pagesel_sdpa_hook_fn fn; void* ctx; } llm_pagesel_hook = { NULL, NULL };
+extern llm_sdpa_hook_slot llm_pagesel_hook;
 
 /* §D R3.3: hook per SDPA EAGER (matmul+softmax+matmul, differenziabile) — l'autograd MLX non
  * ha il VJP per il CustomKernel di `fast_scaled_dot_product_attention`. Il training forward lo
  * installa al posto della fast_sdpa. Stesso meccanismo degli altri hook. */
 typedef bool (*llm_sdpa_hook_fn)(mlx_array* out, mlx_array q, mlx_array k, mlx_array v,
                                  float scale, void* ctx, mlx_stream stream);
-static struct { llm_sdpa_hook_fn fn; void* ctx; } llm_train_sdpa_hook = { NULL, NULL };
+extern llm_sdpa_hook_slot llm_train_sdpa_hook;
 
 /* MASCHERA ADDITIVA "pad" per il decode MLA (DeepSeek/Kimi) — 2026-09-16.
  * Nel forward MLA la maschera causale a decode veniva ricostruita OGNI LAYER OGNI TOKEN con
