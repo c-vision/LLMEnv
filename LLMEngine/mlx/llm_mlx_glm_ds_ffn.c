@@ -253,7 +253,6 @@ bool deepseek_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
         if (ok && llm_mlx_fuse_swiglu_prefill_enabled()) {
             ok = llm_mlx_swiglu_compiled(gate_out, up_out, &act, m->stream);
         } else if (ok) {
-            if (llm_env_isset("LLM_SIG_TRACE")) fprintf(stderr, "[SIG] layer=%d SORTED eager\n", layer_idx);
             ok = mlx_sigmoid(&sig, gate_out, m->stream) == 0;
             if (ok) ok = mlx_multiply(&silu, gate_out, sig, m->stream) == 0;
             if (ok) ok = mlx_multiply(&act, silu, up_out, m->stream) == 0;
@@ -295,7 +294,7 @@ bool deepseek_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
     } else {
         if (ok) ok = llm_mlx_moe_gather_streamed(&m->cfg, layer_idx, 0, &gate_out, x1, gp_w, gp_s, gp_b, no_lhs, top_inds_arr, true, xp_gsz, xp_bts, xp_mode, false, m->stream)==0;
         if (ok) ok = llm_mlx_moe_gather_streamed(&m->cfg, layer_idx, 1, &up_out, x1, up_w, up_s, up_b, no_lhs, top_inds_arr, true, xp_gsz, xp_bts, xp_mode, false, m->stream)==0;
-        if (ok) { if (llm_env_isset("LLM_SIG_TRACE")) fprintf(stderr, "[SIG] layer=%d ROUTED eager\n", layer_idx); ok = mlx_sigmoid(&sig, gate_out, m->stream)==0 && mlx_multiply(&silu, gate_out, sig, m->stream)==0 && mlx_multiply(&act, silu, up_out, m->stream)==0; }
+        if (ok) { ok = mlx_sigmoid(&sig, gate_out, m->stream)==0 && mlx_multiply(&silu, gate_out, sig, m->stream)==0 && mlx_multiply(&act, silu, up_out, m->stream)==0; }
         /* (2026-09-13) RIMOSSO qui il ramo compilato: questo e' il decode unsorted (n_tokens
          * piccolo, M<64) e mlx_closure_apply ha un costo fisso CPU per applicazione che a
          * n_tokens==1 non si ammortizza. A/B V2-Lite: eager 169,1 vs compiled 163,9 tok/s
@@ -323,7 +322,7 @@ bool deepseek_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
         if (ok) { ok = quantized_linear_cfg(&sgo, normed2, sgw,sgs,sgb, gsz,bts, m->cfg.quant_mode, m->stream); DCHK(ok, "shared gate"); }
         if (ok) { ok = quantized_linear_cfg(&suo, normed2, suw,sus,sub, gsz,bts, m->cfg.quant_mode, m->stream); DCHK(ok, "shared up"); }
         if (ok && n_tokens > 1 && llm_mlx_fuse_swiglu_prefill_enabled()) { ok = llm_mlx_swiglu_compiled(sgo, suo, &sact, m->stream); DCHK(ok, "shared swiglu compiled"); }
-        else if (ok) { if (llm_env_isset("LLM_SIG_TRACE")) fprintf(stderr, "[SIG] layer=%d SHARED eager\n", layer_idx); ok = mlx_sigmoid(&ssig, sgo, m->stream)==0 && mlx_multiply(&ssilu, sgo, ssig, m->stream)==0 && mlx_multiply(&sact, ssilu, suo, m->stream)==0; DCHK(ok, "shared swiglu"); }
+        else if (ok) { ok = mlx_sigmoid(&ssig, sgo, m->stream)==0 && mlx_multiply(&ssilu, sgo, ssig, m->stream)==0 && mlx_multiply(&sact, ssilu, suo, m->stream)==0; DCHK(ok, "shared swiglu"); }
         if (ok) { ok = quantized_linear_cfg(&sd_out, sact, sdw,sds,sdb, gsz,bts, m->cfg.quant_mode, m->stream); DCHK(ok, "shared down"); }
         if (ok) { ok = mlx_add(&moe_out, moe_out, sd_out, m->stream)==0; DCHK(ok, "shared add"); }
         mlx_array sh[]={sgw,sgs,sgb,suw,sus,sub,sdw,sds,sdb,sgo,suo,ssig,ssilu,sact,sd_out};
