@@ -322,10 +322,14 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
     /* KV-quant (port Splash): il cold vive nel PAGE POOL int8 = storage PRIMARIO.
      * La cache fp e' SOLO la finestra recente; il read fused legge il pool. */
     llm_kvq_pool* kvqp = NULL;
+    KvDisk* kvq_disk = llm_kvdisk_enabled(m) ? &m->kvdisk : NULL;   /* B9: tier SSD per lo spill */
     if (kvq_sess && m->cfg.kv_quantize && m->cfg.kv_quantize_threshold > 0)
         kvqp = llm_kvq_pool_for((void*)m, (void*)kvq_sess, (int)m->cfg.n_layers,
                                 (int)m->cfg.n_kv_heads, (int)m->cfg.head_dim, LLM_KVQ_FMT_INT8,
-                                m->cfg.kv_quantize_threshold, m->stream);
+                                m->cfg.kv_quantize_threshold, kvq_disk, m->stream);
+    /* B9: se il pool e' stato spilliato (sessione ripresa), ripristina le pagine PRIMA dell'attenzione. */
+    if (kvqp && kvqp->disk && llm_kvq_pool_offloaded(kvqp))
+        llm_kvq_pool_faultin_all(kvqp, kvqp->disk, kvqp->key_base, m->stream);
     bool kvq_read_used = false;
     if (kvq_read && kvqp && kvqp->committed_l[layer_idx] > 0) {
         g_kvq_cold.kw = kvqp->keyData[layer_idx];

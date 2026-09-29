@@ -18,6 +18,7 @@
 #include "llm_mlx_splash_store.h"    /* store int8 verificato */
 #include "llm_mlx_kvpage_store.h"    /* page table + allocator (Splash-like) */
 #include "llm_mlx_memgov.h"          /* B9: memory governor */
+#include "llm_mlx_kvdisk.h"          /* B9: tier SSD per spill/fault pagine */
 #include "llm_engine_opts.h"         /* registro opzioni (memgov_*) */
 #include <stdbool.h>
 #include <stdint.h>
@@ -40,6 +41,8 @@ typedef struct {
     mlx_array* bias;          /* f32 ZERO [nkv, cap, 1] per layer */
     LlmKvPageTable pt;        /* page table logical->physical (condivisa fra i layer) */
     LlmMemGov gov;            /* B9: budget memoria (reserve/grow/timeout) */
+    KvDisk*   disk;          /* B9: tier SSD per spill/fault delle pagine (NULL = off) */
+    uint64_t  key_base;      /* B9: base chiave distinta per questo pool */
     mlx_array ptab;           /* int32 [phys_pages] mirror della page table (per il kernel) */
 } llm_kvq_pool;
 
@@ -113,8 +116,18 @@ static inline bool llm_kvq_pool_init(llm_kvq_pool* p, int layers, int kv_heads, 
 }
 
 /* Raddoppia la capacita' fisica ricopiando i layer allocati e allargando la page table. */
+/* B9: true se qualche pagina logica e' stata spilliata (non residente). */
+static inline bool llm_kvq_pool_offloaded(const llm_kvq_pool* p) {
+    if (!p) return false;
+    for (int lp = 0; lp < p->pt.n_logical; lp++) if (p->pt.table[lp] < 0) return true;
+    return false;
+}
+/* B9: sotto pressione, spilla su disco le pagine dei pool INATTIVI (non `p`). */
+static inline void llm_kvq_pool_pressure_pool(llm_kvq_pool* p, mlx_stream s);
+
 static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
     if (!p) return false;
+    llm_kvq_pool_pressure_pool(p, s);   /* B9: libera RAM spillando i pool inattivi */
     /* B9: prima di crescere, chiedi memoria al governor (attende -> resource_timeout). */
     { uint64_t grew = llm_kv_page_bytes(p->fmt == LLM_KVQ_FMT_INT8, (uint32_t)p->kv_heads, (uint32_t)p->head_dim)
                     * (uint64_t)(p->pt.phys_capacity);  /* pagine aggiunte (doppio) */
@@ -336,10 +349,11 @@ static inline void llm_kvq_pool_free(llm_kvq_pool* p) {
 typedef struct { void* model; void* sess; llm_kvq_pool p; } llm_kvq_pool_entry;
 static llm_kvq_pool_entry g_kvq_pools[8];
 static int g_kvq_pools_n = 0;
+static uint64_t g_kvq_key_seq = 1;
 
 static inline llm_kvq_pool* llm_kvq_pool_for(void* m, void* sess,
                                              int layers, int nkv, int hd, llm_kvq_fmt fmt,
-                                             int cap_tokens, mlx_stream s) {
+                                             int cap_tokens, KvDisk* disk, mlx_stream s) {
     for (int i = 0; i < g_kvq_pools_n; i++)
         if (g_kvq_pools[i].model == m && g_kvq_pools[i].sess == sess) return &g_kvq_pools[i].p;
     if (g_kvq_pools_n >= 8) return NULL;
@@ -347,8 +361,20 @@ static inline llm_kvq_pool* llm_kvq_pool_for(void* m, void* sess,
     memset(e, 0, sizeof *e);
     e->model = m; e->sess = sess;
     if (!llm_kvq_pool_init(&e->p, layers, nkv, hd, fmt, cap_tokens, s)) return NULL;
+    e->p.disk = disk; e->p.key_base = (g_kvq_key_seq++ << 40);
     g_kvq_pools_n++;
     return &e->p;
+}
+
+static inline void llm_kvq_pool_pressure_pool(llm_kvq_pool* p, mlx_stream s) {
+    if (!p || !p->disk) return;
+    uint64_t f = llm_memgov_system_free_bytes();
+    if (!llm_memgov_should_spill(&p->gov, f)) return;
+    for (int i = 0; i < g_kvq_pools_n; i++) {
+        llm_kvq_pool* q = &g_kvq_pools[i].p;
+        if (q == p || !q->disk || llm_kvq_pool_offloaded(q)) continue;
+        llm_kvq_pool_spill_all(q, q->disk, q->key_base, s);
+    }
 }
 
 #endif /* LLM_MLX_KVQ_POOL_H */

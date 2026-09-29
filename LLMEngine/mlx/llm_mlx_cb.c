@@ -1479,3 +1479,39 @@ int llm_ai_mlx_memgov_selftest(char* out, size_t cap) {
              ok, no_room, room, off_room, (unsigned long long)(free_b >> 20), to, pass ? "OK" : "FAIL");
     return pass ? 0 : 1;
 }
+
+/* Self-test B9: policy di spill — sotto pressione si spilla il pool INATTIVO (non l'attivo);
+ * al resume (fault-in) le pagine tornano residenti. */
+int llm_ai_mlx_kvq_spill_policy_selftest(char* out, size_t cap) {
+    if (out == NULL || cap == 0) return -1;
+    out[0] = '\0';
+    /* forza la pressione: reserve enorme -> should_spill() true */
+    llm_ai_mlx_opt_set("memgov_reserve_mb", "1000000");
+    mlx_stream s = mlx_default_gpu_stream_new();
+    KvDisk d = llm_kv_disk_open("/tmp/llm_kvq_spillpol.scratch", 128, (uint64_t)8*1024*1024);
+    const int nkv = 2, hd = 64, N = 64;
+    int modelA = 0, sessA = 0, sessB = 0;
+    llm_kvq_pool* A = llm_kvq_pool_for(&modelA, &sessA, 1, nkv, hd, LLM_KVQ_FMT_INT8, N, &d, s);
+    llm_kvq_pool* B = llm_kvq_pool_for(&modelA, &sessB, 1, nkv, hd, LLM_KVQ_FMT_INT8, N, &d, s);
+    int ok = (A && B && A != B);
+    float* kb = (float*)malloc((size_t)nkv*N*hd*4), *vb = (float*)malloc((size_t)nkv*N*hd*4);
+    for (int i = 0; i < nkv*N*hd; i++) { kb[i] = sinf((float)i*0.7f)*3.0f; vb[i] = cosf((float)i*0.31f)*2.0f; }
+    mlx_array K = mlx_array_new_data(kb, (int[]){nkv,N,hd}, 3, MLX_FLOAT32);
+    mlx_array V = mlx_array_new_data(vb, (int[]){nkv,N,hd}, 3, MLX_FLOAT32);
+    if (ok) ok = llm_kvq_pool_store(A, 0, K, V, 0, N, s) != 0 && llm_kvq_pool_store(B, 0, K, V, 0, N, s) != 0;
+    /* A segnala pressione: B (inattivo) va spillato, A resta residente. */
+    if (ok) llm_kvq_pool_pressure_pool(A, s);
+    int b_spilled = llm_kvq_pool_offloaded(B);
+    int a_resident = !llm_kvq_pool_offloaded(A);
+    int fi = ok ? llm_kvq_pool_faultin_all(B, B->disk, B->key_base, s) : -9;
+    int b_back = !llm_kvq_pool_offloaded(B);
+    int pass = ok && b_spilled && a_resident && fi == 0 && b_back;
+    snprintf(out, cap, "kvq_spill_policy selftest: A_resident=%d B_spilled=%d faultin=%d B_resident_after=%d %s",
+             a_resident, b_spilled, fi, b_back, pass ? "OK" : "FAIL");
+    mlx_array_free(K); mlx_array_free(V); free(kb); free(vb);
+    if (A) llm_kvq_pool_free(A);
+    if (B) llm_kvq_pool_free(B);
+    g_kvq_pools_n = 0;              /* sgancia i pool di test (il KvDisk e' locale) */
+    llm_kv_disk_close(&d);
+    return pass ? 0 : 1;
+}
