@@ -62,8 +62,8 @@ static bool llm_kvq_sdpa_hook_dispatch(mlx_array* out, mlx_array q, mlx_array k,
     mlx_array kw = mlx_array_new(), ks = mlx_array_new(), kb = mlx_array_new();
     mlx_array vw = mlx_array_new(), vs = mlx_array_new(), vb = mlx_array_new();
     int qsh[2] = {nh, hd}, ksh[3] = {nkv, nr, hd};
-    int cw[3] = {nkv, c->nc, hd * c->kbits / 32}, cs[3] = {nkv, c->nc, hd / 64};
-    int cwv[3] = {nkv, c->nc, hd * c->vbits / 32};
+    int cw[3] = {nkv, c->nc, hd}, cs[3] = {nkv, c->nc, 1};      /* Splash: int8 byte + 1 scala/token */
+    int cwv[3] = {nkv, c->nc, hd};
     bool ok = mlx_reshape(&q2, q, qsh, 2, s) == 0 &&
               mlx_reshape(&k2, k, ksh, 3, s) == 0 &&
               mlx_reshape(&v2, v, ksh, 3, s) == 0 &&
@@ -74,7 +74,7 @@ static bool llm_kvq_sdpa_hook_dispatch(mlx_array* out, mlx_array q, mlx_array k,
               mlx_reshape(&vs, c->vs, cs, 3, s) == 0 &&
               mlx_reshape(&vb, c->vb, cs, 3, s) == 0;
     mlx_array o2 = mlx_array_new();
-    if (ok) ok = llm_mlx_kvq_sdpa_decode(&o2, q2, kw, ks, kb, vw, vs, vb, k2, v2, c->nc, c->kbits, c->vbits, scale, s);
+    if (ok) ok = llm_mlx_kvq_sdpa_decode(&o2, q2, kw, ks, kb, vw, vs, vb, k2, v2, c->nc, c->kbits, c->vbits, scale, hd, s);
     if (ok) {
         mlx_array o2c = mlx_array_new();
         ok = (mlx_array_dtype(o2) == mlx_array_dtype(q)) ? (mlx_array_set(&o2c, o2) == 0)
@@ -292,10 +292,7 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
      * e' attivo, invece di richiedere un secondo flag separato che nessun utente/benchmark
      * conosceva: LLM_KV_DEQUANT_READ resta utilizzabile per forzarlo anche in scenari dove
      * kv_quantize non e' ancora stato attivato dal chiamante. */
-    /* KV-quant port Splash: il read usa il DEQUANT Splash (q*scala) — corretto ma
-     * materializza l'fp nella cache MLX (pool). Il passo successivo e' il read
-     * FUSED sul layout Splash (int8 + scala per (token,head)), che non materializza. */
-    bool kvq_read = false;
+    bool kvq_read = (n_tokens == 1) && m->cfg.kv_quantize;   /* read FUSED (kernel Splash layout) */
     bool kvq_read_used = false;
     if (kvq_read && kvq_sess && kvq_sess->kvq_len && kvq_sess->kvq_len[layer_idx] > 0 &&
         kvq_sess->kvq_v_w && kvq_sess->kvq_v_len && kvq_sess->kvq_v_len[layer_idx] == kvq_sess->kvq_len[layer_idx]) {
@@ -587,8 +584,19 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
                 mlx_array_set(&kvq_sess->kvq_v_w[layer_idx], vq);
                 mlx_array_set(&kvq_sess->kvq_sc[layer_idx], sc);
                 mlx_array_set(&kvq_sess->kvq_v_sc[layer_idx], sc);
+                /* bias ZERO (Splash e' simmetrico: q*scala, niente bias). */
+                {
+                    int zsh[4] = {1,(int)mlx_array_shape(*k_cache)[1],n_cold,1};
+                    mlx_array zb = mlx_array_new();
+                    if (mlx_zeros(&zb, zsh, 4, MLX_FLOAT32, m->stream) == 0) {
+                        mlx_array_set(&kvq_sess->kvq_bi[layer_idx], zb);
+                        mlx_array_set(&kvq_sess->kvq_v_bi[layer_idx], zb);
+                    }
+                    mlx_array_free(zb);
+                }
                 kvq_sess->kvq_len[layer_idx] = n_cold;
                 kvq_sess->kvq_v_len[layer_idx] = n_cold;
+                kvq_sess->kvq_bits = 8; kvq_sess->kvq_v_bits = 8;   /* int8 byte (Splash) */
                 /* cache = solo recenti (n_cold..N), K e V */
                 int r0[4] = {0,0,n_cold,0};
                 int r1[4] = {1,(int)mlx_array_shape(*k_cache)[1],N,(int)mlx_array_shape(*k_cache)[3]};
