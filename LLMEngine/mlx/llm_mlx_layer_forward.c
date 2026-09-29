@@ -515,25 +515,6 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
                 layer_idx, peak / 1048576.0, active / 1048576.0, cache / 1048576.0);
         fflush(stderr);
     }
-    if (getenv("LLM_KVQ_MEMDBG") && kvq_sess && (layer_idx == 0 || layer_idx == m->cfg.n_layers - 1)) {
-        size_t kb = (*k_cache).ctx ? mlx_array_size(*k_cache) * mlx_array_itemsize(*k_cache) : 0;
-        size_t vb = (*v_cache).ctx ? mlx_array_size(*v_cache) * mlx_array_itemsize(*v_cache) : 0;
-        size_t qk = 0, qv = 0;
-        if (kvq_sess->kvq_w && kvq_sess->kvq_w[layer_idx].ctx) {
-            qk += mlx_array_size(kvq_sess->kvq_w[layer_idx]) * mlx_array_itemsize(kvq_sess->kvq_w[layer_idx]);
-            qk += mlx_array_size(kvq_sess->kvq_sc[layer_idx]) * mlx_array_itemsize(kvq_sess->kvq_sc[layer_idx]);
-            qk += mlx_array_size(kvq_sess->kvq_bi[layer_idx]) * mlx_array_itemsize(kvq_sess->kvq_bi[layer_idx]);
-        }
-        if (kvq_sess->kvq_v_w && kvq_sess->kvq_v_w[layer_idx].ctx) {
-            qv += mlx_array_size(kvq_sess->kvq_v_w[layer_idx]) * mlx_array_itemsize(kvq_sess->kvq_v_w[layer_idx]);
-            qv += mlx_array_size(kvq_sess->kvq_v_sc[layer_idx]) * mlx_array_itemsize(kvq_sess->kvq_v_sc[layer_idx]);
-            qv += mlx_array_size(kvq_sess->kvq_v_bi[layer_idx]) * mlx_array_itemsize(kvq_sess->kvq_v_bi[layer_idx]);
-        }
-        fprintf(stderr, "[KVQMEM] L%02d n=%d kcache=%.2fMB vcache=%.2fMB kvqK=%.2fMB kvqV=%.2fMB kvq_len=%d\n",
-                layer_idx, n_tokens, kb / 1048576.0, vb / 1048576.0, qk / 1048576.0, qv / 1048576.0,
-                kvq_sess->kvq_len ? kvq_sess->kvq_len[layer_idx] : -1);
-        fflush(stderr);
-    }
     ph_layers++;
     if (gphase && layer_idx + 1 >= m->cfg.n_layers)
         fprintf(stderr, "[LLM_PHASE] layers=%d attn=%.3fs ffn=%.3fs total=%.3fs\n", ph_layers, ph_attn, ph_ffn, ph_attn + ph_ffn);

@@ -770,7 +770,7 @@ int g_gemvq4_disabled = 0;
 
 /* Flag di debug env cached (bug P3 2026-09-03: getenv era letto a ogni layer/token).
  * Lette UNA volta per processo: il debug non va nel percorso caldo. */
-static int g_env_prof = -1, g_env_phase = -1, g_env_mem = -1, g_env_mixtral_time = -1;
+static int g_env_prof = -1, g_env_phase = -1, g_env_mem = -1;
 /* Barrier reduction (Rapid-MLX #2165 §Track 3): permette di misurare l'effetto di NON
  * svuotare la cache allocator MLX (mlx_clear_cache). Default OFF = comportamento invariato
  * (replica mlx_lm). LLM_CLEAR_CACHE_EVERY=N spazia invece che rimuovere del tutto. */
@@ -787,7 +787,7 @@ static int llm_clear_cache_every(void) {
 bool llm_env_prof(void)      { if (g_env_prof < 0)      g_env_prof = (llm_ai_mlx_opt_env("LLM_PROF") != NULL) ? 1 : 0; return g_env_prof == 1; }
 bool llm_env_phase(void)     { if (g_env_phase < 0)     g_env_phase = (llm_ai_mlx_opt_env("LLM_PHASE") != NULL) ? 1 : 0; return g_env_phase == 1; }
 bool llm_env_memprof(void)   { if (g_env_mem < 0)       g_env_mem = (llm_ai_mlx_opt_env("LLM_MEMPROF") != NULL) ? 1 : 0; return g_env_mem == 1; }
-bool llm_env_mixtral_time(void) { if (g_env_mixtral_time < 0) g_env_mixtral_time = (getenv("LLM_MIXTRAL_TIME") != NULL) ? 1 : 0; return g_env_mixtral_time == 1; }
+bool llm_env_mixtral_time(void) { return false; }
 
 /* Cache GENERICA per le flag d'ambiente lette nel percorso caldo (per-layer / per-token):
  * getenv cammina `environ` a ogni chiamata (~50 strcmp) ed era visibile nel profilo `sample`
@@ -884,25 +884,6 @@ void llm_mlx_kv_compact_prefix(int n_layers, int cache_offset, mlx_stream stream
 static bool llm_mlx_gemvq4_try(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases,
                                 int e_group, int e_bits, const char* e_mode, mlx_stream stream) {
     if (!(llm_mlx_gemvq4_enabled() || llm_mlx_gemvq4_verify_enabled())) return false;
-    /* LLM_GEMVQ4_DEBUG=1: stampa UNA volta i valori che decidono l'eleggibilita'. Serve a
-     * distinguere "il kernel ha perso" da "il kernel non e' mai partito" -- senza questo non
-     * c'e' modo di saperlo (un A/B identico al bit puo' voler dire entrambe le cose). */
-    {
-        static int dbg = -1, printed = 0;
-        if (dbg < 0) dbg = (getenv("LLM_GEMVQ4_DEBUG") != NULL) ? 1 : 0;
-        if (dbg == 1 && !printed) {
-            printed = 1;
-            const int xnd0 = mlx_array_ndim(x);
-            const int* xs0 = xnd0 >= 1 ? mlx_array_shape(x) : NULL;
-            fprintf(stderr, "[gemvq4-debug] ctx=%p disabled=%d bits=%d mode=%s scales=%p biases=%p "
-                            "xnd=%d xlast=%d xsize=%ld wnd=%d wdt=%d M=%d gsz=%d\n",
-                    (void*)g_gemvq4_ctx, g_gemvq4_disabled, e_bits, e_mode ? e_mode : "(null)",
-                    (void*)scales.ctx, (void*)biases.ctx, xnd0, xs0 ? xs0[xnd0 - 1] : -1,
-                    (long)mlx_array_size(x), mlx_array_ndim(w),
-                    mlx_array_ndim(w) >= 1 ? (int)mlx_array_dtype(w) : -1,
-                    mlx_array_ndim(w) >= 1 ? (int)mlx_array_shape(w)[0] : -1, e_group);
-        }
-    }
     if (g_gemvq4_disabled || !g_gemvq4_ctx) return false;
     if (e_bits != 4 || !e_mode || strcmp(e_mode, "affine") != 0) return false;
     if (scales.ctx == NULL || biases.ctx == NULL) return false; /* affine reale: presenti sempre */
@@ -1350,9 +1331,6 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
         int K = xs[2], N = mlx_array_shape(w)[0];
         if (llm_mpp_q4_tile_try(res, x, w, scales, biases, mg, mb, K, N, stream, xs[1])) {
             static long mpp_hits = 0;
-            if (++mpp_hits == 1 && getenv("LLM_WHICH_PATH") != NULL)
-                fprintf(stderr, "[which-path] quantized_linear: MPP q4 TILE g%d b4 T=%d K=%d N=%d\n",
-                        mg, xs[1], K, N);
             if (llm_ai_mlx_opt_env("LLMMETAL_MPP_Q4_COUNT") != NULL) {
                 static long last = 0;
                 if (mpp_hits - last >= 500) { last = mpp_hits;
@@ -1366,18 +1344,7 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
          * "tile". Richiede sc/bi bf16 (con lo scales-hoist e' f32 -> non entra: usare
          * LLM_F32_SCALES=0 per provarla). */
         if (llm_mlx_mpp_q4_linear(res, x, w, scales, biases, mg, mb, K, N, stream)) {
-            static int mpp2_hit = 0;
-            if (!mpp2_hit && getenv("LLM_WHICH_PATH") != NULL) {
-                fprintf(stderr, "[which-path] quantized_linear: MPP q4 FM g%d b4 T=%d K=%d N=%d\n", mg, xs[1], K, N);
-                mpp2_hit = 1;
-            }
             return true;
-        }
-        static int mpp_fallback_logged = 0;
-        if (!mpp_fallback_logged && getenv("LLM_WHICH_PATH") != NULL) {
-            fprintf(stderr, "[which-path] quantized_linear: MPP q4 fallback mode=%s group=%d bits=%d K=%d N=%d\n",
-                    mmode, mg, mb, K, N);
-            mpp_fallback_logged = 1;
         }
     }
     /* P10 — GEMM int8-activation × Q4/Q5 (tensor unit M5) per il PREFILL — PRIMITIVE MLX.

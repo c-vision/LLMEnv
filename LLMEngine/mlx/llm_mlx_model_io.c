@@ -85,7 +85,6 @@ bool read_mlx_meta_file(const char* path, MlxSwapMeta* out) {
 
 
 llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
-    if (getenv("LLM_MLX_ERRTRACE")) mlx_set_error_handler(llm_mlx_err_trace_handler, NULL, NULL);
     if (model_dir == NULL) return NULL;
 
     LlmMlxModel* m = (LlmMlxModel*)malloc(sizeof(LlmMlxModel));
@@ -331,10 +330,6 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
             /* RISOLTO 2026-09-25: la de-rotazione Hadamard e' ora fedele (segni PER-BLOCCO +
              * embed-inverse + niente permutazione GDN) e verificata bit-per-bit col reference
              * mlx-vlm (IDS 11751 13 198 ... == reference). Il vecchio rifiuto e' rimosso. */
-            if (getenv("LLM_BONSAI_DBG"))
-            fprintf(stderr, "llm_ai_mlx_load_model: contratto Hadamard del pack letto "
-                            "(block=%d, widths=%d, weight_names=%d, inverse=%d)\n",
-                    bh->block, bh->n_widths, bh->n_names, bh->n_inv);
         } else { free(bh); }
     }
     if (m->arch != NULL &&
@@ -881,46 +876,6 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * LLM_KVQUANT=1 da solo non attivava il dequant-on-read -> percorso legacy per giorni.
      * PUNTO SICURO: qui, dopo la finalizzazione del cfg (il tentativo 1 moriva chiamandolo prima).
      * `want_bf16` e' la locale di questa funzione, in scope. Nessun costo quando il flag e' assente. */
-    if (getenv("LLM_WHICH_PATH")) {
-        LlmWhichPath wp; memset(&wp, 0, sizeof(wp));
-        wp.model_type = m->cfg.model_type;
-        wp.dt_name = want_bf16 ? "bf16" : ((m->cfg.quant_mode && strcmp(m->cfg.quant_mode, "mxfp4") == 0) ? "fp32" : "f16");
-        wp.dtype_src = "policy(cfg/per_tensor/LLM_*)";
-        wp.quant_name = m->cfg.quant_mode;
-        wp.quant_bits = m->cfg.quant_bits;
-        wp.kv_quant = m->cfg.kv_quantize;
-        wp.kv_quant_bits = m->cfg.kv_quantize_bits;
-        wp.kv_quant_thresh = m->cfg.kv_quantize_threshold;
-        wp.kv_read = (m->cfg.kv_quantize && llm_ai_mlx_opt_env("LLM_KV_DEQUANT_READ")) ? 1 : 0;
-        wp.kv_read_src = llm_ai_mlx_opt_env("LLM_KV_DEQUANT_READ") ? 1 : (m->cfg.kv_quantize ? 0 : 2);
-        wp.kv_slice = llm_ai_mlx_opt_env("LLM_KVSLICE") != NULL;
-        wp.kv_seg = llm_ai_mlx_opt_env("LLM_KVSEG") != NULL;
-        wp.kv_f16 = llm_ai_mlx_opt_env("LLM_KVF16") != NULL;
-        wp.kv_metal = llm_ai_mlx_opt_env("LLMMETAL_KVMETAL") != NULL;
-        wp.kv_max_tokens = llm_ai_mlx_opt_env("LLM_KV_MAX_TOKENS") ? atoi(llm_ai_mlx_opt_env("LLM_KV_MAX_TOKENS")) : 0;
-        wp.moe_fuse = llm_ai_mlx_opt_env("LLMENGINE_MOE_FUSE_MOE_DECODE") != NULL;
-        wp.moe_mxfp4 = llm_ai_mlx_opt_env("LLMENGINE_MOE_FUSE_MOE_MXFP4") != NULL;
-        wp.moe_gateup = llm_ai_mlx_opt_env("LLMENGINE_MOE_GATEUP_FUSE") != NULL;
-        wp.moe_n = m->cfg.n_experts;
-        wp.moe_topk = m->cfg.top_k;
-        wp.at_flash_decode = llm_ai_mlx_opt_env("LLM_GEMMA_FLASH_DECODE") != NULL;
-        wp.at_flash_prefill = llm_ai_mlx_opt_env("LLM_GEMMA_FLASH_PREFILL") != NULL;
-        wp.at_fuse_rope = llm_ai_mlx_opt_env("LLM_FUSE_ROPE") != NULL;
-        wp.at_sliding = m->cfg.sliding_window > 0;
-        wp.w_packed_qkv = (strcmp(m->cfg.quant_mode, "affine") == 0 &&
-                           (strcmp(m->cfg.model_type, "llama") == 0 || strcmp(m->cfg.model_type, "qwen3") == 0));
-        wp.w_wcache = llm_ai_mlx_opt_env("LLM_WCACHE") != NULL;
-        wp.w_reshape_canon = llm_ai_mlx_opt_env("LLM_RESHAPE_CANONICAL") != NULL;
-        wp.w_scales_bf16 = want_bf16 ? 1 : 0;
-        wp.w_gemvq4 = llm_ai_mlx_opt_env("LLM_GEMVQ4") != NULL;
-        wp.w_oq_a8 = llm_ai_mlx_opt_env("LLMMETAL_OQ_A8") != NULL;
-        wp.x_compile = llm_ai_mlx_opt_env("LLM_COMPILE") != NULL;
-        wp.x_fixkv = llm_ai_mlx_opt_env("LLM_FIXKV") != NULL;
-        wp.x_compile_dense = llm_ai_mlx_opt_env("LLM_COMPILE_DENSE") != NULL;
-        wp.x_async = llm_ai_mlx_opt_env("LLM_ASYNC_DECODE") != NULL && llm_ai_mlx_opt_env("LLM_NO_ASYNC_DECODE") == NULL;
-        wp.x_sampler_legacy = llm_ai_mlx_opt_env("LLM_SAMPLER_LEGACY") != NULL;
-        llm_mlx_which_path_dump(&wp);
-    }
     return m;
 }
 

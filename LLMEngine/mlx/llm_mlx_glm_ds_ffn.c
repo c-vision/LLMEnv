@@ -381,10 +381,6 @@ bool glm4_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
     CHK(ok, "router lookup");
     /* DIAG (LLM_ROUTER_TIME=1): tempo del router (gate matmul + group_expert_select) per layer.
      * Eval dei soli output del router: attribuzione, non misura di throughput. */
-    static double g_router_time = 0.0; static long g_router_calls = 0;
-    const bool rtime = (getenv("LLM_ROUTER_TIME") != NULL);
-    struct timespec rt0, rt1;
-    if (rtime) clock_gettime(CLOCK_MONOTONIC, &rt0);
     mlx_array gates = mlx_array_new();
     if (ok) {
         if (gs.ctx != NULL && mlx_array_size(gs) > 0)
@@ -555,14 +551,6 @@ bool glm4_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
         CHK(ok, "top-k weights");
     }
     } /* fine eager router (!router_done) */
-    if (rtime && ok) {
-        mlx_array_eval(top_inds); mlx_array_eval(weights);
-        clock_gettime(CLOCK_MONOTONIC, &rt1);
-        g_router_time += (rt1.tv_sec - rt0.tv_sec) + (rt1.tv_nsec - rt0.tv_nsec) * 1e-9;
-        if (++g_router_calls % 100 == 0)
-            fprintf(stderr, "[ROUTER] layer=%d calls=%ld total=%.3fs avg=%.4fms (ntok=%d)\n",
-                    layer_idx, g_router_calls, g_router_time, g_router_time / g_router_calls * 1000.0, n_tokens);
-    }
 
     /* top_inds per la gather: cast u32 + reshape device [n_tokens, top_k].
      * Host readback SOLO per l'imatrix collector (calibration, mai nel forward). */
