@@ -698,7 +698,7 @@ struct LlmMlxModel {
     int prefix_cap;
     llm_radix_trie radix;        /* trie content-addressed dei prefissi (prefix_id = indice in prefixes) */
     KvPagePool kvpool;           /* paged cache CONTENT-ADDRESSED dei blocchi KV del prefisso */
-    KvDisk kvdisk;               /* §G: tier SSD dei blocchi KV del prefisso (LLM_KVDISK) */
+    KvDisk kvdisk;               /* §G: tier SSD dei blocchi KV del prefisso (registro `kvdisk`) */
     int kvdisk_state;            /* -1 = non inizializzato, 0 = OFF, 1 = ON */
     long kvdisk_spills;          /* statistiche: prefissi spillati su disco */
     long kvdisk_restores;        /* statistiche: prefissi ripristinati da disco */

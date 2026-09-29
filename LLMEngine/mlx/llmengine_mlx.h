@@ -227,7 +227,7 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
 int llm_ai_mlx_session_append_auto_prefix(llm_ai_mlx_session_handle sh, llm_ai_mlx_model_handle mh,
                                           const int32_t* token_ids, int n_ids, int min_match);
 
-/* §G-ter — agentic rewind: con LLM_KVDISK attivo il motore scrive checkpoint dei soli layer
+/* §G-ter — agentic rewind: con l'opzione `kvdisk` attiva il motore scrive checkpoint dei soli layer
  * GLOBAL ai confini di LLM_KVCHECKPOINT_BLOCK token (default 256) durante il append. Questa
  * funzione ripristina nella sessione il checkpoint piu' lungo <= keep_tokens, ripristinando la
  * KV da disco e impostando cache_offset/history a quella posizione; il chiamante appende poi il
@@ -240,7 +240,7 @@ int llm_ai_mlx_session_rewind(llm_ai_mlx_session_handle sh, llm_ai_mlx_model_han
 /* §G-ter EVICT: scrive su llm_kv_disk TUTTA la KV della sessione (tutti i layer) + lo stato
  * pending e LIBERA gli array dalla RAM (unified memory: RAM ∝ sessioni ATTIVE, non a tutte
  * quelle viste). Il restore è ON-DEMAND: il prossimo llm_ai_mlx_session_append/generate
- * richiama automaticamente unpark. Richiede LLM_KVDISK attivo. Ritorna 0 o -1. */
+ * richiama automaticamente unpark. Richiede l'opzione `kvdisk` attiva. Ritorna 0 o -1. */
 int llm_ai_mlx_session_park(llm_ai_mlx_session_handle sh, llm_ai_mlx_model_handle mh);
 
 /* Configures per-session sampling for the NEXT llm_ai_mlx_session_generate.

@@ -124,7 +124,7 @@ void llm_mlx_model_init(LlmMlxModel* m) {
     m->prefix_max = 16; /* default: eviction LRU oltre 16 prefissi salvati */
     llm_radix_init(&m->radix);
     m->kvpool = llm_kv_page_pool_new(/*n_pages=*/1024, /*block_size=*/16);
-    m->kvdisk_state = -1; /* §G: tier SSD KV non inizializzato (lazy su LLM_KVDISK) */
+    m->kvdisk_state = -1; /* §G: tier SSD KV non inizializzato (lazy sull'opzione `kvdisk`) */
     m->kvckpt_block = 256; /* §G-ter: checkpoint del rewind ogni 256 token (LLM_KVCHECKPOINT_BLOCK) */
     { const char* kb = llm_ai_mlx_opt_env("LLM_KVCHECKPOINT_BLOCK"); if (kb) m->kvckpt_block = atoi(kb); }
     /* §G-bis leva 1 — sparse page-level attention (default OFF) */

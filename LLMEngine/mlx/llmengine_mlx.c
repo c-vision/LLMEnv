@@ -35,7 +35,7 @@
 #include "llm_mlx_packed_qkv.h"
 #include "llm_mlx_ngram.h"  /* tabella n-gram per self-speculative decoding (P1) */
 #include "llm_mlx_kvpage.h"  /* KV-cache paging (roadmap 8.11 fase 3) */
-#include "llm_mlx_kvdisk.h"     /* §G: tier SSD dei blocchi KV (offload prefissi, LLM_KVDISK) */
+#include "llm_mlx_kvdisk.h"     /* §G: tier SSD dei blocchi KV (offload prefissi; opzione di registro `kvdisk`) */
 #include "llm_mlx_kvdisk_io.h"  /* §G: serializzazione MLX <-> blob KV */
 #include "llm_mlx_kernel.h"   /* runtime kernel replacement (roadmap 8.11 fase 3) */
 #include "llm_mlx_lora.h"     /* adapter LoRA (roadmap 8.11 fase 4) */
@@ -2046,8 +2046,9 @@ void llm_ai_mlx_destroy_session(llm_ai_mlx_session_handle handle) {
 
  */
 
-/* §G — TIER SSD DELLA KV CACHE. Abilitazione lazy via LLM_KVDISK=<path>|1 (default OFF);
- * LLM_KVDISK_CAP_MB limita i byte VIVI su disco (LRU). Vedi llm_mlx_kvdisk.h. */
+/* §G — TIER SSD DELLA KV CACHE. Abilitazione lazy via opzione di registro `kvdisk`
+ * (off|on|<path>, default OFF); `kvdisk_cap_mb` limita i byte VIVI su disco (LRU).
+ * Vedi llm_mlx_kvdisk.h. */
 
 
 

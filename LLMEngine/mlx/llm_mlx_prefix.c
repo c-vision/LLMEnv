@@ -15,14 +15,16 @@
 bool llm_kvdisk_enabled(LlmMlxModel* m) {
     if (!m) return false;
     if (m->kvdisk_state < 0) {
-        const char* e = llm_ai_mlx_opt_env("LLM_KVDISK");
-        if (e == NULL || e[0] == '\0' || strcmp(e, "0") == 0 || strcmp(e, "off") == 0) {
+        /* Registro opzioni (niente env): `kvdisk` = off|on|<path>, `kvdisk_cap_mb` = budget. */
+        char kv[2048];
+        int is_set = (llm_ai_mlx_opt_get_str("kvdisk", kv, (int)sizeof kv) == 0);
+        if (!is_set || kv[0] == '\0' || strcmp(kv, "0") == 0 || strcmp(kv, "off") == 0) {
             m->kvdisk_state = 0;
         } else {
-            const char* path = (strcmp(e, "1") == 0) ? "/tmp/llm_kvdisk.scratch" : e;
-            uint64_t cap = 0;
-            const char* cb = llm_ai_mlx_opt_env("LLM_KVDISK_CAP_MB");
-            if (cb) cap = (uint64_t)strtoull(cb, NULL, 10) * 1024ull * 1024ull;
+            const char* path = (strcmp(kv, "1") == 0 || strcmp(kv, "on") == 0) ? "/tmp/llm_kvdisk.scratch" : kv;
+            int cap_mb = 0;
+            (void)llm_ai_mlx_opt_get_int("kvdisk_cap_mb", &cap_mb);
+            uint64_t cap = (cap_mb > 0) ? (uint64_t)cap_mb * 1024ull * 1024ull : 0;
             m->kvdisk = llm_kv_disk_open(path, /*max_entries=*/8192, cap);
             m->kvdisk_state = (m->kvdisk.f != NULL && m->kvdisk.e != NULL) ? 1 : 0;
             if (m->kvdisk_state == 1)
@@ -330,7 +332,7 @@ int llm_session_unpark(LlmMlxModel* m, LlmMlxSession* s) {
 
 /* Eviction LRU dei prefissi salvati: se il numero di prefissi supera m->prefix_max,
  * rimuove quello usato meno di recente (libera cache/tokens/history e compatta l'array).
- * §G: con LLM_KVDISK attivo, la KV del LRU ancora in RAM viene prima SPILLATA su disco
+ * §G: con l'opzione di registro `kvdisk` attiva, la KV del LRU ancora in RAM viene prima SPILLATA su disco
  * (unified memory liberata, tokens/name conservati: il riuso la ripristina da disco).
  * Ritorna true se ha evittato (o spillato) almeno un prefisso. */
 static bool llm_prefix_evict_lru(LlmMlxModel* m) {
