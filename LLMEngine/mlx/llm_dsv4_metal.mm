@@ -645,6 +645,55 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        float stp = exp2((float)ste); float q = rint(a / stp) * stp; if (q > 448.f) q = 448.f;\n"
 "        X[off+i] = (v < 0.f ? -q : q) * scale;\n"
 "    }\n"
+"}\n"
+/* Indexer QAT: Hadamard128 + FP4 e2m1 per blocco-32, in-place per riga (head_dim=128). P={n_rows,hd}. */
+"kernel void dsv4_indexer_qat(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], uint gid [[thread_position_in_grid]]) {\n"
+"    const uint n_rows = P[0], hd = P[1]; if (gid >= n_rows || hd != 128u) return;\n"
+"    thread float x[128]; device float* row = X + (ulong)gid * 128ul;\n"
+"    for (uint i = 0; i < 128u; i++) x[i] = row[i];\n"
+"    for (uint stride = 1u; stride < 128u; stride <<= 1)\n"
+"        for (uint base = 0; base < 128u; base += 2u * stride)\n"
+"            for (uint i = 0; i < stride; i++) { float a = x[base+i], b = x[base+stride+i]; x[base+i] = a+b; x[base+stride+i] = a-b; }\n"
+"    const float hs = 0.08838834764831845f;\n"
+"    for (uint i = 0; i < 128u; i++) x[i] *= hs;\n"
+"    { const float lv[8] = { 0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f };\n"
+"      for (uint off = 0; off < 128u; off += 32u) {\n"
+"        float amax = 0.f; for (uint i = 0; i < 32u; i++) { float av = fabs(x[off+i]); if (av > amax) amax = av; }\n"
+"        if (amax < 7.052966104933725e-38f) amax = 7.052966104933725e-38f;\n"
+"        float scale = exp2(ceil(log2(amax / 6.f)));\n"
+"        for (uint i = 0; i < 32u; i++) {\n"
+"            float v = x[off+i] / scale; if (v > 6.f) v = 6.f; if (v < -6.f) v = -6.f;\n"
+"            float sg = v < 0.f ? -1.f : 1.f; float ax = fmin(fabs(v), 6.f);\n"
+"            int best = 0; float bd = fabs(ax - lv[0]);\n"
+"            for (int k = 1; k < 8; k++) { float d = fabs(ax - lv[k]); if (d < bd || (d == bd && (k & 1) == 0 && (best & 1) != 0)) { best = k; bd = d; } }\n"
+"            x[off+i] = sg * lv[best] * scale;\n"
+"        }\n"
+"      } }\n"
+"    for (uint i = 0; i < 128u; i++) row[i] = x[i];\n"
+"}\n"
+/* Indexer score: s[c] = sum_h relu(dot(q_h, kvc_c)) * w_h. Un threadgroup per riga c. */
+"kernel void dsv4_indexer_scores(device const float* Q [[buffer(0)]], device const float* KVC [[buffer(1)]],\n"
+"    device const float* W [[buffer(2)]], device float* SCORES [[buffer(3)]], constant uint* P [[buffer(4)]],\n"
+"    uint c [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
+"    const uint nh = P[0], hd = P[1], n_comp = P[2]; if (c >= n_comp) return;\n"
+"    device const float* kv = KVC + (ulong)c * (ulong)hd; float s = 0.f;\n"
+"    for (uint h = 0; h < nh; h++) {\n"
+"        device const float* qh = Q + (ulong)h * (ulong)hd;\n"
+"        float acc = 0.f; for (uint i = tiisg; i < hd; i += 32u) acc += qh[i] * kv[i];\n"
+"        acc = simd_sum(acc); if (acc < 0.f) acc = 0.f; s += acc * W[h];\n"
+"    }\n"
+"    if (tiisg == 0u) SCORES[c] = s;\n"
+"}\n"
+/* Indexer top-k deterministico (primo massimo, indice crescente). P={n_comp, top_k}. */
+"kernel void dsv4_indexer_topk(device const float* SCORES [[buffer(0)]], device int* ALLOWED [[buffer(1)]],\n"
+"    constant uint* P [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n"
+"    const uint n_comp = P[0], top_k = P[1]; if (gid != 0u) return;\n"
+"    for (uint i = 0; i < n_comp; i++) ALLOWED[i] = 0;\n"
+"    for (uint k = 0; k < top_k; k++) {\n"
+"        int best = 0; float bs = -1.0e30f;\n"
+"        for (uint cc = 0; cc < n_comp; cc++) if (!ALLOWED[cc] && SCORES[cc] > bs) { best = (int)cc; bs = SCORES[cc]; }\n"
+"        ALLOWED[best] = 1;\n"
+"    }\n"
 "}\n";
 
 struct LlmDsv4Metal {
@@ -665,6 +714,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_tbl_pair, pso_tbl_sum6;  /* MoE via argument buffer (ds4 table) */
     id<MTLComputePipelineState> pso_attn_mixed;  /* attn mista raw+comp su device (ds4) */
     id<MTLComputePipelineState> pso_comp_pool, pso_comp_fp8;  /* compressor su device (ds4) */
+    id<MTLComputePipelineState> pso_idx_qat, pso_idx_scores, pso_idx_topk;  /* indexer su device (ds4) */
     id<MTLArgumentEncoder> enc_pair, enc_down;
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
@@ -762,6 +812,13 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_comp_pool = f26 ? [dev newComputePipelineStateWithFunction:f26 error:&err] : nil;
     b->pso_comp_fp8  = f27 ? [dev newComputePipelineStateWithFunction:f27 error:&err] : nil;
     if (!f26 || !f27) fprintf(stderr, "dsv4_metal: kernel compressor NON compilato\n");
+    id<MTLFunction> f28 = [lib newFunctionWithName:@"dsv4_indexer_qat"];
+    id<MTLFunction> f29 = [lib newFunctionWithName:@"dsv4_indexer_scores"];
+    id<MTLFunction> f30 = [lib newFunctionWithName:@"dsv4_indexer_topk"];
+    b->pso_idx_qat    = f28 ? [dev newComputePipelineStateWithFunction:f28 error:&err] : nil;
+    b->pso_idx_scores = f29 ? [dev newComputePipelineStateWithFunction:f29 error:&err] : nil;
+    b->pso_idx_topk   = f30 ? [dev newComputePipelineStateWithFunction:f30 error:&err] : nil;
+    if (!f28 || !f29 || !f30) fprintf(stderr, "dsv4_metal: kernel indexer NON compilato\n");
     [lib release];
     if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->pso_route || !b->pso_addr_pair || !b->pso_addr_sum6 || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
@@ -1327,6 +1384,75 @@ int llm_dsv4_metal_comp_fp8(LlmDsv4Metal* b, float* x, int hd, int n_rot) {
         if (rc == 0) memcpy(x, [X contents], (size_t)hd * sizeof(float));
     }
     if (X) [X release];
+    return rc;
+}
+
+/* Indexer QAT in-place (Hadamard128 + fp4) su n_rows righe di head_dim 128. 0 = ok. */
+int llm_dsv4_metal_indexer_qat(LlmDsv4Metal* b, float* x, int n_rows, int hd) {
+    if (!b || !b->pso_idx_qat || !x) return -1;
+    if (n_rows <= 0 || hd != 128) return 0;   /* come la reference: no-op se head_dim != 128 */
+    id<MTLBuffer> X = [b->dev newBufferWithBytes:x length:(NSUInteger)((size_t)n_rows*128u*sizeof(float)) options:MTLResourceStorageModeShared];
+    int rc = X ? 0 : -2;
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:b->pso_idx_qat];
+        [e setBuffer:X offset:0 atIndex:0];
+        uint32_t P[2] = { (uint32_t)n_rows, 128u }; [e setBytes:P length:sizeof(P) atIndex:1];
+        [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)n_rows + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) memcpy(x, [X contents], (size_t)n_rows * 128u * sizeof(float));
+    }
+    if (X) [X release];
+    return rc;
+}
+
+/* Indexer score per le righe compresse: scores[c] = sum_h relu(dot(q_h,kvc_c)) * w[h]. 0 = ok. */
+int llm_dsv4_metal_indexer_scores(LlmDsv4Metal* b, const float* q, int nh, int hd,
+        const float* kvc, int n_comp, const float* w, float* scores) {
+    if (!b || !b->pso_idx_scores || !q || !kvc || !w || !scores) return -1;
+    if (nh <= 0 || hd <= 0 || n_comp <= 0) return -1;
+    id<MTLBuffer> BQ = [b->dev newBufferWithBytes:q length:(NSUInteger)((size_t)nh*hd*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BK = [b->dev newBufferWithBytes:kvc length:(NSUInteger)((size_t)n_comp*hd*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BW = [b->dev newBufferWithBytes:w length:(NSUInteger)((size_t)nh*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BS = [b->dev newBufferWithLength:(NSUInteger)((size_t)n_comp*sizeof(float)) options:MTLResourceStorageModeShared];
+    int rc = (BQ && BK && BW && BS) ? 0 : -2;
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:b->pso_idx_scores];
+        [e setBuffer:BQ offset:0 atIndex:0]; [e setBuffer:BK offset:0 atIndex:1]; [e setBuffer:BW offset:0 atIndex:2]; [e setBuffer:BS offset:0 atIndex:3];
+        uint32_t P[3] = { (uint32_t)nh, (uint32_t)hd, (uint32_t)n_comp }; [e setBytes:P length:sizeof(P) atIndex:4];
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_comp, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) memcpy(scores, [BS contents], (size_t)n_comp*sizeof(float));
+    }
+    if (BQ)[BQ release]; if (BK)[BK release]; if (BW)[BW release]; if (BS)[BS release];
+    return rc;
+}
+
+/* Indexer top-k deterministico -> allowed[n_comp]. 0 = ok. */
+int llm_dsv4_metal_indexer_topk(LlmDsv4Metal* b, const float* scores, int n_comp, int top_k, int* allowed) {
+    if (!b || !b->pso_idx_topk || !scores || !allowed) return -1;
+    if (n_comp <= 0) return -1;
+    if (top_k > n_comp) top_k = n_comp;
+    id<MTLBuffer> BS = [b->dev newBufferWithBytes:scores length:(NSUInteger)((size_t)n_comp*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BA = [b->dev newBufferWithLength:(NSUInteger)((size_t)n_comp*sizeof(int)) options:MTLResourceStorageModeShared];
+    int rc = (BS && BA) ? 0 : -2;
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:b->pso_idx_topk];
+        [e setBuffer:BS offset:0 atIndex:0]; [e setBuffer:BA offset:0 atIndex:1];
+        uint32_t P[2] = { (uint32_t)n_comp, (uint32_t)top_k }; [e setBytes:P length:sizeof(P) atIndex:2];
+        [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) memcpy(allowed, [BA contents], (size_t)n_comp*sizeof(int));
+    }
+    if (BS)[BS release]; if (BA)[BA release];
     return rc;
 }
 
