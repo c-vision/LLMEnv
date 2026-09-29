@@ -1177,6 +1177,15 @@ void* llm_dsv4_metal_upload(LlmDsv4Metal* b, const void* data, size_t bytes) {
 }
 void llm_dsv4_metal_buffer_release(void* h) { if (h) [(id<MTLBuffer>)h release]; }
 
+/* Hook di test (nessuna env): se impostato, il tail scrive gli stadi in <dir>/d4_*.bin. */
+static const char* g_dsv4_tail_dump = NULL;
+void llm_dsv4_metal_tail_set_dump(const char* dir) { g_dsv4_tail_dump = dir; }
+static void dsv4_dump_buf(const char* nm, id<MTLBuffer> buf, size_t nb) {
+    if (!g_dsv4_tail_dump || !buf) return;
+    char p[512]; snprintf(p, sizeof p, "%s/d4_%s.bin", g_dsv4_tail_dump, nm);
+    FILE* f = fopen(p, "wb"); if (f) { fwrite([buf contents], 1, nb, f); fclose(f); }
+}
+
 /* Vista zero-copy pagina-allineata su un blocco pesi (f32 o packed). Ritorna MTLBuffer retained. */
 static id<MTLBuffer> dsv4_view(LlmDsv4Metal* b, const void* p, size_t bytes, size_t* out_lead) {
     const size_t page = (size_t)getpagesize();
@@ -1351,7 +1360,17 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
         [cb commit];
         [cb waitUntilCompleted];
         rc = cb.error ? -3 : 0;
-        if (rc == 0) memcpy(q->out_hc, [OUTC contents], (size_t)HC*D*sizeof(float));
+        if (rc == 0) {
+            memcpy(q->out_hc, [OUTC contents], (size_t)HC*D*sizeof(float));
+            dsv4_dump_buf("heads", HEADS, (size_t)q->n_head*q->hd*sizeof(float));
+            dsv4_dump_buf("attn",  ATTN,  (size_t)D*sizeof(float));
+            dsv4_dump_buf("nxt",   NXT,   (size_t)HC*D*sizeof(float));
+            dsv4_dump_buf("nrm",   NRM,   (size_t)D*sizeof(float));
+            dsv4_dump_buf("sel",   SEL,   (size_t)q->used*sizeof(int));
+            dsv4_dump_buf("rw",    RW,    (size_t)q->used*sizeof(float));
+            dsv4_dump_buf("rout",  ROUT,  (size_t)D*sizeof(float));
+            dsv4_dump_buf("outc",  OUTC,  (size_t)HC*D*sizeof(float));
+        }
     }
 
     if (HEADS) [HEADS release]; if (RES) [RES release]; if (POST) [POST release]; if (COMB) [COMB release];

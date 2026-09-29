@@ -110,4 +110,7 @@ typedef struct {
 /* Esegue l'intero tail del layer in UNA command buffer. 0 = ok, <0 = fallback CPU. */
 int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q);
 
+/* Test: se dir != NULL, il tail scrive gli stadi in <dir>/d4_*.bin. */
+void llm_dsv4_metal_tail_set_dump(const char* dir);
+
 #endif /* LLM_DSV4_METAL_H */
