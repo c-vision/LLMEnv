@@ -1,9 +1,10 @@
 /* llmengine_plugin.c — registry dei PLUGIN nativi (dlopen). Vedi llmengine_plugin.h.
  *
  * Un plugin = una dylib `libllmengine_plugin_<kind>_<name>.dylib` che esporta UN descrittore
- * (`llmcodec_describe` / `llmengine_plugin_prim_describe`). Ricerca in: $LLMENGINE_PLUGIN_DIR,
+ * (`llmcodec_describe` / `llmengine_plugin_prim_describe`). Ricerca in: opzione `plugin_dir`,
  * <cwd risalendo>/Resources/plugins/<rid>/, poi la ricerca di sistema. Cache per (kind,name). */
 #include "llmengine_plugin.h"
+#include "../Options/llm_engine_opts.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +27,8 @@ static const char* find_plugin(const char* kind, const char* name)
     static char buf[4096];
     char fname[256];
     snprintf(fname, sizeof fname, "libllmengine_plugin_%s_%s.dylib", kind, name);
-    const char* env = getenv("LLMENGINE_PLUGIN_DIR");
+    char pdir[2048];
+    const char* env = (llm_ai_mlx_opt_get_str("plugin_dir", pdir, sizeof pdir) == 0 && pdir[0]) ? pdir : NULL;
     if (env && *env) { snprintf(buf, sizeof buf, "%s/%s", env, fname); if (access(buf, R_OK) == 0) return buf; }
     char cwd[2048];
     if (getcwd(cwd, sizeof cwd) != NULL) {
@@ -124,7 +126,9 @@ const LlmEnginePluginPrimMLX* llmengine_plugin_prim_mlx_get(const char* name)
 
 int llmengine_plugin_list(void)
 {
-    const char* dirs[2] = { getenv("LLMENGINE_PLUGIN_DIR"), NULL };
+    char pdir[2048];
+    const char* pdenv = (llm_ai_mlx_opt_get_str("plugin_dir", pdir, sizeof pdir) == 0 && pdir[0]) ? pdir : NULL;
+    const char* dirs[2] = { pdenv, NULL };
     static char dflt[2048];
     snprintf(dflt, sizeof dflt, "Resources/plugins/%s", plugin_rid());
     dirs[1] = dflt;

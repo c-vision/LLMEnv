@@ -27,7 +27,7 @@ static Opt g_opts[] = {
     { "offload",          "streaming/cache esperti MoE da disco",                    T_BOOL,  0, 0, 0, 0, 0, 0, {0}, NULL, 0 },
     { "offload_cache_mb", "RAM per la cache esperti (MB)",                           T_INT,   14336, 14336, 0, 0, 0, 0, {0}, NULL, 0 },
     { "dtype",            "auto|f16|bf16",                                           T_STR,   0, 0, 0, 0, 0, 0, "auto", "auto", 0 },
-    { "kvquant",          "off|4|8[:soglia]",                                        T_STR,   0, 0, 0, 0, 0, 0, "off", "off", 0 },
+    { "kvquant",          "off|8[:finestra]|auto[:soglia]",                          T_STR,   0, 0, 0, 0, 0, 0, "auto", "auto", 0 },
     { "prefill",          "chunk di prefill (0 = default)",                          T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0 },
     { "temp",             "temperatura di sampling",                                 T_FLOAT, 0, 0, 1.0, 1.0, 0, 0, {0}, NULL, 0 },
     { "topp",             "top-p",                                                   T_FLOAT, 0, 0, 1.0, 1.0, 0, 0, {0}, NULL, 0 },
@@ -41,6 +41,8 @@ static Opt g_opts[] = {
     /* DFlash2 (A1): se impostata a un path di draft DFlash2, il decode greedy usa il drafter a
      * contesto PERSISTENTE (spec streaming). "" = off. */
     { "dflash_model",     "draft DFlash2 (path) per la speculazione a contesto persistente", T_STR, 0, 0, 0, 0, 0, 0, "", "", 0 },
+    /* Directory delle librerie plugin (sostituisce la env LLMENGINE_PLUGIN_DIR). "" = default. */
+    { "plugin_dir",       "directory delle librerie plugin (.dylib)",                T_STR,   0, 0, 0, 0, 0, 0, "", "", 0 },
 };
 #define NOPTS ((int)(sizeof g_opts / sizeof g_opts[0]))
 
