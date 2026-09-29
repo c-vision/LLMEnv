@@ -550,5 +550,15 @@ void session_history_append(LlmMlxSession* s, const int32_t* tok, int n) {
         s->history_cap = ncap;
     }
     memcpy(s->history + s->history_len, tok, (size_t)n * sizeof(int32_t));
+    const int hist_before = s->history_len;
     s->history_len += n;
+    /* N-GRAM self-speculative INCREMENTALE: aggiorna la tabella coi token appena aggiunti, cosi'
+     * il copy-draft impara i pattern che si ripetono NELL'OUTPUT (non solo quelli del prompt).
+     * last_suffix = i `order` token che precedono `tok` (dall'history). No-op se la tabella non e'
+     * ancora costruita (build_ngram la costruira' dall'intera history). */
+    if (s->ngram_built && s->ngram.buckets != NULL) {
+        const int ord = s->ngram_order;
+        const int32_t* suffix = (hist_before >= ord) ? (s->history + hist_before - ord) : NULL;
+        llm_mlx_ngram_add(&s->ngram, tok, n, suffix);
+    }
 }
