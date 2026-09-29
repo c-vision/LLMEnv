@@ -905,6 +905,17 @@ int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_
             }
         }
 
+        if (!okb) {   /* forward batch fallito: NIENTE emit/avanzamento (cache resterebbe incoerente) */
+            for (int i = 0; i < s->n_layers; i++) {
+                llm_mlx_cache_rollback(&s->k_cache[i], ckpt_k[i], m->stream);
+                llm_mlx_cache_rollback(&s->v_cache[i], ckpt_v[i], m->stream);
+            }
+            s->cache_offset = co_orig;
+            mlx_array_free(hb);
+            for (int i = 0; i < s->n_layers; i++) { mlx_array_free(ckpt_k[i]); mlx_array_free(ckpt_v[i]); }
+            free(ckpt_k); free(ckpt_v);
+            break;
+        }
         int M = 1;
         if (okb) { for (int i = 1; i < nd; i++) { if (greedy[i - 1] == draft[i]) M++; else break; } }
         int32_t next = okb ? greedy[M - 1] : 0;
