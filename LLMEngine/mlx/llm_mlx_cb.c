@@ -8,6 +8,7 @@
 #include "llm_mlx_splash_store.h"
 #include "llm_mlx_splash_attn.h"   /* opt_env: registro */
 #include "llm_mlx_kvq_splash.h"        /* B7: store/quant Splash int8 */
+#include "llm_mlx_kvq_pool.h"          /* B6: pool paged + spill/fault pagina */
 #include "llm_mlx_kvdisk_io.h"      /* tier SSD: round-trip blob int8 */
 #include "llm_mlx_internal.h"
 #include <stdio.h>
@@ -1397,4 +1398,52 @@ int llm_ai_mlx_kvdisk_int8_selftest(char* out, size_t cap) {
              rc, bad_n, tier_ok, (rc == 0 && bad_n == 0 && tier_ok == 0) ? "OK" : "FAIL");
     mlx_array_free(a); free(blob); free(src);
     return (rc == 0 && bad_n == 0 && tier_ok == 0) ? 0 : 1;
+}
+
+/* Self-test: spill/fault di una pagina del pool int8 sul tier SSD (riuso kvdisk).
+ * Confronto RAW: i byte della pagina (K/V/scale) dopo il fault-in devono essere
+ * IDENTICI a prima dello spill (la pagina fisica viene ripristinata via kvdisk). */
+int llm_ai_mlx_kvq_page_tier_selftest(char* out, size_t cap) {
+    if (out == NULL || cap == 0) return -1;
+    out[0] = '\0';
+    const int nkv = 2, hd = 64, N = 64;   /* 2 pagine da 32 */
+    mlx_stream s = mlx_default_gpu_stream_new();
+    llm_kvq_pool p;
+    if (!llm_kvq_pool_init(&p, 1, nkv, hd, LLM_KVQ_FMT_INT8, N, s)) { snprintf(out, cap, "pool_init FAIL"); return 1; }
+    float* kb = (float*)malloc((size_t)nkv*N*hd*4), *vb = (float*)malloc((size_t)nkv*N*hd*4);
+    for (int i = 0; i < nkv*N*hd; i++) { kb[i] = sinf((float)i*0.7f)*3.0f; vb[i] = cosf((float)i*0.31f)*2.0f; }
+    mlx_array K = mlx_array_new_data(kb, (int[]){nkv,N,hd}, 3, MLX_FLOAT32);
+    mlx_array V = mlx_array_new_data(vb, (int[]){nkv,N,hd}, 3, MLX_FLOAT32);
+    bool stored = (llm_kvq_pool_store(&p, 0, K, V, 0, N, s) != 0);
+
+    /* snapshot RAW della pagina logica 0 (K int8 + scale f32), prima dello spill. */
+    int PT = p.page_tokens, ploc0 = llm_kv_pt_phys(&p.pt, 0) * PT;
+    size_t nk = (size_t)nkv*PT*hd, ns = (size_t)nkv*PT;
+    int8_t* kA = (int8_t*)malloc(nk); float* sA = (float*)malloc(ns*4);
+    int8_t* kB = (int8_t*)malloc(nk); float* sB = (float*)malloc(ns*4);
+    int snapA = 0, snapB = 0;
+    { mlx_array a = mlx_array_new(); int c0[3]={0,ploc0,0}, c1[3]={nkv,ploc0+PT,hd}, st[3]={1,1,1};
+      if (mlx_slice(&a, p.keyData[0], c0,3,c1,3,st,3, s)==0 && mlx_array_eval(a)==0) { memcpy(kA, mlx_array_data_int8(a), nk); snapA++; } mlx_array_free(a); }
+    { mlx_array a = mlx_array_new(); int c0[3]={0,ploc0,0}, c1[3]={nkv,ploc0+PT,1}, st[3]={1,1,1};
+      if (mlx_slice(&a, p.keyScales[0], c0,3,c1,3,st,3, s)==0 && mlx_array_eval(a)==0) { memcpy(sA, mlx_array_data_float32(a), ns*4); snapA++; } mlx_array_free(a); }
+
+    KvDisk d = llm_kv_disk_open("/tmp/llm_kvq_pagetier.scratch", 64, (uint64_t)4*1024*1024);
+    int sp_rc = -9, fi_rc = -9; int tier_ok = 0;
+    if (stored && d.f && d.e) {
+        sp_rc = llm_kvq_pool_spill_page(&p, 0, 0, &d, 0x1111ULL, s);
+        fi_rc = llm_kvq_pool_faultin_page(&p, 0, 0, &d, 0x1111ULL, s);
+    }
+    int ploc0b = llm_kv_pt_phys(&p.pt, 0) * PT;
+    { mlx_array a = mlx_array_new(); int c0[3]={0,ploc0b,0}, c1[3]={nkv,ploc0b+PT,hd}, st[3]={1,1,1};
+      if (mlx_slice(&a, p.keyData[0], c0,3,c1,3,st,3, s)==0 && mlx_array_eval(a)==0) { memcpy(kB, mlx_array_data_int8(a), nk); snapB++; } mlx_array_free(a); }
+    { mlx_array a = mlx_array_new(); int c0[3]={0,ploc0b,0}, c1[3]={nkv,ploc0b+PT,1}, st[3]={1,1,1};
+      if (mlx_slice(&a, p.keyScales[0], c0,3,c1,3,st,3, s)==0 && mlx_array_eval(a)==0) { memcpy(sB, mlx_array_data_float32(a), ns*4); snapB++; } mlx_array_free(a); }
+    if (snapA == 2 && snapB == 2 && sp_rc == 0 && fi_rc == 0)
+        tier_ok = (memcmp(kA, kB, nk) == 0 && memcmp(sA, sB, ns*4) == 0) ? 1 : 0;
+    llm_kv_disk_close(&d);
+    snprintf(out, cap, "kvq_page_tier selftest: store=%d spill=%d faultin=%d raw=%s %s",
+             (int)stored, sp_rc, fi_rc, tier_ok ? "OK" : "FAIL", (stored && tier_ok) ? "OK" : "FAIL");
+    free(kA); free(sA); free(kB); free(sB);
+    mlx_array_free(K); mlx_array_free(V); llm_kvq_pool_free(&p);
+    return (stored && tier_ok) ? 0 : 1;
 }

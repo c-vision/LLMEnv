@@ -220,6 +220,68 @@ static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
     return ok;
 }
 
+/* ── Spill/fault di UNA pagina fisica del pool <-> tier SSD (riuso kvdisk) ──── */
+#include "llm_mlx_kvdisk_io.h"
+static inline int llm_kvq_pool_spill_page(llm_kvq_pool* p, int layer, int lp, KvDisk* d, uint64_t key, mlx_stream s) {
+    if (!p || !d || layer < 0 || layer >= p->layers) return -1;
+    int phys = llm_kv_pt_phys(&p->pt, lp);
+    if (phys < 0) return -1;
+    int PT = p->page_tokens, nkv = p->kv_heads, hd = p->head_dim, t0 = phys * PT;
+    int a0[3] = {0,t0,0}, a1[3] = {nkv,t0+PT,hd}, st[3] = {1,1,1};
+    int s0[3] = {0,t0,0}, s1[3] = {nkv,t0+PT,1};
+    mlx_array K = mlx_array_new(), V = mlx_array_new(), S = mlx_array_new();
+    bool ok = mlx_slice(&K, p->keyData[layer], a0,3,a1,3,st,3, s) == 0 &&
+              mlx_slice(&V, p->valueData[layer], a0,3,a1,3,st,3, s) == 0 &&
+              mlx_slice(&S, p->keyScales[layer], s0,3,s1,3,st,3, s) == 0;
+    uint8_t* buf = NULL; size_t len = 0, cap = 0;
+    if (ok) {
+        uint32_t magic = LLM_KVDISK_BLOB_MAGIC, ver = LLM_KVDISK_BLOB_VER, nt = 3;
+        if (llm_kvdisk_buf_reserve(&buf, &cap, 0, 12) != 0) ok = false;
+        else { memcpy(buf, &magic, 4); memcpy(buf + 4, &ver, 4); memcpy(buf + 8, &nt, 4); len = 12; }
+    }
+    if (ok) ok = llm_kvdisk_blob_append_tensor(&buf, &len, &cap, K, layer, 0) == 0;
+    if (ok) ok = llm_kvdisk_blob_append_tensor(&buf, &len, &cap, V, layer, 1) == 0;
+    if (ok) ok = llm_kvdisk_blob_append_tensor(&buf, &len, &cap, S, layer, 2) == 0;
+    if (ok) ok = llm_kv_disk_put(d, key, buf, len) == 0;
+    if (ok) { llm_kv_pt_release_phys(&p->pt, phys); p->pt.table[lp] = -1; ok = llm_kvq_pool_export_ptab(p, s); }
+    mlx_array_free(K); mlx_array_free(V); mlx_array_free(S); free(buf);
+    return ok ? 0 : -1;
+}
+
+static inline int llm_kvq_pool_faultin_page(llm_kvq_pool* p, int layer, int lp, KvDisk* d, uint64_t key, mlx_stream s) {
+    if (!p || !d || layer < 0 || layer >= p->layers) return -1;
+    if (llm_kv_pt_phys(&p->pt, lp) >= 0) return 0;   /* gia' residente */
+    size_t need = 0;
+    if (!llm_kv_disk_has(d, key, &need) || need < 12) return -1;
+    uint8_t* buf = (uint8_t*)malloc(need); size_t got = 0;
+    if (!buf || llm_kv_disk_get(d, key, buf, need, &got) != 0 || got < 12) { free(buf); return -1; }
+    uint32_t magic = 0, ver = 0; memcpy(&magic, buf, 4); memcpy(&ver, buf + 4, 4);
+    bool ok = (magic == LLM_KVDISK_BLOB_MAGIC && ver == LLM_KVDISK_BLOB_VER);
+    size_t off = 12;
+    mlx_array K = mlx_array_new(), V = mlx_array_new(), S = mlx_array_new(); int l = 0, k = 0;
+    if (ok) ok = llm_kvdisk_blob_read_tensor(buf, got, &off, &K, &l, &k) == 0 &&
+                 llm_kvdisk_blob_read_tensor(buf, got, &off, &V, &l, &k) == 0 &&
+                 llm_kvdisk_blob_read_tensor(buf, got, &off, &S, &l, &k) == 0;
+    if (ok) {
+        int phys = llm_kv_pt_map(&p->pt, lp);
+        if (phys < 0) ok = false;
+        else {
+            int PT = p->page_tokens, nkv = p->kv_heads, hd = p->head_dim, t0 = phys * PT;
+            int a0[3] = {0,t0,0}, a1[3] = {nkv,t0+PT,hd}, st[3] = {1,1,1};
+            int s0[3] = {0,t0,0}, s1[3] = {nkv,t0+PT,1};
+            mlx_array nk = mlx_array_new(), nv = mlx_array_new(), ns = mlx_array_new();
+            ok = mlx_slice_update(&nk, p->keyData[layer], K, a0,3,a1,3,st,3, s) == 0 &&
+                 mlx_slice_update(&nv, p->valueData[layer], V, a0,3,a1,3,st,3, s) == 0 &&
+                 mlx_slice_update(&ns, p->keyScales[layer], S, s0,3,s1,3,st,3, s) == 0;
+            if (ok) { mlx_array_set(&p->keyData[layer], nk); mlx_array_set(&p->valueData[layer], nv); mlx_array_set(&p->keyScales[layer], ns); }
+            mlx_array_free(nk); mlx_array_free(nv); mlx_array_free(ns);
+        }
+    }
+    if (ok) ok = llm_kvq_pool_export_ptab(p, s);
+    mlx_array_free(K); mlx_array_free(V); mlx_array_free(S); free(buf);
+    return ok ? 0 : -1;
+}
+
 static inline void llm_kvq_pool_free(llm_kvq_pool* p) {
     if (!p || !p->keyData) return;
     for (int l = 0; l < p->layers; l++) {
