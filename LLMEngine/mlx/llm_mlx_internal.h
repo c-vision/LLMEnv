@@ -749,6 +749,14 @@ typedef struct DFlash2Runtime {
     Df2CtxState* ctx;         /* slot per-sessione; [0] = la sessione single (default) */
     int n_ctx;                /* slot allocati */
     int cur_ctx;              /* slot corrente (single-session: 0) */
+    /* A1 — contesto del draft PERSISTENTE tra chiamate di generate (streaming). retained_ctx =
+     * l'ultimo `vctx` (feature target delle righe accettate, non ancora appese al ring);
+     * last_session/last_offset identificano la CONTINUAZIONE (stessa sessione, cache_offset
+     * invariato). Serve a NON ri-catturare il prompt ne' resettare il ring a ogni chiamata. */
+    void* last_session;
+    int last_offset;
+    float* retained_ctx;
+    int retained_n;
     /* pesi target referenziati (embed + lm_head), fetch in create */
     mlx_array embed_w, embed_s, embed_b;
     mlx_array lm_w, lm_s, lm_b;

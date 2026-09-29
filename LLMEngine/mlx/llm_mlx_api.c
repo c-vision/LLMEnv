@@ -557,6 +557,12 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
     return ok ? accepted : -1;
 }
 
+/* A1: conserva il ctx del draft (ultimo vctx) per la continuazione; libera il precedente. */
+static void df2_retain_ctx(DFlash2Runtime* rt, float* ctx, int n) {
+    if (rt->retained_ctx) free(rt->retained_ctx);
+    rt->retained_ctx = ctx; rt->retained_n = n;
+}
+
 int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
                                 llm_ai_mlx_session_handle sess_handle,
                                 int32_t eos_token, int max_tokens,
@@ -576,42 +582,58 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
     const int n_prompt = s->cache_offset;
     if (n_prompt <= 0) return -1;
 
-    /* ctx del prompt: re-forward della history su cache scratch con capture (eval a fine
-     * forward: capture robusta). Round1 usa queste righe come nel reference. */
-    int64_t pctx_cap = (int64_t)n_prompt * ncap * H;
-    float* pctx = (float*)malloc((size_t)pctx_cap * sizeof(float));
-    OutputTensors t;
-    bool okc = load_output_tensors(m, &t);
-    const int tnl = m->cfg.n_layers;   /* cache scratch del TARGET (64), NON del draft (5)! */
-    mlx_array* pk = (mlx_array*)malloc((size_t)tnl * sizeof(mlx_array));
-    mlx_array* pv = (mlx_array*)malloc((size_t)tnl * sizeof(mlx_array));
-    bool* ph = (bool*)calloc((size_t)tnl, sizeof(bool));
-    for (int i = 0; i < tnl; i++) { pk[i] = mlx_array_new(); pv[i] = mlx_array_new(); }
-    mlx_array phidden = mlx_array_new();
-    if (okc) okc = df2_capture_batch(m, s, t.embed_w, t.embed_s, t.embed_b,
-                                     s->history, n_prompt, 0, pk, pv, ph,
-                                     caplayers, ncap, pctx, (int)pctx_cap, &phidden);
-    free_output_tensors(&t);
-    for (int i = 0; i < tnl; i++) { mlx_array_free(pk[i]); mlx_array_free(pv[i]); }
-    free(pk); free(pv); free(ph); mlx_array_free(phidden);
-    if (!okc) { free(pctx); fprintf(stderr, "dflash_generate: capture prompt fallita\n"); return -1; }
-    if (getenv("DF2_DUMP_CTX")) {
-        FILE* fc = fopen(getenv("DF2_DUMP_CTX"), "wb");
-        if (fc) { fwrite(pctx, sizeof(float), (size_t)pctx_cap, fc); fclose(fc); }
-        fprintf(stderr, "[ctx] dumped %lld floats\n", (long long)pctx_cap);
+    /* A1 — CONTESTO PERSISTENTE. Se questa e' la CONTINUAZIONE della stessa sessione (nessun
+     * token appeso dal chiamante: cache_offset invariato dall'ultima chiamata), riusiamo il ctx
+     * del draft gia' nel ring + l'ultimo vctx, SENZA ri-catturare il prompt ne' resettare il ring. */
+    const bool cont = (rt->last_session == (void*)s) && (rt->last_offset == s->cache_offset)
+                      && (rt->retained_ctx != NULL) && (rt->retained_n > 0);
+    float* pctx = NULL;
+    int ctx_n0 = 0;
+    if (cont) {
+        ctx_n0 = rt->retained_n;
+        pctx = (float*)malloc((size_t)ctx_n0 * ncap * H * sizeof(float));
+        if (!pctx) return -1;
+        memcpy(pctx, rt->retained_ctx, (size_t)ctx_n0 * ncap * H * sizeof(float));
+    } else {
+        /* ctx del prompt: re-forward della history su cache scratch con capture (eval a fine
+         * forward: capture robusta). Round1 usa queste righe come nel reference. */
+        int64_t pctx_cap = (int64_t)n_prompt * ncap * H;
+        pctx = (float*)malloc((size_t)pctx_cap * sizeof(float));
+        if (!pctx) return -1;
+        ctx_n0 = n_prompt;
+        OutputTensors t;
+        bool okc = load_output_tensors(m, &t);
+        const int tnl = m->cfg.n_layers;   /* cache scratch del TARGET (64), NON del draft (5)! */
+        mlx_array* pk = (mlx_array*)malloc((size_t)tnl * sizeof(mlx_array));
+        mlx_array* pv = (mlx_array*)malloc((size_t)tnl * sizeof(mlx_array));
+        bool* ph = (bool*)calloc((size_t)tnl, sizeof(bool));
+        for (int i = 0; i < tnl; i++) { pk[i] = mlx_array_new(); pv[i] = mlx_array_new(); }
+        mlx_array phidden = mlx_array_new();
+        if (okc) okc = df2_capture_batch(m, s, t.embed_w, t.embed_s, t.embed_b,
+                                         s->history, n_prompt, 0, pk, pv, ph,
+                                         caplayers, ncap, pctx, (int)pctx_cap, &phidden);
+        free_output_tensors(&t);
+        for (int i = 0; i < tnl; i++) { mlx_array_free(pk[i]); mlx_array_free(pv[i]); }
+        free(pk); free(pv); free(ph); mlx_array_free(phidden);
+        if (!okc) { free(pctx); fprintf(stderr, "dflash_generate: capture prompt fallita\n"); return -1; }
+        if (getenv("DF2_DUMP_CTX")) {
+            FILE* fc = fopen(getenv("DF2_DUMP_CTX"), "wb");
+            if (fc) { fwrite(pctx, sizeof(float), (size_t)pctx_cap, fc); fclose(fc); }
+            fprintf(stderr, "[ctx] dumped %lld floats\n", (long long)pctx_cap);
+        }
+        llm_ai_mlx_dflash2_reset(handle);   /* nuova sequenza: ring del draft pulito */
     }
 
-    llm_ai_mlx_dflash2_reset(handle);
     int emitted = 0;
     int stat_rounds = 0, stat_accepted = 0, stat_K = 0;
-    int32_t anchor = s->pending_next_id;   /* bonus = greedy dopo il prompt */
+    int32_t anchor = s->pending_next_id;   /* bonus = greedy dopo il prompt (o pending in continuazione) */
     float* ctx_r = pctx;
-    int ctx_n = n_prompt;
+    int ctx_n = ctx_n0;
 
     while (emitted < max_tokens) {
-        if (anchor == eos_token) { free(ctx_r); return emitted; }   /* eos NON emesso (come session_generate) */
+        if (anchor == eos_token) break;   /* eos NON emesso (come session_generate) */
         out_ids[emitted++] = anchor;
-        if (emitted >= max_tokens) { free(ctx_r); return emitted; }
+        if (emitted >= max_tokens) break;
 
         int32_t drafts[8];
         LLM_DF2_SP_BEGIN(prop);
@@ -627,26 +649,35 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
         int accepted = df2_dflash_verify(s, anchor, drafts, K, caplayers, ncap,
                                          vctx, (int)vctx_cap, &next_anchor);
         LLM_DF2_SP_END(ver);
-        if (accepted < 0 || next_anchor < 0) { free(vctx); free(ctx_r); return -1; }
+        if (accepted < 0 || next_anchor < 0) { free(vctx); break; }
         stat_rounds++; stat_accepted += accepted; stat_K += K;
         if (g_df2_time_on())
             fprintf(stderr, "[df2time] r=%d acc=%d/%d | ckpt=%.0f fwd=%.0f arg=%.0f roll=%.0f PROP=%.0f (bb=%.0f sel=%.0f wget=%.0f argp=%.0f) ms\n",
                     stat_rounds, accepted, K, g_df2_t_ckpt * 1e3, g_df2_t_fwd * 1e3,
                     g_df2_t_arg * 1e3, g_df2_t_roll * 1e3, g_df2_t_prop * 1e3, g_df2_t_bb * 1e3, g_df2_t_sel * 1e3, g_df2_t_wget * 1e3, g_df2_t_argp * 1e3);
 
+        bool stop_eos = false;
         for (int i = 0; i < accepted && emitted < max_tokens; i++) {
-            if (drafts[i] == eos_token) { free(vctx); free(ctx_r); return emitted; }   /* eos non emesso */
+            if (drafts[i] == eos_token) { stop_eos = true; break; }   /* eos non emesso */
             out_ids[emitted++] = drafts[i];
         }
         free(ctx_r);
         ctx_r = vctx;
         ctx_n = accepted + 1;
-        if (emitted >= max_tokens) { free(ctx_r); return emitted; }
         anchor = next_anchor;
+        if (stop_eos) break;
+        if (emitted >= max_tokens) break;
         if (getenv("DF2_STATS"))
             fprintf(stderr, "[df2stats] r=%d accepted=%d/%d\n", stat_rounds, accepted, K);
     }
-    if (ctx_r) free(ctx_r);
+
+    /* A1: persistenza. Il ctx `ctx_r` (ultimo vctx; pctx se nessun round) resta nel runtime per
+     * la prossima chiamata di continuazione; il pending della sessione = l'ultimo anchor. */
+    df2_retain_ctx(rt, ctx_r, ctx_n);
+    rt->last_session = (void*)s;
+    rt->last_offset = s->cache_offset;
+    s->pending_next_id = anchor;
+    s->has_pending = true;
     if (getenv("DF2_STATS") && stat_rounds > 0)
         fprintf(stderr, "[df2stats] total accepted=%d/%d (%.0f%%)\n", stat_accepted, stat_K,
                 100.0 * (double)stat_accepted / (double)stat_K);
