@@ -22,6 +22,9 @@ int  llm_dsv4_gpu_ctx_active(void);
 /* Hook layer/attenzione (0 => esegui su CPU). */
 int llm_dsv4_gpu_moe_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                          const float* x, int token, float* out);
+/* MoE di un chunk di `nt` token in UNA command buffer (1 = eseguito; 0 = usare il per-token). */
+int llm_dsv4_gpu_moe_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
+                               const float* x, const int* tokens, int nt, float* out);
 int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                   const float* xn, int pos, float* q, float* kv, float* qrn);
 int llm_dsv4_gpu_attn_finish_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
@@ -31,6 +34,9 @@ int llm_dsv4_gpu_attn_finish_try(const LlmDsv4Config* c, const LlmDsv4LayerWeigh
 int llm_dsv4_gpu_attn_mid_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
         int ratio, int raw_cap, int comp_cap,
         const float* q, const float* kv, const float* qrn, const float* xn, int pos, float* heads);
+/* Attenzione di un chunk di `nt` token consecutivi in una command buffer per fase (tutto-o-niente, 1 = eseguito). */
+int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
+        int ratio, int raw_cap, int comp_cap, const float* xn, int pos0, int nt, float* out);
 /* Tail fuso del layer (fin+mhc+route+moe+mhc) in UNA command buffer (1 = eseguito). */
 int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
         const LlmDsv4PackedExperts* pe, int il, const float* heads, const float* saved_attn,
