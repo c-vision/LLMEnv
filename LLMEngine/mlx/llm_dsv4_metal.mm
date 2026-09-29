@@ -60,6 +60,29 @@ static const char* const LLM_DSV4_METAL_KERNELS =
 "        }\n"
 "    }\n"
 "    float s = simd_sum(acc); if (tid == 0u) O[tg] = s;\n"
+"}\n"
+/* GEMV Q8_0 veloce: un intero blocco (32 elementi) per iterazione, scale caricato 1x/blocco.
+ * P = {voff, row_bytes, nblk, out_dim}. Stessa semantica di dsv4_gemv(type=8). */
+"kernel void dsv4_gemv_q8_0(device const uchar* W [[buffer(0)]], device const float* X [[buffer(1)]], device float* O [[buffer(2)]], constant uint* P [[buffer(3)]],\n"
+"    uint tg [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {\n"
+"    uint voff = P[0], row_bytes = P[1], nblk = P[2], out_dim = P[3];\n"
+"    if (tg >= out_dim) return;\n"
+"    device const uchar* row = W + voff + (ulong)tg * (ulong)row_bytes;\n"
+"    float acc = 0.0f;\n"
+"    for (uint b = tid; b < nblk; b += 32u) {\n"
+"        device const uchar* blk = row + (ulong)b * 34ul;\n"
+"        ushort dh = (ushort)blk[0] | ((ushort)blk[1] << 8);\n"
+"        float d = (float)as_type<half>(dh);\n"
+"        const uint base = b * 32u; float s = 0.0f;\n"
+"        for (uint i = 0; i < 32u; i += 4) {\n"
+"            s += (float)(char)blk[2u+i]     * X[base+i]\n"
+"               + (float)(char)blk[2u+i+1u]  * X[base+i+1u]\n"
+"               + (float)(char)blk[2u+i+2u]  * X[base+i+2u]\n"
+"               + (float)(char)blk[2u+i+3u]  * X[base+i+3u];\n"
+"        }\n"
+"        acc += d * s;\n"
+"    }\n"
+"    float r = simd_sum(acc); if (tid == 0u) O[tg] = r;\n"
 "}\n";
 
 /* ── Metodo ds4: attivazione Q8_K + integer-dot a blocchi (8 elementi per lookup di griglia).
@@ -719,6 +742,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_q8k_iq2;
     id<MTLComputePipelineState> pso_q8k_q2k;
     id<MTLComputePipelineState> pso_q8k_q4k;
+    id<MTLComputePipelineState> pso_q8_0;  /* GEMV Q8_0 veloce (scale 1x/blocco) */
     id<MTLComputePipelineState> pso_pair;   /* MoE fuso gate+up+swiglu (ds4 pair) */
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
@@ -800,6 +824,9 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_q8k_iq2 = [dev newComputePipelineStateWithFunction:f2 error:&err];
     b->pso_q8k_q2k = [dev newComputePipelineStateWithFunction:f3 error:&err];
     b->pso_q8k_q4k = [dev newComputePipelineStateWithFunction:f4 error:&err];
+    { id<MTLFunction> fq0 = [lib newFunctionWithName:@"dsv4_gemv_q8_0"];
+      b->pso_q8_0 = fq0 ? [dev newComputePipelineStateWithFunction:fq0 error:&err] : nil;
+      if (!fq0) fprintf(stderr, "dsv4_metal: kernel dsv4_gemv_q8_0 NON compilato\n"); }
     b->pso_pair    = f5 ? [dev newComputePipelineStateWithFunction:f5 error:&err] : nil;
     b->pso_sum6_q2k = f6 ? [dev newComputePipelineStateWithFunction:f6 error:&err] : nil;
     b->pso_rms_w    = f7 ? [dev newComputePipelineStateWithFunction:f7 error:&err] : nil;
@@ -866,6 +893,7 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_q8k_iq2)  [b->pso_q8k_iq2 release];
     if (b->pso_q8k_q2k)  [b->pso_q8k_q2k release];
     if (b->pso_q8k_q4k)  [b->pso_q8k_q4k release];
+    if (b->pso_q8_0)     [b->pso_q8_0 release];
     if (b->pso_pair)     [b->pso_pair release];
     if (b->pso_sum6_q2k) [b->pso_sum6_q2k release];
     if (b->pso_slots6)   [b->pso_slots6 release];
@@ -1302,7 +1330,7 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b,
         id<MTLCommandBuffer> cb = [b->queue commandBuffer];
         id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
         for (int g = 0; g < ng; g++) {
-            [e setComputePipelineState:b->pso];
+            [e setComputePipelineState:b->pso_q8_0];
             [e setBuffer:WA offset:0 atIndex:0];
             [e setBuffer:H  offset:(NSUInteger)((size_t)g * gd * sizeof(float)) atIndex:1];
             [e setBuffer:LOW offset:(NSUInteger)((size_t)g * rank * sizeof(float)) atIndex:2];
@@ -1311,7 +1339,7 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b,
             [e setBytes:P length:sizeof(P) atIndex:3];
             [e dispatchThreadgroups:MTLSizeMake(rank, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         }
-        [e setComputePipelineState:b->pso];
+        [e setComputePipelineState:b->pso_q8_0];
         [e setBuffer:WB  offset:0 atIndex:0];
         [e setBuffer:LOW offset:0 atIndex:1];
         [e setBuffer:OUT offset:0 atIndex:2];
@@ -1754,12 +1782,12 @@ int llm_dsv4_metal_attn_proj_fused(LlmDsv4Metal* b,
         id<MTLCommandBuffer> cb = [b->queue commandBuffer];
         id<MTLComputeCommandEncoder> en = [cb computeCommandEncoder];
         /* gemv q_a: X -> QR */
-        [en setComputePipelineState:b->pso];
+        [en setComputePipelineState:b->pso_q8_0];
         [en setBuffer:WA offset:0 atIndex:0]; [en setBuffer:X offset:0 atIndex:1]; [en setBuffer:QR offset:0 atIndex:2];
         { uint32_t P[7]={(uint32_t)l_qa,(uint32_t)qa_row_bytes,embd/32u,lq,8u,34u,32u}; [en setBytes:P length:sizeof(P) atIndex:3]; }
         [en dispatchThreadgroups:MTLSizeMake(lq,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
         /* gemv kv: X -> KVR */
-        [en setComputePipelineState:b->pso];
+        [en setComputePipelineState:b->pso_q8_0];
         [en setBuffer:WK offset:0 atIndex:0]; [en setBuffer:X offset:0 atIndex:1]; [en setBuffer:KVR offset:0 atIndex:2];
         { uint32_t P[7]={(uint32_t)l_kv,(uint32_t)kv_row_bytes,embd/32u,hd,8u,34u,32u}; [en setBytes:P length:sizeof(P) atIndex:3]; }
         [en dispatchThreadgroups:MTLSizeMake(hd,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
@@ -1769,7 +1797,7 @@ int llm_dsv4_metal_attn_proj_fused(LlmDsv4Metal* b,
         { uint32_t P[1]={lq}; [en setBytes:P length:sizeof(P) atIndex:3]; float cf[1]={eps}; [en setBytes:cf length:sizeof(cf) atIndex:4]; }
         [en dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
         /* gemv q_b: QRN -> QB */
-        [en setComputePipelineState:b->pso];
+        [en setComputePipelineState:b->pso_q8_0];
         [en setBuffer:WQ offset:0 atIndex:0]; [en setBuffer:QRN offset:0 atIndex:1]; [en setBuffer:QB offset:0 atIndex:2];
         { uint32_t P[7]={(uint32_t)l_qb,(uint32_t)qb_row_bytes,lq/32u,qd,8u,34u,32u}; [en setBytes:P length:sizeof(P) atIndex:3]; }
         [en dispatchThreadgroups:MTLSizeMake(qd,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
