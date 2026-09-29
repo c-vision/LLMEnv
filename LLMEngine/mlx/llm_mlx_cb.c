@@ -155,7 +155,7 @@ static bool llm_cb_kvq_raw(mlx_array* o, void* c) {
 static bool llm_cb_kvq_llm(mlx_array* o, void* c) {
     llm_cb_kvq_ctx* p = (llm_cb_kvq_ctx*)c;
     return llm_mlx_kvq_sdpa_decode(o, p->q, p->Kc_w, p->Kc_s, p->Kc_b, p->Vc_w, p->Vc_s, p->Vc_b,
-                                   p->Kr, p->Vr, 0, p->bits, p->vbits, p->scale, p->s);
+                                   p->Kr, p->Vr, 0, p->bits, p->vbits, p->scale, 0, p->s);
 }
 
 static mlx_array llm_cb_scalar_bf16(float v, mlx_stream s) {
@@ -827,7 +827,7 @@ int llm_ai_mlx_core_bench(const char* op, int iters, char* out, size_t cap) {
             if (mok) mok = mlx_softmax_axis(&sm,scl,-1,true,s)==0;
             if (mok) mok = mlx_matmul(&om,sm,v4,s)==0;
             if (mok) { int o2[2]={nh,hd}; mok = mlx_reshape(&man,om,o2,2,s)==0; }
-            if (mok) mok = llm_mlx_kvq_sdpa_decode(&ko, c.q, c.Kc_w, c.Kc_s, c.Kc_b, c.Vc_w, c.Vc_s, c.Vc_b, c.Kr, c.Vr, 0, 4, 4, c.scale, s);
+            if (mok) mok = llm_mlx_kvq_sdpa_decode(&ko, c.q, c.Kc_w, c.Kc_s, c.Kc_b, c.Vc_w, c.Vc_s, c.Vc_b, c.Kr, c.Vr, 0, 4, 4, c.scale, 0, s);
             double dk=-1, dr=-1;
             if (mok) { mlx_array mf=mlx_array_new(), kf=mlx_array_new();
                 if (mlx_astype(&mf,man,MLX_FLOAT32,s)==0 && mlx_astype(&kf,ko,MLX_FLOAT32,s)==0 && mlx_array_eval(mf)==0 && mlx_array_eval(kf)==0) {
