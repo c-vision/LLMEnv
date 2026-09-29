@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_kvpage.h"
@@ -83,10 +84,10 @@ int llm_ai_mlx_session_verify_draft_batch(llm_ai_mlx_session_handle handle,
     if (m->cfg.is_linear_layer != NULL)
         for (int l = 0; l < m->cfg.n_layers; l++)
             if (m->cfg.is_linear_layer[l]) { has_linear = true; break; }
-    const bool slice_rollback = !has_linear && getenv("LLM_SPEC_REAPPEND") == NULL;
+    const bool slice_rollback = !has_linear && llm_ai_mlx_opt_env("LLM_SPEC_REAPPEND") == NULL;
     /* S5 (2026-09-21): sui modelli ibridi (GDN) cattura lo stato ricorrente PER-TOKEN
      * durante il batch -> su rifiuto si ripristina con un alias O(1), SENZA re-forward. */
-    const bool cap_ok = has_linear && getenv("LLM_SPEC_NOCAP") == NULL;
+    const bool cap_ok = has_linear && llm_ai_mlx_opt_env("LLM_SPEC_NOCAP") == NULL;
     /* Il greedy dopo il prefisso (posizione 0 del draft) e' gia' calcolato. */
     int32_t greedy0 = s->pending_next_id;
 

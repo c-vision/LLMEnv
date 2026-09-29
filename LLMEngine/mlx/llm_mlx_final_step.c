@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 
@@ -530,7 +531,7 @@ bool final_step_greedy_dev(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
     /* L'argmax e' gia' un array intero: `mlx_astype(..., INT32)` era un nodo AsType per token
      * inutile (gli id reali stanno in [0,vocab), stessi bit int32/uint32). Passato diretto:
      * 0 AsType nel passo greedy. mlx_lm fa `.item()` senza cast. Opt-out LLM_ARGMAX_CAST=1. */
-    static int amcast = -1; if (amcast < 0) amcast = getenv("LLM_ARGMAX_CAST") != NULL ? 1 : 0;
+    static int amcast = -1; if (amcast < 0) amcast = llm_ai_mlx_opt_env("LLM_ARGMAX_CAST") != NULL ? 1 : 0;
     if (ok) ok = amcast ? (mlx_astype(out_id_arr, am, MLX_INT32, m->stream) == 0)
                         : (mlx_array_set(out_id_arr, am) == 0);
     if (!ok) fprintf(stderr, "final_step_greedy_dev: fallito\n");

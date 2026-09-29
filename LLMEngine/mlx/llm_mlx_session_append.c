@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_pflash.h"
@@ -82,7 +83,7 @@ static int llm_ai_mlx_session_append_impl(llm_ai_mlx_session_handle handle, cons
      * vedi llm_mlx_flash_prefill_enabled(). Con il kernel abilitato conviene 2048, ma resta
      * comunque peggio del default -> se lo abiliti, passa LLM_PREFILL_CHUNK=2048 a mano. */
     if (strncmp(m->cfg.model_type, "gemma4", 6) == 0 &&
-        getenv("LLM_PREFILL_CHUNK") == NULL && llm_mlx_flash_prefill_enabled())
+        llm_ai_mlx_opt_env("LLM_PREFILL_CHUNK") == NULL && llm_mlx_flash_prefill_enabled())
         chunk_size = 2048;
     /* h_batch possiede l'output dell'ultimo chunk (ownership trasferita da
      * forward_tokens_batch via out_h). NOTA sul pattern: mlx_array_set(&dst, src)
@@ -257,7 +258,7 @@ static int llm_ai_mlx_session_append_impl(llm_ai_mlx_session_handle handle, cons
     if (ok && !m->cfg.kv_quantize) {
         static int kvqauthr = -2;
         if (kvqauthr == -2) {
-            const char* e = getenv("LLM_KVQUANT_AUTO");
+            const char* e = llm_ai_mlx_opt_env("LLM_KVQUANT_AUTO");
             /* default OFF: la transizione mid-session non e' ancora sicura (vedi sopra). */
             kvqauthr = (e && e[0]) ? atoi(e) : 0;
         }

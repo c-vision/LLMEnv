@@ -19,7 +19,7 @@
 
 static int g_async_decode_state = -1;
 static bool llm_mlx_async_decode_enabled(void) {
-    if (g_async_decode_state < 0) g_async_decode_state = (getenv("LLM_NO_ASYNC_DECODE") != NULL) ? 0 : 1;
+    if (g_async_decode_state < 0) g_async_decode_state = (llm_ai_mlx_opt_env("LLM_NO_ASYNC_DECODE") != NULL) ? 0 : 1;
     return g_async_decode_state == 1;
 }
 
@@ -91,7 +91,7 @@ static bool llm_ai_mlx_session_generate_async_greedy(LlmMlxSession* s, LlmMlxMod
      * Pura schedulazione: gli IDS devono restare identici. LLM_ASYNC_LAG=2 per attivarlo. */
     static int s_lag_state = -1;
     if (s_lag_state < 0) {
-        const char* e = getenv("LLM_ASYNC_LAG");
+        const char* e = llm_ai_mlx_opt_env("LLM_ASYNC_LAG");
         s_lag_state = (e != NULL) ? atoi(e) : 1;
         if (s_lag_state < 1) s_lag_state = 1;
         if (s_lag_state > 2) s_lag_state = 2;
@@ -117,7 +117,7 @@ static bool llm_ai_mlx_session_generate_async_greedy(LlmMlxSession* s, LlmMlxMod
          * 1,32 (+0,16) = +14% CPU/token, IDS identici. Il collo e' l'ENCODING, non il grafo:
          * la leva e' ridurre il NUMERO di dispatch Metal (fusione), non compilarlo. */
         const bool use_compiled_async =
-            (getenv("LLM_COMPILE_ASYNC") != NULL) && (step >= 1) && llm_mlx_compile_enabled() &&
+            (llm_ai_mlx_opt_env("LLM_COMPILE_ASYNC") != NULL) && (step >= 1) && llm_mlx_compile_enabled() &&
             llm_mlx_fixkv_enabled() && llm_mlx_static_cache_ready(s) && m->cfg.kv_max_tokens <= 0 &&
             !m->cfg.kv_quantize && llm_mlx_compile_arch_supported(m);
         mlx_array s_latest = mlx_array_new();
@@ -365,7 +365,7 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
      * e' GREEDY, il decode usa il path speculativo (output identico al greedy AR, ~1.4x).
      * `LLM_MTP_AUTO=0` disattiva; `LLM_MTP_DEPTH` sceglie la profondita' (default 1). */
     if (!m->dsv4 && !m->dsv41 && llm_mlx_mtp_get(m) != NULL) {
-        const char* au = getenv("LLM_MTP_AUTO");
+        const char* au = llm_ai_mlx_opt_env("LLM_MTP_AUTO");
         llm_mlx_sampling_t sm0 = llm_mlx_session_sampling(s);
         if ((au == NULL || au[0] != '0') && (!sm0.active || sm0.temperature <= 0.0f)) {
             int n = llm_ai_mlx_session_generate_mtp(handle, max_new_tokens, eos_token_id, out_ids);
@@ -615,14 +615,14 @@ int llm_ai_mlx_session_generate_batch_spec(llm_ai_mlx_session_handle* handles, i
     LlmMlxSession* s0 = (LlmMlxSession*)handles[0];
     if (s0 == NULL || s0->model == NULL) return -1;
     LlmMlxModel* m = s0->model;
-    { const char* ks = getenv("LLM_BATCH_SPEC"); if (ks != NULL && strcmp(ks, "0") == 0) return -3; }
+    { const char* ks = llm_ai_mlx_opt_env("LLM_BATCH_SPEC"); if (ks != NULL && strcmp(ks, "0") == 0) return -3; }
     if (llm_mlx_mtp_get(m) == NULL) return -3;
     for (int i = 0; i < n; i++) {
         LlmMlxSession* s = (LlmMlxSession*)handles[i];
         if (s == NULL || s->model != m || !s->has_pending) return -1;
         if (llm_mlx_session_sampling(s).active) return -3;   /* MTP: solo greedy */
     }
-    int K = 1; { const char* d = getenv("LLM_MTP_DEPTH"); if (d) { int v = atoi(d); if (v >= 1 && v <= 8) K = v; } }
+    int K = 1; { const char* d = llm_ai_mlx_opt_env("LLM_MTP_DEPTH"); if (d) { int v = atoi(d); if (v >= 1 && v <= 8) K = v; } }
     const int maxd = K + 1;
     int32_t* blocks = (int32_t*)malloc(sizeof(int32_t) * (size_t)n * maxd);
     int* dlen = (int*)calloc((size_t)n, sizeof(int));
@@ -690,7 +690,7 @@ int llm_ai_mlx_session_generate_batch(llm_ai_mlx_session_handle* handles, int n,
     /* S6 — percorso SPECULATIVO multi-sessione quando eleggibile (greedy + head MTP):
      * un draft batchato + un verify batch per round, N*(K+1) token per lettura dei pesi.
      * Con max_new_tokens==1 non conviene (round singolo) -> batch normale. */
-    const char* bspec = getenv("LLM_BATCH_SPEC");
+    const char* bspec = llm_ai_mlx_opt_env("LLM_BATCH_SPEC");
     if (bspec != NULL && strcmp(bspec, "0") != 0 && max_new_tokens > 1 && m->dsv41 == NULL) {
         int rc = llm_ai_mlx_session_generate_batch_spec(handles, n, max_new_tokens,
                                                        eos_token_id, out_ids);

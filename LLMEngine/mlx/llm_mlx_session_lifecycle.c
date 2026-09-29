@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_kvpage.h"
@@ -74,7 +75,7 @@ static bool embed_token(LlmMlxModel* m, mlx_array embed_w, mlx_array embed_s, ml
         }
         /* Ternary-Bonsai: l'embed e' in inverse_weight_names -> si ruota l'USCITA (invert=true).
          * La direzione (R vs R^T) e' ambigua dal naming: la decide il test empirico (NLL). */
-        const int emb_inv = (getenv("LLM_BONSAI_EMBED_INV") != NULL) ? (atoi(getenv("LLM_BONSAI_EMBED_INV")) != 0 ? 1 : 0) : 1;
+        const int emb_inv = (llm_ai_mlx_opt_env("LLM_BONSAI_EMBED_INV") != NULL) ? (atoi(llm_ai_mlx_opt_env("LLM_BONSAI_EMBED_INV")) != 0 ? 1 : 0) : 1;
         ok2 = ok2 && llm_bonsai_rotate(out_x, m, -1, "embed_tokens.weight", emb_inv == 1);
     }
     /* FASE 1b.4.5 (Gemma4): embed_scale = sqrt(hidden_size), sempre (gemma4_text.py:402).
@@ -275,7 +276,7 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
     /* NB: lo stato kvq va allocato anche se la KV-quant si attivera' DOPO via auto-policy
      * (LLM_KVQUANT_AUTO, latch nel prefill): altrimenti kvq_bits resta 0 e mlx_quantize
      * fallisce con "bits 0 is not supported" al primo step di decode (bug 2026-09-19). */
-    const char* kvq_auto_env = getenv("LLM_KVQUANT_AUTO");
+    const char* kvq_auto_env = llm_ai_mlx_opt_env("LLM_KVQUANT_AUTO");
     if (m->cfg.kv_quantize || (kvq_auto_env != NULL && atoi(kvq_auto_env) > 0)) {
         s->kvq_len = (int*)calloc((size_t)m->cfg.n_layers, sizeof(int));
         s->kvq_w = (mlx_array*)malloc((size_t)m->cfg.n_layers * sizeof(mlx_array));
@@ -285,7 +286,7 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
         s->kvq_v_bits = s->kvq_bits;
         s->kvq_v_len = NULL; s->kvq_v_w = NULL; s->kvq_v_sc = NULL; s->kvq_v_bi = NULL;
         /* HETERO-KV: LLM_KV_HETERO=K<bits>V<bits> (es. K8V4). K piu' preciso di V. */
-        { const char* het = getenv("LLM_KV_HETERO");
+        { const char* het = llm_ai_mlx_opt_env("LLM_KV_HETERO");
           if (het != NULL) {
             int kb = 0, vb = 0;
             if (sscanf(het, "K%dV%d", &kb, &vb) == 2 && kb >= 2 && kb <= 16 && vb >= 2 && vb <= 16 && vb < kb) {
@@ -327,7 +328,10 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
      * Override: LLM_PREFILL_CHUNK=N (bug §7). */
     {
         static int chunk_env = -1;
-        if (chunk_env < 0) { const char* e = getenv("LLM_PREFILL_CHUNK"); chunk_env = e ? atoi(e) : 0; }
+        if (chunk_env < 0) {
+            int p = 0;   /* parametro `prefill` del registro (niente env) */
+            if (llm_ai_mlx_opt_get_int("prefill", &p) == 0 && p > 0) chunk_env = p; else chunk_env = 0;
+        }
         int defc = 8192;
         if (strcmp(m->cfg.model_type, "qwen3_5") == 0 ||
             strcmp(m->cfg.model_type, "qwen3_next") == 0)

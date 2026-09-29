@@ -20,6 +20,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "llm_engine_opts.h"   /* registro opzioni: parametri azionabili da BASIC/CLI (niente env) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -569,6 +571,10 @@ int llm_ai_mlx_model_set_bfloat16(llm_ai_mlx_model_handle handle, bool enabled);
 /* Capienza della KV-cache (contesto) a runtime, per QUALUNQUE modello MLX. n = token (0 = default
  * del modello). È il setter dietro CAP_KV_MAX (kv_set_max) dell'ABI comune. 0 ok / -1. */
 int llm_ai_mlx_model_set_kv_max(llm_ai_mlx_model_handle handle, int n);
+
+/* KV quant (E3): quantizza la parte COLD della cache oltre `threshold` token, a `bits` (4|8).
+ * Parametro `kvquant` del registro. 0 ok / -1. */
+int llm_ai_mlx_model_set_kv_quantize(llm_ai_mlx_model_handle handle, bool enabled, int threshold, int bits);
 
 /* Dtype di calcolo scelto dall'alto (host/BASIC), da chiamare DOPO
  * llm_ai_mlx_load_model: i bit bf16 sono letti solo a forward-time, quindi applicarli dopo

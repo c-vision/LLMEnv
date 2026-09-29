@@ -695,6 +695,7 @@ struct LlmMlxModel {
     int  kvckpt_block;           /* §G-ter: blocco (token) dei checkpoint per il rewind (0 = OFF) */
     /* P4 MEMORY PLAN: budget deterministico + admission. */
     uint64_t p4_budget_bytes, p4_weights_bytes, p4_kv_per_token, p4_state_bytes;
+    uint64_t gguf_mmap_bytes;   /* dimensione mmap dei pesi (pesi zero-copy, non contati da MLX) */
     /* P4: registro delle sessioni ATTIVE (conto MULTI-sessione del budget). */
     struct LlmMlxSession* p4_sessions[64];
     int p4_nsessions;
