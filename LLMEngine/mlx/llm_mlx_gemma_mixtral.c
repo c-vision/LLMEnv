@@ -368,18 +368,6 @@ bool gemma4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
                                  !is_sliding && n_tokens == 1 &&
                                  win == 0 && m->cfg.kv_max_tokens <= 0 && (*k_cache).ctx != NULL &&
                                  (*v_cache).ctx != NULL;
-            /* LLM_GEMMA_FLASH_DECODE_DEBUG=1: stampa i soli ingressi che decidono l'eleggibilita'
-             * (una manciata di chiamate) -> distingue "il kernel ha perso" da "non e' partito". */
-            {
-                static int fd_dbg = -1, fd_pr = 0;
-                if (fd_dbg < 0) fd_dbg = (getenv("LLM_GEMMA_FLASH_DECODE_DEBUG") != NULL) ? 1 : 0;
-                if (fd_dbg == 1 && fd_pr < 8) {
-                    fd_pr++;
-                    fprintf(stderr, "[flash-decode-debug] layer=%d is_sliding=%d n_tokens=%d win=%d kv_max=%d hd=%d kctx=%d vctx=%d\n",
-                            layer_idx, (int)is_sliding, n_tokens, win, m->cfg.kv_max_tokens, head_dim,
-                            (*k_cache).ctx != NULL, (*v_cache).ctx != NULL);
-                }
-            }
             if (fd_elig) {
                 /* FIX (2026-09-16): la cache e' [1,nkv,CAP,hd] e CAP e' la **CAPACITA'** del buffer
                  * (arrotondata a step 256), NON la lunghezza valida. Con `vislen = shape(*k_cache)[2]`

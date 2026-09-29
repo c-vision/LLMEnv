@@ -246,30 +246,10 @@ static int llm_ai_mlx_session_append_impl(llm_ai_mlx_session_handle handle, cons
     }
 
     if (ok) { s->cache_offset += n_ids; session_history_append(s, token_ids, n_ids); }
-    /* LLM_KVQUANT_AUTO (2026-09-17) — "incassare" il fix del bug MLX-KVQuant-Contesto-Lungo:
-     * con il percorso veloce ora automatico, la KV-quant a contesto lungo e' un GUADAGNO
-     * (decode 32k/64k 60,9/58,3 tok/s vs fp16 50,85/31,37; KV dimezzata). NON conviene per
-     * generazioni corte (break-even ~1.810 token generati a 32k, ~4.166 a 64k, articolo #30).
-     * ATTENZIONE (misurato 2026-09-17): l'attivazione MID-SESSION NON e' sicura: col latch
-     * attivo il decode dopo l'accensione NON stampa nulla (verificato su Qwen3-8B a 32k), mentre
-     * il percorso a LOAD (`LLM_KVQUANT=1`) funziona (52,4 tok/s a 32k). Le cache quantizzate
-     * devono quindi essere inizializzate al load: la policy mid-session va resa sicura prima.
-     * Percio' il DEFAULT e' OFF (soglia 0). Opt-in esplicito: LLM_KVQUANT_AUTO=<token>. */
-    if (ok && !m->cfg.kv_quantize) {
-        static int kvqauthr = -2;
-        if (kvqauthr == -2) {
-            const char* e = llm_ai_mlx_opt_env("LLM_KVQUANT_AUTO");
-            /* default OFF: la transizione mid-session non e' ancora sicura (vedi sopra). */
-            kvqauthr = (e && e[0]) ? atoi(e) : 0;
-        }
-        if (kvqauthr > 0 && s->cache_offset >= kvqauthr) {
-            m->cfg.kv_quantize = true;
-            m->cfg.kv_quantize_bits = 8;
-            m->cfg.kv_quantize_threshold = 2048;
-            fprintf(stderr, "[kvqauto] contesto=%d >= %d -> KV-quant ON (bits=8 thresh=2048, latched)\n",
-                    s->cache_offset, kvqauthr);
-        }
-    }
+    /* NOTA (2026-09-29): la vecchia policy auto via env `LLM_KVQUANT_AUTO` e' stata RIMOSSA.
+     * Ora l'attivazione automatica a contesto lungo e' una policy di REGISTRO (`kvquant=auto[:soglia]`,
+     * default `auto:8192`) gestita in `llm_mlx_layer_forward.c` (compatibile e sicura mid-session:
+     * il pool int8 Splash sostituisce l'fp, nessun latch fragile). Vedi `() - KV-int8-Splash-...`. */
 
     /* §G-ter: checkpoint del rewind ai confini di blocco (auto-prefill a chunk => i confini
      * cadono esattamente). Solo se il tier SSD e' attivo; nessun costo quando OFF. */
@@ -444,15 +424,6 @@ int llm_ai_mlx_session_capture_hidden(llm_ai_mlx_session_handle handle,
      * clear_cache il pool GPU cresce a ogni chunk (stesso motivo del chunked prefill 8b451f40)
      * fino a far uccidere il processo (Jetsam/OOM su macOS). */
     mlx_clear_cache();
-    if (getenv("LLM_MEMTRACE")) {
-        size_t cache_mb = 0, active_mb = 0, peak_mb = 0;
-        mlx_get_cache_memory(&cache_mb);
-        mlx_get_active_memory(&active_mb);
-        mlx_get_peak_memory(&peak_mb);
-        fprintf(stderr, "[mem] cache=%.0fMB active=%.0fMB peak=%.0fMB (n=%d)\n",
-                cache_mb / 1048576.0, active_mb / 1048576.0, peak_mb / 1048576.0, n_ids);
-        fflush(stderr);
-    }
     free_output_tensors(&t);
     return ok ? n_ids : -1;
 }

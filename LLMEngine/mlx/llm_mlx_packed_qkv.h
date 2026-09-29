@@ -107,11 +107,6 @@ static bool llm_mlx_qkv_apply(LlmMlxPackedQkv* p, mlx_array x,
              mlx_vector_array_get(v, sec, 2) == 0;
         mlx_vector_array_free(sec);
     }
-    if (ok && !(p->reported & 2u) && getenv("LLM_PACKED_QKV_VERBOSE")) {
-        fprintf(stderr, "[packed-qkv] rows=%d/%d/%d tokens=%d\n",
-                p->rows[0], p->rows[1], p->rows[2], mlx_array_shape(x)[1]);
-        p->reported |= 2u;
-    }
     mlx_array_free(y);
     if (!ok) fprintf(stderr, "[packed-qkv] projection failed; using separate Q/K/V\n");
     return ok;

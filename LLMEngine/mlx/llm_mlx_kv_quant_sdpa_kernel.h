@@ -24,18 +24,19 @@ static const char llm_kvq_sdpa_kernel_header[] =
     "\n"
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
-    "// affine dequant: scale*q + bias\n"
-    "static inline float llm_kv_dq(uint q, float s, float b) { return s * (float)q + b; }\n"
+    "// dequant: scale*q + bias (q con segno quando Sym = simmetrico Splash, bias 0)\n"
+    "static inline float llm_kv_dq(int q, float s, float b) { return s * (float)q + b; }\n"
     "// estrae il valore d dal flusso di bit (bits=b) stile MLX (little-endian continuo).\n"
-    "// b==4 usa il percorso veloce a word (nibble).\n"
-    "template <uint B>\n"
-    "static inline uint llm_kv_val(const device uint* w, const device uint8_t* wb, uint d) {\n"
-    "    if (B == 4u) { uint word = w[d >> 3]; return (word >> ((d & 7u) * 4u)) & 15u; }\n"
-    "    if (B == 8u) { return (uint)wb[d]; }\n"
+    "// b==4 usa il percorso veloce a word (nibble). Sym: int8 SIM metrico (segno) invece\n"
+    "// dell'offset affine [0,2^b-1] (Splash: q in [-127,127] con bias 0).\n"
+    "template <uint B, bool Sym>\n"
+    "static inline int llm_kv_val(const device uint* w, const device uint8_t* wb, uint d) {\n"
+    "    if (B == 4u) { uint word = w[d >> 3]; return (int)((word >> ((d & 7u) * 4u)) & 15u); }\n"
+    "    if (B == 8u) { return Sym ? (int)(int8_t)wb[d] : (int)wb[d]; }\n"
     "    uint bit = d * B, b0 = bit >> 3, sh = bit & 7u;\n"
     "    uint v = (uint)wb[b0] >> sh;\n"
     "    if (sh + B > 8u) v |= (uint)wb[b0 + 1u] << (8u - sh);\n"
-    "    return v & ((1u << B) - 1u);\n"
+    "    return (int)(v & ((1u << B) - 1u));\n"
     "}\n"
 ;
 
@@ -46,7 +47,7 @@ static const char llm_kvq_sdpa_kernel_src[] =
     "    uint qh    = threadgroup_position_in_grid.x;\n"
     "    uint split = threadgroup_position_in_grid.y;\n"
     "    constexpr uint DPL = Dhead / 32u;\n"
-    "    constexpr uint G = 64u;                // group_size affine (scale/bias)\n"
+    "    constexpr uint G = GK;                // group della scala (64 affine / Dhead Splash-symmetric)\n"
     "    constexpr uint KWB = (Dhead * BK) / 8u;   // byte per token (K)\n"
     "    constexpr uint VWB = (Dhead * BV) / 8u;   // byte per token (V)\n"
     "    uint kh = qh * NKV / NH;\n"
@@ -70,7 +71,7 @@ static const char llm_kvq_sdpa_kernel_src[] =
     "        float p = 0.0f;\n"
     "        for (uint i = 0; i < DPL; ++i) {\n"
     "            uint d = lane + 32u * i;\n"
-    "            p += qreg[i] * llm_kv_dq(llm_kv_val<BK>(kw, kwb, d), (float)ks[d / G], (float)kb[d / G]);\n"
+    "            p += qreg[i] * llm_kv_dq(llm_kv_val<BK, SYM>(kw, kwb, d), (float)ks[d / G], (float)kb[d / G]);\n"
     "        }\n"
     "        float s = simd_sum(p) * scale;\n"
     "        float mn = max(m, s);\n"
@@ -83,7 +84,7 @@ static const char llm_kvq_sdpa_kernel_src[] =
     "        const device ST*     vb  = Vc_b + (kh * capi + t) * (Dhead / G);\n"
     "        for (uint i = 0; i < DPL; ++i) {\n"
     "            uint d = lane + 32u * i;\n"
-    "            acc[i] = acc[i] * f + e * llm_kv_dq(llm_kv_val<BV>(vw, vwb, d), (float)vs[d / G], (float)vb[d / G]);\n"
+    "            acc[i] = acc[i] * f + e * llm_kv_dq(llm_kv_val<BV, SYM>(vw, vwb, d), (float)vs[d / G], (float)vb[d / G]);\n"
     "        }\n"
     "        m = mn;\n"
     "    }\n"
@@ -121,7 +122,7 @@ static const char llm_kvq_sdpa_kernel_src_gqa[] =
     "    uint kh    = threadgroup_position_in_grid.x;\n"
     "    uint split = threadgroup_position_in_grid.y;\n"
     "    constexpr uint DPL = Dhead / 32u;\n"
-    "    constexpr uint G = 64u;\n"
+    "    constexpr uint G = GK;\n"
     "    constexpr uint KWB = (Dhead * BK) / 8u;\n"
     "    constexpr uint VWB = (Dhead * BV) / 8u;\n"
     "\n"
@@ -144,7 +145,7 @@ static const char llm_kvq_sdpa_kernel_src_gqa[] =
     "        float kd[DPL];\n"
     "        for (uint i = 0; i < DPL; ++i) {\n"
     "            uint d = lane + 32u * i;\n"
-    "            kd[i] = llm_kv_dq(llm_kv_val<BK>(kw, kwb, d), (float)ks[d / G], (float)kb[d / G]);\n"
+    "            kd[i] = llm_kv_dq(llm_kv_val<BK, SYM>(kw, kwb, d), (float)ks[d / G], (float)kb[d / G]);\n"
     "        }\n"
     "        const device uint*   vw  = (const device uint*)((const device uint8_t*)Vc_w + (size_t)(kh * capi + t) * VWB);\n"
     "        const device uint8_t* vwb = (const device uint8_t*)vw;\n"
@@ -153,7 +154,7 @@ static const char llm_kvq_sdpa_kernel_src_gqa[] =
     "        float vd[DPL];\n"
     "        for (uint i = 0; i < DPL; ++i) {\n"
     "            uint d = lane + 32u * i;\n"
-    "            vd[i] = llm_kv_dq(llm_kv_val<BV>(vw, vwb, d), (float)vs[d / G], (float)vb[d / G]);\n"
+    "            vd[i] = llm_kv_dq(llm_kv_val<BV, SYM>(vw, vwb, d), (float)vs[d / G], (float)vb[d / G]);\n"
     "        }\n"
     "        for (uint h = 0; h < NQ; ++h) {\n"
     "            float p = 0.0f;\n"
@@ -315,7 +316,7 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
                                     mlx_array Kc_w, mlx_array Kc_s, mlx_array Kc_b,
                                     mlx_array Vc_w, mlx_array Vc_s, mlx_array Vc_b,
                                     mlx_array Kr, mlx_array Vr, int nc, int kbits, int vbits,
-                                    float scale, mlx_stream stream) {
+                                    float scale, int gval, mlx_stream stream) {
     if (llm_mlx_kvq_sdpa_kernel_build() != 0) return false;
     if (mlx_array_ndim(q) != 2) return false;
     if (kbits < 2 || kbits > 8 || vbits < 2 || vbits > 8) return false;
@@ -329,9 +330,11 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     if (nc <= 0 || nc > cap) nc = cap;
     if (nkv <= 0 || nh <= 0 || nh % nkv != 0) return false;
     int nq = nh / nkv;   /* q-head per kv-head (GQA): il kernel v2 le condivide */
-    if ((int)mlx_array_shape(Kr)[2] != hd || (int)mlx_array_shape(Kc_w)[2] != (hd * kbits) / 32) return false;
-    if ((int)mlx_array_shape(Vc_w)[1] != cap || (int)mlx_array_shape(Vc_w)[2] != (hd * vbits) / 32) return false;
-    if (mlx_array_dtype(Kc_w) != MLX_UINT32 || mlx_array_dtype(Vc_w) != MLX_UINT32) return false;
+    const int kw_last = (gval > 0) ? hd : (hd * kbits) / 32;   /* Splash: int8 byte, ultima dim = hd */
+    const int vw_last = (gval > 0) ? hd : (hd * vbits) / 32;
+    if ((int)mlx_array_shape(Kr)[2] != hd || (int)mlx_array_shape(Kc_w)[2] != kw_last) return false;
+    if ((int)mlx_array_shape(Vc_w)[1] != cap || (int)mlx_array_shape(Vc_w)[2] != vw_last) return false;
+    if (gval <= 0 && (mlx_array_dtype(Kc_w) != MLX_UINT32 || mlx_array_dtype(Vc_w) != MLX_UINT32)) return false;
     mlx_dtype st = mlx_array_dtype(Kc_s);
     if (mlx_array_dtype(Kc_b) != st || mlx_array_dtype(Vc_s) != st || mlx_array_dtype(Vc_b) != st) return false;
     mlx_dtype T = mlx_array_dtype(q);
@@ -377,6 +380,8 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "Dhead", hd);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "NH", nh);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "NKV", nkv);
+    mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "GK", gval > 0 ? gval : 64);
+    mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "SYM", gval > 0 ? 1 : 0);
     if (llm_kvq_gqa()) mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "NQ", nq);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "BK", kbits);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "BV", vbits);
@@ -388,11 +393,6 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     mlx_fast_metal_kernel_config_add_output_arg(cfg, pash, 3, MLX_FLOAT32);
     mlx_fast_metal_kernel_config_set_grid(cfg, (llm_kvq_gqa() ? nkv : nh) * 32, splits, 1);   /* THREAD totali */
     mlx_fast_metal_kernel_config_set_thread_group(cfg, 32, 1, 1);
-    if (getenv("LLM_KVQ_VERBOSE")) {
-        mlx_fast_metal_kernel_config_set_verbose(cfg, true);
-        fprintf(stderr, "[LLM_KVQ] nc=%d cap=%d split_tokens=%d splits=%d splits_max=%d nh=%d\n",
-                nc, cap, split_tokens, splits, splits_max, nh);
-    }
 
     mlx_vector_array outputs = mlx_vector_array_new();
     int rc = mlx_fast_metal_kernel_apply(&outputs, llm_kvq_sdpa_singleton.part, inputs, cfg, stream);

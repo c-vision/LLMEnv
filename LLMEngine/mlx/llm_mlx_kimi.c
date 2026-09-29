@@ -29,13 +29,6 @@ bool kimi_mla_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
     const int vhd = m->cfg.v_head_dim, kvl = m->cfg.kv_lora_rank;
     const int qh = qn + qr;
     char nb[256];
-    if (getenv("LLM_KIMI_DEBUG")) {
-        int kc0 = (has_cache && k_cache && (*k_cache).ctx) ? (int)mlx_array_shape(*k_cache)[2] : -1;
-        mlx_array* acd = (m->aux_cache && layer_idx < m->cfg.n_layers) ? &m->aux_cache[layer_idx] : NULL;
-        int ac0 = (acd && (*acd).ctx) ? (int)mlx_array_shape(*acd)[2] : -1;
-        fprintf(stderr, "[KIMI_MLA] layer=%d coff=%d n=%d has_cache=%d k_cache_S=%d aux_S=%d H=%d qn=%d qr=%d\n",
-                layer_idx, cache_offset, n_tokens, has_cache, kc0, ac0, H, qn, qr);
-    }
     mlx_array ln=mlx_array_new(), qw=mlx_array_new(),qs=mlx_array_new(),qb=mlx_array_new();
     mlx_array aw=mlx_array_new(),as=mlx_array_new(),ab=mlx_array_new(),aln=mlx_array_new();
     mlx_array ew=mlx_array_new(),es=mlx_array_new(),eb=mlx_array_new();
@@ -132,13 +125,6 @@ bool kimi_mla_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
         if (ok) { int sh[4]={1,1,n_tokens,S}; ok = mlx_reshape(&addmask, addmask, sh, 4, m->stream)==0; }
         mlx_array_free(iq);mlx_array_free(ik);mlx_array_free(iqe);mlx_array_free(ike);mlx_array_free(cmp);mlx_array_free(ip);
     }
-    if (ok && getenv("LLM_KIMI_DEBUG")) {
-        int s0 = mlx_array_ndim(spe)>=4 ? (int)mlx_array_shape(spe)[2] : -1;
-        int s1 = mlx_array_ndim(spe)>=4 ? (int)mlx_array_shape(spe)[3] : -1;
-        int m0 = mlx_array_ndim(addmask)>=4 ? (int)mlx_array_shape(addmask)[2] : -1;
-        int m1 = mlx_array_ndim(addmask)>=4 ? (int)mlx_array_shape(addmask)[3] : -1;
-        fprintf(stderr, "[KIMI_MLA] layer=%d spe=[..,%d,%d] addmask=[..,%d,%d]\n", layer_idx, s0, s1, m0, m1);
-    }
     if (ok) ok = mlx_add(&spe_m, spe, addmask, m->stream)==0;
 
     /* SDPA assorbita */
@@ -233,11 +219,6 @@ bool kimi_delta_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset,
     const int kk = m->cfg.linear_attn_conv_kernel > 0 ? m->cfg.linear_attn_conv_kernel : 4;
     const int P = H * D, CD = 3 * P, csl = kk - 1;
     mlx_stream s = m->stream;
-    if (getenv("LLM_KIMI_DEBUG")) {
-        int ss0 = (k_cache && (*k_cache).ctx) ? (int)mlx_array_shape(*k_cache)[1] : -1;
-        fprintf(stderr, "[KIMI_KDA] layer=%d coff=%d n=%d H=%d D=%d P=%d CD=%d ss=%d\n",
-                layer_idx, cache_offset, n_tokens, H, D, P, CD, ss0);
-    }
 #define KCHK(cond, what) do { if (!(cond)) { fprintf(stderr, "kimi_kda[layer=%d]: %s failed\n", layer_idx, (what)); ok = false; } } while (0)
 /* Workaround MLX (indagare): la PRIMA quantized_matmul dopo una sequenza di op lazy puo'
  * fallire (rc!=0) mentre un identico retry riesce. Riproviamo una volta. */

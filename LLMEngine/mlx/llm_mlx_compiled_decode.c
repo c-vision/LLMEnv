@@ -584,9 +584,6 @@ bool llm_mlx_session_run_compiled_step_arr(LlmMlxSession* s, mlx_array tid_in, i
         mlx_closure_free(comp);
         if (rc != 0) return false;
         s->compiled_decode_valid = true;
-        if (getenv("LLM_COMPILE_VERBOSE"))
-            fprintf(stderr, "[compiled-decode] closure creata arch=%s fuse=%s n_layers=%d\n",
-                    m->cfg.model_type, llm_ai_mlx_opt_env("LLM_COMPILE_FUSE") ? "ON" : "off", s->n_layers);
     }
 
     mlx_vector_array in = mlx_vector_array_new();

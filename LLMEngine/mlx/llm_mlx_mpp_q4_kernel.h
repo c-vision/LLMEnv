@@ -67,7 +67,6 @@ static mlx_fast_metal_kernel llm_mpp_q4_get(int K, int N, int M, int GS) {
     if (!src) { free(body); return (mlx_fast_metal_kernel){0}; }
     snprintf(src, bl + 64, "  constexpr uint K=%d, N=%d, M=%d, GSSZ=%d;\n%s", K, N, M, GS, body);
     free(body);
-    if (getenv("LLMMETAL_MPP_Q4_DUMP")) fprintf(stderr, "=== MPP Q4 SRC (K=%d N=%d M=%d GS=%d) ===\n%s\n===\n", K, N, M, GS, src);
     mlx_vector_string iv = mlx_vector_string_new();
     const char* in[] = {"x", "w", "sc", "bi"};
     for (int i = 0; i < 4; i++) mlx_vector_string_append_value(iv, in[i]);
@@ -87,7 +86,6 @@ static mlx_fast_metal_kernel llm_mpp_q4_get(int K, int N, int M, int GS) {
 static bool llm_mlx_mpp_q4_linear(mlx_array* out, mlx_array x, mlx_array w, mlx_array sc, mlx_array bi,
                                   int group_size, int bits, int K, int N, mlx_stream s) {
     if ((group_size != 64 && group_size != 32) || bits != 4) return false;
-    if (getenv("LLMMETAL_MPP_Q4_DUMP")) fprintf(stderr, "[mpp-dtype] sc=%d bi=%d w=%d x=%d (f32=%d bf16=%d u32=%d)\n", (int)mlx_array_dtype(sc), (int)mlx_array_dtype(bi), (int)mlx_array_dtype(w), (int)mlx_array_dtype(x), (int)MLX_FLOAT32, (int)MLX_BFLOAT16, (int)MLX_UINT32);
     if (mlx_array_dtype(sc) != MLX_BFLOAT16 || mlx_array_dtype(bi) != MLX_BFLOAT16) return false;
     if (K % group_size != 0 || N % 128 != 0 || K <= 0) return false;
     if (mlx_array_ndim(x) != 3) return false;
@@ -124,7 +122,6 @@ static bool llm_mlx_mpp_q4_linear(mlx_array* out, mlx_array x, mlx_array w, mlx_
      * grid.x/threadgroup.x = N/128. */
     mlx_fast_metal_kernel_config_set_grid(cfg, (N / 128) * 256, 1, 1);
     mlx_fast_metal_kernel_config_set_thread_group(cfg, 256, 1, 1);
-    if (getenv("LLMMETAL_MPP_Q4_DUMP")) fprintf(stderr, "[mpp-apply] K=%d N=%d M=%d GS=%d T=%d\n", K, N, M, group_size, T);
     mlx_vector_array outputs = mlx_vector_array_new();
     int rc = mlx_fast_metal_kernel_apply(&outputs, k, inputs, cfg, s);
     mlx_fast_metal_kernel_config_free(cfg);

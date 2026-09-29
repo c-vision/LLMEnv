@@ -241,7 +241,6 @@ static bool llm_mlx_moe_fused_decode(
         int dff_pad = ((dff + sgy - 1) / sgy) * sgy;
         mlx_fast_metal_kernel_config_set_grid(cfg, 32, dff_pad, k);
         mlx_fast_metal_kernel_config_set_thread_group(cfg, 32, sgy, 1);
-        if (getenv("LLMENGINE_MOE_FUSE_MOE_VERBOSE")) mlx_fast_metal_kernel_config_set_verbose(cfg, true);
 
         mlx_vector_array outputs = mlx_vector_array_new();
         int rc = mlx_fast_metal_kernel_apply(&outputs, llm_moe_gateup_kernel_singleton.k, inputs, cfg, stream);
@@ -549,7 +548,6 @@ static bool llm_mlx_moe_fused_decode_mxfp4(
         int dff_pad = ((dff + sgy - 1) / sgy) * sgy;
         mlx_fast_metal_kernel_config_set_grid(cfg, 32, dff_pad, k);
         mlx_fast_metal_kernel_config_set_thread_group(cfg, 32, sgy, 1);
-        if (getenv("LLMENGINE_MOE_FUSE_MOE_VERBOSE")) mlx_fast_metal_kernel_config_set_verbose(cfg, true);
 
         mlx_vector_array outputs = mlx_vector_array_new();
         int rc = mlx_fast_metal_kernel_apply(&outputs, llm_moe_gateup_mxfp4_kernel_singleton.k, inputs, cfg, stream);

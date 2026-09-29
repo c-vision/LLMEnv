@@ -103,7 +103,6 @@ static bool llm_mlx_swiglu_metal(mlx_array gate, mlx_array up, mlx_array* out_ac
     mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, "InT", dt);
     mlx_fast_metal_kernel_config_add_output_arg(cfg, shp, (size_t)ndim, dt);
     mlx_fast_metal_kernel_config_set_grid(cfg, grid, 1, 1);
-    if (getenv("LLMMETAL_SWIGLU_METAL_VERBOSE")) mlx_fast_metal_kernel_config_set_verbose(cfg, true);
     mlx_fast_metal_kernel_config_set_thread_group(cfg, tg, 1, 1);
 
     mlx_vector_array outputs = mlx_vector_array_new();

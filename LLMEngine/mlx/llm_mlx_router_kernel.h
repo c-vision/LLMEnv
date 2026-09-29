@@ -118,7 +118,6 @@ static bool llm_mlx_router_metal(mlx_array gates, mlx_array escb, int top_k,
     mlx_fast_metal_kernel_config_add_output_arg(cfg, wshape, 2, MLX_FLOAT32);
     mlx_fast_metal_kernel_config_set_grid(cfg, (size_t)N, 1, 1);
     mlx_fast_metal_kernel_config_set_thread_group(cfg, (size_t)E, 1, 1);
-    if (getenv("LLMMETAL_ROUTER_METAL_VERBOSE")) mlx_fast_metal_kernel_config_set_verbose(cfg, true);
 
     mlx_vector_array outputs = mlx_vector_array_new();
     int rc = mlx_fast_metal_kernel_apply(&outputs, llm_router_kernel_singleton.k, inputs, cfg, stream);
