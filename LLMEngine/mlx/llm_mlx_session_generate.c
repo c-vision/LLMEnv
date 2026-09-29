@@ -376,8 +376,9 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
      * contesto, verificati dal modello con UN forward batch -> output IDENTICO al greedy AR.
      * Config-driven (opzione di registro `spec_ngram`, nessuna env). Default 0 = off. */
     if (!m->dsv4 && !m->dsv41 && m->cfg.n_experts == 0) {
-        int ord = 0;
-        if (llm_ai_mlx_opt_get_int("spec_ngram", &ord) == 0 && ord >= 2) {
+        int ord = 8;   /* default built-in: on per i densi greedy (opt-out `spec_ngram=0`) */
+        if (llm_ai_mlx_opt_get_int("spec_ngram", &ord) != 0) ord = 8;
+        if (ord >= 2) {
             llm_mlx_sampling_t smn = llm_mlx_session_sampling(s);
             if (!smn.active || smn.temperature <= 0.0f) {
                 if (!s->ngram_built) llm_ai_mlx_session_build_ngram(handle, ord);
