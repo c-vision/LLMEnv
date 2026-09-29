@@ -673,10 +673,13 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                     m->cfg.kv_quantize = false; m->cfg.kv_quantize_bits = 16; m->cfg.kv_quantize_threshold = 0;
                     fprintf(stderr, "[kvquant] bf16 (nessuna quant, opzione di registro)\n");
                 } else if (bits == 4 || bits == 8) {
-                    m->cfg.kv_quantize = true; m->cfg.kv_quantize_bits = bits;
-                    m->cfg.kv_quantize_threshold = thr > 0 ? thr : 1024;
-                    fprintf(stderr, "[kvquant] attivato bits=%d threshold=%d (opzione di registro)\n",
-                            m->cfg.kv_quantize_bits, m->cfg.kv_quantize_threshold);
+                    /* B7 (2026-09-29): la KV-quant ATTUALE e' MEMORY-UNSAFE — misurato con
+                     * mlx_get_active_memory/phys_footprint su Llama-3.2-1B: 0.219 MB/token vs
+                     * 0.062 del path fp (≈3.5x; 2657 vs ~1300 MB fisici a 8192 token). Va
+                     * RI-IMPLEMENTATA (int8 preallocato + kernel fused, vedi TODO
+                     * Splash-Derived-Migliorie §B7) prima di poter essere usata. NON la attivo. */
+                    fprintf(stderr, "[kvquant] RIFIUTATA: la KV-quant attuale e' memory-unsafe "
+                                    "(~3.5x il path fp) e va ri-implementata — ignoro bits=%d.\n", bits);
                 } else {
                     fprintf(stderr, "[kvquant] valore '%s' non valido (off|4|8|16[:soglia])\n", kvs);
                 }
