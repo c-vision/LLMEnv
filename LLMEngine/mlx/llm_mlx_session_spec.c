@@ -824,9 +824,8 @@ int llm_ai_mlx_session_generate_constrained(llm_ai_mlx_session_handle handle,
  * M che coincidono col greedy. M==K -> K token con 1 forward (guadagno); M<K -> rollback
  * (Cache ABI) + riforward di M. Correttezza: il primo draft deve == greedy noto. */
 /* Longest-suffix prompt-lookup: cerca il piu' LUNGO suffisso della history (L in 2..MAXL) che
- * ricorre prima (finestra W), e ritorna il seguito (fino a max_draft). Piu' "intelligente" del
- * n-gram a ordine fisso: usa contesti lunghi (draft piu' affidabili su span ripetuti). Bounded
- * (W*MAXL) per non costare su contesti enormi. Ritorna nd (0 se nessun match). */
+ * ricorre prima (finestra W), e ritorna il seguito (fino a max_draft). Draft piu' affidabili su
+ * span brevi ripetuti con prefisso variabile (che l'ordine fisso manca). Bounded (W*MAXL). */
 static int spec_lookup_suffix(LlmMlxSession* s, int32_t* draft, int max_draft) {
     const int n = s->history_len; const int32_t* H = s->history;
     if (H == NULL || n < 3 || max_draft <= 0) return 0;
@@ -846,8 +845,7 @@ static int spec_lookup_suffix(LlmMlxSession* s, int32_t* draft, int max_draft) {
     return 0;
 }
 
-/* Draft self-speculativo: PRIMA il n-gram a ordine fisso (successore piu' frequente, provato),
- * POI il longest-suffix prompt-lookup come fallback (quando l'ordine fisso non predice). */
+/* Draft self-speculativo: PRIMA il n-gram a ordine fisso, POI il longest-suffix come fallback. */
 static int spec_build_draft(LlmMlxSession* s, int32_t* draft, int max_draft) {
     if (s == NULL || draft == NULL || max_draft <= 0 || s->history_len < 2) return 0;
     int nd = 0;
