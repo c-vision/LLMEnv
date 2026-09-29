@@ -686,6 +686,7 @@ int llm_ai_mlx_dflash2_generate_multi(llm_ai_mlx_dflash2_handle handle,
 int llm_ai_mlx_core_bench(const char* op, int iters, char* out, size_t cap);
 /* Self-test del port Splash (store/quant in scrittura). 0 se fedele al riferimento. */
 int llm_ai_mlx_splash_store_selftest(char* out, size_t cap);
+int llm_ai_mlx_splash_pool_selftest(char* out, size_t cap);
 
 #ifdef __cplusplus
 }

@@ -1122,3 +1122,50 @@ int llm_ai_mlx_splash_store_selftest(char* out, size_t cap) {
     free(kh); free(vh); free(kref); free(ksref);
     return (rc == 0 && bad == 0) ? 0 : 1;
 }
+
+/* Self-test del pool int8 Splash: store -> scatter agli indici Splash -> verifica. */
+int llm_ai_mlx_splash_pool_selftest(char* out, size_t cap) {
+    if (out == NULL || cap == 0) return -1;
+    out[0] = '\0';
+    const int nkv = 4, n = 8, hd = 64, cap_t = 32;
+    const int N = nkv * n * hd;
+    float* kh = (float*)malloc((size_t)N * sizeof(float));
+    float* vh = (float*)malloc((size_t)N * sizeof(float));
+    for (int i = 0; i < N; i++) { kh[i] = (float)((i*37%200)-100)*0.031f; vh[i] = (float)((i*53%160)-80)*0.027f; }
+    mlx_stream st = mlx_default_gpu_stream_new();
+    int ksh[3] = {nkv,n,hd};
+    mlx_array k = mlx_array_new_data(kh, ksh, 3, MLX_FLOAT32);
+    mlx_array v = mlx_array_new_data(vh, ksh, 3, MLX_FLOAT32);
+    mlx_array kq = mlx_array_new(), vq = mlx_array_new(), ks = mlx_array_new(), vs = mlx_array_new();
+    int rc = llm_splash_store_run(&kq, &vq, &ks, &vs, k, v, st);
+    int psh[3] = {nkv,cap_t,hd}, vsh[3] = {nkv,hd,cap_t}, ssh[3] = {nkv,cap_t,1};
+    mlx_array kpool = mlx_array_new(), vpool = mlx_array_new(), spool = mlx_array_new();
+    if (rc == 0) { rc = mlx_zeros(&kpool, psh,3,MLX_INT8,st)==0 && mlx_zeros(&vpool, vsh,3,MLX_INT8,st)==0 && mlx_zeros(&spool, ssh,3,MLX_FLOAT32,st)==0 ? 0 : -1; }
+    if (rc == 0) rc = llm_splash_pool_scatter(kpool, vpool, spool, kq, vq, ks, 0, n, nkv, hd, st);
+    int bad = 0;
+    if (rc == 0) {
+        mlx_array_eval(kpool); mlx_array_eval(vpool); mlx_array_eval(spool);
+        const int8_t* kp = (const int8_t*)mlx_array_data_int8(kpool);
+        const int8_t* vp = (const int8_t*)mlx_array_data_int8(vpool);
+        const float* sp = (const float*)mlx_array_data_float32(spool);
+        /* riferimento int8 V (per il check del layout dim-major) */
+        for (int h = 0; h < nkv; h++) for (int t = 0; t < n; t++) {
+            const size_t off = ((size_t)h*n+t)*hd; float mx = 0.0f;
+            for (int d = 0; d < hd; d++) { float a=fabsf(kh[off+d]), b=fabsf(vh[off+d]); if(a>mx)mx=a; if(b>mx)mx=b; }
+            for (int d = 0; d < hd; d++) {
+                long rk = mx==0.0f?0:lrintf(kh[off+d]*127.0f/mx); if(rk>127)rk=127; if(rk<-127)rk=-127;
+                long rv = mx==0.0f?0:lrintf(vh[off+d]*127.0f/mx); if(rv>127)rv=127; if(rv<-127)rv=-127;
+                int kidx = (h*cap_t + t)*hd + d;               /* K token-major */
+                int vidx = (h*hd + d)*cap_t + t;               /* V dim-major */
+                if (kp && kp[kidx] != (int8_t)rk) bad++;
+                if (vp && vp[vidx] != (int8_t)rv) bad++;
+                if (sp && t == 0 && d == 0 && fabsf(sp[h*cap_t+t] - (mx==0.0f?0.0f:mx/127.0f)) > 1e-6f) bad++;
+            }
+        }
+        snprintf(out, cap, "splash_pool selftest: rc=0 mismatch=%d %s", bad, bad==0 ? "OK" : "FAIL");
+    } else snprintf(out, cap, "splash_pool selftest: rc=%d FAIL", rc);
+    mlx_array_free(k); mlx_array_free(v); mlx_array_free(kq); mlx_array_free(vq); mlx_array_free(ks); mlx_array_free(vs);
+    mlx_array_free(kpool); mlx_array_free(vpool); mlx_array_free(spool);
+    free(kh); free(vh);
+    return (rc == 0 && bad == 0) ? 0 : 1;
+}

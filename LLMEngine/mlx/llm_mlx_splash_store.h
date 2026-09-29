@@ -82,4 +82,33 @@ static inline int llm_splash_store_run(mlx_array* kq, mlx_array* vq, mlx_array* 
     return ok ? 0 : -1;
 }
 
+/* ── Scrittura nel pool paginato (indici Splash fedeli) ─────────────────────
+ * Le righe int8 prodotte dallo store vanno nel pool: K token-major
+ * [nkv, cap, hd], V dimension-major [nkv, hd, cap], scale [nkv, cap].
+ * La page_table (logical->physical) e' il passo successivo: qui il pool e'
+ * contiguo (page_table identita'), che per gli indici di Splash equivale a
+ * [head][token_globale]. */
+static inline int llm_splash_pool_scatter(mlx_array kpool, mlx_array vpool, mlx_array spool,
+                                          mlx_array kq, mlx_array vq, mlx_array sc,
+                                          int pos, int n, int nkv, int hd, mlx_stream s) {
+    /* K: [nkv, pos:pos+n, hd] */
+    int k0[3] = {0,pos,0}, k1[3] = {nkv,pos+n,hd}, st[3] = {1,1,1};
+    mlx_array nk = mlx_array_new();
+    bool ok = mlx_slice_update(&nk, kpool, kq, k0,3,k1,3,st,3, s) == 0;
+    /* V dimension-major: vq [nkv,n,hd] -> [nkv,hd,n] */
+    mlx_array vqt = mlx_array_new();
+    if (ok) { int perm[3] = {0,2,1}; ok = mlx_transpose_axes(&vqt, vq, perm, 3, s) == 0; }
+    int v0[3] = {0,0,pos}, v1[3] = {nkv,hd,pos+n};
+    mlx_array nv = mlx_array_new();
+    if (ok) ok = mlx_slice_update(&nv, vpool, vqt, v0,3,v1,3,st,3, s) == 0;
+    /* scale [nkv, pos:pos+n] */
+    mlx_array s3 = mlx_array_new(), ns = mlx_array_new();
+    if (ok) { int sh[3] = {nkv,n,1}; ok = mlx_reshape(&s3, sc, sh, 3, s) == 0; }
+    int p0[3] = {0,pos,0}, p1[3] = {nkv,pos+n,1};
+    if (ok) ok = mlx_slice_update(&ns, spool, s3, p0,3,p1,3,st,3, s) == 0;
+    if (ok) { mlx_array_set(&kpool, nk); mlx_array_set(&vpool, nv); mlx_array_set(&spool, ns); }
+    mlx_array_free(nk); mlx_array_free(nv); mlx_array_free(vqt); mlx_array_free(s3); mlx_array_free(ns);
+    return ok ? 0 : -1;
+}
+
 #endif /* LLM_MLX_SPLASH_STORE_H */
