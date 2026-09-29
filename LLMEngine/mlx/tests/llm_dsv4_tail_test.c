@@ -146,6 +146,14 @@ int main(int argc, char** argv) {
     { float* a = rdbin("/tmp","rw",c.n_expert_used); if(a){ double mx=0; for(int i=0;i<c.n_expert_used;i++){double v=fabs(a[i]); if(v>mx)mx=v;} fprintf(stderr,"[TAIL] rw     max|.|=%.4g\n", mx); free(a);} }
     { float* t = rdbin("/tmp","rout",D); double mxt=0; if(t){ for(int i=0;i<D;i++){double v=fabs(t[i]); if(v>mxt)mxt=v;} free(t);} double mxr=0; for(int i=0;i<D;i++){double v=fabs(rrout[i]); if(v>mxr)mxr=v;}
       fprintf(stderr,"[TAIL] rout   |tail|max=%.6g  |ref|max=%.6g    (gate=%p up=%p down=%p)\n", mxt, mxr, (void*)pe.gate, (void*)pe.up, (void*)pe.down); }
+    /* Confronto decisivo: output INTERO del layer, tail (hook) vs path non-tail. */
+    { LlmDsv4LayerCache k2; llm_dsv4_cache_init(&k2, &c, IL, 128, 8);
+      float* out_ref = (float*)malloc(sizeof(float)*HC*D);
+      llm_dsv4_layer_forward_cached_pe(&c, &L, &pe, &k2, hc, POS, POS, IL, out_ref);
+      double d = maxdiff(out_tail, out_ref, HC*D);
+      fprintf(stderr, "[TAIL] out_hc  tail-vs-nontail max|diff|=%.6g%s\n", d, (d>1e-2)?"  <<< DIVERGE":"");
+      if (d > 1e-2) fails++;
+      llm_dsv4_cache_free(&k2); free(out_ref); }
     fprintf(stderr, "%s layer %d tail: %s\n", fails?"FAIL":"PASS", IL, fails?"primo stadio divergente sopra":"tutti bit-exact");
     return fails?1:0;
 }

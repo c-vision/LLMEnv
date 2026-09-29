@@ -448,29 +448,29 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    for(uint i=0;i<used;i++) WEIGHT[i]=probs[SELECTED[i]]/sum*scale;\n"
 "}\n"
 "kernel void dsv4_slots6_addr_pair_swiglu_iq2(\n"
-"    device const int* SEL [[buffer(0)]], device const char* GB [[buffer(1)]], device const char* UB [[buffer(2)]],\n"
+"    device const int* SEL [[buffer(0)]], device const ulong* GADDR [[buffer(1)]], device const ulong* UADDR [[buffer(2)]],\n"
 "    device const float* Y [[buffer(3)]], device float* MID [[buffer(4)]], device const float* RW [[buffer(5)]],\n"
 "    constant float* CF [[buffer(6)]], constant uint* P [[buffer(7)]],\n"
 "    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]],\n"
 "    ushort sgitg [[simdgroup_index_in_threadgroup]], threadgroup char* shmem [[threadgroup(0)]]) {\n"
 "    const int idx = (int)tgpig.z; const int e = SEL[idx];\n"
-"    device const char* SG = GB + (ulong)P[5] + (ulong)e * (ulong)P[3];\n"
-"    device const char* SU = UB + (ulong)P[6] + (ulong)e * (ulong)P[4];\n"
+"    device const char* SG = (device const char*)(ulong)GADDR[e];\n"
+"    device const char* SU = (device const char*)(ulong)UADDR[e];\n"
 "    const int ne00=(int)P[0], nb01=(int)P[1], ne0=(int)P[2];\n"
 "    dsv4_pair_core(SG, SU, Y, MID, RW[idx], idx*ne0, CF[0], ne00, nb01, ne0, 0u, 0u, tgpig.x, tiisg, sgitg, shmem);\n"
 "}\n"
-"kernel void dsv4_sum6_addr_q2k(device const int* SEL [[buffer(0)]], device const char* DB [[buffer(1)]],\n"
+"kernel void dsv4_sum6_addr_q2k(device const int* SEL [[buffer(0)]], device const ulong* DADDR [[buffer(1)]],\n"
 "    device const float* MID [[buffer(2)]], device float* OUT [[buffer(3)]], constant uint* P [[buffer(4)]],\n"
 "    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) {\n"
 "    const short NSG = 4; const short nr0 = 4;\n"
 "    const int nb = (int)P[0]; const uint nb01 = P[1];\n"
-"    const int ne0 = (int)P[2]; const int ne00 = (int)P[3]; const uint stride_d = P[4]; const uint lead_d = P[5];\n"
+"    const int ne0 = (int)P[2]; const int ne00 = (int)P[3];\n"
 "    const int first_row = (tgpig.x * NSG + sgitg) * nr0;\n"
 "    float sumf[4] = {0.f,0.f,0.f,0.f};\n"
 "    const short ix = tiisg / 8; const short it = tiisg % 8;\n"
 "    const short iq = it / 4; const short ir = it % 4; const short is = (8 * ir) / 16;\n"
 "    for (int slot = 0; slot < 6; slot++) {\n"
-"        device const char* s0 = DB + (ulong)lead_d + (ulong)SEL[slot] * (ulong)stride_d;\n"
+"        device const char* s0 = (device const char*)(ulong)DADDR[SEL[slot]];\n"
 "        device const float* y = MID + (ulong)slot * (ulong)ne00;\n"
 "        device const float* y4 = y + ix * 256 + 128 * iq + 8 * ir;\n"
 "        for (int ib = ix; ib < nb; ib += 4) {\n"
@@ -1208,20 +1208,29 @@ static id<MTLBuffer> dsv4_view(LlmDsv4Metal* b, const void* p, size_t bytes, siz
     return [b->dev newBufferWithBytesNoCopy:(void*)ap length:vl options:MTLResourceStorageModeShared deallocator:nil];
 }
 
-/* Cache PERSISTENTE di viste (memoizzate per ptr+bytes): i tensori degli esperti sono fissi
- * (mmap), quindi la vista si crea UNA volta e si riusa (niente alloc per-token). */
-static struct { const void* ptr; size_t bytes; id<MTLBuffer> buf; } g_tv_cache[512];
-static int g_tv_n = 0;
+/* Cache PERSISTENTE (hash) di viste no-copy: i tensori/esperti sono fissi (mmap) -> la vista
+ * si crea UNA volta. Regge decine di migliaia di buffer per-esperto (piccoli). */
+#define DSV4_TVC_N 131072u
+static struct { const void* ptr; size_t bytes; id<MTLBuffer> buf; size_t lead; } g_tvc[DSV4_TVC_N];
 static id<MTLBuffer> dsv4_view_cached(LlmDsv4Metal* b, const void* p, size_t bytes, size_t* out_lead) {
-    for (int i = 0; i < g_tv_n; i++)
-        if (g_tv_cache[i].ptr == p && g_tv_cache[i].bytes == bytes) {
-            if (out_lead) { const size_t page=(size_t)getpagesize(); *out_lead=(size_t)((uintptr_t)p & (page-1)); }
-            return g_tv_cache[i].buf;
+    size_t h = (((uintptr_t)p >> 4) ^ (bytes >> 4)) & (DSV4_TVC_N - 1);
+    for (size_t i = 0; i < 128; i++) {
+        size_t j = (h + i) & (DSV4_TVC_N - 1);
+        if (g_tvc[j].buf == NULL) {
+            size_t lead = 0; id<MTLBuffer> buf = dsv4_view(b, p, bytes, &lead);
+            if (buf) { g_tvc[j].ptr = p; g_tvc[j].bytes = bytes; g_tvc[j].buf = buf; g_tvc[j].lead = lead; }
+            if (out_lead) *out_lead = lead;
+            return buf;
         }
-    size_t lead = 0; id<MTLBuffer> buf = dsv4_view(b, p, bytes, &lead);
-    if (out_lead) *out_lead = lead;
-    if (buf && g_tv_n < 512) { g_tv_cache[g_tv_n].ptr = p; g_tv_cache[g_tv_n].bytes = bytes; g_tv_cache[g_tv_n].buf = buf; g_tv_n++; }
-    return buf;
+        if (g_tvc[j].ptr == p && g_tvc[j].bytes == bytes) { if (out_lead) *out_lead = g_tvc[j].lead; return g_tvc[j].buf; }
+    }
+    return dsv4_view(b, p, bytes, out_lead);
+}
+
+/* gpuAddress (buffer registrato persistente + lead) dell'esperto: indirizzo valido per la GPU. */
+uint64_t llm_dsv4_metal_expert_gaddr(LlmDsv4Metal* b, const void* ptr, size_t bytes) {
+    size_t lead = 0; id<MTLBuffer> buf = dsv4_view_cached(b, ptr, bytes, &lead);
+    return buf ? (uint64_t)[buf gpuAddress] + (uint64_t)lead : 0;
 }
 
 /* TAIL FUSO del layer (ds4): attn-out + mhc_post + mhc_pre + route + moe + mhc_post in UNA cb.
@@ -1233,7 +1242,7 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
         !b->pso_addr_pair || !b->pso_addr_sum6 || !b->pso_swiglu || !b->pso_add) return -1;
     const uint32_t D = (uint32_t)q->D, HC = (uint32_t)q->HC, SIZE = (uint32_t)q->SIZE, HCD = (uint32_t)q->HCD;
     if (!q->heads || !q->out_hc || !q->res_attn || !q->post_attn || !q->comb_attn || !q->fn ||
-        !q->scale || !q->base || !q->norm_w || !q->router_w || !q->gate_base || !q->up_base || !q->down_base) return -1;
+        !q->scale || !q->base || !q->norm_w || !q->router_w || !q->gaddr || !q->uaddr || !q->daddr) return -1;
     if ((q->hd % 1) || (D % 32u)) return -1;
 
     id<MTLBuffer> HEADS = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->heads, (size_t)q->n_head*q->hd*sizeof(float));
@@ -1246,10 +1255,9 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
     id<MTLBuffer> NORMW = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->norm_w, (size_t)D*sizeof(float));
     id<MTLBuffer> EXPB  = q->exp_probs_b ? (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->exp_probs_b, (size_t)q->n_expert*sizeof(float)) : nil;
     size_t rtw_lead = 0;
-    size_t lg = 0, lu = 0, ld = 0;
-    id<MTLBuffer> GB = dsv4_view_cached(b, q->gate_base, (size_t)q->n_expert * q->gate_stride, &lg);
-    id<MTLBuffer> UB = dsv4_view_cached(b, q->up_base,   (size_t)q->n_expert * q->up_stride,   &lu);
-    id<MTLBuffer> DB = dsv4_view_cached(b, q->down_base, (size_t)q->n_expert * q->down_stride, &ld);
+    id<MTLBuffer> GADR = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->gaddr, (size_t)q->n_expert*sizeof(uint64_t));
+    id<MTLBuffer> UADR = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->uaddr, (size_t)q->n_expert*sizeof(uint64_t));
+    id<MTLBuffer> DADR = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->daddr, (size_t)q->n_expert*sizeof(uint64_t));
     id<MTLBuffer> RTW = dsv4_view(b, q->router_w, (size_t)q->n_expert*D*sizeof(float), &rtw_lead);
     size_t oa_lead = 0, ob_lead = 0;
     id<MTLBuffer> OUTA = dsv4_view(b, q->outa_w, (size_t)q->ng*q->rank*q->outa_row_bytes, &oa_lead);
@@ -1278,7 +1286,7 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
     id<MTLBuffer> MID2 = dsv4_scratch(b, &b->sx[37], &b->sx_cap[37], (size_t)q->ff*sizeof(float));
     id<MTLBuffer> D2   = dsv4_scratch(b, &b->sx[38], &b->sx_cap[38], (size_t)D*sizeof(float));
 
-    int rc = (HEADS&&RES&&POST&&COMB&&FN&&SCALE&&BASE&&NORMW&&GB&&UB&&DB&&RTW&&OUTA&&OUTB&&
+    int rc = (HEADS&&RES&&POST&&COMB&&FN&&SCALE&&BASE&&NORMW&&GADR&&UADR&&DADR&&RTW&&OUTA&&OUTB&&
               ATTN&&NXT&&FLAT&&MIXES&&SPLIT&&HIN&&NRM&&LOGI&&SEL&&RW&&MID&&ROUT&&OUTC&&HLOW&&
               (q->sg?(WG&&WU&&WD&&G&&U&&MID2&&D2):1)) ? 0 : -2;
 
@@ -1344,15 +1352,15 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
         [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
         /* 6) MoE addr: pair slots6 (grid z=used) + sum6 -> ROUT */
         [e setComputePipelineState:b->pso_addr_pair];
-        [e setBuffer:SEL offset:0 atIndex:0]; [e setBuffer:GB offset:0 atIndex:1]; [e setBuffer:UB offset:0 atIndex:2];
+        [e setBuffer:SEL offset:0 atIndex:0]; [e setBuffer:GADR offset:0 atIndex:1]; [e setBuffer:UADR offset:0 atIndex:2];
         [e setBuffer:NRM offset:0 atIndex:3]; [e setBuffer:MID offset:0 atIndex:4]; [e setBuffer:RW offset:0 atIndex:5];
         { float cf[1]={q->clamp}; [e setBytes:cf length:sizeof(cf) atIndex:6]; }
-        { uint32_t P[7]={D,q->gu_nb01,q->ff,(uint32_t)q->gate_stride,(uint32_t)q->up_stride,(uint32_t)lg,(uint32_t)lu}; [e setBytes:P length:sizeof(P) atIndex:7]; }
+        { uint32_t P[3]={D,q->gu_nb01,q->ff}; [e setBytes:P length:sizeof(P) atIndex:7]; }
         [e setThreadgroupMemoryLength:256*8+128 atIndex:0];
         [e dispatchThreadgroups:MTLSizeMake((q->ff+NSG*nr0-1)/(NSG*nr0),1,(NSUInteger)q->used) threadsPerThreadgroup:MTLSizeMake(32*NSG,1,1)];
         [e setComputePipelineState:b->pso_addr_sum6];
-        [e setBuffer:SEL offset:0 atIndex:0]; [e setBuffer:DB offset:0 atIndex:1]; [e setBuffer:MID offset:0 atIndex:2]; [e setBuffer:ROUT offset:0 atIndex:3];
-        { uint32_t P[6]={q->ff/256u,q->down_nb01,D,q->ff,(uint32_t)q->down_stride,(uint32_t)ld}; [e setBytes:P length:sizeof(P) atIndex:4]; }
+        [e setBuffer:SEL offset:0 atIndex:0]; [e setBuffer:DADR offset:0 atIndex:1]; [e setBuffer:MID offset:0 atIndex:2]; [e setBuffer:ROUT offset:0 atIndex:3];
+        { uint32_t P[4]={q->ff/256u,q->down_nb01,D,q->ff}; [e setBytes:P length:sizeof(P) atIndex:4]; }
         [e dispatchThreadgroups:MTLSizeMake((D+NSG*nr0-1)/(NSG*nr0),1,1) threadsPerThreadgroup:MTLSizeMake(32*NSG,1,1)];
         /* shared expert -> ROUT += D2 */
         if (q->sg) {
@@ -1405,7 +1413,7 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
     if (HEADS) [HEADS release]; if (RES) [RES release]; if (POST) [POST release]; if (COMB) [COMB release];
     if (FN) [FN release]; if (SCALE) [SCALE release]; if (BASE) [BASE release]; if (NORMW) [NORMW release];
     if (EXPB) [EXPB release];
-    /* GB/UB/DB: viste in cache persistente, NON rilasciate. */
+    if (GADR) [GADR release]; if (UADR) [UADR release]; if (DADR) [DADR release];
     if (RTW) [RTW release]; if (OUTA) [OUTA release]; if (OUTB) [OUTB release];
     if (WG) [WG release]; if (WU) [WU release]; if (WD) [WD release];
     return rc;

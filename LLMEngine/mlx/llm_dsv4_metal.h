@@ -99,8 +99,7 @@ typedef struct {
     const void* router_w;     /* f32 [n_expert, D] (ffn_gate_inp) */
     const float* exp_probs_b; /* [n_expert] o NULL */
     int n_expert, used; float expert_scale;
-    const void* gate_base; const void* up_base; const void* down_base;  /* tensori interi */
-    size_t gate_stride, up_stride, down_stride;                          /* byte per esperto */
+    const uint64_t* gaddr; const uint64_t* uaddr; const uint64_t* daddr;  /* [n_expert] gpuAddress */
     float clamp; uint32_t gu_nb01, ff, down_nb01;
     const void* sg; const void* su; const void* sd; uint32_t s_nb_g, s_nb_d;
     int HC, D, SIZE, HCD, sinkhorn_iters; float hc_eps, rms_eps;
@@ -118,5 +117,8 @@ void llm_dsv4_metal_tail_set_dump(const char* dir);
  * grezzo dai kernel addr; rilasciare con _release. NULL su errore. */
 void* llm_dsv4_metal_register(LlmDsv4Metal* b, const void* ptr, size_t bytes);
 void  llm_dsv4_metal_register_release(void* h);
+
+/* gpuAddress (buffer per-esperto registrato, persistente) dell'esperto in `ptr`. */
+uint64_t llm_dsv4_metal_expert_gaddr(LlmDsv4Metal* b, const void* ptr, size_t bytes);
 
 #endif /* LLM_DSV4_METAL_H */
