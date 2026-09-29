@@ -441,16 +441,6 @@ static bool qwen4_exp_ple_inject(LlmMlxModel* m, int layer_idx, int cache_offset
 #define CHK(cond, what) do { \
         if (!(cond)) { fprintf(stderr, "qwen4_exp_ple[layer=%d]: %s failed\n", layer_idx, (what)); ok = false; } \
     } while (0)
-    /* DIAGNOSTICA F2 (todo Qwen38-FlashNext-60tok): la PLE non cambia l'output -> dove si annulla? */
-#define PLEDBG_F(tag, arr) do { if (llm_env_isset("LLM_QWEN4EXP_PLE_DEBUG") && (arr).ctx != NULL) { \
-        mlx_array ab_ = mlx_array_new(), mx_ = mlx_array_new(); \
-        if (mlx_abs(&ab_, (arr), s) == 0 && mlx_max(&mx_, ab_, false, s) == 0 && mlx_array_eval(mx_) == 0) { \
-            const float* pp_ = mlx_array_data_float32(mx_); \
-            fprintf(stderr, "[ple-debug][layer=%d] %-16s shape[0]=%d absmax=%.6g\n", layer_idx, tag, \
-                    mlx_array_ndim(arr) > 0 ? (int)mlx_array_shape(arr)[0] : -1, pp_ ? (double)pp_[0] : -1.0); } \
-        mlx_array_free(ab_); mlx_array_free(mx_); } } while (0)
-
-    PLEDBG_F("hidden_in", hidden_states);
     mlx_array mult_arr = mlx_array_new(), voff = mlx_array_new(), vsz = mlx_array_new();
     tname(m->cfg.layer_prefix, layer_idx, "ple.ple_embedding.layer_multipliers", namebuf, sizeof(namebuf));
     ok = ok && multishard_get(&m->weights, namebuf, &mult_arr);
@@ -498,13 +488,6 @@ static bool qwen4_exp_ple_inject(LlmMlxModel* m, int layer_idx, int cache_offset
         ok = mlx_astype(&ids_u32, ids, MLX_UINT32, s) == 0;
         if (ok) ok = mlx_array_eval(ids_u32) == 0;
         CHK(ok, "ngram ids astype/eval");
-        if (ok && llm_env_isset("LLM_QWEN4EXP_PLE_DEBUG")) {
-            const uint32_t* rid = mlx_array_data_uint32(ids_u32);
-            int d0 = mlx_array_dim(ids_u32, 0), d1 = mlx_array_dim(ids_u32, 1), d2 = mlx_array_dim(ids_u32, 2);
-            fprintf(stderr, "[ple-ids][layer=%d] shape=[%d,%d,%d] last:", layer_idx, d0, d1, d2);
-            for (int i = 0; i < d2; i++) fprintf(stderr, " %u", rid[(size_t)(d1 - 1) * (size_t)d2 + (size_t)i]);
-            fprintf(stderr, "\n");
-        }
         const size_t n_rows = ok ? mlx_array_size(ids_u32) : 0;
         const uint32_t* row_ids = ok ? mlx_array_data_uint32(ids_u32) : NULL;
         if (ok) ok = qwen4_exp_ngram_read_rows(m, row_ids, n_rows, &w_rows_flat, &s_rows_flat, have_b ? &b_rows_flat : NULL);
@@ -533,20 +516,6 @@ static bool qwen4_exp_ple_inject(LlmMlxModel* m, int layer_idx, int cache_offset
         CHK(ok, "ngram table gather/dequantize");
     }
     if (ok) { const int es[3] = {1, n_tokens, embed_dim}; ok = mlx_reshape(&embeddings, gathered, es, 3, s) == 0; CHK(ok, "embeddings reshape"); }
-    PLEDBG_F("embeddings", embeddings);
-    if (ok && llm_env_isset("LLM_QWEN4EXP_PLE_DEBUG")) {
-        mlx_array ef = mlx_array_new();
-        if (mlx_astype(&ef, embeddings, MLX_FLOAT32, s) == 0 && mlx_array_eval(ef) == 0) {
-            const float* ed = mlx_array_data_float32(ef);
-            int d0 = mlx_array_dim(ef, 0), d1 = mlx_array_dim(ef, 1), d2 = mlx_array_dim(ef, 2);
-            size_t off = (size_t)(d1 - 1) * (size_t)d2;
-            fprintf(stderr, "[ple-emb][layer=%d] shape=[%d,%d,%d] last_first8:", layer_idx, d0, d1, d2);
-            for (int i = 0; i < 8 && i < d2; i++) fprintf(stderr, " %.6g", ed[off + (size_t)i]);
-            fprintf(stderr, "\n");
-        }
-        mlx_array_free(ef);
-    }
-
     mlx_array key_w = mlx_array_new(), key_sc = mlx_array_new(), key_b = mlx_array_new();
     mlx_array val_w = mlx_array_new(), val_sc = mlx_array_new(), val_b = mlx_array_new();
     mlx_array nk_w = mlx_array_new(), nq_w = mlx_array_new(), nc_w = mlx_array_new(), cv_w = mlx_array_new();
@@ -569,7 +538,6 @@ static bool qwen4_exp_ple_inject(LlmMlxModel* m, int layer_idx, int cache_offset
     mlx_array key_lin = mlx_array_new(), values = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&key_lin, embeddings, key_w, key_sc, key_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "key_proj matmul"); }
     if (ok) { ok = quantized_linear_cfg(&values, embeddings, val_w, val_sc, val_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "value_proj matmul"); }
-    PLEDBG_F("key_lin", key_lin); PLEDBG_F("values", values);
 
     bool has_conv_state = false;
     mlx_array* conv_cache = llm_mlx_qwen4exp_ple_conv_cache(m, layer_idx, &has_conv_state);
@@ -582,7 +550,6 @@ static bool qwen4_exp_ple_inject(LlmMlxModel* m, int layer_idx, int cache_offset
                                                m->cfg.hc_count, m->cfg.hidden_size,
                                                m->cfg.ple_conv_kernel_size, ngram_size, m->cfg.rms_norm_eps, s);
               CHK(ok, "ple_layer"); }
-    PLEDBG_F("ple_out", *out);
     if (ok && conv_cache != NULL) { mlx_array_free(*conv_cache); *conv_cache = mlx_array_new(); mlx_array_set(conv_cache, conv_state_out); }
 
     mlx_array_free(mult_arr); mlx_array_free(voff); mlx_array_free(vsz); mlx_array_free(mult_i64);
@@ -649,7 +616,6 @@ bool qwen4_exp_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offse
         }
     }
     if (!ok) { mlx_array_free(x_ple); return false; }
-    PLEDBG_F("x_ple_after", x_ple);
 
     mlx_array hc_norm_w = mlx_array_new();
     mlx_array down_w = mlx_array_new(), down_sc = mlx_array_new(), down_b = mlx_array_new();
