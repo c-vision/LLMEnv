@@ -134,7 +134,7 @@ static const char splash_store_row_metal[] =
  * GAP (parti NON copiabili/ancora non copiate, NON sostituite):
  * GAP-1: helper device-side `splash_current_key_index/value_index` e i template
  *        (KVHeads) dai kernel Splash vanno ancora trascritti nel sorgente Metal.
- * GAP-2: il read usа MPP (MetalPerformancePrimitives) `matmul2d` in
+ * GAP-2: il read usa MPP (MetalPerformancePrimitives) `matmul2d` in
  *        paged_attention_tile.h: MPP non e' disponibile nel nostro host MLX.
  *        Da decidere COME con il committente (non sostituito da me).
  * GAP-3: PageStorage/KvPool/KvCache (storage fisico, sparse heap, policy) e
