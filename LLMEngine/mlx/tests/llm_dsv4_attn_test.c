@@ -49,6 +49,10 @@ int main(void) {
     ok &= run_case(b, 8, 128, 11, 47, 1);   /* poche raw */
     ok &= run_case(b, 4, 128, 29, 0, 0);    /* solo raw (ratio=0 / no compresse) */
     ok &= run_case(b, 8, 128, 0, 40, 1);    /* solo compresse */
+    ok &= run_case(b, 8, 512, 37, 53, 1);   /* hd reale DS4, split ns=2 */
+    ok &= run_case(b, 64, 512, 128, 400, 1);  /* teste/finestra reali, ctx ~1.6k */
+    ok &= run_case(b, 64, 512, 128, 3000, 1); /* ns=16 (ctx lungo): merge di 16 parziali */
+    ok &= run_case(b, 64, 512, 5, 0, 0);    /* poche posizioni: split con simdgroup vuoti */
     printf(ok ? "PASS attn_mixed: entro 1e-4 vs reference CPU\n"
               : "FAIL attn_mixed\n");
     llm_dsv4_metal_destroy(b);
