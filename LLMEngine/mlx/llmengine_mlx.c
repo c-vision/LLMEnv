@@ -799,7 +799,9 @@ bool llm_env_isset(const char* name) {
     static unsigned char vals[128];
     static int n = 0;
     for (int i = 0; i < n; i++) if (keys[i] == name || strcmp(keys[i], name) == 0) return vals[i] != 0;
-    bool v = (getenv(name) != NULL);
+    /* REGISTRO OPZIONI PRIMA (promozione degli switch a opzioni): impostabile via --opt; la env
+     * resta solo come fallback di TRANSIZIONE. */
+    bool v = (llm_ai_mlx_opt_is_set(name) == 1) || (getenv(name) != NULL);
     if (n < 128) { keys[n] = name; vals[n] = (unsigned char)v; n++; }
     return v;
 }
@@ -808,9 +810,15 @@ bool llm_env_isset(const char* name) {
 const char* llm_env_get(const char* name) {
     static const char* keys[64];
     static const char* vals[64];
+    static char bufs[64][256];
     static int n = 0;
     for (int i = 0; i < n; i++) if (keys[i] == name || strcmp(keys[i], name) == 0) return vals[i];
-    const char* v = getenv(name);
+    const char* v = NULL;
+    if (llm_ai_mlx_opt_is_set(name) == 1) {
+        if (n < 64) { bufs[n][0] = 0; llm_ai_mlx_opt_get_str(name, bufs[n], (int)sizeof bufs[n]); v = bufs[n]; keys[n] = name; vals[n] = v; n++; }
+        return v;
+    }
+    v = getenv(name);
     if (n < 64) { keys[n] = name; vals[n] = v; n++; }
     return v;
 }
