@@ -649,32 +649,6 @@ bool qwen4_exp_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offse
     if (ok) { ok = llm_mlx_hc_combine(out_h, sub_out, residual, injection, m->cfg.hc_count, m->cfg.hidden_size, s);
               CHK(ok, "attn_hyper_connection combine"); }
 
-    /* F3: dump dell'output ATTENTION (fine sub-blocco, prima del ffn) per-layer. */
-    if (ok && llm_env_isset("LLM_QWEN4EXP_LAYER_DUMP")) {
-        const char* e = 0;
-        int lim = (e && *e) ? atoi(e) : 48;
-        if (layer_idx < lim) {
-            mlx_array dbga = mlx_array_new();
-            if (mlx_astype(&dbga, *out_h, MLX_FLOAT32, s) == 0 && mlx_array_eval(dbga) == 0) {
-                const float* d = mlx_array_data_float32(dbga);
-                int nd = mlx_array_ndim(dbga);
-                if (d && nd >= 2) {
-                    int W = (int)mlx_array_shape(dbga)[nd - 1];
-                    int S = (int)mlx_array_shape(dbga)[nd - 2];
-                    if (W > 0 && S > 0) {
-                        const float* last = d + (size_t)(S - 1) * (size_t)W;
-                        float am = 0.0f; double sum = 0.0;
-                        for (int i = 0; i < W; i++) { float a = fabsf(last[i]); if (a > am) am = a; sum += (double)last[i]; }
-                        const char* lty = (m->cfg.is_linear_layer && layer_idx < m->cfg.n_layers && m->cfg.is_linear_layer[layer_idx]) ? "GDN" : "QSA";
-                        fprintf(stderr, "[Q4_ATTN] layer=%d type=%s absmax=%.6f mean=%.6f sum=%.6f first4=%.6f,%.6f,%.6f,%.6f W=%d\n",
-                                layer_idx, lty, am, sum / (double)W, sum, last[0], last[1], last[2], last[3], W);
-                    }
-                }
-            }
-            mlx_array_free(dbga);
-        }
-    }
-
     mlx_array_free(hc_norm_w);
     mlx_array_free(down_w); mlx_array_free(down_sc); mlx_array_free(down_b);
     mlx_array_free(up_w); mlx_array_free(up_sc); mlx_array_free(up_b);
@@ -721,42 +695,6 @@ bool qwen4_exp_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arr
 
     if (ok) { ok = llm_mlx_hc_combine(out, moe_out, residual, injection, m->cfg.hc_count, m->cfg.hidden_size, s);
               CHK(ok, "mlp_hyper_connection combine"); }
-
-    /* F3 (parità qwen4_exp): dump per-layer dell'hidden di output del layer (ultimo token).
-     * LLM_QWEN4EXP_LAYER_DUMP=<N> → stampa absmax/mean sui primi N layer. Confrontato col
-     * reference lazy (tools/q4_ref_lazy.py). No-op se non impostato. */
-    if (ok && llm_env_isset("LLM_QWEN4EXP_LAYER_DUMP")) {
-        const char* e = 0;
-        int lim = (e && *e) ? atoi(e) : 48;
-        if (layer_idx < lim) {
-            mlx_array dbg = mlx_array_new();
-            if (mlx_astype(&dbg, *out, MLX_FLOAT32, s) == 0 && mlx_array_eval(dbg) == 0) {
-                const float* d = mlx_array_data_float32(dbg);
-                int nd = mlx_array_ndim(dbg);
-                if (d && nd >= 2) {
-                    int W = (int)mlx_array_shape(dbg)[nd - 1];
-                    int S = (int)mlx_array_shape(dbg)[nd - 2];
-                    if (W > 0 && S > 0) {
-                        const float* last = d + (size_t)(S - 1) * (size_t)W;
-                        float am = 0.0f; double sum = 0.0;
-                        for (int i = 0; i < W; i++) { float a = fabsf(last[i]); if (a > am) am = a; sum += (double)last[i]; }
-                        const char* lty = (m->cfg.is_linear_layer && layer_idx < m->cfg.n_layers && m->cfg.is_linear_layer[layer_idx]) ? "GDN" : "QSA";
-                        fprintf(stderr, "[Q4_DUMP] layer=%d type=%s absmax=%.6f mean=%.6f sum=%.6f first4=%.6f,%.6f,%.6f,%.6f W=%d\n",
-                                layer_idx, lty, am, sum / (double)W, sum, last[0], last[1], last[2], last[3], W);
-                        /* F3: dump vettoriale (ultimo token, f32) per il confronto di correlazione. */
-                        const char* vp = llm_ai_mlx_opt_env("LLM_QWEN4EXP_LAYER_VEC");
-                        if (vp && *vp && n_tokens > 1) {
-                            char vpath[1024];
-                            snprintf(vpath, sizeof vpath, "%s.%d.bin", vp, layer_idx);
-                            FILE* vf = fopen(vpath, "wb");
-                            if (vf) { fwrite(last, sizeof(float), (size_t)W, vf); fclose(vf); }
-                        }
-                    }
-                }
-            }
-            mlx_array_free(dbg);
-        }
-    }
 
     mlx_array_free(hc_norm_w);
     mlx_array_free(down_w); mlx_array_free(down_sc); mlx_array_free(down_b);

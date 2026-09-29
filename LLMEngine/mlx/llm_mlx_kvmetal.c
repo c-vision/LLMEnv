@@ -119,7 +119,7 @@ bool llm_mlx_kvmetal_step(void** kvmetal_ctx_arr, int layer_idx, LlmMlxModel* m,
      * dell'INTERO grafo lazy accumulato fino a qui, non solo di q/k/v -- sospetto principale
      * del rallentamento, non ancora isolato da waitUntilCompleted) vs metal_dispatch (write +
      * commit/waitUntilCompleted del kernel) vs wrap (mlx_array_new_data + astype indietro). */
-    const bool kvtime = llm_env_isset("LLMMETAL_KVMETAL_TIME");
+    const bool kvtime = false;
     struct timespec kt0, kt1, kt2, kt3;
     if (kvtime) clock_gettime(CLOCK_MONOTONIC, &kt0);
 

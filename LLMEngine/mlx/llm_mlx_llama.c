@@ -384,10 +384,8 @@ bool llama_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
          * sotto-blocco qui misurato, senza le proiezioni Q/K/V/O, risultava piu' costoso del
          * blocco intero misurato da LLM_PHASE, che le include -- impossibile se non per
          * questo artefatto). Usare solo per un segnale di massima, non per numeri assoluti. */
-        const char* ktime_env = llm_env_get("LLM_KVSLICE_TIME");
-        bool ktime = ktime_env != NULL;
-        bool ktime_multi = ktime && strcmp(ktime_env, "2") != 0; /* =2: un solo eval finale, per
-            escludere che gli eval intermedi stessi introducano il costo osservato */
+        bool ktime = false;
+        bool ktime_multi = false;
         struct timespec kt0, kt1;
         double t_write = 0, t_read = 0, t_sdpa = 0;
         if (ktime) clock_gettime(CLOCK_MONOTONIC, &kt0);
