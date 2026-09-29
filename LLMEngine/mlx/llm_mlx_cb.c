@@ -7,6 +7,7 @@
 #include "llm_engine_opts.h"
 #include "llm_mlx_splash_store.h"
 #include "llm_mlx_splash_attn.h"   /* opt_env: registro */
+#include "llm_mlx_kvq_splash.h"        /* B7: store/quant Splash int8 */
 #include "llm_mlx_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1219,3 +1220,78 @@ int llm_ai_mlx_splash_attn_selftest(char* out, size_t cap) {
     return (rc==0&&bad==0)?0:1;
 }
 
+
+/* Self-test B7: store int8 (Splash) + kernel read fused → confronto con un
+ * riferimento C (dequant-folded). Valida layout + segno int8 + scala. */
+int llm_ai_mlx_kvq_splash_selftest(char* out, size_t cap) {
+    if (out == NULL || cap == 0) return -1;
+    out[0] = '\0';
+    const int nh = 8, nkv = 2, hd = 64, n = 96;
+    const float attn = 1.0f / sqrtf((float)hd);
+    size_t nk = (size_t)nkv * n * hd;
+    float* kbuf = (float*)malloc(nk * sizeof(float));
+    float* vbuf = (float*)malloc(nk * sizeof(float));
+    float* qbuf = (float*)malloc((size_t)nh * hd * sizeof(float));
+    if (!kbuf || !vbuf || !qbuf) { free(kbuf); free(vbuf); free(qbuf); return -1; }
+    for (size_t i = 0; i < nk; i++) { kbuf[i] = sinf((float)i * 0.7f) * 3.0f; vbuf[i] = cosf((float)i * 0.31f) * 2.0f; }
+    for (int i = 0; i < nh * hd; i++) qbuf[i] = sinf((float)i * 0.13f);
+    int ksh[3] = {nkv, n, hd};
+    mlx_array ka = mlx_array_new_data(kbuf, ksh, 3, MLX_FLOAT32);
+    mlx_array va = mlx_array_new_data(vbuf, ksh, 3, MLX_FLOAT32);
+    mlx_array qa = mlx_array_new_data(qbuf, (int[]){nh, hd}, 2, MLX_FLOAT32);
+    mlx_stream s = mlx_default_gpu_stream_new();
+    mlx_array kq = mlx_array_new(), vq = mlx_array_new(), ks = mlx_array_new(), vs = mlx_array_new();
+    int rc = llm_splash_store_run(&kq, &vq, &ks, &vs, ka, va, s);
+    int bad = 0; double maxdiff = 0; int ref_ok = 0;
+    if (rc == 0 && mlx_array_eval(kq) == 0 && mlx_array_eval(vq) == 0 && mlx_array_eval(ks) == 0) {
+        const int8_t* KQ = mlx_array_data_int8(kq);
+        const int8_t* VQ = mlx_array_data_int8(vq);
+        /* scala [nkv,n] */
+        const float* SC = mlx_array_data_float32(ks);
+        /* riferimento dequant-folded */
+        float* ref = (float*)malloc((size_t)nh * hd * sizeof(float));
+        for (int h = 0; h < nh && ref; h++) {
+            int kh = (int)((long long)h * nkv / nh);
+            float scn[1026]; if (n > 1024) break;
+            for (int t = 0; t < n; t++) {
+                float scv = SC[(size_t)kh * n + t];
+                float dot = 0.0f;
+                for (int d = 0; d < hd; d++) dot += qbuf[h*hd+d] * ((float)KQ[((size_t)kh*n+t)*hd+d] * scv);
+                scn[t] = dot * attn;
+            }
+            scn[n] = 0.0f;   /* recente fp = K nullo -> score 0 (V nullo, contributo out 0) */
+            float mx = -INFINITY; for (int t = 0; t <= n; t++) if (scn[t] > mx) mx = scn[t];
+            float sum = 0.0f; for (int t = 0; t <= n; t++) { scn[t] = expf(scn[t]-mx); sum += scn[t]; }
+            for (int d = 0; d < hd; d++) {
+                float acc = 0.0f;
+                for (int t = 0; t < n; t++) {
+                    float scv = SC[(size_t)kh * n + t];
+                    acc += (scn[t]/sum) * ((float)VQ[((size_t)kh*n+t)*hd+d] * scv);
+                }
+                ref[h*hd+d] = acc;
+            }
+        }
+        /* cold int8 + recente fp nullo [nkv,1,hd] */
+        mlx_array kr = mlx_array_new(), vr = mlx_array_new();
+        mlx_zeros(&kr, (int[]){nkv, 1, hd}, 3, MLX_FLOAT32, s);
+        mlx_zeros(&vr, (int[]){nkv, 1, hd}, 3, MLX_FLOAT32, s);
+        mlx_array kb = mlx_array_new(), vb = mlx_array_new();
+        mlx_zeros(&kb, (int[]){nkv, n, 1}, 3, MLX_FLOAT32, s);
+        mlx_zeros(&vb, (int[]){nkv, n, 1}, 3, MLX_FLOAT32, s);
+        mlx_array o = mlx_array_new();
+        bool dok = llm_mlx_kvq_sdpa_decode(&o, qa, kq, ks, kb, vq, vs, vb, kr, vr, n, 8, 8, attn, hd, s);
+        if (dok && mlx_array_eval(o) == 0 && ref) {
+            const float* od = mlx_array_data_float32(o);
+            for (int i = 0; i < nh*hd; i++) { double df = fabs((double)od[i] - (double)ref[i]); if (df > 1e-3) bad++; if (df > maxdiff) maxdiff = df; }
+            ref_ok = 1;
+        }
+        free(ref);
+        mlx_array_free(kr); mlx_array_free(vr); mlx_array_free(kb); mlx_array_free(vb); mlx_array_free(o);
+    }
+    snprintf(out, cap, "kvq_splash selftest: rc=%d ref=%d bad=%d/%d maxdiff=%.4g %s",
+             rc, ref_ok, bad, ref_ok ? nh*hd : 0, maxdiff, (ref_ok && bad == 0) ? "OK" : "FAIL");
+    mlx_array_free(kq); mlx_array_free(vq); mlx_array_free(ks); mlx_array_free(vs);
+    mlx_array_free(ka); mlx_array_free(va); mlx_array_free(qa);
+    free(kbuf); free(vbuf); free(qbuf);
+    return (ref_ok && bad == 0) ? 0 : 1;
+}
