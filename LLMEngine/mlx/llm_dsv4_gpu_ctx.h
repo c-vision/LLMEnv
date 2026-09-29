@@ -26,6 +26,11 @@ int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeig
                                   const float* xn, int pos, float* q, float* kv, float* qrn);
 int llm_dsv4_gpu_attn_finish_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                  float* heads, int pos, float* out);
+/* Middle attenzione (compressor+indexer+attn) su GPU con KV/stato su device (1 = eseguito).
+ * `q`/`kv`/`qrn` sono l'uscita della proiezione; `ratio`/`raw_cap`/`comp_cap` dalla cache. */
+int llm_dsv4_gpu_attn_mid_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
+        int ratio, int raw_cap, int comp_cap,
+        const float* q, const float* kv, const float* qrn, const float* xn, int pos, float* heads);
 /* Tail fuso del layer (fin+mhc+route+moe+mhc) in UNA command buffer (1 = eseguito). */
 int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
         const LlmDsv4PackedExperts* pe, int il, const float* heads, const float* saved_attn,

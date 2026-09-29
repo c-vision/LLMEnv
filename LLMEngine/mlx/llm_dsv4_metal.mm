@@ -1582,6 +1582,7 @@ int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p) {
 
     /* 3) attn compressa (se dovuta): pool -> rms -> rope -> fp8, poi shift dello stato */
     if (p->due) {
+      if (p->push_acomp) {
         [e setComputePipelineState:b->pso_comp_pool];
         [e setBuffer:sakv offset:0 atIndex:0]; [e setBuffer:sasc offset:0 atIndex:1];
         [e setBuffer:aB offset:(NSUInteger)((size_t)p->acomp_off * 4) atIndex:2];
@@ -1605,6 +1606,7 @@ int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p) {
         [e setBuffer:aB offset:(NSUInteger)((size_t)p->acomp_off * 4) atIndex:0];
         { uint32_t P[1] = { (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
         [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((hd + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+      }
         if (ratio == 4) {
             [e setComputePipelineState:b->pso_comp_shift];
             [e setBuffer:sakv offset:0 atIndex:0]; { uint32_t P[2] = { (uint32_t)(ratio * width), (uint32_t)(ratio * width) }; [e setBytes:P length:sizeof(P) atIndex:1]; }
@@ -1630,6 +1632,7 @@ int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p) {
         { uint32_t P[1] = { (uint32_t)iwidth }; [e setBytes:P length:sizeof(P) atIndex:2]; }
         [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)iwidth + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         if (p->due) {
+          if (p->push_icomp) {
             [e setComputePipelineState:b->pso_comp_pool];
             [e setBuffer:sikv offset:0 atIndex:0]; [e setBuffer:sisc offset:0 atIndex:1];
             [e setBuffer:icB offset:(NSUInteger)((size_t)p->icomp_off * 4) atIndex:2];
@@ -1653,6 +1656,7 @@ int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p) {
             [e setBuffer:icB offset:(NSUInteger)((size_t)p->icomp_off * 4) atIndex:0];
             { uint32_t P[1] = { (uint32_t)ihd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
             [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((ihd + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+          }
             if (ratio == 4) {
                 [e setComputePipelineState:b->pso_comp_shift];
                 [e setBuffer:sikv offset:0 atIndex:0]; { uint32_t P[2] = { (uint32_t)(ratio * iwidth), (uint32_t)(ratio * iwidth) }; [e setBytes:P length:sizeof(P) atIndex:1]; }

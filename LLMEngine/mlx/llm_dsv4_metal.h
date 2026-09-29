@@ -101,7 +101,7 @@ int llm_dsv4_metal_comp_shift(LlmDsv4Metal* b, void* h, int n, int src);
 typedef struct {
     int embd, hd, ihd, ratio, co, n_head, n_rot;
     int idx_nh, idx_hd, idx_top_k, lq, qdim;
-    int pos, due, state_row, ape_off, has_idx;
+    int pos, due, state_row, ape_off, has_idx, push_acomp, push_icomp;
     float rms_eps;
     float rope_cfg[7];
     void* w_ckv; void* w_cgate; void* w_cape; void* w_cnorm;

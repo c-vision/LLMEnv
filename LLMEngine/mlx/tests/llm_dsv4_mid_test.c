@@ -109,6 +109,7 @@ int main(int argc, char** argv) {
         p.n_head=c.n_head; p.n_rot=c.n_rot; p.rms_eps=c.rms_eps;
         p.idx_nh=c.n_indexer_head; p.idx_hd=ihd; p.idx_top_k=c.n_indexer_top_k; p.lq=c.n_lora_q; p.qdim=qdim;
         p.pos=pos; p.due=due; p.state_row=state_row; p.ape_off=pos_mod; p.has_idx=(ratio==4);
+        p.push_acomp=(due && n_acomp<comp_cap); p.push_icomp=(due && n_icomp<comp_cap);
         p.rope_cfg[0]=freq_base; p.rope_cfg[1]=freq_scale; p.rope_cfg[2]=ext_factor; p.rope_cfg[3]=attn_factor;
         p.rope_cfg[4]=c.rope_yarn_beta_fast; p.rope_cfg[5]=c.rope_yarn_beta_slow; p.rope_cfg[6]=(float)(compressed?c.rope_orig_ctx:0);
         p.w_ckv=dw_ckv; p.w_cgate=dw_cgate; p.w_cape=dw_cape; p.w_cnorm=dw_cnorm;
