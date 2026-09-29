@@ -20,7 +20,10 @@ if(APPLE)
     list(APPEND DS4_CORE ds4_metal.m)
 endif()
 
-add_library(ds4_engine STATIC ${DS4_CORE})
+add_library(ds4_engine STATIC ${DS4_CORE} ds4_shim.c)
+
+add_executable(ds4_shim_test ds4_shim_test.c)
+target_link_libraries(ds4_shim_test PRIVATE ds4_engine)
 
 if(APPLE)
     set_source_files_properties(ds4_metal.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
@@ -30,10 +33,10 @@ target_include_directories(ds4_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_compile_options(ds4_engine PRIVATE -O3 -ffast-math)
 if(APPLE)
-    target_compile_options(ds4_engine PRIVATE -mcpu=native -Wall -Wextra)
-    target_link_libraries(ds4_engine PUBLIC
-        -framework Foundation -framework Metal -framework MetalPerformanceShaders
-        -lm -pthread)
+    find_library(FW_METAL Metal REQUIRED)
+    find_library(FW_FOUNDATION Foundation REQUIRED)
+    find_library(FW_MPS MetalPerformanceShaders REQUIRED)
+    target_link_libraries(ds4_engine PUBLIC ${FW_METAL} ${FW_FOUNDATION} ${FW_MPS} "-lm" "-pthread")
 else()
     target_compile_options(ds4_engine PRIVATE -march=native -Wall -Wextra -D_GNU_SOURCE -fno-finite-math-only)
     target_link_libraries(ds4_engine PUBLIC -lm -pthread)
