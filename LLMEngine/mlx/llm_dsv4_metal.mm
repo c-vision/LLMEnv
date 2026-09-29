@@ -735,6 +735,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_scale, pso_copy;  /* ausiliari middle su GPU (ds4) */
     id<MTLComputePipelineState> pso_f16;  /* f16-round ingresso cache KV (ds4) */
     id<MTLArgumentEncoder> enc_pair, enc_down;
+    id<MTLResidencySet> residency;  /* CONDIVISO da tutti gli argbuf (limite 32 set/coda) */
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
     size_t sx_cap[64], so_cap[64], spb_cap[64];
@@ -891,6 +892,7 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
         if (b->so[i])  [b->so[i] release];
         if (b->spb[i]) [b->spb[i] release];
     }
+    if (b->residency) [b->residency release];
     if (b->queue)   [b->queue release];
     if (b->dev)     [b->dev release];
     free(b);
@@ -1887,16 +1889,19 @@ typedef struct {
     id<MTLCommandQueue> queue; /* posseduta da LlmDsv4Metal */
 } Dsv4ArgBuf;
 static int dsv4_argbuf_make_resident(LlmDsv4Metal* b, Dsv4ArgBuf* h) {
-    MTLResidencySetDescriptor* d = [MTLResidencySetDescriptor new];
-    d.initialCapacity = (NSUInteger)h->nv + 1;
-    h->residency = [b->dev newResidencySetWithDescriptor:d error:nil];
-    [d release];
-    if (!h->residency) return 0;
-    [h->residency addAllocation:h->ab];
-    for (int i = 0; i < h->nv; i++) [h->residency addAllocation:h->views[i]];
-    [h->residency commit];
-    [h->residency requestResidency];
-    [b->queue addResidencySet:h->residency];
+    if (!b->residency) {
+        MTLResidencySetDescriptor* d = [MTLResidencySetDescriptor new];
+        d.initialCapacity = 1024;
+        b->residency = [b->dev newResidencySetWithDescriptor:d error:nil];
+        [d release];
+        if (!b->residency) return 0;
+        [b->queue addResidencySet:b->residency];
+    }
+    [b->residency addAllocation:h->ab];
+    for (int i = 0; i < h->nv; i++) [b->residency addAllocation:h->views[i]];
+    [b->residency commit];
+    [b->residency requestResidency];
+    h->residency = b->residency;   /* condiviso: NON posseduto dall'argbuf */
     h->queue = b->queue;
     return 1;
 }
@@ -1944,8 +1949,11 @@ void llm_dsv4_metal_argbuf_bind(void* enc, void* handle, int index) {
 }
 void llm_dsv4_metal_argbuf_free(void* handle) {
     Dsv4ArgBuf* h = (Dsv4ArgBuf*)handle; if (!h) return;
-    if (h->queue && h->residency) [h->queue removeResidencySet:h->residency];
-    if (h->residency) [h->residency release];
+    if (h->queue && h->residency) {   /* residenza: rimuove le allocazioni dal set CONDIVISO */
+        for (int i = 0; i < h->nv; i++) [h->residency removeAllocation:h->views[i]];
+        if (h->ab) [h->residency removeAllocation:h->ab];
+        [h->residency commit];
+    }
     if (h->ab) [h->ab release];
     free(h->views); free(h);
 }
