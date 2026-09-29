@@ -852,7 +852,5 @@ GmoeFfnQuant* llm_mlx_moe_ffn_quant(LlmMlxModel* m, int layer_idx) {
         sok = sok && multishard_get_triple(&m->weights, nb, &c->sg_w, &c->sg_s, &c->sg_b);
         c->has_shared = sok;
     }
-    if (llm_env_get("LLM_WDEBUG")) fprintf(stderr, "[wcache] layer %d risolto (g=%d/%d/%d b=%d/%d/%d shared=%d)\n",
-                                      layer_idx, c->gg, c->ug, c->dg, c->gbts, c->ubts, c->dbts, c->has_shared ? 1 : 0);
     return c;
 }

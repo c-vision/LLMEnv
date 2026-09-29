@@ -426,8 +426,6 @@ int llm_ai_mlx_eval_sdpadrift_selftest(int nkv_start, int nkv_grow, int iters, c
         if (it == 0) first = ms;
         if (it == iters - 1) last = ms;
         if (it >= 64 && ms > worst) worst = ms;
-        if ((it % 64) == 63 && llm_env_get("LLM_DRIFT_TRACE"))
-            fprintf(stderr, "[sdpadrift] it=%d Nk=%d  %.3f ms\n", it + 1, N, ms);
     }
     snprintf(out, (size_t)cap, "sdpadrift: nkv=%d grow=%d iters=%d | primo=%.3f ultimo=%.3f worst=%.3f -> %s",
              nkv_start, nkv_grow, iters, first, last, worst, (last > first * 2.0) ? "*** CRESCE ***" : "stabile");

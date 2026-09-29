@@ -154,7 +154,6 @@ void llm_mlx_model_destroy(LlmMlxModel* m) {
         for (int l = 0; l < m->ffn_quant_n; l++) {
             GmoeFfnQuant* c = &m->ffn_quant[l];
             if (!c->valid) continue;
-            if (llm_env_get("LLM_WDEBUG")) fprintf(stderr, "[wcache] destroy free layer %d\n", l);
             mlx_array_free(c->ln2); mlx_array_free(c->rw); mlx_array_free(c->rs); mlx_array_free(c->rb);
             mlx_array_free(c->gw); mlx_array_free(c->gs); mlx_array_free(c->gb);
             mlx_array_free(c->uw); mlx_array_free(c->us); mlx_array_free(c->ub);
