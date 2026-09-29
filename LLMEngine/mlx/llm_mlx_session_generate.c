@@ -374,29 +374,8 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
     }
     /* N-GRAM self-speculative GENERALE (tutti i modelli, greedy): draft dalla tabella n-gram del
      * contesto, verificati dal modello con UN forward batch -> output IDENTICO al greedy AR.
-     * Config-driven (opzione di registro `spec_ngram`, nessuna env). Default 0 = off. */
-    /* Draft-model speculativo GENERICO (#3): se l'opzione `draft_model` e' impostata e greedy, un
-     * modello DRAFT propone K token (verify dal target). Fallback al n-gram/AR sotto. */
-    if (!m->dsv4 && !m->dsv41 && !llm_mlx_in_draft && !s->draft_off && llm_mlx_session_draftmodel_enabled(s)) {
-        llm_mlx_sampling_t smd = llm_mlx_session_sampling(s);
-        if (!smd.active || smd.temperature <= 0.0f) {
-            int cnt = 0;
-            while (cnt < max_new_tokens) {
-                if (s->spec_buf_pos >= s->spec_buf_len) {
-                    llm_mlx_session_spec_begin(s);   /* checkpoint per lo scarto su append esterno */
-                    int got = llm_mlx_session_generate_draftmodel(s, 8, eos_token_id, s->spec_buf);
-                    if (got <= 0) { if (++s->draft_zeros >= 3) s->draft_off = 1; break; }
-                    s->draft_zeros = 0;
-                    s->spec_buf_len = got; s->spec_buf_pos = 0;
-                }
-                int32_t tok = s->spec_buf[s->spec_buf_pos++];
-                out_ids[cnt++] = tok;
-                if (eos_token_id >= 0 && tok == eos_token_id) break;
-            }
-            if (cnt > 0) return cnt;
-        }
-    }
-    if (!m->dsv4 && !m->dsv41 && !llm_mlx_in_draft) {
+     * Config-driven (opzione di registro `spec_ngram`, nessuna env). Default 8 (built-in). */
+    if (!m->dsv4 && !m->dsv41) {
         int ord = 8;   /* default built-in (opt-out `spec_ngram=0`) */
         if (llm_ai_mlx_opt_get_int("spec_ngram", &ord) != 0) ord = 8;
         if (ord >= 2) {

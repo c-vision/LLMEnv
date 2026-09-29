@@ -435,7 +435,6 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
 
 void llm_mlx_session_destroy(LlmMlxSession* s) {
     llm_mlx_session_spec_free(s);   /* spec streaming: libera i checkpoint K/V (alias) */
-    if (s->draft_sess != NULL) { llm_ai_mlx_destroy_session((llm_ai_mlx_session_handle)s->draft_sess); s->draft_sess = NULL; }
     if (s->dsv41) { llm_dsv41_cache_free((LlmDsv41Cache*)s->dsv41); free(s->dsv41); s->dsv41 = NULL; }
     if (s->kvmetal_ctx != NULL) {
         if (g_kvmetal_act > 0) g_kvmetal_act--;

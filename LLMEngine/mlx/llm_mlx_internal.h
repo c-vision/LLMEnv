@@ -310,11 +310,6 @@ typedef struct LlmMlxSession {
     int ps_cap;               /* §G-bis pagesel: capacita' pagine allocata */
     /* DeepSeek V4.1 (whole-model): cache a 7 slot per-sessione (`LlmDsv41Cache*`, lazy). */
     void* dsv41;
-    /* Draft-model speculativo generico (#3): sessione del modello DRAFT (stesso tokenizer del
-     * target) e stato di fallback. `draft_off` disattiva dopo troppi accetti nulli. */
-    void* draft_sess;
-    int draft_zeros;
-    int draft_off;
 } LlmMlxSession;
 
 typedef struct {
