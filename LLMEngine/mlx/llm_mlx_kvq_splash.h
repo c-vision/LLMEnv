@@ -133,4 +133,50 @@ static const char llm_kvq_store_src[] =
     "    if (lane == 0) { kscale[sbase] = ks; vscale[sbase] = vs; }\n"
     "}\n";
 
+/* ── Quant Splash-style via op MLX (fedele alla matematica di splash_store_kv_row) ──
+ * UNA scala simmetrica per (token, kv-head) = max(|k|,|v|) sul head_dim / 127;
+ * q = clamp(rint(v*127/max), -127, 127). Niente mlx_quantize (nessun grafo
+ * multi-op): e' la differenza chiave. In: k,v [1,nkv,n,hd] fp. Out: kq,vq int8
+ * [1,nkv,n,hd] + sc f32 [1,nkv,n,1]. */
+static int llm_mlx_kvq_splash_quant(mlx_array* kq, mlx_array* vq, mlx_array* sc,
+                                    mlx_array k, mlx_array v, mlx_stream s) {
+    mlx_array ka = mlx_array_new(), va = mlx_array_new();
+    mlx_array km = mlx_array_new(), vm = mlx_array_new(), mx = mlx_array_new();
+    mlx_array sca = mlx_array_new(), ksc = mlx_array_new(), vsc = mlx_array_new();
+    mlx_array kf = mlx_array_new(), vf = mlx_array_new();
+    mlx_array kqf = mlx_array_new(), vqf = mlx_array_new();
+    bool ok = mlx_abs(&ka, k, s) == 0 && mlx_abs(&va, v, s) == 0;
+    if (ok) ok = mlx_max_axis(&km, ka, -1, /*keepdims=*/true, s) == 0 &&
+                 mlx_max_axis(&vm, va, -1, true, s) == 0;
+    if (ok) ok = mlx_maximum(&mx, km, vm, s) == 0;
+    if (ok) ok = mlx_divide(&sca, mx, mlx_array_new_float(127.0f), s) == 0;
+    if (ok) ok = mlx_astype(&kf, k, MLX_FLOAT32, s) == 0 && mlx_astype(&vf, v, MLX_FLOAT32, s) == 0;
+    if (ok) ok = mlx_multiply(&ksc, kf, mlx_array_new_float(127.0f), s) == 0;
+    if (ok) ok = mlx_divide(&kqf, ksc, mx, s) == 0;         /* k*127/max */
+    if (ok) ok = mlx_multiply(&vsc, vf, mlx_array_new_float(127.0f), s) == 0;
+    if (ok) ok = mlx_divide(&vqf, vsc, mx, s) == 0;
+    mlx_array kr = mlx_array_new(), vr = mlx_array_new();
+    mlx_array kr2 = mlx_array_new(), vr2 = mlx_array_new();
+    mlx_array lo = mlx_array_new_float(-127.0f), hi = mlx_array_new_float(127.0f);
+    if (ok) ok = mlx_round(&kr, kqf, 0, s) == 0 && mlx_round(&vr, vqf, 0, s) == 0;
+    if (ok) ok = mlx_clip(&kr2, kr, lo, hi, s) == 0 && mlx_clip(&vr2, vr, lo, hi, s) == 0;
+    if (ok) ok = mlx_astype(kq, kr2, MLX_INT8, s) == 0 && mlx_astype(vq, vr2, MLX_INT8, s) == 0;
+    if (ok) mlx_array_set(sc, sca);
+    mlx_array_free(kr); mlx_array_free(vr); mlx_array_free(kr2); mlx_array_free(vr2);
+    mlx_array_free(lo); mlx_array_free(hi);
+    mlx_array_free(ka); mlx_array_free(va); mlx_array_free(km); mlx_array_free(vm); mlx_array_free(mx);
+    mlx_array_free(sca); mlx_array_free(ksc); mlx_array_free(vsc);
+    mlx_array_free(kf); mlx_array_free(vf); mlx_array_free(kqf); mlx_array_free(vqf);
+    return ok ? 0 : -1;
+}
+
+/* Dequant Splash-style: x = q * scale (sc broadcast su hd, [1,nkv,n,1]). */
+static int llm_mlx_kvq_splash_dequant(mlx_array* x, mlx_array q, mlx_array sc, mlx_stream s) {
+    mlx_array qf = mlx_array_new();
+    bool ok = mlx_astype(&qf, q, MLX_FLOAT32, s) == 0;
+    if (ok) ok = mlx_multiply(x, qf, sc, s) == 0;
+    mlx_array_free(qf);
+    return ok ? 0 : -1;
+}
+
 #endif /* LLM_MLX_KVQ_SPLASH_H */
