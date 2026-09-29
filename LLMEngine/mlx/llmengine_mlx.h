@@ -121,6 +121,14 @@ typedef void* llm_ai_mlx_model_handle;
  * inatteso, shard mancante). */
 llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir);
 
+/* Offload esperti MoE da disco (streaming): `dir` è la directory del modello da cui leggere solo i
+ * k esperti attivi per step invece di materializzare tutti gli esperti. Va chiamata PRIMA di
+ * `llm_ai_mlx_load_model` (la dir coincide con quella del load). `NULL`/"" disattiva. Nessun env. */
+void llm_ai_mlx_set_moe_swap_dir(const char* dir);
+/* TurboQuant: scelta MEMORIA (1, default: esperti packed, RSS basso) vs VELOCITA' (0: affine-2bit
+ * residenti + gather_qmm MLX). API del motore, impostata dal consumer (BASIC/FastLLM), non env. */
+void llm_ai_mlx_set_tq_memory_opt(int on);
+
 void llm_ai_mlx_free_model(llm_ai_mlx_model_handle handle);
 
 /* ── GGUF single-file supportato dal motore MLX (auto-route da BASIC/C#) ──────
@@ -323,6 +331,15 @@ int llm_ai_mlx_session_logprob_of(llm_ai_mlx_session_handle handle, int32_t toke
  * logprob_of(pending_next_id): "confidenza del modello" sul prossimo token. 0 / -1. */
 int llm_ai_mlx_session_last_logprob(llm_ai_mlx_session_handle handle, float* out_logprob);
 
+/* TOPK (ABI v3): i k token piu' probabili alla posizione "pending" con le loro logprob naturali,
+ * ordinati per logprob DECRESCENTE (out_ids[0]/out_logprobs[0] = argmax). Stessa distribuzione di
+ * logprob_of (final_norm + lm_head + softcap + log-softmax), stato della sessione NON toccato:
+ * e' la controparte "alternative" della logprob del scelto, per `top_logprobs` di OpenAI. Scrive
+ * k voci (k ridotto al vocabolario se maggiore) e ritorna k, oppure -1 (argomenti invalidi/stato
+ * senza pending). out_ids/out_logprobs hanno almeno k elementi. */
+int llm_ai_mlx_session_topk(llm_ai_mlx_session_handle handle, int k, int32_t* out_ids,
+                            float* out_logprobs);
+
 /* Genera fino a max_new token come llm_ai_mlx_session_generate(max_new) ma, per OGNI token emesso,
  * scrive la sua logprob (out_logprobs[i]). La logprob e' catturata dalla distribuzione del modello
  * alla posizione di PARTENZA di quello step, PRIMA che il token avanzi: esatta anche con sampling
@@ -416,6 +433,15 @@ int llm_ai_mlx_session_generate_mtp(llm_ai_mlx_session_handle session_handle,
 int llm_ai_mlx_session_capture_hidden(llm_ai_mlx_session_handle session_handle,
                                       const int32_t* token_ids, int n_ids,
                                       float* out, int cap);
+
+/* EMBEDDING IDS-based (CAP_EMBED, ABI v4). `llm_ai_mlx_embed_dim` ritorna la dimensione
+ * dell'embedding (hidden_size), o -1. `llm_ai_mlx_embed_ids` calcola il mean-pool dell'hidden
+ * dell'ultimo layer su TUTTI i token di `token_ids` (n_ids), scrivendo `dim` float in `out`
+ * (cap >= dim) e ritornando dim, oppure -1. Crea una sessione temporanea (la KV del chiamante
+ * NON viene toccata); il chunking della cattura non cambia il risultato (la media e' lineare). */
+int llm_ai_mlx_embed_dim(llm_ai_mlx_model_handle handle);
+int llm_ai_mlx_embed_ids(llm_ai_mlx_model_handle handle, const int32_t* token_ids, int n_ids,
+                         float* out, int cap);
 
 /* Stima del footprint KV per-architettura (port da rapidMLX kv_estimation.py):
  * classifica i layer (full-growth / sliding sublineare / GDN stato fisso) e calcola
@@ -520,6 +546,10 @@ int llm_ai_mlx_model_memory_limit_mb(llm_ai_mlx_model_handle handle);
 
 /* Matcha mlx_lm: embed+layer in bfloat16 (sincronizza g_bf16_all). 0 ok / -1. */
 int llm_ai_mlx_model_set_bfloat16(llm_ai_mlx_model_handle handle, bool enabled);
+
+/* Capienza della KV-cache (contesto) a runtime, per QUALUNQUE modello MLX. n = token (0 = default
+ * del modello). È il setter dietro CAP_KV_MAX (kv_set_max) dell'ABI comune. 0 ok / -1. */
+int llm_ai_mlx_model_set_kv_max(llm_ai_mlx_model_handle handle, int n);
 
 /* Dtype di calcolo scelto dall'alto (host/BASIC), da chiamare DOPO
  * llm_ai_mlx_load_model: i bit bf16 sono letti solo a forward-time, quindi applicarli dopo

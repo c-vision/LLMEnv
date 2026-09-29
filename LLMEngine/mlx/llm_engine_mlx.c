@@ -46,6 +46,23 @@ static int mlx_generate_id_constrained(LlmEngineLlmSession s, const int32_t* all
                                                    n_allowed, out_token_id);
 }
 
+/* ABI v3 — TOPK: distribuzione top-k alla posizione pending (nativo). */
+static int mlx_token_topk(LlmEngineLlmSession s, int k, int32_t* out_ids, float* out_logprobs) {
+    return llm_ai_mlx_session_topk((llm_ai_mlx_session_handle)s, k, out_ids, out_logprobs);
+}
+
+/* ABI v4 — EMBED IDS: mean-pool IDS-based (nativo, senza sessione del chiamante). */
+static int mlx_embed_dim(LlmEngineLlmModel m) {
+    return llm_ai_mlx_embed_dim((llm_ai_mlx_model_handle)m);
+}
+static int mlx_embed_ids(LlmEngineLlmModel m, const int32_t* ids, int n, float* out, int cap) {
+    return llm_ai_mlx_embed_ids((llm_ai_mlx_model_handle)m, ids, n, out, cap);
+}
+
+/* ABI v5 — EXPERT SWAP: offload esperti da disco (scelta del consumer, nessun env). */
+static void mlx_set_expert_swap(const char* dir) { llm_ai_mlx_set_moe_swap_dir(dir); }
+static void mlx_set_tq_memory_opt(int on) { llm_ai_mlx_set_tq_memory_opt(on); }
+
 /* ABI v2 — KV: reset in-place + stats. */
 static int mlx_kv_clear(LlmEngineLlmSession s) {
     return llm_ai_mlx_session_reset((llm_ai_mlx_session_handle)s);
@@ -83,11 +100,17 @@ static int mlx_capture_hidden(LlmEngineLlmSession s, const int32_t* ids, int n, 
     return llm_ai_mlx_session_capture_hidden((llm_ai_mlx_session_handle)s, ids, n, out, cap);
 }
 
+/* CAP_KV_MAX: imposta la capienza della KV-cache (contesto) a runtime, per qualunque modello. */
+static int mlx_kv_set_max(LlmEngineLlmModel m, int n) {
+    return llm_ai_mlx_model_set_kv_max((llm_ai_mlx_model_handle)m, n);
+}
+
 static const LlmEngineLlmEngine LLM_MLX_ENGINE = {
     .name = "mlx",
     .caps = LLMMODELIO_CAP_IDS | LLMMODELIO_CAP_PREFIX | LLMMODELIO_CAP_BATCH |
             LLMMODELIO_CAP_CHUNK | LLMMODELIO_CAP_LORA | LLMMODELIO_CAP_KV |
-            LLMMODELIO_CAP_LOGPROBS | LLMMODELIO_CAP_CONSTRAINED,
+            LLMMODELIO_CAP_LOGPROBS | LLMMODELIO_CAP_CONSTRAINED | LLMMODELIO_CAP_EMBED |
+            LLMMODELIO_CAP_KV_MAX,
     .load_model = mlx_load, .free_model = mlx_free,
     .create_session = mlx_sess, .destroy_session = mlx_dsess,
     .append_ids = mlx_append_ids, .append_text = NULL,
@@ -99,7 +122,9 @@ static const LlmEngineLlmEngine LLM_MLX_ENGINE = {
     .append_ids_prefix = mlx_append_ids_prefix,
     .save_prefix = mlx_save_prefix,
     .generate_batch = mlx_generate_batch,
-    .emb_dim = NULL, .embed_text = NULL,
+    /* CAP_KV_MAX: contesto/KV a runtime (generico, tutti i modelli MLX). */
+    .kv_set_max = mlx_kv_set_max,
+    .emb_dim = mlx_embed_dim, .embed_text = NULL,
     .vision_load = NULL, .vision_read_image = NULL, .vision_read_audio = NULL, .vision_unload = NULL,
     .lora_clear = mlx_lora_clear, .lora_add = mlx_lora_add, .lora_set_enabled = mlx_lora_set_enabled,
     .lora_save = mlx_lora_save, .lora_load = mlx_lora_load, .capture_hidden = mlx_capture_hidden,
@@ -109,6 +134,13 @@ static const LlmEngineLlmEngine LLM_MLX_ENGINE = {
     .last_logprob = mlx_last_logprob,
     .generate_ids_probs = mlx_generate_ids_probs,
     .generate_id_constrained = mlx_generate_id_constrained,
+    /* ABI v3 (in coda): top-k della distribuzione pending. */
+    .token_topk = mlx_token_topk,
+    /* ABI v4 (in coda): embedding IDS-based. */
+    .embed_ids = mlx_embed_ids,
+    /* ABI v5 (in coda): offload esperti da disco. */
+    .set_expert_swap = mlx_set_expert_swap,
+    .set_tq_memory_opt = mlx_set_tq_memory_opt,
 };
 
 const LlmEngineLlmEngine* llmengine_llm_engine_mlx(void) { return &LLM_MLX_ENGINE; }

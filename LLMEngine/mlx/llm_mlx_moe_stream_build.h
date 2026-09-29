@@ -153,79 +153,7 @@ static inline int llm_mlx_tq_affine_full(const LlmEngineMoeTsIngest* s, int laye
 typedef struct { mlx_array w, sc, cb; int E, O, PW, NG, grp, trit, bits, cbn, built; } LlmTqPackedFull;
 static LlmTqPackedFull g_tq_pk[LLMENGINE_MOE_TS_MAXLAYER][LLMENGINE_MOE_TS_NPROJ];
 
-static inline int llm_mlx_tq_packed_full(const LlmEngineMoeTsIngest* s, int layer, int proj,
-        mlx_array* w, mlx_array* sc, mlx_array* cb,
-        int* E, int* O, int* PW, int* NG, int* grp, int* trit, int* bits) {
-    LlmTqPackedFull* f = &g_tq_pk[layer][proj];
-    const LlmEngineMoeTsSlice* tw = llmengine_moe_ts_slice(s, layer, proj, 0);
-    const LlmEngineMoeTsSlice* ts = llmengine_moe_ts_slice(s, layer, proj, 1);
-    uint32_t cbb = 0, sgb = 0; int cbn = 0, in_dim = 0;
-    const uint8_t* cbp = llmengine_moe_ts_aux_get(s, layer, proj, 1, &cbb, &cbn);
-    const uint8_t* sgp = llmengine_moe_ts_aux_get(s, layer, proj, 0, &sgb, &in_dim);
-    if (!tw || !ts || !cbp || !sgp || cbn != 3) return -1;
-    if (!f->built) {
-        const int E_ = tw->n, O_ = tw->d1, PW_ = tw->d2, NG_ = ts->d2;
-        if (E_ <= 0 || O_ <= 0 || PW_ <= 0 || NG_ <= 0 || in_dim <= 0) return -1;
-        const uint8_t* w0 = llmengine_moe_ts_get(s, layer, proj, 0, 0, NULL);
-        const uint8_t* s0 = llmengine_moe_ts_get(s, layer, proj, 1, 0, NULL);
-        if (!w0 || !s0) return -1;
-        int wshp[3] = { E_, O_, PW_ };
-        int sshp[3] = { E_, O_, NG_ };
-        int cshp[1] = { cbn };
-        mlx_array W = mlx_array_new_data((const void*)w0, wshp, 3, MLX_UINT32); /* copia [E,O,PW] */
-        mlx_array S = mlx_array_new_data((const void*)s0, sshp, 3, MLX_FLOAT16);
-        mlx_array C = mlx_array_new_data((const void*)cbp, cshp, 1, MLX_FLOAT16);
-        if (W.ctx == NULL || S.ctx == NULL || C.ctx == NULL) { mlx_array_free(W); mlx_array_free(S); mlx_array_free(C); return -1; }
-        f->w = W; f->sc = S; f->cb = C;
-        f->E = E_; f->O = O_; f->PW = PW_; f->NG = NG_;
-        f->grp = in_dim / NG_; f->trit = 1; f->bits = 3; f->cbn = cbn; f->built = 1;
-    }
-    *w = f->w; *sc = f->sc; *cb = f->cb;
-    *E = f->E; *O = f->O; *PW = f->PW; *NG = f->NG;
-    *grp = f->grp; *trit = f->trit; *bits = f->bits;
-    return 0;
-}
 
-/* Gather+matvec decode (batch=1): UN SOLO launch del kernel (mode kg) su [E,O,PW] + indices.
- * y[kk,row] = dequant(W[indices[kk]])·x[kk]; output [1,tk,1,O]. Niente sort/tile/eval-host. */
-static inline int llm_mlx_tq_gather_qmv(mlx_array* res, mlx_array pw, mlx_array sc, mlx_array cb,
-        mlx_array x_rot, mlx_array idxs, int O, int PW, int NG, int grp, int trit, int bits, mlx_stream st) {
-    const int ind = (int)mlx_array_ndim(idxs);
-    const int tk = (int)mlx_array_dim(idxs, ind - 1);
-    const int xnd = (int)mlx_array_ndim(x_rot);
-    const int rows = (xnd >= 2) ? (int)mlx_array_dim(x_rot, 1) : 1;
-    const int in = (int)mlx_array_dim(x_rot, xnd - 1);
-    if (tk <= 0 || in <= 0) return -1;
-    /* x -> [tk,in] contiguo (broadcast se gate/up: stessa x per tutti i k). */
-    int shp2[2] = { rows, in };
-    mlx_array x2 = mlx_array_new();
-    if (mlx_reshape(&x2, x_rot, shp2, 2, st) != 0) { mlx_array_free(x2); return -1; }
-    mlx_array xb = mlx_array_new();
-    if (rows == tk) {
-        if (mlx_contiguous(&xb, x2, false, st) != 0) { mlx_array_free(x2); mlx_array_free(xb); return -1; }
-    } else {
-        int bsh[2] = { tk, in };
-        mlx_array xbc = mlx_array_new();
-        if (mlx_broadcast_to(&xbc, x2, bsh, 2, st) != 0) { mlx_array_free(x2); mlx_array_free(xbc); return -1; }
-        if (mlx_contiguous(&xb, xbc, false, st) != 0) { mlx_array_free(x2); mlx_array_free(xbc); mlx_array_free(xb); return -1; }
-        mlx_array_free(xbc);
-    }
-    mlx_array_free(x2);
-    int ish[1] = { tk };
-    mlx_array idxf = mlx_array_new();
-    if (mlx_reshape(&idxf, idxs, ish, 1, st) != 0) { mlx_array_free(xb); mlx_array_free(idxf); return -1; }
-    mlx_array y2 = mlx_array_new();
-    int rc = llm_mlx_tq_qmv_kg(&y2, pw, sc, cb, xb, idxf, tk, in, O, NG, PW, bits, grp, trit, st);
-    mlx_array_free(xb); mlx_array_free(idxf);
-    if (rc != 0) { mlx_array_free(y2); return -1; }
-    int osh[4] = { 1, tk, 1, O };
-    mlx_array out = mlx_array_new();
-    if (mlx_reshape(&out, y2, osh, 4, st) != 0) { mlx_array_free(y2); mlx_array_free(out); return -1; }
-    mlx_array_free(y2);
-    mlx_array_set(res, out);
-    mlx_array_free(out);
-    return 0;
-}
 
 /* Rotazione ONLINE dell'input: x_rot = Hadamard(x · signs) (dominio dei pesi, non li srotola).
  * Usa `mlx_hadamard_transform` (stessa op della libreria di riferimento). Cast finale a `cdt`
@@ -327,68 +255,6 @@ static inline int llm_mlx_tq_gather_packed(const LlmEngineMoeTsIngest* s, int la
     return 0;
 }
 
-/* Self-test ISOLATO del kernel mode 1 (`kg`, gather multi-esperto): y[kk,row] deve coincidere col
- * decode di riferimento dell'esperto indices[kk]. Env LLM_TQ_KG_TEST=1. Isola il kernel dal resto. */
-static inline void llm_mlx_tq_kg_selftest(const LlmEngineMoeTsIngest* s, int layer, int proj, mlx_stream st) {
-    static int done[8] = { 0 };
-    if (proj < 0 || proj >= 8 || done[proj]) return;
-    done[proj] = 1;
-    const LlmEngineMoeTsSlice* tw = llmengine_moe_ts_slice(s, layer, proj, 0);
-    const LlmEngineMoeTsSlice* ts = llmengine_moe_ts_slice(s, layer, proj, 1);
-    uint32_t cbb = 0, sgb = 0; int cbn = 0, in_dim = 0;
-    const uint8_t* cbp = llmengine_moe_ts_aux_get(s, layer, proj, 1, &cbb, &cbn);
-    const uint8_t* sgp = llmengine_moe_ts_aux_get(s, layer, proj, 0, &sgb, &in_dim);
-    if (!tw || !ts || !cbp || !sgp || in_dim <= 0) { fprintf(stderr, "[tq-kg-test] dati mancanti\n"); return; }
-    const int E = tw->n, O = tw->d1, PW = tw->d2, NG = ts->d2;
-    const int trit = (cbn == 3);
-    const int bits = trit ? 3 : (cbn == 8 ? 3 : (cbn == 4 ? 2 : 4));
-    const int grp = (NG > 0) ? in_dim / NG : 64;
-    const int tk = (E >= 2) ? 2 : 1;
-    const uint8_t* w0 = llmengine_moe_ts_get(s, layer, proj, 0, 0, NULL);
-    const uint8_t* s0 = llmengine_moe_ts_get(s, layer, proj, 1, 0, NULL);
-    if (!w0 || !s0) { fprintf(stderr, "[tq-kg-test] base mancante\n"); return; }
-    int wsh[3] = { E, O, PW }, ssh[3] = { E, O, NG }, csh[1] = { cbn };
-    mlx_array W = mlx_array_new_data((const void*)w0, wsh, 3, MLX_UINT32);
-    mlx_array S = mlx_array_new_data((const void*)s0, ssh, 3, MLX_FLOAT16);
-    mlx_array CB = mlx_array_new_data((const void*)cbp, csh, 1, MLX_FLOAT16);
-    float* x0 = (float*)malloc((size_t)tk * in_dim * sizeof(float));
-    for (int kk = 0; kk < tk; kk++) for (int i = 0; i < in_dim; i++)
-        x0[kk * in_dim + i] = ((float)(((unsigned)(kk * 7919 + i) * 2654435761u) >> 9 & 0x1ffu) / 256.0f) - 1.0f;
-    int xsh[2] = { tk, in_dim };
-    mlx_array X0 = mlx_array_new_data(x0, xsh, 2, MLX_FLOAT32);
-    uint32_t* idb = (uint32_t*)malloc((size_t)tk * sizeof(uint32_t));
-    for (int kk = 0; kk < tk; kk++) idb[kk] = (uint32_t)(kk % E);
-    int ish[1] = { tk };
-    mlx_array IDX = mlx_array_new_data(idb, ish, 1, MLX_UINT32);
-    mlx_array Xr = mlx_array_new(), Y = mlx_array_new();
-    int rc = llm_mlx_tq_rotate_input(s, layer, proj, X0, st, MLX_FLOAT32, &Xr);
-    if (rc == 0) rc = llm_mlx_tq_qmv_kg(&Y, W, S, CB, Xr, IDX, tk, in_dim, O, NG, PW, bits, grp, trit, st);
-    if (rc != 0 || mlx_array_eval(Y) != 0 || (int)mlx_array_size(Y) != tk * O) {
-        fprintf(stderr, "[tq-kg-test] kernel fallito rc=%d size=%d\n", rc, (int)mlx_array_size(Y));
-    } else {
-        float cbf[16];
-        for (int i = 0; i < cbn; i++) cbf[i] = llmcodec_f16_to_f32(((const uint16_t*)(const void*)cbp)[i]);
-        float* sgf = (float*)malloc((size_t)in_dim * sizeof(float));
-        for (int i = 0; i < in_dim; i++) sgf[i] = llmcodec_f16_to_f32(((const uint16_t*)(const void*)sgp)[i]);
-        float* f = (float*)malloc((size_t)in_dim * sizeof(float));
-        const float* yv = mlx_array_data_float32(Y);
-        double maxd = 0, ref2 = 0;
-        for (int kk = 0; kk < tk; kk++) {
-            const uint32_t* we = (const uint32_t*)(const void*)w0 + (size_t)idb[kk] * O * PW;
-            const uint16_t* se = (const uint16_t*)(const void*)s0 + (size_t)idb[kk] * O * NG;
-            for (int r = 0; r < O; r++) {
-                llm_mlx_tq_decode_row(we + (size_t)r * PW, se + (size_t)r * NG, cbf, sgf, in_dim, NG, trit, bits, f);
-                double acc = 0; for (int c = 0; c < in_dim; c++) acc += (double)f[c] * x0[kk * in_dim + c];
-                double d = fabs(acc - (double)yv[kk * O + r]); if (d > maxd) maxd = d; ref2 += acc * acc;
-            }
-        }
-        fprintf(stderr, "[tq-kg-test] layer=%d proj=%d E=%d O=%d in=%d trit=%d grp=%d max_abs_diff=%.6g rms_ref=%.4g\n",
-                layer, proj, E, O, in_dim, trit, grp, maxd, sqrt(ref2 / (tk * O)));
-        free(sgf); free(f);
-    }
-    mlx_array_free(W); mlx_array_free(S); mlx_array_free(CB); mlx_array_free(X0); mlx_array_free(IDX);
-    mlx_array_free(Xr); mlx_array_free(Y); free(x0); free(idb);
-}
 
 /* Stack TurboQuant degli esperti `uniq[]` per (layer,proj): decodifica on-the-fly da packed
  * (indici→codebook→scala→Hadamard inversa→signs) nel dominio NON ruotato, F16 [k, out, in].
@@ -444,60 +310,6 @@ static inline int llm_mlx_tq_stack(const LlmEngineMoeTsIngest* s, int layer, int
 /* Self-test (env LLM_TQ_QMV_TEST=1, una volta): il kernel polar_qmv deve coincidere col decode di
  * riferimento nel dominio ruotato — kernel(W_rot, x_rot) == dot(unrotate(W_rot), x0). */
 static int g_tq_qmv_tested = 0;
-static inline void llm_mlx_tq_qmv_selftest(const LlmEngineMoeTsIngest* s, int layer, int proj, mlx_stream st) {
-    if (g_tq_qmv_tested) return;
-    g_tq_qmv_tested = 1;
-    const LlmEngineMoeTsSlice* tw = llmengine_moe_ts_slice(s, layer, proj, 0);
-    const LlmEngineMoeTsSlice* ts = llmengine_moe_ts_slice(s, layer, proj, 1);
-    uint32_t cbb = 0, sgb = 0; int cbn = 0, in_dim = 0;
-    const uint8_t* cbp = llmengine_moe_ts_aux_get(s, layer, proj, 1, &cbb, &cbn);
-    const uint8_t* sgp = llmengine_moe_ts_aux_get(s, layer, proj, 0, &sgb, &in_dim);
-    if (!tw || !ts || !cbp || !sgp || in_dim <= 0) { fprintf(stderr, "[tq-qmv-test] dati mancanti\n"); return; }
-    const int O = tw->d1, packed = tw->d2, ngrp = ts->d2;
-    const int trit = (cbn == 3);
-    const int bits = trit ? 3 : (cbn == 8 ? 3 : (cbn == 4 ? 2 : 4));
-    const int group = (ngrp > 0) ? in_dim / ngrp : 64;
-    const uint8_t* wp = llmengine_moe_ts_get(s, layer, proj, 0, 0, NULL);
-    const uint8_t* scp = llmengine_moe_ts_get(s, layer, proj, 1, 0, NULL);
-    if (!wp || !scp) { fprintf(stderr, "[tq-qmv-test] expert mancante\n"); return; }
-    int wshp[3] = { 1, O, packed }, sshp[3] = { 1, O, ngrp }, cshp[1] = { cbn };
-    mlx_array W = mlx_array_new_data((const void*)wp, wshp, 3, MLX_UINT32);   /* copia */
-    mlx_array S = mlx_array_new_data((const void*)scp, sshp, 3, MLX_FLOAT16);
-    mlx_array C = mlx_array_new_data((const void*)cbp, cshp, 1, MLX_FLOAT16);
-    float* x0 = (float*)malloc((size_t)in_dim * sizeof(float));
-    for (int i = 0; i < in_dim; i++) x0[i] = ((float)(((unsigned)i * 2654435761u) >> 9 & 0x1ffu) / 256.0f) - 1.0f;
-    int xshp[1] = { in_dim };
-    mlx_array X0 = mlx_array_new_data(x0, xshp, 1, MLX_FLOAT32);
-    mlx_array Xrot = mlx_array_new();
-    mlx_array Y = mlx_array_new();
-    if (llm_mlx_tq_rotate_input(s, layer, proj, X0, st, MLX_FLOAT32, &Xrot) != 0) {
-        fprintf(stderr, "[tq-qmv-test] rotate fallita\n");
-    } else if (llm_mlx_tq_qmv(&Y, W, S, C, Xrot, /*e=*/0, in_dim, O, ngrp, packed, bits, group, trit, st) != 0) {
-        fprintf(stderr, "[tq-qmv-test] kernel apply fallita\n");
-    } else if (mlx_array_eval(Y) != 0 || (int)mlx_array_size(Y) != O) {
-        fprintf(stderr, "[tq-qmv-test] eval/output inattesi\n");
-    } else {
-        float cbf[16];
-        for (int i = 0; i < cbn; i++) cbf[i] = llmcodec_f16_to_f32(((const uint16_t*)(const void*)cbp)[i]);
-        float* sgf = (float*)malloc((size_t)in_dim * sizeof(float));
-        float* f = (float*)malloc((size_t)in_dim * sizeof(float));
-        for (int i = 0; i < in_dim; i++) sgf[i] = llmcodec_f16_to_f32(((const uint16_t*)(const void*)sgp)[i]);
-        const float* yv = mlx_array_data_float32(Y);
-        double maxd = 0, ref2 = 0;
-        for (int r = 0; r < O; r++) {
-            const uint32_t* wrow = (const uint32_t*)(const void*)wp + (size_t)r * packed;
-            const uint16_t* scrow = (const uint16_t*)(const void*)scp + (size_t)r * ngrp;
-            llm_mlx_tq_decode_row(wrow, scrow, cbf, sgf, in_dim, ngrp, trit, bits, f);
-            double acc = 0; for (int c = 0; c < in_dim; c++) acc += (double)f[c] * x0[c];
-            double d = fabs(acc - (double)yv[r]); if (d > maxd) maxd = d; ref2 += acc * acc;
-        }
-        fprintf(stderr, "[tq-qmv-test] layer=%d proj=%d O=%d in=%d trit=%d group=%d cbn=%d max_abs_diff=%.6g rms_ref=%.4g\n",
-                layer, proj, O, in_dim, trit, group, cbn, maxd, sqrt(ref2 / (O > 0 ? O : 1)));
-        free(sgf); free(f);
-    }
-    mlx_array_free(W); mlx_array_free(S); mlx_array_free(C); mlx_array_free(X0); mlx_array_free(Xrot);
-    mlx_array_free(Y); free(x0);
-}
 
 /* Prepara lo stacked [k,d1,d2] del SOLO `proj` richiesto (w/scales/biases). Prima si impilavano
  * TUTTI e 3 i proj e il chiamante ne usava uno: 6 stack su 9 sprecati a ogni chiamata (2/3 del

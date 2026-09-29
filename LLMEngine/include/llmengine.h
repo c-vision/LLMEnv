@@ -19,8 +19,12 @@
 /* Versione dell'ABI. Incrementata quando la vtable cambia in modo osservabile dal consumatore
  * (nuovi metodi/capabilities in coda, semantica di quelli esistenti). I consumatori possono
  * confrontarla a runtime via `llmengine_abi_version()` per decidere se una voce opzionale e'
- * disponibile, PRIMA di dereferenziarla. v2 = logprobs + constrained + kv_stats/kv_clear (MLX). */
-#define LLMENGINE_ABI_VERSION 2u
+ * disponibile, PRIMA di dereferenziarla. v2 = logprobs + constrained + kv_stats/kv_clear (MLX).
+ * v3 = token_topk (distribuzione top-k alla posizione pending, MLX).
+ * v4 = embed_ids (embedding IDS-based, MLX).
+ * v5 = set_expert_swap (offload esperti MoE da disco, MLX).
+ * v6 = set_tq_memory_opt (TurboQuant: memoria vs velocita' per gli esperti). */
+#define LLMENGINE_ABI_VERSION 6u
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,6 +44,7 @@ enum {
     LLMMODELIO_CAP_LORA     = 1 << 9,   /* lora_* / capture_hidden (training; oggi solo MLX) */
     LLMMODELIO_CAP_LOGPROBS = 1 << 10,  /* token_logprob / last_logprob / generate_ids_probs */
     LLMMODELIO_CAP_CONSTRAINED = 1 << 11, /* generate_id_constrained (argmax ristretto) */
+    LLMMODELIO_CAP_KV_MAX    = 1 << 12,  /* kv_set_max: dimensione contesto/KV a runtime */
 };
 
 /* Parametri di sampling (sottoinsieme comune). I campi non supportati sono ignorati. */
@@ -84,6 +89,9 @@ typedef struct LlmEngineLlmEngine {
     int   (*append_ids_prefix)(LlmEngineLlmModel m, LlmEngineLlmSession s, const int32_t* ids, int n, int min_match); /* CAP_PREFIX */
     int   (*save_prefix)(LlmEngineLlmModel m, const char* name, LlmEngineLlmSession s);    /* CAP_PREFIX */
     int   (*generate_batch)(LlmEngineLlmSession* sess, int n, int max_new, int32_t eos, int32_t* out); /* CAP_BATCH */
+    /* Contesto/KV a runtime per TUTTI i modelli del motore (CAP_KV_MAX): imposta la capienza della
+     * KV-cache in token (0 = default del modello). Ritorna 0 se accettato, !=0 se non supportato. */
+    int   (*kv_set_max)(LlmEngineLlmModel m, int n);
 
     /* EMBED (CAP_EMBED): embedding testuale del modello. */
     int   (*emb_dim)(LlmEngineLlmModel m);
@@ -133,6 +141,34 @@ typedef struct LlmEngineLlmEngine {
      * e' la controparte ABI di `llm_ai_mlx_session_generate_constrained`. Ritorna 0 / -1. */
     int   (*generate_id_constrained)(LlmEngineLlmSession s, const int32_t* allowed_ids, int n_allowed,
                                      int32_t* out_token_id);
+
+    /* ── ABI v3 — campo NUOVO in coda (NULL se il motore non lo implementa). ────────────────────
+     * TOPK (CAP_LOGPROBS): i k token piu' probabili alla posizione "pending" della sessione, con
+     * le loro logprob naturali, ordinati per logprob DECRESCENTE (indice 0 = argmax). E' la
+     * distribuzione top-k che OpenAI espone in `logprobs.content[].top_logprobs[]`, complementare
+     * a `generate_ids_probs` (che da' la logprob del SOLO token scelto). Non modifica lo stato:
+     * puo' essere chiamata PRIMA di un passo di generate per fotografare la distribuzione che lo
+     * step emettera'. Scrive fino a k voci (k ridotto al vocabolario) e ritorna il numero scritto,
+     * oppure -1 su argomenti invalidi / sessione senza posizione pending. out_ids/out_logprobs
+     * hanno almeno k elementi. */
+    int   (*token_topk)(LlmEngineLlmSession s, int k, int32_t* out_ids, float* out_logprobs);
+
+    /* ── ABI v4 — campo NUOVO in coda (NULL se il motore non lo implementa). ────────────────────
+     * EMBED IDS (CAP_EMBED): embedding testuale IDS-based. Il runner MLX non possiede la
+     * tokenizzazione (sta a monte), quindi l'embedding si chiede sui token-id gia' prodotti dal
+     * consumer con il proprio tokenizer. Ritorna la dimensione `dim` del vettore (e ne scrive
+     * `dim` float in `out`, cap >= dim) oppure -1. `emb_dim` da' la dimensione senza calcolare.
+     * Non usa una sessione del chiamante: e' una lettura senza stato. */
+    int   (*embed_ids)(LlmEngineLlmModel m, const int32_t* ids, int n, float* out, int cap);
+
+    /* ── ABI v5 — campo NUOVO in coda (NULL se il motore non lo implementa). ────────────────────
+     * EXPERT SWAP/OFFLOAD (MLX): abilita lo streaming degli esperti MoE da DISCO invece di
+     * materializzarli in RAM. `dir` è la directory del modello (di norma la stessa di load_model)
+     * da cui leggere solo i k esperti attivi per step. Va chiamata PRIMA di `load_model`; `NULL`
+     * o "" disattiva. E' la controparte API dell'opzione di offload degli altri engine (niente
+     * variabili d'ambiente). Per modelli senza esperti (dense) è un no-op. */
+    void  (*set_expert_swap)(const char* dir);
+    void  (*set_tq_memory_opt)(int on);   /* v6: TurboQuant memoria (1) vs velocita' (0) */
 } LlmEngineLlmEngine;
 
 /* Versione dell'ABI esportata dal runner (== LLMENGINE_ABI_VERSION dell'header con cui e' stato

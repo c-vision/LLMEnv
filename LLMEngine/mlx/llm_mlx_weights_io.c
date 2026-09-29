@@ -18,13 +18,6 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
-#include <mach/mach.h>
-static void llm_mem_dbg(const char* tag) {
-    if (getenv("LLM_MEM_DBG") == NULL) return;
-    struct mach_task_basic_info info; mach_msg_type_number_t cnt = MACH_TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &cnt) == KERN_SUCCESS)
-        fprintf(stderr, "[mem] %s: rss=%.0f MB\n", tag, info.resident_size / (1024.0 * 1024.0));
-}
 
 /* Pesi caricati da TUTTI gli shard safetensors del modello (a differenza
  * delle funzioni di checkpoint sopra, che leggono solo il primo file). Ogni
@@ -286,7 +279,6 @@ static void strset_free(StrSet* s) {
 }
 
 bool load_all_shards(const char* model_dir, mlx_stream stream, MultiShardWeights* weights) {
-    llm_mem_dbg("load_all_shards:start");
     char path[1024];
     snprintf(path, sizeof(path), "%s/model.safetensors.index.json", model_dir);
     FILE* f = fopen(path, "rb");
@@ -360,7 +352,6 @@ bool load_all_shards(const char* model_dir, mlx_stream stream, MultiShardWeights
         weights->shards[weights->count++] = m;
     }
     strset_free(&shard_files);
-    llm_mem_dbg("load_all_shards:end");
     return ok;
 }
 
@@ -748,7 +739,6 @@ int gptq_nf4_synthesize_weights(MultiShardWeights* weights, mlx_stream stream) {
 
 int turboquant_synthesize_weights(MultiShardWeights* weights, mlx_stream stream) {
     if (weights == NULL || weights->count <= 0) return 0;
-    llm_mem_dbg("tq_synth:start");
     mlx_map_string_to_array synth = mlx_map_string_to_array_new();
     if (synth.ctx == NULL) return -1;
     int n_dec = 0; bool ok = true;
@@ -873,7 +863,6 @@ int turboquant_synthesize_weights(MultiShardWeights* weights, mlx_stream stream)
     } else {
         mlx_map_string_to_array_free(synth);
     }
-    llm_mem_dbg("tq_synth:end");
     return ok ? n_dec : -1;
 }
 

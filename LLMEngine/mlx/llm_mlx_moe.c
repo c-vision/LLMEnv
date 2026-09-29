@@ -21,6 +21,15 @@ static char g_moe_swap_dir[1024];
 int llm_mlx_moe_swap_on(void) { return g_moe_swap_dir[0] != '\0'; }
 const char* llm_mlx_moe_swap_dir(void) { return g_moe_swap_dir; }
 
+/* ── TurboQuant: scelta MEMORIA vs VELOCITÀ per gli esperti ─────────────────────────────────────
+ * API del motore (NON env): il consumer (GMBasic via BASIC / FastLLM) la imposta.
+ *   on=1 (default): esperti PACKED (kernel TQ diretto) -> RSS basso, un po' piu' lento.
+ *   on=0          : array affine-2bit residenti + gather_qmm MLX -> velocita' massima, piu' RAM. */
+static int g_tq_mem_opt = 1;
+void llm_ai_mlx_set_tq_memory_opt(int on) { g_tq_mem_opt = on ? 1 : 0; }
+int llm_mlx_tq_mem_opt(void) { return g_tq_mem_opt; }
+
+
 /* LLMENGINE_MOE_GATEUP_FUSE (default OFF): stessa tecnica di rapidMLX vllm_mlx/moe_fusion.py
  * (+7.0% decode misurato DA LORO su Qwen3.6-35B-A3B) -- un gather_qmm sul peso gate+up
  * concatenato (fq->guw/gus/gub, calcolato una volta al caricamento, vedi GmoeFfnQuant) invece
@@ -169,29 +178,11 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
         uint32_t cbb = 0; int cbn = 0;
         llmengine_moe_ts_aux_get(ing, layer, proj, 1, &cbb, &cbn);
         if (cbn == 3) {
-            if (getenv("LLM_TQ_QMV_TEST") != NULL) llm_mlx_tq_qmv_selftest(ing, layer, proj, st);
-            if (getenv("LLM_TQ_KG_TEST") != NULL) llm_mlx_tq_kg_selftest(ing, layer, proj, st);
-            /* Esperti PACKED diretti (DEFAULT): niente array affine-2bit residenti (~11.5 GB in meno
-             * sul 35B). Fallback al path affine sotto. `LLM_TQ_AFFINE_EXPERTS=1` per disabilitare. */
-            if (getenv("LLM_TQ_AFFINE_EXPERTS") == NULL) {
+            /* Esperti PACKED (scelta API del motore `llm_ai_mlx_set_tq_memory_opt`, NON env): kernel TQ
+             * diretto sui pesi packed -> RSS basso. on=0 -> affine-2bit residenti + gather_qmm MLX. */
+            if (llm_mlx_tq_mem_opt()) {
                 if (llm_mlx_tq_gather_packed(ing, layer, proj, res, x, w, s, idxs, transpose, st) == 0)
                     return 0;
-            }
-            /* DECODE (T==1): gather FUSO a UN launch (mode kg). OPT-IN (`LLM_TQ_QMV=1`): il kernel
-             * naïf (32 thread/riga scalare) e' 13 tok/s vs 22 del `gather_qmm` MLX -> il default
-             * resta il path affine. Utile solo come base per un kernel ottimizzato (tile/MIA). */
-            const int xnd = (int)mlx_array_ndim(x);
-            if (getenv("LLM_TQ_QMV") != NULL && xnd >= 1 && (int)mlx_array_dim(x, 0) == 1) {
-                mlx_array pw, sc, cb; int E, O, PW, NG, grp, trit, bits;
-                if (llm_mlx_tq_packed_full(ing, layer, proj, &pw, &sc, &cb, &E, &O, &PW, &NG, &grp, &trit, &bits) == 0) {
-                    const mlx_dtype cdt0 = mlx_array_dtype(x);
-                    mlx_array x_rot = mlx_array_new();
-                    if (llm_mlx_tq_rotate_input(ing, layer, proj, x, st, cdt0, &x_rot) == 0) {
-                        int rcq = llm_mlx_tq_gather_qmv(res, pw, sc, cb, x_rot, idxs, O, PW, NG, grp, trit, bits, st);
-                        mlx_array_free(x_rot);
-                        if (rcq == 0) return 0;
-                    } else { mlx_array_free(x_rot); }
-                }
             }
             /* PREFILL / fallback: array pieni affine-2bit residenti + gather_qmm. */
             const mlx_dtype cdt = mlx_array_dtype(x);

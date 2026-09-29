@@ -916,6 +916,8 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
 uint64_t llm_mlx_moe_swap_expert_bytes(void);
 /* Offload esperti (streaming da disco): stato impostato via API `llm_ai_mlx_set_moe_swap_dir`. */
 int llm_mlx_moe_swap_on(void);
+/* TurboQuant: 1 = esperti packed (memoria), 0 = affine-2bit residenti (velocita'). */
+int llm_mlx_tq_mem_opt(void);
 /* true se l'ingest SWAP e' realmente aperto (streaming utilizzabile). Condizione per saltare la
  * materializzazione degli esperti nel synth (`turboquant_synthesize_weights`), a differenza di
  * `swap_on` che riflette solo la dir impostata. */
