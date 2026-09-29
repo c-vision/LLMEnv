@@ -4,7 +4,9 @@
  * (rms_norm_cfg/quantized_linear_cfg/plain_linear/llm_mlx_mode_set/...) ora extern.
  */
 #include "llmengine_mlx.h"
-#include "llm_engine_opts.h"   /* opt_env: registro */
+#include "llm_engine_opts.h"
+#include "llm_mlx_splash_attn_sg.h"
+#include "llm_mlx_splash_attn_mpp.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include <stdio.h>
 #include <stdlib.h>

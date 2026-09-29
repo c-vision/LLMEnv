@@ -14,6 +14,8 @@
 #include "mlx/c/mlx.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include "llm_mlx_splash_store.h"   /* usa i metodi di main (store/pool) */
+#include "llm_mlx_splash_attn.h"    /* usa i metodi di main (read) */
 
 /* q [kSplashRowsQ, D] f32 ; kpool int8 [nkv, cap, D] ; vpool int8 [nkv, hd, cap] ;
  * ks [nkv, cap] f32 (key/value scale, condivisa come Splash) ; nc, capi ; attn. */
