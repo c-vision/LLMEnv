@@ -22,6 +22,7 @@
 #include "llm_dsv4_weights.h"
 #include "llm_dsv4_gpu_ctx.h"
 #include "llm_dsv4_metal.h"
+#include "llm_dsv4_store.h"
 #include "llm_gguf.h"
 
 static float* rdbin(const char* dir, const char* nm, int n) {
@@ -93,6 +94,11 @@ int main(int argc, char** argv) {
         if (!ok2) fprintf(stderr, "bind layer %d fallito (ok parziale)\n", il2);
     }
     pe = exps[IL];   /* il tail e il riferimento usano lo stesso layer reale */
+    { /* Store streaming attivo (come in produzione): il ramo residente di gpu_moe_try e' rotto. */
+      LlmDsv4Store* st = llm_dsv4_store_open(path, &g, &c, LLM_DSV4_STORE_SWAP, 0);
+      if (st) for (int i = 0; i < c.n_layer; i++) { exps[i].store = st;
+        exps[i].store_get = (const uint8_t* (*)(void*,int,int,const uint8_t**,const uint8_t**,const uint8_t**))llm_dsv4_store_expert; }
+      fprintf(stderr, "[TAIL] store=%p\n", (void*)st); }
     if (!llm_dsv4_gpu_ctx_init(&c, exps)) { fprintf(stderr, "ctx GPU init fallito\n"); return 3; }
     llm_dsv4_metal_tail_set_dump("/tmp");
 
@@ -123,9 +129,12 @@ int main(int argc, char** argv) {
     llm_dsv4_block_pre(&c, L.hc_ffn_fn, L.hc_ffn_scale, L.hc_ffn_base, L.ffn_norm, rnxt, rnrm, p2, c2);
     int rsel[64]; float rw[64];
     llm_dsv4_moe_route(&c, &L, rnrm, IL, 0, rsel, rw);
-    /* Riferimento CPU per la MoE (corretto); il GPU non-tail nel test e' inaffidabile. */
+    /* Riferimento: MoE GPU NON-tail (valido con lo store attivo) + CPU. */
     float* rrout = (float*)malloc(sizeof(float)*D);
-    llm_dsv4_moe_forward_packed(&c, &L, &pe, rnrm, IL, 0, rrout);
+    if (!llm_dsv4_gpu_moe_try(&c, &L, IL, rnrm, 0, rrout)) { fprintf(stderr,"moe_try non eseguito\n"); return 3; }
+    { float* rcpu=(float*)malloc(sizeof(float)*D); llm_dsv4_moe_forward_packed(&c,&L,&pe,rnrm,IL,0,rcpu);
+      double mg=0,mc=0; for(int i=0;i<D;i++){double v=fabs(rrout[i]); if(v>mg)mg=v; double w=fabs(rcpu[i]); if(w>mc)mc=w;}
+      fprintf(stderr,"[TAIL] moe_ref gpu-vs-cpu max|diff|=%.6g (|gpu|max=%.4g |cpu|max=%.4g)\n", maxdiff(rrout,rcpu,D), mg, mc); free(rcpu); }
 
     int fails = 0;
     #define CMPT(nm, ref, n, thr) do { float* a=rdbin("/tmp", nm, n); \
@@ -135,6 +144,11 @@ int main(int argc, char** argv) {
     CMPT("nxt", rnxt, HC*D, 1e-4);
     CMPT("nrm", rnrm, D, 1e-5);
     CMPT("rout", rrout, D, 5.0);   /* f32(GPU) vs Q8_K(CPU): differenza attesa */
+    /* Isola hc_post_ffn: outc del tail vs block_post sul SUO STESSO rout. */
+    { float* tr = rdbin("/tmp","rout",D); float* rc = (float*)malloc(sizeof(float)*HC*D);
+      if (tr) llm_dsv4_block_post(&c, tr, rnxt, p2, c2, rc);
+      CMPT("outc", rc, HC*D, 1e-4);
+      free(tr); free(rc); }
     { FILE* f=fopen("/tmp/d4_sel.bin","rb"); int a[64]={0}; size_t got=f?fread(a,sizeof(int),c.n_expert_used,f):0; if(f)fclose(f);
       int mism=0; for (int i=0;i<c.n_expert_used && (int)i<(int)got;i++) if (a[i]!=rsel[i]) mism++;
       fprintf(stderr,"[TAIL] sel    mism=%d%s\n", mism, mism?"  <<< DIVERGE":"");
