@@ -434,9 +434,8 @@ int llm_ai_mlx_session_generate_mtp(llm_ai_mlx_session_handle sh, int max_new_to
     LlmMlxSession* s = (LlmMlxSession*)sh;
     if (s == NULL || s->model == NULL || out_ids == NULL || max_new_tokens <= 0) return -1;
     if (llm_mlx_mtp_get(s->model) == NULL) return -2;
-    int K = 1; { const char* d = llm_ai_mlx_opt_env("LLM_MTP_DEPTH"); if (d) { int v = atoi(d); if (v >= 1 && v <= 8) K = v; } }
-    int32_t* drafts = (int32_t*)malloc(sizeof(int32_t) * (size_t)K);
-    int32_t* blk = (int32_t*)malloc(sizeof(int32_t) * ((size_t)K + 1));
+    int32_t* drafts = (int32_t*)malloc(sizeof(int32_t) * 8);
+    int32_t* blk = (int32_t*)malloc(sizeof(int32_t) * 9);
     if (!drafts || !blk) { free(drafts); free(blk); return -1; }
     int n = 0; int done = 0;
     while (n < max_new_tokens && !done) {
@@ -445,12 +444,21 @@ int llm_ai_mlx_session_generate_mtp(llm_ai_mlx_session_handle sh, int max_new_to
         out_ids[n++] = x1;
         if (eos_token_id >= 0 && x1 == eos_token_id) break;
         if (n >= max_new_tokens) break;
+        /* Profondità del draft MTP: ADATTIVA (Gufo MtpLengthController: acceptance EWMA + sonda
+         * full-accept) con override da registro (`LLM_MTP_DEPTH`). */
+        int K = llm_mlx_spec_adaptive_width(s, 7);
+        { const char* d = llm_ai_mlx_opt_env("LLM_MTP_DEPTH"); if (d) { int v = atoi(d); if (v >= 1 && v <= 8) K = v; } }
+        if (K > 7) K = 7; if (K < 1) K = 1;
         int32_t g1 = -1;
         if (llm_ai_mlx_mtp_draftk(sh, K, drafts, &g1) != 0) for (int i = 0; i < K; i++) drafts[i] = x1;
         blk[0] = x1;
         for (int i = 0; i < K; i++) blk[i + 1] = drafts[i];
         int32_t acc = 0, next = -1;
         if (llm_ai_mlx_session_verify_draft_batch(sh, blk, K + 1, &acc, &next) != 0) break;
+        /* Feedback al controllore adattivo: draft accettati = acc-1 (il primary e' sempre acc=1). */
+        { int m_acc = acc > 0 ? acc - 1 : 0; if (m_acc > K) m_acc = K;
+          s->spec_acc_ewma = (s->spec_acc_ewma <= 0.0f) ? (float)m_acc : 0.75f * s->spec_acc_ewma + 0.25f * (float)m_acc;
+          s->spec_full_streak = (m_acc == K) ? s->spec_full_streak + 1 : 0; }
         /* acc >= 1 (il primary e' sempre il greedy corrente): emetti i draft accettati. */
         for (int i = 1; i < acc && n < max_new_tokens; i++) {
             out_ids[n++] = blk[i];

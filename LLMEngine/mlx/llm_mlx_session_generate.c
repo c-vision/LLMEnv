@@ -368,8 +368,22 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
         const char* au = llm_ai_mlx_opt_env("LLM_MTP_AUTO");
         llm_mlx_sampling_t sm0 = llm_mlx_session_sampling(s);
         if ((au == NULL || au[0] != '0') && (!sm0.active || sm0.temperature <= 0.0f)) {
-            int n = llm_ai_mlx_session_generate_mtp(handle, max_new_tokens, eos_token_id, out_ids);
-            if (n >= 0) return n;   /* fallback alla AR se il path MTP fallisce */
+            /* STREAMING BUFFER: il consumer chiama generate(1) per token. Senza buffer il path MTP
+             * emette il pending e fa break PRIMA del forward -> il pending non avanza -> token
+             * ripetuto (stesso bug del vecchio n-gram). Genera un CHUNK MTP e lo bufferizza. */
+            int cnt = 0;
+            while (cnt < max_new_tokens) {
+                if (s->spec_buf_pos >= s->spec_buf_len) {
+                    llm_mlx_session_spec_begin(s);   /* checkpoint per lo scarto su append esterno */
+                    int got = llm_ai_mlx_session_generate_mtp(handle, 16, eos_token_id, s->spec_buf);
+                    if (got <= 0) break;
+                    s->spec_buf_len = got; s->spec_buf_pos = 0;
+                }
+                int32_t tok = s->spec_buf[s->spec_buf_pos++];
+                out_ids[cnt++] = tok;
+                if (eos_token_id >= 0 && tok == eos_token_id) break;
+            }
+            if (cnt > 0) return cnt;   /* fallback a n-gram/AR se MTP non produce */
         }
     }
     /* N-GRAM self-speculative GENERALE (tutti i modelli, greedy): draft dalla tabella n-gram del
