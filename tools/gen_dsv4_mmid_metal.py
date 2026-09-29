@@ -48,21 +48,31 @@ constant bool FC_mul_mm_bc_inp = false;
 """)
 for name in ("block_q2_K", "block_q4_K", "block_iq2_xxs"):
     parts.append(block(r"struct " + name + r"\s*\{"))
+parts.append("struct block_q8_0 {\n    half d;\n    int8_t qs[QK8_0];\n};")   # preambolo embedded di ds4_metal.m
 parts.append(block(r"static inline uchar2 get_scale_min_k4_just2\([^)]*\)\s*\{"))
 for fn in ("dequantize_q2_K", "dequantize_q4_K", "dequantize_iq2_xxs"):
     parts.append("template <typename type4x4>\n" + block(r"void " + fn + r"\("))
+DENSE = pathlib.Path(str(SRC).replace("moe.metal", "dense.metal")).read_text()
+_m = re.search(r"template <typename type4x4>\s*void dequantize_q8_0\(", DENSE)
+_i = DENSE.index("{", _m.end()); _d = 0; _k = _i
+while True:
+    _d += (DENSE[_k] == "{") - (DENSE[_k] == "}")
+    if _d == 0 and DENSE[_k] == "}": break
+    _k += 1
+parts.append(DENSE[_m.start():_k + 1])
 parts.append(block(r"static inline bool ds4_tp_owns_expert\("))
 parts.append(block(r"struct ds4_metal_args_mul_mm_id_map0\s*\{"))
 parts.append(block(r"struct ds4_metal_args_mul_mm_id\s*\{"))
 parts.append("template<short ne20>\n" + block(r"kernel void kernel_mul_mm_id_map0\("))
-parts.append("template [[host_name(\"kernel_mul_mm_id_map0_ne20_6\")]] kernel decltype(kernel_mul_mm_id_map0<6>) kernel_mul_mm_id_map0<6>;")
+for _n in (1, 6, 8):
+    parts.append(f'template [[host_name("kernel_mul_mm_id_map0_ne20_{_n}")]] kernel decltype(kernel_mul_mm_id_map0<{_n}>) kernel_mul_mm_id_map0<{_n}>;')
 mm = re.search(r"template<short NR1, typename S0, typename S0_4x4, typename S0_8x8, typename S1, typename S1_2x4, typename S1_8x8, typename block_q, short nl, void \(\*dequantize_func\)\(device const block_q \*, short, thread S0_4x4 &\), typename T0, typename T0_4x4, typename T1, typename T1_2x4, bool CULL_TAIL_SIMDGROUPS = false, bool EXPERT_ADDRESSES = false>\s*kernel void kernel_mul_mm_id\(", s)
 if not mm: raise SystemExit("kernel_mul_mm_id non trovato")
 sub = s[mm.start():]
 parts.append(block(re.escape(sub[:mm.end() - mm.start()])))
 parts.append("typedef decltype(kernel_mul_mm_id<32, half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, block_q2_K, QK_NL, dequantize_q2_K, float, float4x4, float, float2x4>) mul_mm_id;")
-for host, blk, deq in (("iq2_xxs", "block_iq2_xxs", "dequantize_iq2_xxs"), ("q2_K", "block_q2_K", "dequantize_q2_K"), ("q4_K", "block_q4_K", "dequantize_q4_K")):
-    parts.append(f'template [[host_name("kernel_mul_mm_id_{host}_f32")]] kernel mul_mm_id kernel_mul_mm_id<32, half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, {blk}, QK_NL, {deq}, float, float4x4, float, float2x4>;')
+for host, blk, deq in (("q8_0", "block_q8_0", "dequantize_q8_0"), ("iq2_xxs", "block_iq2_xxs", "dequantize_iq2_xxs"), ("q2_K", "block_q2_K", "dequantize_q2_K"), ("q4_K", "block_q4_K", "dequantize_q4_K")):
+    parts.append(f'template [[host_name("kernel_mul_mm_id_{host}_f32")]] kernel mul_mm_id kernel_mul_mm_id<32, half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, {blk}, {'2' if host == 'q8_0' else 'QK_NL'}, {deq}, float, float4x4, float, float2x4>;')
 
 body = "\n\n".join(parts)
 # stringa C: raw literal (MSL contiene virgolette e backslash)

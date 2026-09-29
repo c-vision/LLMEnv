@@ -139,6 +139,10 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t ou
 int llm_dsv4_metal_moe_mm_batch(LlmDsv4Metal* b, int nt, const void* gate_w, const void* up_w, const void* down_w,
         int gtype, int dtype, uint32_t n_expert, uint32_t embd, uint32_t ff, uint32_t gu_row_bytes, uint32_t down_row_bytes,
         const int* ids, const float* rws, const float* x, float clamp, float* out);
+/* Output grouped-LoRA via mul_mm_id Q8_0 (gruppi = esperti) per `nt` token; attivazioni a half nel kernel. */
+int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes, int ng, uint32_t gd,
+        uint32_t rank, const void* outb_w, size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
+        const float* heads, float* out);
 /* Come attn_out_fused per `nt` token: heads [nt*heads_total] -> out [nt*embd]. */
 int llm_dsv4_metal_attn_out_fused_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes,
         size_t outa_lead0, int ng, uint32_t gd, uint32_t rank, const void* outb_w,
