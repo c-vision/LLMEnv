@@ -34,7 +34,8 @@ typedef struct {
     llm_kvq_fmt fmt;
     /* Capacita' (token) e array, per layer. */
     int  cap_tokens;          /* capacita' allocata (multiplo di page_tokens) */
-    int  committed;           /* token scritti (logici) */
+    int  committed;           /* token scritti (layer 0, riferimento) */
+    int* committed_l;         /* token scritti PER LAYER */
     mlx_array* keyData;       /* int8  [nkv, cap, hd]  (token-major, vedi nota sotto) */
     mlx_array* keyScales;     /* f32   [nkv, cap] */
     mlx_array* valueData;     /* int8  [nkv, cap, hd]  (token-major) */
@@ -65,7 +66,8 @@ static inline bool llm_kvq_pool_init(llm_kvq_pool* p, int layers, int kv_heads, 
     p->keyScales = (mlx_array*)calloc((size_t)layers, sizeof(mlx_array));
     p->valueData = (mlx_array*)calloc((size_t)layers, sizeof(mlx_array));
     p->valueScales = (mlx_array*)calloc((size_t)layers, sizeof(mlx_array));
-    if (!p->keyData || !p->keyScales || !p->valueData || !p->valueScales) return false;
+    p->committed_l = (int*)calloc((size_t)layers, sizeof(int));
+    if (!p->keyData || !p->keyScales || !p->valueData || !p->valueScales || !p->committed_l) return false;
     const mlx_dtype edt = (fmt == LLM_KVQ_FMT_INT8) ? MLX_INT8 : MLX_BFLOAT16;
     { int bsh[3] = {kv_heads, cap_tokens, 1};
       p->bias = mlx_array_new();
@@ -164,7 +166,7 @@ static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
                   mlx_array_set(&p->keyScales[layer], nks); mlx_array_set(&p->valueScales[layer], nvs); }
         mlx_array_free(nk); mlx_array_free(nv); mlx_array_free(nks); mlx_array_free(nvs);
     }
-    if (ok && pos + n > p->committed) p->committed = pos + n;
+    if (ok) { p->committed_l[layer] = pos + n; if (pos + n > p->committed) p->committed = pos + n; }
     mlx_array_free(sc2); mlx_array_free(vqt);
     mlx_array_free(kq); mlx_array_free(vq); mlx_array_free(sc);
     return ok;
@@ -176,7 +178,7 @@ static inline void llm_kvq_pool_free(llm_kvq_pool* p) {
         mlx_array_free(p->keyData[l]); mlx_array_free(p->valueData[l]);
         mlx_array_free(p->keyScales[l]); mlx_array_free(p->valueScales[l]);
     }
-    free(p->keyData); free(p->keyScales); free(p->valueData); free(p->valueScales);
+    free(p->keyData); free(p->keyScales); free(p->valueData); free(p->valueScales); free(p->committed_l);
     if (p->bias.ctx) mlx_array_free(p->bias);
     memset(p, 0, sizeof *p);
 }

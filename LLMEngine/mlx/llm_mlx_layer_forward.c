@@ -303,14 +303,14 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
                                 (int)m->cfg.n_kv_heads, (int)m->cfg.head_dim, LLM_KVQ_FMT_INT8,
                                 m->cfg.kv_quantize_threshold, m->stream);
     bool kvq_read_used = false;
-    if (kvq_read && kvqp && kvqp->committed > 0) {
+    if (kvq_read && kvqp && kvqp->committed_l[layer_idx] > 0) {
         g_kvq_cold.kw = kvqp->keyData[layer_idx];
         g_kvq_cold.ks = kvqp->keyScales[layer_idx];
         g_kvq_cold.kb = kvqp->bias;
         g_kvq_cold.vw = kvqp->valueData[layer_idx];
         g_kvq_cold.vs = kvqp->valueScales[layer_idx];
         g_kvq_cold.vb = kvqp->bias;
-        g_kvq_cold.nc = kvqp->committed;
+        g_kvq_cold.nc = kvqp->committed_l[layer_idx];
         g_kvq_cold.kbits = 8; g_kvq_cold.vbits = 8;
         llm_kvq_hook.fn = llm_kvq_sdpa_hook_dispatch;
         llm_kvq_hook.ctx = &g_kvq_cold;
@@ -577,15 +577,15 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
         int N = (int)mlx_array_shape(*k_cache)[2];
         if (N > thr && (int)mlx_array_shape(*v_cache)[2] == N) {
             int upto = N - thr;                       /* cold = [0, upto) */
-            int n_new = upto - kvqp->committed;
+            int n_new = upto - kvqp->committed_l[layer_idx];
             int one[4] = {1,1,1,1};
             if (n_new > 0) {
-                int s0[4] = {0,0,kvqp->committed,0};
+                int s0[4] = {0,0,kvqp->committed_l[layer_idx],0};
                 int s1[4] = {1,(int)mlx_array_shape(*k_cache)[1],upto,(int)mlx_array_shape(*k_cache)[3]};
                 mlx_array kn = mlx_array_new(), vn = mlx_array_new();
                 if (mlx_slice(&kn, *k_cache, s0,4,s1,4,one,4,m->stream) == 0 &&
                     mlx_slice(&vn, *v_cache, s0,4,s1,4,one,4,m->stream) == 0)
-                    llm_kvq_pool_store(kvqp, layer_idx, kn, vn, kvqp->committed, n_new, m->stream);
+                    llm_kvq_pool_store(kvqp, layer_idx, kn, vn, kvqp->committed_l[layer_idx], n_new, m->stream);
                 mlx_array_free(kn); mlx_array_free(vn);
             }
             /* cache = finestra recente [upto, N) */
