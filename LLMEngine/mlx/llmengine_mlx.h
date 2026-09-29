@@ -684,6 +684,10 @@ int llm_ai_mlx_dflash2_generate_multi(llm_ai_mlx_dflash2_handle handle,
  * {"rms_norm","qlinear","sdpa","all"}; iters<1 => 200. Scrive righe TSV in `out`
  * (OP <name> ... raw_ms= llm_ms= ratio= maxdiff=). Ritorna il numero di op misurate. */
 int llm_ai_mlx_core_bench(const char* op, int iters, char* out, size_t cap);
+int llm_ai_mlx_splash_store_selftest(char* out, size_t cap);
+int llm_ai_mlx_splash_pool_selftest(char* out, size_t cap);
+int llm_ai_mlx_splash_attn_selftest(char* out, size_t cap);
+
 
 #ifdef __cplusplus
 }
