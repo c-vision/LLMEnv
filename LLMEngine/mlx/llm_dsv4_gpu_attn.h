@@ -91,6 +91,14 @@ static inline bool llm_dsv4_gpu_attn_finish(LlmDsv4AttnGpu* m, const LlmDsv4Conf
     const int ng = c->n_out_group, rank = c->n_lora_o, embd = c->n_embd;
     const int gd = c->n_head_dim * (c->n_head / ng), ol = ng * rank;
     llm_dsv4_rope_tail_layer_inplace(c, heads, c->n_head, c->n_head_dim, c->n_rot, pos, il, 1);
+    if (m->outa[il].type == 8 && m->outb[il].type == 8) {
+        /* FUSO ds4: out_a (ng) + out_b in UNA command buffer, `low` su device. */
+        return llm_dsv4_metal_attn_out_fused(m->be, m->outa[il].w, m->outa[il].row_bytes, 0,
+                                             ng, (uint32_t)gd, (uint32_t)rank,
+                                             m->outb[il].w, m->outb[il].row_bytes,
+                                             (uint32_t)ol, (uint32_t)embd,
+                                             (uint32_t)(c->n_head * c->n_head_dim), heads, out) == 0;
+    }
     float* low = (float*)malloc(sizeof(float) * (size_t)ol);
     bool ok = low != NULL;
     if (ok) {

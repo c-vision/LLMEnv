@@ -710,3 +710,57 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
     if (PSUM) [PSUM release];
     return rc;
 }
+
+/* Output grouped-LoRA FUSO (ds4): out_a (ng gruppi) + out_b in UNA command buffer, con `low`
+ * intermedio su DEVICE (nessun readback/upload). Pesi Q8_0. `out[embd]` scritto per intero. 0 = ok. */
+int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b,
+        const void* outa_w, size_t outa_row_bytes, size_t outa_lead0,
+        int ng, uint32_t gd, uint32_t rank,
+        const void* outb_w, size_t outb_row_bytes,
+        uint32_t ol, uint32_t embd, uint32_t heads_total,
+        const float* heads, float* out) {
+    if (!b || !b->pso || ng <= 0 || ng > 64 || !outa_w || !outb_w || !heads || !out) return -1;
+    const size_t page = (size_t)getpagesize();
+    size_t abytes = (size_t)ng * rank * outa_row_bytes;
+    size_t bbytes = (size_t)embd * outb_row_bytes;
+    uintptr_t apa = (uintptr_t)outa_w & ~(uintptr_t)(page-1); size_t la = (size_t)((uintptr_t)outa_w-apa);
+    uintptr_t apb = (uintptr_t)outb_w & ~(uintptr_t)(page-1); size_t lb = (size_t)((uintptr_t)outb_w-apb);
+    size_t vla = ((la+abytes+page-1)/page)*page;
+    size_t vlb = ((lb+bbytes+page-1)/page)*page;
+    id<MTLBuffer> WA  = [b->dev newBufferWithBytesNoCopy:(void*)apa length:vla options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> WB  = [b->dev newBufferWithBytesNoCopy:(void*)apb length:vlb options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> H   = dsv4_scratch(b, &b->sx[3], &b->sx_cap[3], (size_t)heads_total * sizeof(float));
+    id<MTLBuffer> LOW = dsv4_scratch(b, &b->sx[4], &b->sx_cap[4], (size_t)ol * sizeof(float));
+    id<MTLBuffer> OUT = dsv4_scratch(b, &b->sx[5], &b->sx_cap[5], (size_t)embd * sizeof(float));
+    int rc = (WA && WB && H && LOW && OUT) ? 0 : -2;
+    if (rc == 0) memcpy([H contents], heads, (size_t)heads_total * sizeof(float));
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        for (int g = 0; g < ng; g++) {
+            [e setComputePipelineState:b->pso];
+            [e setBuffer:WA offset:0 atIndex:0];
+            [e setBuffer:H  offset:(NSUInteger)((size_t)g * gd * sizeof(float)) atIndex:1];
+            [e setBuffer:LOW offset:(NSUInteger)((size_t)g * rank * sizeof(float)) atIndex:2];
+            uint32_t P[7] = { (uint32_t)(la + outa_lead0 + (size_t)g * rank * outa_row_bytes), (uint32_t)outa_row_bytes,
+                              (uint32_t)(gd / 32u), rank, 8u, 34u, 32u };
+            [e setBytes:P length:sizeof(P) atIndex:3];
+            [e dispatchThreadgroups:MTLSizeMake(rank, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        }
+        [e setComputePipelineState:b->pso];
+        [e setBuffer:WB  offset:0 atIndex:0];
+        [e setBuffer:LOW offset:0 atIndex:1];
+        [e setBuffer:OUT offset:0 atIndex:2];
+        uint32_t P2[7] = { (uint32_t)lb, (uint32_t)outb_row_bytes, (uint32_t)(ol / 32u), embd, 8u, 34u, 32u };
+        [e setBytes:P2 length:sizeof(P2) atIndex:3];
+        [e dispatchThreadgroups:MTLSizeMake(embd, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) memcpy(out, [OUT contents], (size_t)embd * sizeof(float));
+    }
+    if (WA) [WA release];
+    if (WB) [WB release];
+    return rc;
+}

@@ -66,6 +66,12 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
                                float clamp, uint32_t embd, uint32_t gu_nb01, uint32_t ff,
                                uint32_t down_nb01, float* out);
 
+/* Output grouped-LoRA FUSO (ds4): out_a (ng gruppi) + out_b in UNA command buffer, `low` su device. */
+int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t outa_row_bytes,
+        size_t outa_lead0, int ng, uint32_t gd, uint32_t rank, const void* outb_w,
+        size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
+        const float* heads, float* out);
+
 #ifdef __cplusplus
 }
 #endif
