@@ -707,16 +707,15 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    }\n"
 "    if (tiisg == 0u) SCORES[c] = s;\n"
 "}\n"
-/* Indexer top-k deterministico (primo massimo, indice crescente). P={n_comp, top_k}. */
+/* Indexer top-k deterministico (stesso insieme della selezione seriale «primo massimo, indice
+ * crescente»): un thread per riga c, rank = #righe che la battono (score maggiore, o uguale con indice
+ * minore); allowed[c] = rank < top_k. Parallelo, O(n_comp) per thread. P={n_comp, top_k}. */
 "kernel void dsv4_indexer_topk(device const float* SCORES [[buffer(0)]], device int* ALLOWED [[buffer(1)]],\n"
-"    constant uint* P [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n"
-"    const uint n_comp = P[0], top_k = P[1]; if (gid != 0u) return;\n"
-"    for (uint i = 0; i < n_comp; i++) ALLOWED[i] = 0;\n"
-"    for (uint k = 0; k < top_k; k++) {\n"
-"        int best = 0; float bs = -1.0e30f;\n"
-"        for (uint cc = 0; cc < n_comp; cc++) if (!ALLOWED[cc] && SCORES[cc] > bs) { best = (int)cc; bs = SCORES[cc]; }\n"
-"        ALLOWED[best] = 1;\n"
-"    }\n"
+"    constant uint* P [[buffer(2)]], uint c [[thread_position_in_grid]]) {\n"
+"    const uint n_comp = P[0], top_k = P[1]; if (c >= n_comp) return;\n"
+"    const float s = SCORES[c]; uint rank = 0;\n"
+"    for (uint j = 0; j < n_comp; j++) { const float sj = SCORES[j]; if (sj > s || (sj == s && j < c)) rank++; }\n"
+"    ALLOWED[c] = rank < top_k ? 1 : 0;\n"
 "}\n"
 /* Shift del buffer di stato: copia [src, src+n) in [0, n) (ds4: righe ratio..2ratio -> 0..ratio). P={n,src}. */
 "kernel void dsv4_comp_shift(device float* BUF [[buffer(0)]], constant uint* P [[buffer(1)]], uint gid [[thread_position_in_grid]]) {\n"
@@ -1511,7 +1510,7 @@ int llm_dsv4_metal_indexer_topk(LlmDsv4Metal* b, const float* scores, int n_comp
         [e setComputePipelineState:b->pso_idx_topk];
         [e setBuffer:BS offset:0 atIndex:0]; [e setBuffer:BA offset:0 atIndex:1];
         uint32_t P[2] = { (uint32_t)n_comp, (uint32_t)top_k }; [e setBytes:P length:sizeof(P) atIndex:2];
-        [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)n_comp + 63) / 64, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(allowed, [BA contents], (size_t)n_comp*sizeof(int));
@@ -1732,7 +1731,7 @@ int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p) {
         [e setComputePipelineState:b->pso_idx_topk];
         [e setBuffer:SCO offset:0 atIndex:0]; [e setBuffer:allowedB offset:0 atIndex:1];
         { uint32_t P[2] = { (uint32_t)p->n_icomp, (uint32_t)p->idx_top_k }; [e setBytes:P length:sizeof(P) atIndex:2]; }
-        [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)p->n_icomp + 63) / 64, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     }
 
     /* 5) attenzione mista (raw + compresse) */
