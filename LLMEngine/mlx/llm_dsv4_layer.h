@@ -70,6 +70,7 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
     float* nxt    = (float*)malloc(sizeof(float) * (size_t)HC * D);
     float* post   = (float*)malloc(sizeof(float) * (size_t)HC);
     float* comb   = (float*)malloc(sizeof(float) * (size_t)HC * HC);
+    int tail_done = 0;
     for (int k = 0; k < n_ops; k++) {
         const char* op = ops[k];
         if (strcmp(op, "mhc_pre_attn") == 0) {
@@ -81,7 +82,30 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
             memcpy(saved, cur, sizeof(float) * (size_t)HC * D);
             llm_dsv4_block_pre(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, cur, normed, post, comb);
         } else if (strcmp(op, "attention") == 0) {
-            llm_dsv4_attn_cached(c, L, pe, cache, normed, pos, il, proj);
+            /* La tabella completa registra 256 esperti per layer: sullo store
+             * streaming il path selected-slots rimane il ramo efficiente. */
+            int canonical_tail = out_hc && pe && !pe->store && n_ops == 6 && k == 1 &&
+                strcmp(ops[0], "mhc_pre_attn") == 0 &&
+                strcmp(ops[2], "mhc_post_attn") == 0 &&
+                strcmp(ops[3], "mhc_pre_ffn") == 0 &&
+                strcmp(ops[4], "moe") == 0 &&
+                strcmp(ops[5], "mhc_post_ffn") == 0;
+            if (canonical_tail) {
+                float* heads = (float*)malloc(sizeof(float) * (size_t)c->n_head * c->n_head_dim);
+                if (heads) {
+                    if (llm_dsv4_attn_cached_mid(c, L, pe, cache, normed, pos, il, heads)) {
+                        tail_done = llm_dsv4_gpu_attn_tail_try(c, L, pe, il, heads, saved, post, comb, pos, out_hc);
+                        if (!tail_done && !llm_dsv4_gpu_attn_finish_try(c, L, il, heads, pos, proj))
+                            llm_dsv4_attn_finish(c, L, pe, heads, pos, il, proj);
+                    }
+                    free(heads);
+                } else {
+                    llm_dsv4_attn_cached(c, L, pe, cache, normed, pos, il, proj);
+                }
+            } else {
+                llm_dsv4_attn_cached(c, L, pe, cache, normed, pos, il, proj);
+            }
+            if (tail_done) break;
             { const char* da = getenv("LLM_DSV4_DUMP_AOUT");
               if (da && da[0] && il == 0) { FILE* f = fopen(da, "wb"); if (f) { fwrite(proj, sizeof(float), (size_t)D, f); fclose(f); } } }
         } else if (strcmp(op, "moe") == 0) {
@@ -101,7 +125,7 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
         }
         /* op sconosciuto: ignorato (il gap e' visibile nel log della pipeline) */
     }
-    if (out_hc) memcpy(out_hc, cur, sizeof(float) * (size_t)HC * D);
+    if (out_hc && !tail_done) memcpy(out_hc, cur, sizeof(float) * (size_t)HC * D);
     free(comb); free(post); free(nxt); free(saved); free(proj); free(normed); free(cur);
 }
 

@@ -509,6 +509,70 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        const float s = simd_sum(sumf[row]);\n"
 "        if (tiisg == 0) OUT[first_row + row] = s;\n"
 "    }\n"
+"}\n"
+"typedef struct { device const char* g[256]; device const char* u[256]; } D4PT;\n"
+"kernel void dsv4_slots6_tbl_pair(\n"
+"    device const int* SEL [[buffer(0)]], device const D4PT& T [[buffer(1)]],\n"
+"    device const float* Y [[buffer(2)]], device float* MID [[buffer(3)]], device const float* RW [[buffer(4)]],\n"
+"    constant float* CF [[buffer(5)]], constant uint* P [[buffer(6)]],\n"
+"    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]],\n"
+"    ushort sgitg [[simdgroup_index_in_threadgroup]], threadgroup char* shmem [[threadgroup(0)]]) {\n"
+"    const int idx = (int)tgpig.z; const int e = SEL[idx];\n"
+"    device const char* SG = T.g[e]; device const char* SU = T.u[e];\n"
+"    const int ne00=(int)P[0], nb01=(int)P[1], ne0=(int)P[2];\n"
+"    dsv4_pair_core(SG, SU, Y, MID, RW[idx], idx*ne0, CF[0], ne00, nb01, ne0, 0u, 0u, tgpig.x, tiisg, sgitg, shmem);\n"
+"}\n"
+"typedef struct { device const char* g[256]; } D4DT;\n"
+"kernel void dsv4_sum6_tbl(device const int* SEL [[buffer(0)]], device const D4DT& T [[buffer(1)]],\n"
+"    device const float* MID [[buffer(2)]], device float* OUT [[buffer(3)]], constant uint* P [[buffer(4)]],\n"
+"    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) {\n"
+"    const short NSG = 4; const short nr0 = 4;\n"
+"    const int nb = (int)P[0]; const uint nb01 = P[1];\n"
+"    const int ne0 = (int)P[2]; const int ne00 = (int)P[3];\n"
+"    const int first_row = (tgpig.x * NSG + sgitg) * nr0;\n"
+"    float sumf[4] = {0.f,0.f,0.f,0.f};\n"
+"    const short ix = tiisg / 8; const short it = tiisg % 8;\n"
+"    const short iq = it / 4; const short ir = it % 4; const short is = (8 * ir) / 16;\n"
+"    for (int slot = 0; slot < 6; slot++) {\n"
+"        device const char* s0 = T.g[SEL[slot]];\n"
+"        device const float* y = MID + (ulong)slot * (ulong)ne00;\n"
+"        device const float* y4 = y + ix * 256 + 128 * iq + 8 * ir;\n"
+"        for (int ib = ix; ib < nb; ib += 4) {\n"
+"            float yl[32]; float4 sumy = {0.f,0.f,0.f,0.f};\n"
+"            for (short i = 0; i < 8; ++i) {\n"
+"                yl[i+0]=y4[i+0]; sumy[0]+=yl[i+0]; yl[i+8]=y4[i+32]; sumy[1]+=yl[i+8];\n"
+"                yl[i+16]=y4[i+64]; sumy[2]+=yl[i+16]; yl[i+24]=y4[i+96]; sumy[3]+=yl[i+24]; }\n"
+"            for (short row = 0; row < nr0; row++) {\n"
+"                if (first_row + row < ne0) {\n"
+"                    device const uchar* blk = (device const uchar*)s0 + (ulong)(first_row+row) * (ulong)nb01 + (ulong)ib * 84u;\n"
+"                    device const uint8_t* scr = blk + 8*iq + is;\n"
+"                    device const uint16_t* qsr = (device const uint16_t*)(blk + 16u) + 16*iq + 4*ir;\n"
+"                    ushort dh0 = (ushort)blk[80] | ((ushort)blk[81] << 8);\n"
+"                    ushort dh1 = (ushort)blk[82] | ((ushort)blk[83] << 8);\n"
+"                    const float dall = (float)as_type<half>(dh0);\n"
+"                    const float dmin = (float)as_type<half>(dh1) * (1.f/16.f);\n"
+"                    float4 acc1 = {0.f,0.f,0.f,0.f}; float4 acc2 = {0.f,0.f,0.f,0.f};\n"
+"                    for (int i = 0; i < 8; i += 2) {\n"
+"                        acc1[0] += yl[i+0]*(qsr[i/2]&0x0003); acc2[0] += yl[i+1]*(qsr[i/2]&0x0300);\n"
+"                        acc1[1] += yl[i+8]*(qsr[i/2]&0x000c); acc2[1] += yl[i+9]*(qsr[i/2]&0x0c00);\n"
+"                        acc1[2] += yl[i+16]*(qsr[i/2]&0x0030); acc2[2] += yl[i+17]*(qsr[i/2]&0x3000);\n"
+"                        acc1[3] += yl[i+24]*(qsr[i/2]&0x00c0); acc2[3] += yl[i+25]*(qsr[i/2]&0xc000);\n"
+"                    }\n"
+"                    sumf[row] += dall * ((acc1[0]+1.f/256.f*acc2[0])*(scr[0]&0xF)\n"
+"                                       + (acc1[1]+1.f/256.f*acc2[1])*(scr[2]&0xF)*0.25f\n"
+"                                       + (acc1[2]+1.f/256.f*acc2[2])*(scr[4]&0xF)*0.0625f\n"
+"                                       + (acc1[3]+1.f/256.f*acc2[3])*(scr[6]&0xF)*0.015625f)\n"
+"                               - dmin * (sumy[0]*(scr[0]&0xF0) + sumy[1]*(scr[2]&0xF0)\n"
+"                                       + sumy[2]*(scr[4]&0xF0) + sumy[3]*(scr[6]&0xF0));\n"
+"                }\n"
+"            }\n"
+"            y4 += 4 * 256;\n"
+"        }\n"
+"    }\n"
+"    for (int row = 0; row < nr0 && first_row + row < ne0; row++) {\n"
+"        const float s = simd_sum(sumf[row]);\n"
+"        if (tiisg == 0) OUT[first_row + row] = s;\n"
+"    }\n"
 "}\n";
 
 struct LlmDsv4Metal {
@@ -526,6 +590,8 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
     id<MTLComputePipelineState> pso_route;   /* router su GPU (softplus/top-k) */
     id<MTLComputePipelineState> pso_addr_pair, pso_addr_sum6; /* MoE via tabella indirizzi (ds4 addr) */
+    id<MTLComputePipelineState> pso_tbl_pair, pso_tbl_sum6;  /* MoE via argument buffer (ds4 table) */
+    id<MTLArgumentEncoder> enc_pair, enc_down;
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
     size_t sx_cap[64], so_cap[64], spb_cap[64];
@@ -606,6 +672,14 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_route    = f20 ? [dev newComputePipelineStateWithFunction:f20 error:&err] : nil;
     b->pso_addr_pair = f21 ? [dev newComputePipelineStateWithFunction:f21 error:&err] : nil;
     b->pso_addr_sum6 = f22 ? [dev newComputePipelineStateWithFunction:f22 error:&err] : nil;
+    id<MTLFunction> f23 = [lib newFunctionWithName:@"dsv4_slots6_tbl_pair"];
+    id<MTLFunction> f24 = [lib newFunctionWithName:@"dsv4_sum6_tbl"];
+    b->pso_tbl_pair = f23 ? [dev newComputePipelineStateWithFunction:f23 error:&err] : nil;
+    b->pso_tbl_sum6 = f24 ? [dev newComputePipelineStateWithFunction:f24 error:&err] : nil;
+    b->enc_pair = f23 ? [f23 newArgumentEncoderWithBufferIndex:1] : nil;
+    b->enc_down = f24 ? [f24 newArgumentEncoderWithBufferIndex:1] : nil;
+    if (!f23) fprintf(stderr, "dsv4_metal: kernel dsv4_slots6_tbl_pair NON compilato\n");
+    if (!f24) fprintf(stderr, "dsv4_metal: kernel dsv4_sum6_tbl NON compilato\n");
     [lib release];
     if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->pso_route || !b->pso_addr_pair || !b->pso_addr_sum6 || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
@@ -615,6 +689,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     return b;
 }
 
+static void dsv4_view_cache_clear(void);
 void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (!b) return;
     if (b->pso)          [b->pso release];
@@ -634,6 +709,11 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_route)    [b->pso_route release];
     if (b->pso_addr_pair) [b->pso_addr_pair release];
     if (b->pso_addr_sum6) [b->pso_addr_sum6 release];
+    if (b->pso_tbl_pair) [b->pso_tbl_pair release];
+    if (b->pso_tbl_sum6) [b->pso_tbl_sum6 release];
+    if (b->enc_pair)     [b->enc_pair release];
+    if (b->enc_down)     [b->enc_down release];
+    dsv4_view_cache_clear();
     if (b->pso_rms_w)    [b->pso_rms_w release];
     if (b->pso_head_rms) [b->pso_head_rms release];
     if (b->pso_rope)     [b->pso_rope release];
@@ -1212,6 +1292,13 @@ static id<MTLBuffer> dsv4_view(LlmDsv4Metal* b, const void* p, size_t bytes, siz
  * si crea UNA volta. Regge decine di migliaia di buffer per-esperto (piccoli). */
 #define DSV4_TVC_N 131072u
 static struct { const void* ptr; size_t bytes; id<MTLBuffer> buf; size_t lead; } g_tvc[DSV4_TVC_N];
+static void dsv4_view_cache_clear(void) {
+    for (size_t i = 0; i < DSV4_TVC_N; i++) {
+        if (g_tvc[i].buf) [g_tvc[i].buf release];
+        g_tvc[i].ptr = NULL; g_tvc[i].bytes = 0;
+        g_tvc[i].buf = nil; g_tvc[i].lead = 0;
+    }
+}
 static id<MTLBuffer> dsv4_view_cached(LlmDsv4Metal* b, const void* p, size_t bytes, size_t* out_lead) {
     size_t h = (((uintptr_t)p >> 4) ^ (bytes >> 4)) & (DSV4_TVC_N - 1);
     for (size_t i = 0; i < 128; i++) {
@@ -1233,6 +1320,78 @@ uint64_t llm_dsv4_metal_expert_gaddr(LlmDsv4Metal* b, const void* ptr, size_t by
     return buf ? (uint64_t)[buf gpuAddress] + (uint64_t)lead : 0;
 }
 
+/* Argument buffer ds4 "table": struct { device const char* g[N]; ... } con le view per-esperto. */
+typedef struct {
+    id<MTLBuffer> ab;
+    id<MTLBuffer>* views;
+    int nv;
+    id<MTLResidencySet> residency;
+    id<MTLCommandQueue> queue; /* posseduta da LlmDsv4Metal */
+} Dsv4ArgBuf;
+static int dsv4_argbuf_make_resident(LlmDsv4Metal* b, Dsv4ArgBuf* h) {
+    MTLResidencySetDescriptor* d = [MTLResidencySetDescriptor new];
+    d.initialCapacity = (NSUInteger)h->nv + 1;
+    h->residency = [b->dev newResidencySetWithDescriptor:d error:nil];
+    [d release];
+    if (!h->residency) return 0;
+    [h->residency addAllocation:h->ab];
+    for (int i = 0; i < h->nv; i++) [h->residency addAllocation:h->views[i]];
+    [h->residency commit];
+    [h->residency requestResidency];
+    [b->queue addResidencySet:h->residency];
+    h->queue = b->queue;
+    return 1;
+}
+void* llm_dsv4_metal_argbuf_pair(LlmDsv4Metal* b, const void* const* gs, const void* const* us, int n,
+                                 size_t gbytes, size_t ubytes) {
+    if (!b->enc_pair || n <= 0 || n > 256) return NULL;
+    Dsv4ArgBuf* h = (Dsv4ArgBuf*)calloc(1, sizeof *h); if (!h) return NULL;
+    h->ab = [b->dev newBufferWithLength:[b->enc_pair encodedLength] options:MTLResourceStorageModeShared];
+    h->views = (id<MTLBuffer>*)calloc((size_t)n * 2, sizeof(id<MTLBuffer>));
+    if (!h->ab || !h->views) { llm_dsv4_metal_argbuf_free(h); return NULL; }
+    [b->enc_pair setArgumentBuffer:h->ab offset:0];
+    for (int e = 0; e < n; e++) {
+        size_t glead = 0, ulead = 0;
+        id<MTLBuffer> gv = dsv4_view_cached(b, gs[e], gbytes, &glead);
+        id<MTLBuffer> uv = dsv4_view_cached(b, us[e], ubytes, &ulead);
+        if (!gv || !uv) { llm_dsv4_metal_argbuf_free(h); return NULL; }
+        [b->enc_pair setBuffer:gv offset:(NSUInteger)glead atIndex:(NSUInteger)e];
+        [b->enc_pair setBuffer:uv offset:(NSUInteger)ulead atIndex:(NSUInteger)(n + e)];
+        h->views[h->nv++] = gv; h->views[h->nv++] = uv;
+    }
+    if (!dsv4_argbuf_make_resident(b, h)) { llm_dsv4_metal_argbuf_free(h); return NULL; }
+    return (void*)h;
+}
+void* llm_dsv4_metal_argbuf_down(LlmDsv4Metal* b, const void* const* ds, int n, size_t dbytes) {
+    if (!b->enc_down || n <= 0 || n > 256) return NULL;
+    Dsv4ArgBuf* h = (Dsv4ArgBuf*)calloc(1, sizeof *h); if (!h) return NULL;
+    h->ab = [b->dev newBufferWithLength:[b->enc_down encodedLength] options:MTLResourceStorageModeShared];
+    h->views = (id<MTLBuffer>*)calloc((size_t)n, sizeof(id<MTLBuffer>));
+    if (!h->ab || !h->views) { llm_dsv4_metal_argbuf_free(h); return NULL; }
+    [b->enc_down setArgumentBuffer:h->ab offset:0];
+    for (int e = 0; e < n; e++) {
+        size_t dlead = 0;
+        id<MTLBuffer> dv = dsv4_view_cached(b, ds[e], dbytes, &dlead);
+        if (!dv) { llm_dsv4_metal_argbuf_free(h); return NULL; }
+        [b->enc_down setBuffer:dv offset:(NSUInteger)dlead atIndex:(NSUInteger)e];
+        h->views[h->nv++] = dv;
+    }
+    if (!dsv4_argbuf_make_resident(b, h)) { llm_dsv4_metal_argbuf_free(h); return NULL; }
+    return (void*)h;
+}
+void llm_dsv4_metal_argbuf_bind(void* enc, void* handle, int index) {
+    Dsv4ArgBuf* h = (Dsv4ArgBuf*)handle; id<MTLComputeCommandEncoder> e = (id<MTLComputeCommandEncoder>)enc;
+    if (!h) return;
+    [e setBuffer:h->ab offset:0 atIndex:(NSUInteger)index];
+}
+void llm_dsv4_metal_argbuf_free(void* handle) {
+    Dsv4ArgBuf* h = (Dsv4ArgBuf*)handle; if (!h) return;
+    if (h->queue && h->residency) [h->queue removeResidencySet:h->residency];
+    if (h->residency) [h->residency release];
+    if (h->ab) [h->ab release];
+    free(h->views); free(h);
+}
+
 /* TAIL FUSO del layer (ds4): attn-out + mhc_post + mhc_pre + route + moe + mhc_post in UNA cb.
  * 0 = ok, <0 = fallback CPU. */
 int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
@@ -1242,7 +1401,8 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
         !b->pso_addr_pair || !b->pso_addr_sum6 || !b->pso_swiglu || !b->pso_add) return -1;
     const uint32_t D = (uint32_t)q->D, HC = (uint32_t)q->HC, SIZE = (uint32_t)q->SIZE, HCD = (uint32_t)q->HCD;
     if (!q->heads || !q->out_hc || !q->res_attn || !q->post_attn || !q->comb_attn || !q->fn ||
-        !q->scale || !q->base || !q->norm_w || !q->router_w || !q->gaddr || !q->uaddr || !q->daddr) return -1;
+        !q->scale || !q->base || !q->norm_w || !q->router_w || !q->arg_pair || !q->arg_down) return -1;
+    if (!b->pso_tbl_pair || !b->pso_tbl_sum6) return -1;
     if ((q->hd % 1) || (D % 32u)) return -1;
 
     id<MTLBuffer> HEADS = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->heads, (size_t)q->n_head*q->hd*sizeof(float));
@@ -1255,9 +1415,7 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
     id<MTLBuffer> NORMW = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->norm_w, (size_t)D*sizeof(float));
     id<MTLBuffer> EXPB  = q->exp_probs_b ? (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->exp_probs_b, (size_t)q->n_expert*sizeof(float)) : nil;
     size_t rtw_lead = 0;
-    id<MTLBuffer> GADR = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->gaddr, (size_t)q->n_expert*sizeof(uint64_t));
-    id<MTLBuffer> UADR = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->uaddr, (size_t)q->n_expert*sizeof(uint64_t));
-    id<MTLBuffer> DADR = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->daddr, (size_t)q->n_expert*sizeof(uint64_t));
+    id<MTLBuffer> GADR = nil; id<MTLBuffer> UADR = nil; id<MTLBuffer> DADR = nil;
     id<MTLBuffer> RTW = dsv4_view(b, q->router_w, (size_t)q->n_expert*D*sizeof(float), &rtw_lead);
     size_t oa_lead = 0, ob_lead = 0;
     id<MTLBuffer> OUTA = dsv4_view(b, q->outa_w, (size_t)q->ng*q->rank*q->outa_row_bytes, &oa_lead);
@@ -1286,7 +1444,7 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
     id<MTLBuffer> MID2 = dsv4_scratch(b, &b->sx[37], &b->sx_cap[37], (size_t)q->ff*sizeof(float));
     id<MTLBuffer> D2   = dsv4_scratch(b, &b->sx[38], &b->sx_cap[38], (size_t)D*sizeof(float));
 
-    int rc = (HEADS&&RES&&POST&&COMB&&FN&&SCALE&&BASE&&NORMW&&GADR&&UADR&&DADR&&RTW&&OUTA&&OUTB&&
+    int rc = (HEADS&&RES&&POST&&COMB&&FN&&SCALE&&BASE&&NORMW&&RTW&&OUTA&&OUTB&&
               ATTN&&NXT&&FLAT&&MIXES&&SPLIT&&HIN&&NRM&&LOGI&&SEL&&RW&&MID&&ROUT&&OUTC&&HLOW&&
               (q->sg?(WG&&WU&&WD&&G&&U&&MID2&&D2):1)) ? 0 : -2;
 
@@ -1351,15 +1509,18 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
         { uint32_t P[3]={(uint32_t)q->n_expert,(uint32_t)q->used,(EXPB?1u:0u)}; [e setBytes:P length:sizeof(P) atIndex:4]; float cf[1]={q->expert_scale}; [e setBytes:cf length:sizeof(cf) atIndex:5]; }
         [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
         /* 6) MoE addr: pair slots6 (grid z=used) + sum6 -> ROUT */
-        [e setComputePipelineState:b->pso_addr_pair];
-        [e setBuffer:SEL offset:0 atIndex:0]; [e setBuffer:GADR offset:0 atIndex:1]; [e setBuffer:UADR offset:0 atIndex:2];
-        [e setBuffer:NRM offset:0 atIndex:3]; [e setBuffer:MID offset:0 atIndex:4]; [e setBuffer:RW offset:0 atIndex:5];
-        { float cf[1]={q->clamp}; [e setBytes:cf length:sizeof(cf) atIndex:6]; }
-        { uint32_t P[3]={D,q->gu_nb01,q->ff}; [e setBytes:P length:sizeof(P) atIndex:7]; }
+        [e setComputePipelineState:b->pso_tbl_pair];
+        [e setBuffer:SEL offset:0 atIndex:0];
+        llm_dsv4_metal_argbuf_bind((void*)e, (void*)q->arg_pair, 1);
+        [e setBuffer:NRM offset:0 atIndex:2]; [e setBuffer:MID offset:0 atIndex:3]; [e setBuffer:RW offset:0 atIndex:4];
+        { float cf[1]={q->clamp}; [e setBytes:cf length:sizeof(cf) atIndex:5]; }
+        { uint32_t P[3]={D,q->gu_nb01,q->ff}; [e setBytes:P length:sizeof(P) atIndex:6]; }
         [e setThreadgroupMemoryLength:256*8+128 atIndex:0];
         [e dispatchThreadgroups:MTLSizeMake((q->ff+NSG*nr0-1)/(NSG*nr0),1,(NSUInteger)q->used) threadsPerThreadgroup:MTLSizeMake(32*NSG,1,1)];
-        [e setComputePipelineState:b->pso_addr_sum6];
-        [e setBuffer:SEL offset:0 atIndex:0]; [e setBuffer:DADR offset:0 atIndex:1]; [e setBuffer:MID offset:0 atIndex:2]; [e setBuffer:ROUT offset:0 atIndex:3];
+        [e setComputePipelineState:b->pso_tbl_sum6];
+        [e setBuffer:SEL offset:0 atIndex:0];
+        llm_dsv4_metal_argbuf_bind((void*)e, (void*)q->arg_down, 1);
+        [e setBuffer:MID offset:0 atIndex:2]; [e setBuffer:ROUT offset:0 atIndex:3];
         { uint32_t P[4]={q->ff/256u,q->down_nb01,D,q->ff}; [e setBytes:P length:sizeof(P) atIndex:4]; }
         [e dispatchThreadgroups:MTLSizeMake((D+NSG*nr0-1)/(NSG*nr0),1,1) threadsPerThreadgroup:MTLSizeMake(32*NSG,1,1)];
         /* shared expert -> ROUT += D2 */
@@ -1405,6 +1566,7 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
             dsv4_dump_buf("nrm",   NRM,   (size_t)D*sizeof(float));
             dsv4_dump_buf("sel",   SEL,   (size_t)q->used*sizeof(int));
             dsv4_dump_buf("rw",    RW,    (size_t)q->used*sizeof(float));
+            dsv4_dump_buf("mid",   MID,   (size_t)q->used*q->ff*sizeof(float));
             dsv4_dump_buf("rout",  ROUT,  (size_t)D*sizeof(float));
             dsv4_dump_buf("outc",  OUTC,  (size_t)HC*D*sizeof(float));
         }

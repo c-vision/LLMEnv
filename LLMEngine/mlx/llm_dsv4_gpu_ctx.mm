@@ -17,34 +17,35 @@ static LlmDsv4AttnGpu g_attn;
 static int g_on = 0;
 static int g_ref = 0;
 
-/* Tabella gpuAddress per-esperto (buffer piccoli, registrati, PERSISTENTI), per layer. */
-static uint64_t* g_gaddr[LLM_DSV4_MAX_LAYER]; static uint64_t* g_uaddr[LLM_DSV4_MAX_LAYER]; static uint64_t* g_daddr[LLM_DSV4_MAX_LAYER];
-static int g_tbl_ready[LLM_DSV4_MAX_LAYER]; static int g_tbl_ne = -1; static uint64_t g_tbl_ep[LLM_DSV4_MAX_LAYER];
-static int dsv4_build_tables(const LlmDsv4PackedExperts* pe, int il, int n_expert) {
+/* Argument buffer per layer sugli ESPERTI dello STORE (residenti, veloci); ricostruito solo
+ * quando lo store sfratta (epoch). Il mmap sarebbe stabile ma NON residente sotto streaming. */
+static void* g_argp[LLM_DSV4_MAX_LAYER]; static void* g_argd[LLM_DSV4_MAX_LAYER];
+static int g_arg_ready[LLM_DSV4_MAX_LAYER]; static uint64_t g_arg_ep[LLM_DSV4_MAX_LAYER];
+static int dsv4_build_argbufs(const LlmDsv4PackedExperts* pe, int il, int n_expert) {
     if (il < 0 || il >= LLM_DSV4_MAX_LAYER) return 0;
     LlmDsv4Store* st = (LlmDsv4Store*)pe->store;
     uint64_t ep = st ? st->evictions : 0;
-    if (g_tbl_ready[il] && g_tbl_ne == n_expert && g_tbl_ep[il] == ep) return 1;
-    free(g_gaddr[il]); free(g_uaddr[il]); free(g_daddr[il]);
-    g_gaddr[il] = (uint64_t*)malloc((size_t)n_expert*sizeof(uint64_t));
-    g_uaddr[il] = (uint64_t*)malloc((size_t)n_expert*sizeof(uint64_t));
-    g_daddr[il] = (uint64_t*)malloc((size_t)n_expert*sizeof(uint64_t));
-    if (!g_gaddr[il] || !g_uaddr[il] || !g_daddr[il]) return 0;
+    if (g_arg_ready[il] && g_arg_ep[il] == ep) return 1;
     size_t nbg = (size_t)llm_ggml_nbytes(pe->gate_type, pe->in_dim);
     size_t nbd = (size_t)llm_ggml_nbytes(pe->down_type, pe->ff_dim);
     size_t gbytes = (size_t)pe->ff_dim * nbg, dbytes = (size_t)pe->in_dim * nbd;
-    size_t sg = gbytes, sd = dbytes;
+    const void** gp = (const void**)malloc((size_t)n_expert*sizeof(void*));
+    const void** up = (const void**)malloc((size_t)n_expert*sizeof(void*));
+    const void** dp = (const void**)malloc((size_t)n_expert*sizeof(void*));
+    if (!gp || !up || !dp) { free(gp); free(up); free(dp); return 0; }
     for (int e = 0; e < n_expert; e++) {
-        /* Preferisci i buffer dello STORE (RAM, residenti); il mmap sotto streaming e' non-residente. */
         const uint8_t *g = NULL, *u = NULL, *d = NULL;
         if (pe->store && pe->store_get) pe->store_get(pe->store, il, e, &g, &u, &d);
-        else { g = pe->gate + (size_t)e*sg; u = pe->up + (size_t)e*sg; d = pe->down + (size_t)e*sd; }
-        if (!g || !u || !d) { return 0; }
-        g_gaddr[il][e] = llm_dsv4_metal_expert_gaddr(g_be, g, gbytes);
-        g_uaddr[il][e] = llm_dsv4_metal_expert_gaddr(g_be, u, gbytes);
-        g_daddr[il][e] = llm_dsv4_metal_expert_gaddr(g_be, d, dbytes);
+        else { g = pe->gate + (size_t)e*gbytes; u = pe->up + (size_t)e*gbytes; d = pe->down + (size_t)e*dbytes; }
+        gp[e] = g; up[e] = u; dp[e] = d;
     }
-    g_tbl_ready[il] = 1; g_tbl_ne = n_expert; g_tbl_ep[il] = ep;
+    if (g_argp[il]) { llm_dsv4_metal_argbuf_free(g_argp[il]); g_argp[il] = NULL; }
+    if (g_argd[il]) { llm_dsv4_metal_argbuf_free(g_argd[il]); g_argd[il] = NULL; }
+    g_argp[il] = llm_dsv4_metal_argbuf_pair(g_be, gp, up, n_expert, gbytes, gbytes);
+    g_argd[il] = llm_dsv4_metal_argbuf_down(g_be, dp, n_expert, dbytes);
+    free(gp); free(up); free(dp);
+    if (!g_argp[il] || !g_argd[il]) return 0;
+    g_arg_ready[il] = 1; g_arg_ep[il] = ep;
     return 1;
 }
 
@@ -56,7 +57,7 @@ int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights
     if (g_attn.outa[il].type != 8 || g_attn.outb[il].type != 8) return 0;
     if (g_moe.gate[il].type != 16 || g_moe.up[il].type != 16 || g_moe.down[il].type != 10) return 0; /* pair IQ2 + down Q2_K */
     int n_expert = c->n_expert;
-    if (!dsv4_build_tables(pe, il, n_expert)) return 0;
+    if (!dsv4_build_argbufs(pe, il, n_expert)) return 0;
     const int ng = c->n_out_group, rank = c->n_lora_o, embd = c->n_embd, HC = c->n_hc;
     const int gd = c->n_head_dim * (c->n_head / ng), ol = ng * rank;
     int compressed = llm_dsv4_layer_compress_ratio(c, il) != 0;
@@ -86,8 +87,12 @@ int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights
     q.HC = HC; q.D = embd; q.SIZE = (2 + HC) * HC; q.HCD = HC * embd;
     q.sinkhorn_iters = c->n_hc_sinkhorn_iter; q.hc_eps = c->hc_eps; q.rms_eps = c->rms_eps;
     q.heads = heads; q.out_hc = out_hc;
-    q.gaddr = g_gaddr[il]; q.uaddr = g_uaddr[il]; q.daddr = g_daddr[il];
+    q.arg_pair = g_argp[il]; q.arg_down = g_argd[il];
     int rc = llm_dsv4_metal_layer_tail(g_be, &q) == 0;
+    if (rc) {
+        static int logged = 0;
+        if (!logged) { logged = 1; fprintf(stderr, "DSV4 GPU: tail table eseguito su GPU\n"); }
+    }
     return rc;
 }
 
@@ -138,6 +143,11 @@ void llm_dsv4_gpu_ctx_reinit(const LlmDsv4Config* c, const LlmDsv4PackedExperts*
 void llm_dsv4_gpu_ctx_close(void) {
     if (!g_on) return;
     if (--g_ref > 0) return;
+    for (int il = 0; il < LLM_DSV4_MAX_LAYER; il++) {
+        llm_dsv4_metal_argbuf_free(g_argp[il]); g_argp[il] = NULL;
+        llm_dsv4_metal_argbuf_free(g_argd[il]); g_argd[il] = NULL;
+        g_arg_ready[il] = 0;
+    }
     llm_dsv4_gpu_moe_destroy(&g_moe);
     llm_dsv4_gpu_attn_destroy(&g_attn);
     llm_dsv4_metal_destroy(g_be);
