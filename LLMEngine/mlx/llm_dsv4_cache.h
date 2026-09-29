@@ -227,6 +227,12 @@ static inline int llm_dsv4_attn_cached_mid(const LlmDsv4Config* c, const LlmDsv4
     if (!q || !kv || !qrn) { free(q); free(kv); free(qrn); return 0; }
     if (!llm_dsv4_gpu_attn_project_try(c, L, il, xn, pos, q, kv, qrn))
         llm_dsv4_attn_project(c, L, pe, xn, pos, il, q, kv, qrn);
+    /* Middle su GPU (compressor+indexer+attn) con KV/stato su device: se riesce, salta il path C. */
+    if (llm_dsv4_gpu_attn_mid_try(c, L, il, k->compress_ratio, k->raw_cap, k->comp_cap,
+            q, kv, qrn, xn, pos, heads)) {
+        free(qrn); free(kv); free(q);
+        return 1;
+    }
     llm_dsv4_fp8_kv_quantize_row(kv, c->n_head_dim, c->n_rot);
     llm_dsv4_cache_push_raw(k, kv);
     int ratio = k->compress_ratio;
