@@ -866,6 +866,28 @@ static int spec_build_draft(LlmMlxSession* s, int32_t* draft, int max_draft) {
     return nd;
 }
 
+/* Larghezza adattiva del draft (stile Gufo DFlashLengthController, semplificata): dal tasso di
+ * accettazione (EWMA) sceglie il K che massimizza token attesi / costo (costo lineare: lettura pesi
+ * + per-token); su full-accept sonda più largo (censoring). Deterministico: usa solo l'acceptance
+ * osservata, mai i tempi della richiesta. */
+int llm_mlx_spec_adaptive_width(LlmMlxSession* s, int cap) {
+    if (s == NULL || cap < 2) return cap < 2 ? cap : 2;
+    float m = s->spec_acc_ewma > 0.0f ? s->spec_acc_ewma : 4.0f;
+    if (m > (float)cap) m = (float)cap;
+    const float p = m / (m + 1.0f);
+    float survival = 1.0f, expected = 1.0f, best = 1.0f;
+    int best_w = 1;
+    for (int w = 1; w <= cap; w++) {
+        survival *= p; expected += survival;
+        const float cost = 1.0f + 0.18f * (float)w;   /* lettura pesi (1) + per-token */
+        const float score = expected / cost;
+        if (score > best) { best = score; best_w = w; }
+    }
+    if (s->spec_full_streak > 0 && best_w < cap) best_w++;   /* censoring: sonda più largo */
+    if (best_w < 2) best_w = 2;
+    return best_w;
+}
+
 int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_new_tokens,
                                       int32_t eos_token_id, int32_t* out_ids, int draft_len) {
     if (handle == NULL || max_new_tokens <= 0 || out_ids == NULL) return -1;
@@ -955,6 +977,9 @@ int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_
         int M = 1;
         if (okb) { for (int i = 1; i < nd; i++) { if (greedy[i - 1] == draft[i]) M++; else break; } }
         int32_t next = okb ? greedy[M - 1] : 0;
+        /* Feedback al controllore adattivo (Gufo): EWMA dell'acceptance + streak full-accept. */
+        s->spec_acc_ewma = (s->spec_acc_ewma <= 0.0f) ? (float)M : 0.75f * s->spec_acc_ewma + 0.25f * (float)M;
+        s->spec_full_streak = (okb && M == nd) ? s->spec_full_streak + 1 : 0;
 
         if (M == nd && okb) {
             for (int i = 0; i < s->n_layers; i++) llm_mlx_cache_commit(&ckpt_k[i], m->stream);

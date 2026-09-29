@@ -287,6 +287,10 @@ typedef struct LlmMlxSession {
     mlx_array* spec_ckpt_k;  /* per-layer checkpoint K del chunk-start (alias O(1)) */
     mlx_array* spec_ckpt_v;  /* per-layer checkpoint V del chunk-start */
     bool spec_ckpt_valid;
+    /* Larghezza adattiva del draft (da Gufo DFlashLengthController): EWMA dell'acceptance e streak
+     * di full-accept per sondare più largo. Deterministico (nessuna timing della richiesta). */
+    float spec_acc_ewma;
+    int spec_full_streak;
     /* RMLX10 Fase B (2026-09-03): decode-step compilato (mlx_compile). La
      * closure e' creata lazy al primo step compilato e VIVE per tutta la
      * sessione (la cache di compile di mlx core e' keyed per fun_id: riusare

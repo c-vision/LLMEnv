@@ -390,10 +390,11 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
                     int cnt = 0;
                     while (cnt < max_new_tokens) {
                         if (s->spec_buf_pos >= s->spec_buf_len) {
-                            if (!llm_mlx_session_spec_can(s)) break;  /* n-gram non predice */
-                            int chunk = ord + 2; if (chunk < 2) chunk = 2; if (chunk > 60) chunk = 60;
-                            llm_mlx_session_spec_begin(s);
-                            int got = llm_ai_mlx_session_generate_ngram(handle, chunk, eos_token_id, s->spec_buf, ord);
+                        if (!llm_mlx_session_spec_can(s)) break;  /* n-gram non predice */
+                        int w = llm_mlx_spec_adaptive_width(s, 16);   /* larghezza adattiva (Gufo) */
+                        int chunk = w + 2; if (chunk < 2) chunk = 2; if (chunk > 60) chunk = 60;
+                        llm_mlx_session_spec_begin(s);
+                        int got = llm_ai_mlx_session_generate_ngram(handle, chunk, eos_token_id, s->spec_buf, w);
                             if (got < 0) break;
                             s->spec_buf_len = got; s->spec_buf_pos = 0;
                             if (got == 0) break;
