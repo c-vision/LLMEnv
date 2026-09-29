@@ -389,6 +389,9 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
 
     if (!s->has_pending) return -1; /* niente da salvare senza prefill */
 
+    /* DS4 (dsv4): cache per-layer sul device, non c'e' un KV MLX da salvare -> nessun prefix cache. */
+    if (m->dsv4) return -1;
+
     /* DeepSeek V4.1 whole-model: snapshot del cache 7-slot + history del prefisso. */
     if (m->dsv41) {
         LlmDsv41Cache* c = (LlmDsv41Cache*)s->dsv41;
