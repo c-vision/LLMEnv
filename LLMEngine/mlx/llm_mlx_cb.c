@@ -14,6 +14,7 @@
 #include "llm_mlx_geglu_kernel.h"
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
 #include "llm_mlx_splash_store.h"
+#include "llm_mlx_splash_attn.h"
 #include "llm_mlx_moe_fused_kernel.h"
 #include "llm_mlx_swiglu_kernel.h"
 #include "llm_mlx_swiglu_gptoss_kernel.h"
@@ -1196,4 +1197,51 @@ int llm_ai_mlx_splash_mpp_probe(char* out, size_t cap) {
     mlx_vector_array_free(in); mlx_vector_array_free(outs); mlx_array_free(a);
     mlx_fast_metal_kernel_config_free(cfg);
     return 0;
+}
+
+/* Self-test del read paged int8 Splash vs riferimento C (dequant-folded). */
+int llm_ai_mlx_splash_attn_selftest(char* out, size_t cap) {
+    if (out == NULL || cap == 0) return -1;
+    out[0] = '\0';
+    const int nh = 4, nkv = 2, hd = 64, n = 8, cap_t = 32;
+    const int N = nkv * n * hd;
+    float* kh = (float*)malloc((size_t)N * sizeof(float));
+    float* vh = (float*)malloc((size_t)N * sizeof(float));
+    float* qh = (float*)malloc((size_t)(nh*hd) * sizeof(float));
+    for (int i = 0; i < N; i++) { kh[i]=(float)((i*37%200)-100)*0.031f; vh[i]=(float)((i*53%160)-80)*0.027f; }
+    for (int i = 0; i < nh*hd; i++) qh[i]=(float)((i*29%120)-60)*0.041f;
+    mlx_stream st = mlx_default_gpu_stream_new();
+    int ksh[3]={nkv,n,hd};
+    mlx_array k=mlx_array_new_data(kh,ksh,3,MLX_FLOAT32), v=mlx_array_new_data(vh,ksh,3,MLX_FLOAT32);
+    mlx_array kq=mlx_array_new(),vq=mlx_array_new(),ks=mlx_array_new(),vs=mlx_array_new();
+    int rc = llm_splash_store_run(&kq,&vq,&ks,&vs,k,v,st);
+    int psh[3]={nkv,cap_t,hd}, vsh[3]={nkv,hd,cap_t}, ssh[3]={nkv,cap_t,1};
+    mlx_array kpool=mlx_array_new(),vpool=mlx_array_new(),spool=mlx_array_new();
+    if (rc==0) rc = (mlx_zeros(&kpool,psh,3,MLX_INT8,st)==0 && mlx_zeros(&vpool,vsh,3,MLX_INT8,st)==0 && mlx_zeros(&spool,ssh,3,MLX_FLOAT32,st)==0)?0:-1;
+    if (rc==0) rc = llm_splash_pool_scatter(kpool,vpool,spool,kq,vq,ks,0,n,nkv,hd,st);
+    int qsh[2]={nh,hd}; mlx_array q=mlx_array_new_data(qh,qsh,2,MLX_FLOAT32);
+    mlx_array attn=mlx_array_new();
+    float attn_scale = 1.0f / sqrtf((float)hd);
+    if (rc==0) rc = llm_splash_attn_run(&attn,q,kpool,vpool,ks,vs,n,cap_t,attn_scale,st);
+    int bad=0; float maxdiff=0.0f;
+    if (rc==0) {
+        mlx_array_eval(attn);
+        const float* ap=(const float*)mlx_array_data_float32(attn);
+        const float* ksp=(const float*)mlx_array_data_float32(ks);
+        const int8_t* kpp=(const int8_t*)mlx_array_data_int8(kpool);
+        const int8_t* vpp=(const int8_t*)mlx_array_data_int8(vpool);
+        for (int h=0; h<nh; h++) {
+            int khh = h*nkv/nh;
+            float sc[64]; float mxs=-1e30f;
+            for (int t=0;t<n;t++){ float dot=0; for(int d=0;d<hd;d++) dot += qh[h*hd+d]*(float)kpp[(khh*cap_t+t)*hd+d]; float s=dot*ksp[khh*cap_t+t]*attn_scale; sc[t]=s; if(s>mxs)mxs=s; }
+            float sm=0; for(int t=0;t<n;t++){ sc[t]=expf(sc[t]-mxs); sm+=sc[t]; }
+            for (int d=0; d<hd; d++){ const int8_t* vpd; (void)vpd; float a=0; for(int t=0;t<n;t++) a += (sc[t]/sm)*ksp[khh*cap_t+t]*(float)vpp[(khh*hd+d)*cap_t+t];
+                float diff=fabsf(a-ap[h*hd+d]); if(diff>maxdiff)maxdiff=diff; if(diff>1e-3f)bad++; }
+        }
+        snprintf(out,cap,"splash_attn selftest: rc=0 bad=%d/%d maxdiff=%.3g %s",bad,nh*hd,(double)maxdiff,bad==0?"OK":"FAIL");
+    } else snprintf(out,cap,"splash_attn selftest: rc=%d FAIL",rc);
+    mlx_array_free(k);mlx_array_free(v);mlx_array_free(kq);mlx_array_free(vq);mlx_array_free(ks);mlx_array_free(vs);
+    mlx_array_free(kpool);mlx_array_free(vpool);mlx_array_free(spool);mlx_array_free(q);mlx_array_free(attn);
+    free(kh);free(vh);free(qh);
+    return (rc==0&&bad==0)?0:1;
 }

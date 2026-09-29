@@ -688,6 +688,7 @@ int llm_ai_mlx_core_bench(const char* op, int iters, char* out, size_t cap);
 int llm_ai_mlx_splash_store_selftest(char* out, size_t cap);
 int llm_ai_mlx_splash_pool_selftest(char* out, size_t cap);
 int llm_ai_mlx_splash_mpp_probe(char* out, size_t cap);
+int llm_ai_mlx_splash_attn_selftest(char* out, size_t cap);
 
 #ifdef __cplusplus
 }
