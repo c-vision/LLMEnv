@@ -306,7 +306,11 @@ int llm_ai_mlx_session_build_ngram(llm_ai_mlx_session_handle handle, int order) 
     LlmMlxSession* s = (LlmMlxSession*)handle;
     if (order < 1) order = 3;
     llm_mlx_ngram_free(&s->ngram);
-    s->ngram = llm_mlx_ngram_new(order, 1024);
+    /* Capacita' (#2): nbuckets >= 1024 e scalato alla history (meno collisioni su contesti
+     * lunghi; la tabella cresce anche incrementalmente coi token generati). Potenza di 2. */
+    size_t nb = 1024;
+    while (nb < (size_t)s->history_len + 64) nb <<= 1;
+    s->ngram = llm_mlx_ngram_new(order, nb);
     s->ngram_order = order;
     llm_mlx_ngram_add(&s->ngram, s->history, s->history_len, NULL);
     s->ngram_built = true;
