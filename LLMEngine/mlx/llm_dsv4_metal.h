@@ -95,6 +95,30 @@ void  llm_dsv4_metal_buf_free(void* h);
 /* Shift [src, src+n) -> [0,n) di un buffer device (stato compressor). 0 = ok. */
 int llm_dsv4_metal_comp_shift(LlmDsv4Metal* b, void* h, int n, int src);
 
+/* ── Middle attenzione su GPU (compressor+indexer+attn) in UNA command buffer ──
+ * KV/stato su device (buffer opachi); pesi compressor/indexer f32 su device; input/output host.
+ * Replica llm_dsv4_attn_cached_mid (esclusa la proiezione, gia' fatta dal caller). 0 = ok. */
+typedef struct {
+    int embd, hd, ihd, ratio, co, n_head, n_rot;
+    int idx_nh, idx_hd, idx_top_k, lq, qdim;
+    int pos, due, state_row, ape_off, has_idx;
+    float rms_eps;
+    float rope_cfg[7];
+    void* w_ckv; void* w_cgate; void* w_cape; void* w_cnorm;
+    void* w_ickv; void* w_icgate; void* w_icape; void* w_icnorm;
+    void* w_iqb; void* w_iproj; void* sinks;
+    void* st_akv; void* st_asc; void* st_ikv; void* st_isc;
+    void* raw;  int raw_cap; int raw_off; int raw_full;
+    void* acomp; int acomp_off;
+    void* icomp; int icomp_off;
+    void* allowed;
+    const float* xn; const float* qrn; const float* q; const float* kv_cur;
+    int n_raw, n_acomp, n_icomp;
+    float* heads;
+} LlmDsv4MidParams;
+
+int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p);
+
 /* Output grouped-LoRA FUSO (ds4): out_a (ng gruppi) + out_b in UNA command buffer, `low` su device. */
 int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t outa_row_bytes,
         size_t outa_lead0, int ng, uint32_t gd, uint32_t rank, const void* outb_w,

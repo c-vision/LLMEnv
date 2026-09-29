@@ -69,6 +69,8 @@ int main(void) {
     if (!b) { printf("FAIL: llm_dsv4_metal_create\n"); return 1; }
     int ok = 1;
     ok &= test_pool(b, 128, 4, 2, 0);    /* compressor attn (ratio 4, co 2) */
+    ok &= test_pool(b, 512, 4, 2, 0);    /* compressor attn reale (hd=512) */
+    ok &= test_pool(b, 512, 4, 2, 1);
     ok &= test_pool(b, 128, 4, 2, 1);    /* con sentinelle -1e30 -> out 0 */
     ok &= test_pool(b, 128, 128, 1, 0);  /* compressor indexer (ratio 128, co 1) */
     ok &= test_fp8(b, 128, 64, 3.0f);    /* n_nope=64 */

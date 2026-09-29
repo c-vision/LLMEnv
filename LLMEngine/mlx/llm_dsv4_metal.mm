@@ -698,6 +698,18 @@ static const char* const LLM_DSV4_METAL_MOE =
 /* Shift del buffer di stato: copia [src, src+n) in [0, n) (ds4: righe ratio..2ratio -> 0..ratio). P={n,src}. */
 "kernel void dsv4_comp_shift(device float* BUF [[buffer(0)]], constant uint* P [[buffer(1)]], uint gid [[thread_position_in_grid]]) {\n"
 "    const uint n = P[0], src = P[1]; if (gid >= n) return; BUF[gid] = BUF[src + gid];\n"
+"}\n"
+/* X *= CF[0] su n elementi (scala dei pesi indexer). P={n}. */
+"kernel void dsv4_scale(device float* X [[buffer(0)]], constant float* CF [[buffer(1)]], constant uint* P [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n"
+"    const uint n = P[0]; if (gid >= n) return; X[gid] *= CF[0];\n"
+"}\n"
+/* DST[gid] = SRC[gid]. P={n}. */
+"kernel void dsv4_copy(device const float* SRC [[buffer(0)]], device float* DST [[buffer(1)]], constant uint* P [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n"
+"    const uint n = P[0]; if (gid >= n) return; DST[gid] = SRC[gid];\n"
+"}\n"
+/* Arrotondamento a f16 in-place (ingresso cache KV, come llm_ggml_f16_round). P={n}. */
+"kernel void dsv4_f16(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], uint gid [[thread_position_in_grid]]) {\n"
+"    const uint n = P[0]; if (gid >= n) return; X[gid] = (float)((half)X[gid]);\n"
 "}\n";
 
 struct LlmDsv4Metal {
@@ -720,6 +732,8 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_comp_pool, pso_comp_fp8;  /* compressor su device (ds4) */
     id<MTLComputePipelineState> pso_idx_qat, pso_idx_scores, pso_idx_topk;  /* indexer su device (ds4) */
     id<MTLComputePipelineState> pso_comp_shift;  /* shift dello stato compressor (ds4) */
+    id<MTLComputePipelineState> pso_scale, pso_copy;  /* ausiliari middle su GPU (ds4) */
+    id<MTLComputePipelineState> pso_f16;  /* f16-round ingresso cache KV (ds4) */
     id<MTLArgumentEncoder> enc_pair, enc_down;
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
@@ -827,6 +841,14 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     id<MTLFunction> f31 = [lib newFunctionWithName:@"dsv4_comp_shift"];
     b->pso_comp_shift = f31 ? [dev newComputePipelineStateWithFunction:f31 error:&err] : nil;
     if (!f31) fprintf(stderr, "dsv4_metal: kernel dsv4_comp_shift NON compilato\n");
+    id<MTLFunction> f32 = [lib newFunctionWithName:@"dsv4_scale"];
+    id<MTLFunction> f33 = [lib newFunctionWithName:@"dsv4_copy"];
+    b->pso_scale = f32 ? [dev newComputePipelineStateWithFunction:f32 error:&err] : nil;
+    b->pso_copy  = f33 ? [dev newComputePipelineStateWithFunction:f33 error:&err] : nil;
+    if (!f32 || !f33) fprintf(stderr, "dsv4_metal: kernel scale/copy NON compilato\n");
+    id<MTLFunction> f34 = [lib newFunctionWithName:@"dsv4_f16"];
+    b->pso_f16 = f34 ? [dev newComputePipelineStateWithFunction:f34 error:&err] : nil;
+    if (!f34) fprintf(stderr, "dsv4_metal: kernel dsv4_f16 NON compilato\n");
     [lib release];
     if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->pso_route || !b->pso_addr_pair || !b->pso_addr_sum6 || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
@@ -1491,6 +1513,203 @@ int llm_dsv4_metal_comp_shift(LlmDsv4Metal* b, void* h, int n, int src) {
     [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)n + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
     return cb.error ? -3 : 0;
+}
+
+/* Middle attenzione (compressor+indexer+attn) in UNA command buffer. Replica
+ * llm_dsv4_attn_cached_mid a valle della proiezione. KV/stato su device. 0 = ok. */
+int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p) {
+    if (!b || !p || !p->heads) return -1;
+    if (!b->pso_gemv_f32 || !b->pso_rms_w || !b->pso_rope || !b->pso_add || !b->pso_comp_pool || !b->pso_attn_mixed) return -1;
+    const int embd = p->embd, hd = p->hd, ihd = p->ihd, ratio = p->ratio, co = p->co;
+    const int width = co * hd, iwidth = co * ihd, nnope = hd - p->n_rot;
+    if (ratio <= 0 || (co != 1 && co != 2)) return -1;
+    id<MTLBuffer> X   = dsv4_scratch(b, &b->sx[40], &b->sx_cap[40], (size_t)embd * sizeof(float));
+    id<MTLBuffer> KVC = dsv4_scratch(b, &b->sx[41], &b->sx_cap[41], (size_t)hd * sizeof(float));
+    id<MTLBuffer> Q   = dsv4_scratch(b, &b->sx[42], &b->sx_cap[42], (size_t)p->n_head * hd * sizeof(float));
+    id<MTLBuffer> QRN = dsv4_scratch(b, &b->sx[43], &b->sx_cap[43], (size_t)p->lq * sizeof(float));
+    id<MTLBuffer> QI  = dsv4_scratch(b, &b->sx[44], &b->sx_cap[44], (size_t)(p->has_idx ? p->qdim : 1) * sizeof(float));
+    id<MTLBuffer> WI  = dsv4_scratch(b, &b->sx[45], &b->sx_cap[45], (size_t)(p->has_idx ? p->idx_nh : 1) * sizeof(float));
+    id<MTLBuffer> SCO = dsv4_scratch(b, &b->sx[46], &b->sx_cap[46], (size_t)(p->n_icomp > 0 ? p->n_icomp : 1) * sizeof(float));
+    id<MTLBuffer> HD  = dsv4_scratch(b, &b->sx[47], &b->sx_cap[47], (size_t)p->n_head * hd * sizeof(float));
+    if (!X || !KVC || !Q || !QRN || !QI || !WI || !SCO || !HD) return -2;
+    memcpy([X contents], p->xn, (size_t)embd * sizeof(float));
+    memcpy([Q contents], p->q, (size_t)p->n_head * hd * sizeof(float));
+    memcpy([KVC contents], p->kv_cur, (size_t)hd * sizeof(float));
+    if (p->has_idx) memcpy([QRN contents], p->qrn, (size_t)p->lq * sizeof(float));
+
+    id<MTLBuffer> rawB = (id<MTLBuffer>)p->raw, aB = (id<MTLBuffer>)p->acomp, icB = (id<MTLBuffer>)p->icomp;
+    id<MTLBuffer> sakv = (id<MTLBuffer>)p->st_akv, sasc = (id<MTLBuffer>)p->st_asc;
+    id<MTLBuffer> sikv = (id<MTLBuffer>)p->st_ikv, sisc = (id<MTLBuffer>)p->st_isc;
+    id<MTLBuffer> allowedB = (id<MTLBuffer>)p->allowed;
+    const NSUInteger off_a = (NSUInteger)((size_t)p->state_row * width * 4);
+    const NSUInteger off_i = (NSUInteger)((size_t)p->state_row * iwidth * 4);
+    id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+
+    /* 1) compressor attn: kv/gate f32 + ape */
+    [e setComputePipelineState:b->pso_gemv_f32];
+    [e setBuffer:(id<MTLBuffer>)p->w_ckv offset:0 atIndex:0]; [e setBuffer:X offset:0 atIndex:1]; [e setBuffer:sakv offset:off_a atIndex:2];
+    { uint32_t P[2] = { (uint32_t)embd, 0u }; [e setBytes:P length:sizeof(P) atIndex:3]; }
+    [e dispatchThreadgroups:MTLSizeMake((NSUInteger)width, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [e setComputePipelineState:b->pso_gemv_f32];
+    [e setBuffer:(id<MTLBuffer>)p->w_cgate offset:0 atIndex:0]; [e setBuffer:X offset:0 atIndex:1]; [e setBuffer:sasc offset:off_a atIndex:2];
+    { uint32_t P[2] = { (uint32_t)embd, 0u }; [e setBytes:P length:sizeof(P) atIndex:3]; }
+    [e dispatchThreadgroups:MTLSizeMake((NSUInteger)width, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [e setComputePipelineState:b->pso_add];
+    [e setBuffer:sasc offset:off_a atIndex:0]; [e setBuffer:(id<MTLBuffer>)p->w_cape offset:(NSUInteger)((size_t)p->ape_off * width * 4) atIndex:1];
+    { uint32_t P[1] = { (uint32_t)width }; [e setBytes:P length:sizeof(P) atIndex:2]; }
+    [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)width + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+    /* 2) raw: shift se pieno, fp8 della riga, copia in raw[raw_off] */
+    if (p->raw_full) {
+        [e setComputePipelineState:b->pso_comp_shift];
+        [e setBuffer:rawB offset:0 atIndex:0];
+        { uint32_t P[2] = { (uint32_t)((p->raw_cap - 1) * hd), (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)(((p->raw_cap - 1) * hd + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
+    [e setComputePipelineState:b->pso_comp_fp8];
+    [e setBuffer:KVC offset:0 atIndex:0];
+    { uint32_t P[1] = { (uint32_t)nnope }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+    [e dispatchThreadgroups:MTLSizeMake((NSUInteger)(nnope / 64), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [e setComputePipelineState:b->pso_f16];
+    [e setBuffer:KVC offset:0 atIndex:0];
+    { uint32_t P[1] = { (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+    [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((hd + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [e setComputePipelineState:b->pso_copy];
+    [e setBuffer:KVC offset:0 atIndex:0]; [e setBuffer:rawB offset:(NSUInteger)((size_t)p->raw_off * 4) atIndex:1];
+    { uint32_t P[1] = { (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:2]; }
+    [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((hd + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+    /* 3) attn compressa (se dovuta): pool -> rms -> rope -> fp8, poi shift dello stato */
+    if (p->due) {
+        [e setComputePipelineState:b->pso_comp_pool];
+        [e setBuffer:sakv offset:0 atIndex:0]; [e setBuffer:sasc offset:0 atIndex:1];
+        [e setBuffer:aB offset:(NSUInteger)((size_t)p->acomp_off * 4) atIndex:2];
+        { uint32_t P[3] = { (uint32_t)hd, (uint32_t)ratio, (uint32_t)co }; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)hd + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e setComputePipelineState:b->pso_rms_w];
+        [e setBuffer:aB offset:(NSUInteger)((size_t)p->acomp_off * 4) atIndex:0]; [e setBuffer:(id<MTLBuffer>)p->w_cnorm offset:0 atIndex:1];
+        [e setBuffer:aB offset:(NSUInteger)((size_t)p->acomp_off * 4) atIndex:2];
+        { uint32_t P[1] = { (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:3]; float cf[1] = { p->rms_eps }; [e setBytes:cf length:sizeof(cf) atIndex:4]; }
+        [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e setComputePipelineState:b->pso_rope];
+        [e setBuffer:aB offset:(NSUInteger)((size_t)p->acomp_off * 4) atIndex:0];
+        { uint32_t P[4] = { (uint32_t)p->n_rot, (uint32_t)hd, (uint32_t)(p->pos + 1 - ratio), 0u }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+        [e setBytes:p->rope_cfg length:7 * sizeof(float) atIndex:2];
+        [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e setComputePipelineState:b->pso_comp_fp8];
+        [e setBuffer:aB offset:(NSUInteger)((size_t)p->acomp_off * 4) atIndex:0];
+        { uint32_t P[1] = { (uint32_t)nnope }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)(nnope / 64), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e setComputePipelineState:b->pso_f16];
+        [e setBuffer:aB offset:(NSUInteger)((size_t)p->acomp_off * 4) atIndex:0];
+        { uint32_t P[1] = { (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((hd + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        if (ratio == 4) {
+            [e setComputePipelineState:b->pso_comp_shift];
+            [e setBuffer:sakv offset:0 atIndex:0]; { uint32_t P[2] = { (uint32_t)(ratio * width), (uint32_t)(ratio * width) }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((ratio * width + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            [e setComputePipelineState:b->pso_comp_shift];
+            [e setBuffer:sasc offset:0 atIndex:0]; { uint32_t P[2] = { (uint32_t)(ratio * width), (uint32_t)(ratio * width) }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((ratio * width + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        }
+    }
+
+    /* 4) indexer: compressor + allowed */
+    if (p->has_idx) {
+        [e setComputePipelineState:b->pso_gemv_f32];
+        [e setBuffer:(id<MTLBuffer>)p->w_ickv offset:0 atIndex:0]; [e setBuffer:X offset:0 atIndex:1]; [e setBuffer:sikv offset:off_i atIndex:2];
+        { uint32_t P[2] = { (uint32_t)embd, 0u }; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)iwidth, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e setComputePipelineState:b->pso_gemv_f32];
+        [e setBuffer:(id<MTLBuffer>)p->w_icgate offset:0 atIndex:0]; [e setBuffer:X offset:0 atIndex:1]; [e setBuffer:sisc offset:off_i atIndex:2];
+        { uint32_t P[2] = { (uint32_t)embd, 0u }; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)iwidth, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e setComputePipelineState:b->pso_add];
+        [e setBuffer:sisc offset:off_i atIndex:0]; [e setBuffer:(id<MTLBuffer>)p->w_icape offset:(NSUInteger)((size_t)p->ape_off * iwidth * 4) atIndex:1];
+        { uint32_t P[1] = { (uint32_t)iwidth }; [e setBytes:P length:sizeof(P) atIndex:2]; }
+        [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)iwidth + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        if (p->due) {
+            [e setComputePipelineState:b->pso_comp_pool];
+            [e setBuffer:sikv offset:0 atIndex:0]; [e setBuffer:sisc offset:0 atIndex:1];
+            [e setBuffer:icB offset:(NSUInteger)((size_t)p->icomp_off * 4) atIndex:2];
+            { uint32_t P[3] = { (uint32_t)ihd, (uint32_t)ratio, (uint32_t)co }; [e setBytes:P length:sizeof(P) atIndex:3]; }
+            [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)ihd + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            [e setComputePipelineState:b->pso_rms_w];
+            [e setBuffer:icB offset:(NSUInteger)((size_t)p->icomp_off * 4) atIndex:0]; [e setBuffer:(id<MTLBuffer>)p->w_icnorm offset:0 atIndex:1];
+            [e setBuffer:icB offset:(NSUInteger)((size_t)p->icomp_off * 4) atIndex:2];
+            { uint32_t P[1] = { (uint32_t)ihd }; [e setBytes:P length:sizeof(P) atIndex:3]; float cf[1] = { p->rms_eps }; [e setBytes:cf length:sizeof(cf) atIndex:4]; }
+            [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            [e setComputePipelineState:b->pso_rope];
+            [e setBuffer:icB offset:(NSUInteger)((size_t)p->icomp_off * 4) atIndex:0];
+            { uint32_t P[4] = { (uint32_t)p->n_rot, (uint32_t)ihd, (uint32_t)(p->pos + 1 - ratio), 0u }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+            [e setBytes:p->rope_cfg length:7 * sizeof(float) atIndex:2];
+            [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            [e setComputePipelineState:b->pso_idx_qat];
+            [e setBuffer:icB offset:(NSUInteger)((size_t)p->icomp_off * 4) atIndex:0];
+            { uint32_t P[2] = { 1u, (uint32_t)ihd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+            [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            [e setComputePipelineState:b->pso_f16];
+            [e setBuffer:icB offset:(NSUInteger)((size_t)p->icomp_off * 4) atIndex:0];
+            { uint32_t P[1] = { (uint32_t)ihd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((ihd + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            if (ratio == 4) {
+                [e setComputePipelineState:b->pso_comp_shift];
+                [e setBuffer:sikv offset:0 atIndex:0]; { uint32_t P[2] = { (uint32_t)(ratio * iwidth), (uint32_t)(ratio * iwidth) }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+                [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((ratio * iwidth + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [e setComputePipelineState:b->pso_comp_shift];
+                [e setBuffer:sisc offset:0 atIndex:0]; { uint32_t P[2] = { (uint32_t)(ratio * iwidth), (uint32_t)(ratio * iwidth) }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+                [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((ratio * iwidth + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            }
+        }
+        /* q indexer = idx_q_b * qrn, rope, qat */
+        [e setComputePipelineState:b->pso_gemv_f32];
+        [e setBuffer:(id<MTLBuffer>)p->w_iqb offset:0 atIndex:0]; [e setBuffer:QRN offset:0 atIndex:1]; [e setBuffer:QI offset:0 atIndex:2];
+        { uint32_t P[2] = { (uint32_t)p->lq, 0u }; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)p->qdim, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e setComputePipelineState:b->pso_rope];
+        [e setBuffer:QI offset:0 atIndex:0];
+        { uint32_t P[4] = { (uint32_t)p->n_rot, (uint32_t)p->idx_hd, (uint32_t)p->pos, 0u }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+        [e setBytes:p->rope_cfg length:7 * sizeof(float) atIndex:2];
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)p->idx_nh, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e setComputePipelineState:b->pso_idx_qat];
+        [e setBuffer:QI offset:0 atIndex:0];
+        { uint32_t P[2] = { (uint32_t)p->idx_nh, (uint32_t)p->idx_hd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((p->idx_nh + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        /* w indexer = idx_proj * x, scalato */
+        [e setComputePipelineState:b->pso_gemv_f32];
+        [e setBuffer:(id<MTLBuffer>)p->w_iproj offset:0 atIndex:0]; [e setBuffer:X offset:0 atIndex:1]; [e setBuffer:WI offset:0 atIndex:2];
+        { uint32_t P[2] = { (uint32_t)embd, 0u }; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)p->idx_nh, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e setComputePipelineState:b->pso_scale];
+        [e setBuffer:WI offset:0 atIndex:0];
+        { float cf[1] = { 1.0f / sqrtf((float)(p->idx_hd * p->idx_nh)) }; [e setBytes:cf length:sizeof(cf) atIndex:1]; }
+        { uint32_t P[1] = { (uint32_t)p->idx_nh }; [e setBytes:P length:sizeof(P) atIndex:2]; }
+        [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)p->idx_nh + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        /* scores + top-k */
+        [e setComputePipelineState:b->pso_idx_scores];
+        [e setBuffer:QI offset:0 atIndex:0]; [e setBuffer:icB offset:0 atIndex:1]; [e setBuffer:WI offset:0 atIndex:2]; [e setBuffer:SCO offset:0 atIndex:3];
+        { uint32_t P[3] = { (uint32_t)p->idx_nh, (uint32_t)p->idx_hd, (uint32_t)p->n_icomp }; [e setBytes:P length:sizeof(P) atIndex:4]; }
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)p->n_icomp, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e setComputePipelineState:b->pso_idx_topk];
+        [e setBuffer:SCO offset:0 atIndex:0]; [e setBuffer:allowedB offset:0 atIndex:1];
+        { uint32_t P[2] = { (uint32_t)p->n_icomp, (uint32_t)p->idx_top_k }; [e setBytes:P length:sizeof(P) atIndex:2]; }
+        [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
+
+    /* 5) attenzione mista (raw + compresse) */
+    [e setComputePipelineState:b->pso_attn_mixed];
+    [e setBuffer:Q offset:0 atIndex:0]; [e setBuffer:rawB offset:0 atIndex:1]; [e setBuffer:aB offset:0 atIndex:2];
+    [e setBuffer:allowedB offset:0 atIndex:3]; [e setBuffer:(id<MTLBuffer>)p->sinks offset:0 atIndex:4]; [e setBuffer:HD offset:0 atIndex:5];
+    { uint32_t P[4] = { (uint32_t)p->n_raw, (uint32_t)p->n_acomp, (uint32_t)hd, (uint32_t)(p->has_idx ? 1u : 0u) }; [e setBytes:P length:sizeof(P) atIndex:6]; }
+    [e dispatchThreadgroups:MTLSizeMake((NSUInteger)p->n_head, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+
+    [e endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) return -3;
+    memcpy(p->heads, [HD contents], (size_t)p->n_head * hd * sizeof(float));
+    return 0;
 }
 
 /* Proiezioni Q-LoRA + KV FUSE (ds4): q_a, kv, RMS, q_b, head_rms, RoPE in UNA command buffer.
