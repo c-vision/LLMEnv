@@ -6,3 +6,4 @@ work/
 .DS_Store
 __pycache__/
 /legacy/
+.opencode/ralph-loop.local.md
