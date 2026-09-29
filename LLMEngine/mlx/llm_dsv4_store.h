@@ -34,6 +34,7 @@ typedef struct {
     LlmDsv4StoreLayer* layers;
     LlmDsv4StoreEnt* ents;
     int cap, n, tick;
+    int* ht_keys; int* ht_vals; int ht_cap;   /* hash (layer,e) -> idx entry, open addressing */
     uint64_t bytes_read, hits, misses, evictions;
 } LlmDsv4Store;
 
@@ -48,6 +49,12 @@ static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngin
     s->layers = (LlmDsv4StoreLayer*)calloc((size_t)c->n_layer, sizeof(LlmDsv4StoreLayer));
     s->ents = (LlmDsv4StoreEnt*)calloc((size_t)s->cap, sizeof(LlmDsv4StoreEnt));
     if (!s->layers || !s->ents) { free(s->layers); free(s->ents); free(s); return NULL; }
+    int hcap = 16; while (hcap < s->cap * 2) hcap <<= 1;
+    s->ht_cap = hcap;
+    s->ht_keys = (int*)malloc(sizeof(int) * (size_t)hcap);
+    s->ht_vals = (int*)malloc(sizeof(int) * (size_t)hcap);
+    if (!s->ht_keys || !s->ht_vals) { free(s->ht_keys); free(s->ht_vals); free(s->layers); free(s->ents); free(s); return NULL; }
+    for (int i = 0; i < hcap; i++) s->ht_keys[i] = -1;
     s->fd = -1;
     if (mode == LLM_DSV4_STORE_SWAP) {
         s->fd = open(path, O_RDONLY);
@@ -81,14 +88,42 @@ static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngin
 static inline void llm_dsv4_store_free(LlmDsv4Store* s) {
     if (!s) return;
     if (s->ents) { for (int i = 0; i < s->cap; i++) free(s->ents[i].buf); free(s->ents); }
+    free(s->ht_keys); free(s->ht_vals);
     if (s->fd >= 0) close(s->fd);
     free(s->layers); free(s);
 }
 static inline int llm_dsv4_store_find(LlmDsv4Store* s, int layer, int e) {
-    for (int i = 0; i < s->n; i++) if (s->ents[i].valid && s->ents[i].layer == layer && s->ents[i].e == e) return i;
+    int key = layer * 512 + e, mask = s->ht_cap - 1;
+    uint32_t h = (uint32_t)((uint32_t)key * 2654435761u) & (uint32_t)mask;
+    for (int p = 0; p < s->ht_cap; p++) {
+        int i = ((int)h + p) & mask, k = s->ht_keys[i];
+        if (k == -1) return -1;
+        if (k == key) return s->ht_vals[i];
+    }
     return -1;
 }
+static inline void llm_dsv4_store_ht_put(LlmDsv4Store* s, int layer, int e, int val) {
+    int key = layer * 512 + e, mask = s->ht_cap - 1;
+    uint32_t h = (uint32_t)((uint32_t)key * 2654435761u) & (uint32_t)mask;
+    int tomb = -1;
+    for (int p = 0; p < s->ht_cap; p++) {
+        int i = ((int)h + p) & mask, k = s->ht_keys[i];
+        if (k == key) { s->ht_vals[i] = val; return; }
+        if (k == -1) { if (tomb >= 0) { s->ht_keys[tomb] = key; s->ht_vals[tomb] = val; } else { s->ht_keys[i] = key; s->ht_vals[i] = val; } return; }
+        if (k == -2 && tomb < 0) tomb = i;
+    }
+}
+static inline void llm_dsv4_store_ht_del(LlmDsv4Store* s, int layer, int e) {
+    int key = layer * 512 + e, mask = s->ht_cap - 1;
+    uint32_t h = (uint32_t)((uint32_t)key * 2654435761u) & (uint32_t)mask;
+    for (int p = 0; p < s->ht_cap; p++) {
+        int i = ((int)h + p) & mask, k = s->ht_keys[i];
+        if (k == -1) return;
+        if (k == key) { s->ht_keys[i] = -2; return; }
+    }
+}
 /* Ritorna i puntatori ai tre record-esperto (validi fino alla prossima chiamata). */
+static inline const uint8_t* llm_dsv4_store_expert_impl(LlmDsv4Store*, int, int, const uint8_t**, const uint8_t**, const uint8_t**);
 static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, int e,
         const uint8_t** gate, const uint8_t** up, const uint8_t** down) {
     LlmDsv4StoreLayer* L = &s->layers[layer];
@@ -107,6 +142,7 @@ static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, i
         if (idx < 0) {  /* evict LRU */
             uint64_t oldest = ~0ull; for (int i = 0; i < s->cap; i++) if (s->ents[i].age < oldest) { oldest = s->ents[i].age; idx = i; }
             s->evictions++;
+            llm_dsv4_store_ht_del(s, s->ents[idx].layer, s->ents[idx].e);
         }
         LlmDsv4StoreEnt* en = &s->ents[idx];
         size_t len = L->nb_g + L->nb_u + L->nb_d;
@@ -130,6 +166,7 @@ static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, i
         }
         s->bytes_read += len;
         en->valid = 1; en->layer = layer; en->e = e; en->age = ++s->tick;
+        llm_dsv4_store_ht_put(s, layer, e, idx);
         if (idx >= s->n) s->n = idx + 1;
     }
     LlmDsv4StoreEnt* en = &s->ents[idx];
