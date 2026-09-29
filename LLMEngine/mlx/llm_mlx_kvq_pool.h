@@ -37,8 +37,9 @@ typedef struct {
     int  committed;           /* token scritti (logici) */
     mlx_array* keyData;       /* int8  [nkv, cap, hd]  (token-major, vedi nota sotto) */
     mlx_array* keyScales;     /* f32   [nkv, cap] */
-    mlx_array* valueData;     /* int8  [nkv, hd, cap]  (dimension-major) */
+    mlx_array* valueData;     /* int8  [nkv, cap, hd]  (token-major) */
     mlx_array* valueScales;   /* f32   [nkv, cap] */
+    mlx_array  bias;          /* f32 ZERO [nkv, cap, 1]: Splash e' simmetrico (q*scala) */
 } llm_kvq_pool;
 
 /* Nota: per semplicita' dell'host usiamo [nkv, cap, hd] (K) e [nkv, hd, cap] (V)
@@ -66,6 +67,9 @@ static inline bool llm_kvq_pool_init(llm_kvq_pool* p, int layers, int kv_heads, 
     p->valueScales = (mlx_array*)calloc((size_t)layers, sizeof(mlx_array));
     if (!p->keyData || !p->keyScales || !p->valueData || !p->valueScales) return false;
     const mlx_dtype edt = (fmt == LLM_KVQ_FMT_INT8) ? MLX_INT8 : MLX_BFLOAT16;
+    { int bsh[3] = {kv_heads, cap_tokens, 1};
+      p->bias = mlx_array_new();
+      if (mlx_zeros(&p->bias, bsh, 3, MLX_FLOAT32, s) != 0) return false; }
     for (int l = 0; l < layers; l++) {
         int ksh[3] = {kv_heads, cap_tokens, head_dim};
         int vsh[3] = {kv_heads, cap_tokens, head_dim};   /* token-major come il kernel read */
@@ -127,6 +131,8 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
         p->keyData[l] = nk; p->valueData[l] = nv; p->keyScales[l] = nks; p->valueScales[l] = nvs;
     }
     p->cap_tokens = ncap;
+    { int bsh[3] = {p->kv_heads, ncap, 1}; mlx_array nb = mlx_array_new();
+      if (mlx_zeros(&nb, bsh, 3, MLX_FLOAT32, s) == 0) { mlx_array_free(p->bias); p->bias = nb; } }
     return true;
 }
 
@@ -171,7 +177,27 @@ static inline void llm_kvq_pool_free(llm_kvq_pool* p) {
         mlx_array_free(p->keyScales[l]); mlx_array_free(p->valueScales[l]);
     }
     free(p->keyData); free(p->keyScales); free(p->valueData); free(p->valueScales);
+    if (p->bias.ctx) mlx_array_free(p->bias);
     memset(p, 0, sizeof *p);
+}
+
+/* ── Registry: un pool per (modello, sessione), creato lazy. ───────────────── */
+typedef struct { void* model; void* sess; llm_kvq_pool p; } llm_kvq_pool_entry;
+static llm_kvq_pool_entry g_kvq_pools[8];
+static int g_kvq_pools_n = 0;
+
+static inline llm_kvq_pool* llm_kvq_pool_for(void* m, void* sess,
+                                             int layers, int nkv, int hd, llm_kvq_fmt fmt,
+                                             int cap_tokens, mlx_stream s) {
+    for (int i = 0; i < g_kvq_pools_n; i++)
+        if (g_kvq_pools[i].model == m && g_kvq_pools[i].sess == sess) return &g_kvq_pools[i].p;
+    if (g_kvq_pools_n >= 8) return NULL;
+    llm_kvq_pool_entry* e = &g_kvq_pools[g_kvq_pools_n];
+    memset(e, 0, sizeof *e);
+    e->model = m; e->sess = sess;
+    if (!llm_kvq_pool_init(&e->p, layers, nkv, hd, fmt, cap_tokens, s)) return NULL;
+    g_kvq_pools_n++;
+    return &e->p;
 }
 
 #endif /* LLM_MLX_KVQ_POOL_H */
