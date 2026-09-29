@@ -422,6 +422,30 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    float acc = BO[d] * POST[dst];\n"
 "    for (uint src = 0; src < HC; src++) acc += COMB[dst + src*HC] * RES[(ulong)src*D + d];\n"
 "    OUT[gid] = acc;\n"
+"}\n"
+"kernel void dsv4_route(device const float* LOGITS [[buffer(0)]], device const float* BIAS [[buffer(1)]],\n"
+"    device int* SELECTED [[buffer(2)]], device float* WEIGHT [[buffer(3)]],\n"
+"    constant uint* P [[buffer(4)]], constant float* CF [[buffer(5)]], uint gid [[thread_position_in_grid]]) {\n"
+"    const uint n_expert=P[0], used=P[1], has_bias=P[2];\n"
+"    if (gid != 0u) return;\n"
+"    const float scale = CF[0];\n"
+"    float probs[256]; float sel[256];\n"
+"    for (uint i=0;i<n_expert;i++){\n"
+"        float x=LOGITS[i];\n"
+"        float sp=(x>20.f)?x:((x<-20.f)?exp(x):log(1.f+exp(x)));\n"
+"        float p=sqrt(sp); probs[i]=p; sel[i]=p+(has_bias?BIAS[i]:0.f);\n"
+"    }\n"
+"    for (uint k=0;k<used;k++){\n"
+"        float bs=-1.0e30f; int besti=0; int any=0;\n"
+"        for (uint i=0;i<n_expert;i++){\n"
+"            int already=0; for(uint j=0;j<k;j++) if (SELECTED[j]==(int)i){already=1;break;}\n"
+"            if (!already && (!any || sel[i]>bs)){ bs=sel[i]; besti=(int)i; any=1; }\n"
+"        }\n"
+"        SELECTED[k]=besti;\n"
+"    }\n"
+"    float sum=0.f; for(uint i=0;i<used;i++) sum+=probs[SELECTED[i]];\n"
+"    if (sum<6.103515625e-5f) sum=6.103515625e-5f;\n"
+"    for(uint i=0;i<used;i++) WEIGHT[i]=probs[SELECTED[i]]/sum*scale;\n"
 "}\n";
 
 struct LlmDsv4Metal {
@@ -437,6 +461,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
+    id<MTLComputePipelineState> pso_route;   /* router su GPU (softplus/top-k) */
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
     size_t sx_cap[64], so_cap[64], spb_cap[64];
@@ -489,6 +514,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     id<MTLFunction> f17 = [lib newFunctionWithName:@"dsv4_hc_sinkhorn"];
     id<MTLFunction> f18 = [lib newFunctionWithName:@"dsv4_hc_sum"];
     id<MTLFunction> f19 = [lib newFunctionWithName:@"dsv4_hc_post"];
+    id<MTLFunction> f20 = [lib newFunctionWithName:@"dsv4_route"];
     if (!f7 || !f8 || !f9) fprintf(stderr, "dsv4_metal: kernel rms/rope NON compilato\n");
     if (!f10) fprintf(stderr, "dsv4_metal: kernel dsv4_slots6_pair_swiglu_iq2 NON compilato\n");
     LlmDsv4Metal* b = (LlmDsv4Metal*)calloc(1, sizeof *b);
@@ -511,8 +537,9 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_sinkhorn = f17 ? [dev newComputePipelineStateWithFunction:f17 error:&err] : nil;
     b->pso_hc_sum   = f18 ? [dev newComputePipelineStateWithFunction:f18 error:&err] : nil;
     b->pso_hc_post  = f19 ? [dev newComputePipelineStateWithFunction:f19 error:&err] : nil;
+    b->pso_route    = f20 ? [dev newComputePipelineStateWithFunction:f20 error:&err] : nil;
     [lib release];
-    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->queue) {
+    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->pso_route || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
                 err ? [[err localizedDescription] UTF8String] : "?");
         llm_dsv4_metal_destroy(b); return NULL;
@@ -536,6 +563,7 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_sinkhorn) [b->pso_sinkhorn release];
     if (b->pso_hc_sum)   [b->pso_hc_sum release];
     if (b->pso_hc_post)  [b->pso_hc_post release];
+    if (b->pso_route)    [b->pso_route release];
     if (b->pso_rms_w)    [b->pso_rms_w release];
     if (b->pso_head_rms) [b->pso_head_rms release];
     if (b->pso_rope)     [b->pso_rope release];
