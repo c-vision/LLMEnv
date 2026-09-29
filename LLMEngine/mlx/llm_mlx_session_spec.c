@@ -1035,3 +1035,27 @@ void llm_mlx_session_spec_discard(LlmMlxSession* s) {
     }
     s->spec_buf_len = 0; s->spec_buf_pos = 0;
 }
+
+/* True se la tabella n-gram PREDICE almeno 2 token dalla history corrente (draft[0] ==
+ * pending_next_id). Serve al dispatch per NON entrare nel fallback AR di generate_ngram quando la
+ * tabella non predice: quel fallback e' un forward SINCRONO, piu' lento del path principale (async
+ * con overlap I/O) sui modelli I/O-bound -- misurato 3.7x su OLMoE (562 vs 150 ms/tok). */
+int llm_mlx_session_spec_can(LlmMlxSession* s) {
+    if (s == NULL || !s->ngram_built || s->pending_next_id < 0 || s->history_len <= 0) return 0;
+    int32_t d0 = llm_mlx_ngram_predict(&s->ngram, s->history, s->history_len);
+    if (d0 != s->pending_next_id) return 0;
+    const int n = s->history_len;
+    int32_t stackbuf[4096];
+    int32_t* tmp = stackbuf;
+    int32_t* heap = NULL;
+    if (n + 1 > (int)(sizeof(stackbuf) / sizeof(stackbuf[0]))) {
+        heap = (int32_t*)malloc(((size_t)n + 1) * sizeof(int32_t));
+        tmp = heap;
+        if (tmp == NULL) return 0;
+    }
+    for (int i = 0; i < n; i++) tmp[i] = s->history[i];
+    tmp[n] = d0;
+    int32_t d1 = llm_mlx_ngram_predict(&s->ngram, tmp, n + 1);
+    free(heap);
+    return (d1 >= 0) ? 1 : 0;
+}

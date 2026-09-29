@@ -375,31 +375,35 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
     /* N-GRAM self-speculative GENERALE (tutti i modelli, greedy): draft dalla tabella n-gram del
      * contesto, verificati dal modello con UN forward batch -> output IDENTICO al greedy AR.
      * Config-driven (opzione di registro `spec_ngram`, nessuna env). Default 0 = off. */
-    if (!m->dsv4 && !m->dsv41 && m->cfg.n_experts == 0) {
-        int ord = 8;   /* default built-in: on per i densi greedy (opt-out `spec_ngram=0`) */
+    if (!m->dsv4 && !m->dsv41) {
+        int ord = 8;   /* default built-in (opt-out `spec_ngram=0`) */
         if (llm_ai_mlx_opt_get_int("spec_ngram", &ord) != 0) ord = 8;
         if (ord >= 2) {
             llm_mlx_sampling_t smn = llm_mlx_session_sampling(s);
             if (!smn.active || smn.temperature <= 0.0f) {
                 if (!s->ngram_built) llm_ai_mlx_session_build_ngram(handle, ord);
-                /* Speculative streaming: il consumer (es. CLI/server) chiama generate(1) per
-                 * token; il motore genera in anticipo un chunk con generate_ngram e lo bufferizza.
-                 * Output IDENTICO al greedy AR. */
-                int cnt = 0;
-                while (cnt < max_new_tokens) {
-                    if (s->spec_buf_pos >= s->spec_buf_len) {
-                        int chunk = ord + 2; if (chunk < 2) chunk = 2; if (chunk > 60) chunk = 60;
-                        llm_mlx_session_spec_begin(s);
-                        int got = llm_ai_mlx_session_generate_ngram(handle, chunk, eos_token_id, s->spec_buf, ord);
-                        if (got < 0) break;
-                        s->spec_buf_len = got; s->spec_buf_pos = 0;
-                        if (got == 0) break;
+                /* Speculative streaming: il consumer chiama generate(1) per token; il motore
+                 * genera in anticipo un chunk e lo bufferizza. Usato SOLO se la tabella n-gram
+                 * predice (>=2 token): altrimenti si usa il path principale, perche' il fallback
+                 * AR sincrono di generate_ngram e' piu' lento dell'async sui modelli I/O-bound. */
+                if (s->spec_buf_pos < s->spec_buf_len || llm_mlx_session_spec_can(s)) {
+                    int cnt = 0;
+                    while (cnt < max_new_tokens) {
+                        if (s->spec_buf_pos >= s->spec_buf_len) {
+                            if (!llm_mlx_session_spec_can(s)) break;  /* n-gram non predice */
+                            int chunk = ord + 2; if (chunk < 2) chunk = 2; if (chunk > 60) chunk = 60;
+                            llm_mlx_session_spec_begin(s);
+                            int got = llm_ai_mlx_session_generate_ngram(handle, chunk, eos_token_id, s->spec_buf, ord);
+                            if (got < 0) break;
+                            s->spec_buf_len = got; s->spec_buf_pos = 0;
+                            if (got == 0) break;
+                        }
+                        int32_t tok = s->spec_buf[s->spec_buf_pos++];
+                        out_ids[cnt++] = tok;
+                        if (eos_token_id >= 0 && tok == eos_token_id) break;
                     }
-                    int32_t tok = s->spec_buf[s->spec_buf_pos++];
-                    out_ids[cnt++] = tok;
-                    if (eos_token_id >= 0 && tok == eos_token_id) break;
+                    if (cnt > 0) return cnt;
                 }
-                if (cnt > 0) return cnt;
             }
         }
     }

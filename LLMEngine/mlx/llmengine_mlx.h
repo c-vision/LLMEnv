@@ -198,6 +198,9 @@ struct LlmMlxSession;
 void llm_mlx_session_spec_begin(struct LlmMlxSession* s);
 void llm_mlx_session_spec_discard(struct LlmMlxSession* s);
 void llm_mlx_session_spec_free(struct LlmMlxSession* s);
+/* True se la tabella n-gram predice >=2 token dalla history (draft[0]==pending): il dispatch usa
+ * lo spec solo in quel caso, per evitare il fallback AR sincrono di generate_ngram. */
+int llm_mlx_session_spec_can(struct LlmMlxSession* s);
 
 /* Fase 3 continuous batching (default OFF via LLM_BATCH_DECODE): genera fino a max_new_tokens
  * per N sessioni (stesso modello) in UN forward BATCHED per step (attention per-sessione +
