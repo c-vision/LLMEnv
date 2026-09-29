@@ -163,19 +163,11 @@ static const char* const LLM_DSV4_METAL_Q8K =
 /* Port FEDELE di ds4 `kernel_mul_mv_iq2_xxs_pair_f32_impl` (metal/moe.metal:3137): simdgroup,
  * nr0=4 righe/simdgroup, QK_K=256, gate+up in un pass, attivazioni f32; swiglu×peso in coda. */
 static const char* const LLM_DSV4_METAL_MOE =
-"kernel void dsv4_pair_swiglu_iq2(\n"
-"    device const char* SG [[buffer(0)]], device const char* SU [[buffer(1)]],\n"
-"    device const float* Y [[buffer(2)]], device float* MID [[buffer(3)]],\n"
-"    device const float* RW [[buffer(4)]], constant float* CF [[buffer(5)]],\n"
-"    constant uint* P [[buffer(6)]],\n"
-"    uint3 tgpig [[threadgroup_position_in_grid]],\n"
-"    ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]],\n"
-"    threadgroup char* shmem [[threadgroup(0)]]) {\n"
+"static inline void dsv4_pair_core(device const char* SG, device const char* SU, device const float* Y,\n"
+"    device float* MID, float rw, int mid_off, float clampv, int ne00, int nb01, int ne0,\n"
+"    uint leadg, uint leadu, uint tgx, ushort tiisg, ushort sgitg, threadgroup char* shmem) {\n"
 "    const int nr0 = 4; const short NSG = 4;\n"
-"    const int ne00 = (int)P[0], nb01 = (int)P[1], ne0 = (int)P[2];\n"
-"    const uint leadg = P[3], leadu = P[4]; const int mid_off = (int)P[5];\n"
-"    const int nb = ne00 / 256; const int first_row = (tgpig.x * NSG + sgitg) * nr0;\n"
-"    const float clampv = CF[0];\n"
+"    const int nb = ne00 / 256; const int first_row = (tgx * NSG + sgitg) * nr0;\n"
 "    device const char* xg = SG + (ulong)leadg + (ulong)first_row * (ulong)nb01;\n"
 "    device const char* xu = SU + (ulong)leadu + (ulong)first_row * (ulong)nb01;\n"
 "    float yl[32]; float sumg[4] = {0.f,0.f,0.f,0.f}; float sumu[4] = {0.f,0.f,0.f,0.f};\n"
@@ -229,9 +221,35 @@ static const char* const LLM_DSV4_METAL_MOE =
 "            float gg = g, uu = u;\n"
 "            if (clampv > 1.0e-6f) { gg = min(gg, clampv); uu = clamp(uu, -clampv, clampv); }\n"
 "            const float silu = gg / (1.f + exp(-gg));\n"
-"            MID[mid_off + first_row + row] = silu * uu * RW[0];\n"
+"            MID[mid_off + first_row + row] = silu * uu * rw;\n"
 "        }\n"
 "    }\n"
+"}\n"
+"kernel void dsv4_pair_swiglu_iq2(device const char* SG [[buffer(0)]], device const char* SU [[buffer(1)]],\n"
+"    device const float* Y [[buffer(2)]], device float* MID [[buffer(3)]], device const float* RW [[buffer(4)]],\n"
+"    constant float* CF [[buffer(5)]], constant uint* P [[buffer(6)]],\n"
+"    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]],\n"
+"    ushort sgitg [[simdgroup_index_in_threadgroup]], threadgroup char* shmem [[threadgroup(0)]]) {\n"
+"    dsv4_pair_core(SG, SU, Y, MID, RW[0], (int)P[5], CF[0], (int)P[0], (int)P[1], (int)P[2], P[3], P[4], tgpig.x, tiisg, sgitg, shmem);\n"
+"}\n"
+"kernel void dsv4_slots6_pair_swiglu_iq2(\n"
+"    device const char* G0 [[buffer(0)]], device const char* G1 [[buffer(1)]], device const char* G2 [[buffer(2)]],\n"
+"    device const char* G3 [[buffer(3)]], device const char* G4 [[buffer(4)]], device const char* G5 [[buffer(5)]],\n"
+"    device const char* U0 [[buffer(6)]], device const char* U1 [[buffer(7)]], device const char* U2 [[buffer(8)]],\n"
+"    device const char* U3 [[buffer(9)]], device const char* U4 [[buffer(10)]], device const char* U5 [[buffer(11)]],\n"
+"    device const float* Y [[buffer(12)]], device float* MID [[buffer(13)]], device const float* RW [[buffer(14)]],\n"
+"    constant float* CF [[buffer(15)]], constant uint* P [[buffer(16)]],\n"
+"    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]],\n"
+"    ushort sgitg [[simdgroup_index_in_threadgroup]], threadgroup char* shmem [[threadgroup(0)]]) {\n"
+"    const int idx = (int)tgpig.z;\n"
+"    device const char* SG = G0; device const char* SU = U0;\n"
+"    switch (idx) {\n"
+"    case 1: SG = G1; SU = U1; break; case 2: SG = G2; SU = U2; break;\n"
+"    case 3: SG = G3; SU = U3; break; case 4: SG = G4; SU = U4; break;\n"
+"    case 5: SG = G5; SU = U5; break; default: break; }\n"
+"    const int ne00 = (int)P[0], nb01 = (int)P[1], ne0 = (int)P[2];\n"
+"    dsv4_pair_core(SG, SU, Y, MID, RW[idx], idx * ne0, CF[0], ne00, nb01, ne0,\n"
+"                   P[3 + idx], P[9 + idx], tgpig.x, tiisg, sgitg, shmem);\n"
 "}\n"
 "kernel void dsv4_sum6_q2k(\n"
 "    device const char* S0 [[buffer(0)]], device const char* S1 [[buffer(1)]],\n"
@@ -353,6 +371,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_q8k_q4k;
     id<MTLComputePipelineState> pso_pair;   /* MoE fuso gate+up+swiglu (ds4 pair) */
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
+    id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
@@ -398,7 +417,9 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     id<MTLFunction> f7 = [lib newFunctionWithName:@"dsv4_rms_norm_w"];
     id<MTLFunction> f8 = [lib newFunctionWithName:@"dsv4_head_rms"];
     id<MTLFunction> f9 = [lib newFunctionWithName:@"dsv4_rope_tail_ext"];
+    id<MTLFunction> f10 = [lib newFunctionWithName:@"dsv4_slots6_pair_swiglu_iq2"];
     if (!f7 || !f8 || !f9) fprintf(stderr, "dsv4_metal: kernel rms/rope NON compilato\n");
+    if (!f10) fprintf(stderr, "dsv4_metal: kernel dsv4_slots6_pair_swiglu_iq2 NON compilato\n");
     LlmDsv4Metal* b = (LlmDsv4Metal*)calloc(1, sizeof *b);
     b->dev = [dev retain];
     b->queue = [dev newCommandQueue];
@@ -411,8 +432,9 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_rms_w    = f7 ? [dev newComputePipelineStateWithFunction:f7 error:&err] : nil;
     b->pso_head_rms = f8 ? [dev newComputePipelineStateWithFunction:f8 error:&err] : nil;
     b->pso_rope     = f9 ? [dev newComputePipelineStateWithFunction:f9 error:&err] : nil;
+    b->pso_slots6   = f10 ? [dev newComputePipelineStateWithFunction:f10 error:&err] : nil;
     [lib release];
-    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->queue) {
+    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
                 err ? [[err localizedDescription] UTF8String] : "?");
         llm_dsv4_metal_destroy(b); return NULL;
@@ -428,6 +450,7 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_q8k_q4k)  [b->pso_q8k_q4k release];
     if (b->pso_pair)     [b->pso_pair release];
     if (b->pso_sum6_q2k) [b->pso_sum6_q2k release];
+    if (b->pso_slots6)   [b->pso_slots6 release];
     if (b->pso_rms_w)    [b->pso_rms_w release];
     if (b->pso_head_rms) [b->pso_head_rms release];
     if (b->pso_rope)     [b->pso_rope release];
@@ -701,7 +724,7 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
                                const void* const* downs, const float* x, const float* rws, int n,
                                float clamp, uint32_t embd, uint32_t gu_nb01, uint32_t ff,
                                uint32_t down_nb01, float* out) {
-    if (!b || !b->pso_pair || !b->pso_sum6_q2k || n != 6 || !gates || !ups || !downs || !x || !rws || !out) return -1;
+    if (!b || !b->pso_slots6 || !b->pso_sum6_q2k || n != 6 || !gates || !ups || !downs || !x || !rws || !out) return -1;
     if ((ff % 256u) != 0u) return -1;
     const size_t page = (size_t)getpagesize();
     id<MTLBuffer> X   = dsv4_scratch(b, &b->sx[0], &b->sx_cap[0], (size_t)embd * sizeof(float));
@@ -709,26 +732,27 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
     id<MTLBuffer> OUT = dsv4_scratch(b, &b->sx[2], &b->sx_cap[2], (size_t)embd * sizeof(float));
     if (!X || !MID || !OUT) return -2;
     memcpy([X contents], x, (size_t)embd * sizeof(float));
-    id<MTLBuffer> BG[6], BU[6], BD[6], RW[6], PB[6];
-    for (int i = 0; i < 6; i++) { BG[i] = BU[i] = BD[i] = RW[i] = PB[i] = nil; }
-    id<MTLBuffer> CF = [b->dev newBufferWithBytes:&clamp length:sizeof(float) options:MTLResourceStorageModeShared];
-    id<MTLBuffer> PSUM = nil;
-    int rc = (CF == nil) ? -2 : 0;
+    id<MTLBuffer> BG[6], BU[6], BD[6];
+    for (int i = 0; i < 6; i++) { BG[i] = BU[i] = BD[i] = nil; }
+    uint32_t PV[15]; PV[0] = embd; PV[1] = gu_nb01; PV[2] = ff;
+    int rc = 0;
     for (int i = 0; i < n; i++) {
         size_t gbytes = (size_t)ff * gu_nb01, dbytes = (size_t)embd * down_nb01;
         uintptr_t apg = (uintptr_t)gates[i] & ~(uintptr_t)(page-1); size_t lg = (size_t)((uintptr_t)gates[i]-apg);
         uintptr_t apu = (uintptr_t)ups[i]   & ~(uintptr_t)(page-1); size_t lu = (size_t)((uintptr_t)ups[i]-apu);
         uintptr_t apd = (uintptr_t)downs[i] & ~(uintptr_t)(page-1); size_t ld = (size_t)((uintptr_t)downs[i]-apd);
         size_t vlg = ((lg+gbytes+page-1)/page)*page, vlu = ((lu+gbytes+page-1)/page)*page, vld = ((ld+dbytes+page-1)/page)*page;
+        PV[3+i] = (uint32_t)lg; PV[9+i] = (uint32_t)lu;
         BG[i] = [b->dev newBufferWithBytesNoCopy:(void*)apg length:vlg options:MTLResourceStorageModeShared deallocator:nil];
         BU[i] = [b->dev newBufferWithBytesNoCopy:(void*)apu length:vlu options:MTLResourceStorageModeShared deallocator:nil];
         BD[i] = [b->dev newBufferWithBytesNoCopy:(void*)apd length:vld options:MTLResourceStorageModeShared deallocator:nil];
-        float rw = rws[i];
-        RW[i] = [b->dev newBufferWithBytes:&rw length:sizeof(float) options:MTLResourceStorageModeShared];
-        uint32_t P[6] = { embd, gu_nb01, ff, (uint32_t)lg, (uint32_t)lu, (uint32_t)((size_t)i * ff) };
-        PB[i] = [b->dev newBufferWithBytes:P length:sizeof(P) options:MTLResourceStorageModeShared];
-        if (!BG[i] || !BU[i] || !BD[i] || !RW[i] || !PB[i]) { rc = -2; break; }
+        if (!BG[i] || !BU[i] || !BD[i]) { rc = -2; break; }
     }
+    id<MTLBuffer> RWV  = [b->dev newBufferWithBytes:rws length:(NSUInteger)n*sizeof(float) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> PBV  = [b->dev newBufferWithBytes:PV length:sizeof(PV) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> CF   = [b->dev newBufferWithBytes:&clamp length:sizeof(float) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> PSUM = nil;
+    if (rc == 0 && (!RWV || !PBV || !CF)) rc = -2;
     { uint32_t P[4] = { ff / 256u, down_nb01, embd, ff };
       PSUM = [b->dev newBufferWithBytes:P length:sizeof(P) options:MTLResourceStorageModeShared];
       if (!PSUM) rc = -2; }
@@ -736,19 +760,17 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
         id<MTLCommandBuffer> cb = [b->queue commandBuffer];
         id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
         const uint32_t NSG = 4, nr0 = 4;
-        for (int i = 0; i < n; i++) {
-            [e setComputePipelineState:b->pso_pair];
-            [e setBuffer:BG[i] offset:0 atIndex:0];
-            [e setBuffer:BU[i] offset:0 atIndex:1];
-            [e setBuffer:X offset:0 atIndex:2];
-            [e setBuffer:MID offset:0 atIndex:3];
-            [e setBuffer:RW[i] offset:0 atIndex:4];
-            [e setBuffer:CF offset:0 atIndex:5];
-            [e setBuffer:PB[i] offset:0 atIndex:6];
-            [e setThreadgroupMemoryLength:256 * 8 + 128 atIndex:0];
-            [e dispatchThreadgroups:MTLSizeMake((ff + NSG*nr0 - 1) / (NSG*nr0), 1, 1)
-             threadsPerThreadgroup:MTLSizeMake(32*NSG, 1, 1)];
-        }
+        [e setComputePipelineState:b->pso_slots6];
+        for (int i = 0; i < 6; i++) [e setBuffer:BG[i] offset:0 atIndex:i];
+        for (int i = 0; i < 6; i++) [e setBuffer:BU[i] offset:0 atIndex:6+i];
+        [e setBuffer:X   offset:0 atIndex:12];
+        [e setBuffer:MID offset:0 atIndex:13];
+        [e setBuffer:RWV offset:0 atIndex:14];
+        [e setBuffer:CF  offset:0 atIndex:15];
+        [e setBuffer:PBV offset:0 atIndex:16];
+        [e setThreadgroupMemoryLength:256 * 8 + 128 atIndex:0];
+        [e dispatchThreadgroups:MTLSizeMake((ff + NSG*nr0 - 1) / (NSG*nr0), 1, 6)
+         threadsPerThreadgroup:MTLSizeMake(32*NSG, 1, 1)];
         [e setComputePipelineState:b->pso_sum6_q2k];
         [e setBuffer:BD[0] offset:0 atIndex:0];
         [e setBuffer:BD[1] offset:0 atIndex:1];
@@ -769,8 +791,9 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
     }
     for (int i = 0; i < n; i++) {
         if (BG[i]) [BG[i] release]; if (BU[i]) [BU[i] release]; if (BD[i]) [BD[i] release];
-        if (RW[i]) [RW[i] release]; if (PB[i]) [PB[i] release];
     }
+    if (RWV) [RWV release];
+    if (PBV) [PBV release];
     if (CF) [CF release];
     if (PSUM) [PSUM release];
     return rc;
