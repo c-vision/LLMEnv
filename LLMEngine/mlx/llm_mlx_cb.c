@@ -1285,3 +1285,42 @@ int llm_ai_mlx_splash_mpp_matmul_probe(char* out, size_t cap) {
     mlx_fast_metal_kernel_config_free(cfg);
     return 0;
 }
+
+/* Probe MPP matmul2d v2 — pattern di Splash (tensor espliciti + .template). */
+int llm_ai_mlx_splash_mpp_matmul2(char* out, size_t cap) {
+    if (out == NULL || cap == 0) return -1;
+    out[0] = '\0';
+    const char* hdr = "#include <metal_stdlib>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
+                      "using namespace metal;\nusing namespace mpp::tensor_ops;\n";
+    const char* src =
+        "  constexpr int M=8,N=32,K=64;\n"
+        "  auto a = tensor(x, dextents<int,2>{K,M}, array<int,2>{1,K});\n"
+        "  auto a0 = a.slice<K,M>(0,0);\n"
+        "  tensor<threadgroup half, dextents<int,2>, tensor_inline> bt0(stage, dextents<int,2>{K,N}, array<int,2>{1,K});\n"
+        "  auto b0 = bt0.slice<K,N>(0,0);\n"
+        "  constexpr auto desc = matmul2d_descriptor(M,N,K,false,true,false, matmul2d_descriptor::mode::multiply);\n"
+        "  matmul2d<desc, execution_simdgroups<1>> op;\n"
+        "  auto d = op.template get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();\n"
+        "  op.run(a0, b0, d);\n"
+        "  auto c = tensor(y, dextents<int,2>{N,M}, array<int,2>{1,N});\n"
+        "  d.store(c.slice<N,M>(0,0));\n"
+        "  threadgroup half stage[K*N];\n";
+    mlx_vector_string iv = mlx_vector_string_new(); mlx_vector_string_append_value(iv, "x");
+    mlx_vector_string ov = mlx_vector_string_new(); mlx_vector_string_append_value(ov, "y");
+    mlx_fast_metal_kernel k = mlx_fast_metal_kernel_new("mpp_mm2", iv, ov, src, hdr, true, false);
+    mlx_vector_string_free(iv); mlx_vector_string_free(ov);
+    if (k.ctx == NULL) { snprintf(out, cap, "MPP matmul2: build FALLITA"); return 1; }
+    mlx_fast_metal_kernel_config cfg = mlx_fast_metal_kernel_config_new();
+    mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, "T", MLX_FLOAT32);
+    int csh[2] = {32,8}; mlx_fast_metal_kernel_config_add_output_arg(cfg, csh, 2, MLX_FLOAT32);
+    mlx_fast_metal_kernel_config_set_grid(cfg, 32, 1, 1); mlx_fast_metal_kernel_config_set_thread_group(cfg, 32, 1, 1);
+    mlx_stream s = mlx_default_gpu_stream_new();
+    int xsh[2] = {64,8}; mlx_array x = mlx_array_new_data((float[]){0}, xsh, 2, MLX_FLOAT32);
+    mlx_vector_array in = mlx_vector_array_new(); mlx_vector_array_append_value(in, x);
+    mlx_vector_array outs = mlx_vector_array_new();
+    int rc = mlx_fast_metal_kernel_apply(&outs, k, in, cfg, s);
+    snprintf(out, cap, "MPP matmul2: build OK, apply rc=%d", rc);
+    mlx_vector_array_free(in); mlx_vector_array_free(outs); mlx_array_free(x);
+    mlx_fast_metal_kernel_config_free(cfg);
+    return 0;
+}
