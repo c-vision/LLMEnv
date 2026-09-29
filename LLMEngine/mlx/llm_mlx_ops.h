@@ -1485,6 +1485,7 @@ static bool llm_mlx_cache_commit(mlx_array* ckpt, mlx_stream stream)
 static bool llm_mlx_cache_trim(mlx_array* out, mlx_array cache, int keep, mlx_stream stream)
 {
     if (keep < 0) keep = 0;
+    if (cache.ctx == NULL) return true;   /* cache vuota (GDN/linear-attn): niente da trimmare */
     int ndim = mlx_array_ndim(cache);
     if (ndim < 3) {
         if (keep == 0) { mlx_array_set_int(out, 0); return true; }
