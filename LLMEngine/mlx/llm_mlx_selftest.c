@@ -51,8 +51,6 @@ int llm_ai_mlx_eval_drift_selftest(int n_ops, int iters, char* out, int cap) {
         if (it == 0) first = ms;
         if (it == iters - 1) last = ms;
         if (it >= 64 && ms > worst) worst = ms;
-        if ((it % 64) == 63 && getenv("LLM_DRIFT_TRACE"))
-            fprintf(stderr, "[drift] it=%d  %.3f ms  (primo=%.3f)\n", it + 1, ms, first);
         printed++;
     }
     snprintf(out, (size_t)cap, "eval_drift: n_ops=%d iters=%d | primo=%.3f ms ultimo=%.3f ms worst(>=64)=%.3f ms -> %s",

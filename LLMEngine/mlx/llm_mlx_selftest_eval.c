@@ -472,8 +472,6 @@ int llm_ai_mlx_eval_shapedrift_selftest(int base_n, int grow, int iters, char* o
         if (it == 0) first = ms;
         if (it == iters - 1) last = ms;
         if (it >= 64 && ms > worst) worst = ms;
-        if ((it % 64) == 63 && getenv("LLM_DRIFT_TRACE"))
-            fprintf(stderr, "[shapedrift] it=%d N=%d  %.3f ms\n", it + 1, N, ms);
     }
     snprintf(out, (size_t)cap, "shapedrift: base=%d grow=%d iters=%d | primo=%.3f ultimo=%.3f worst=%.3f -> %s",
              base_n, grow, iters, first, last, worst, (last > first * 2.0) ? "*** cresce con la FORMA nuova ***" : "stabile");

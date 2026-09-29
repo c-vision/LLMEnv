@@ -28,7 +28,6 @@ static void llm_mlx_mtp_to_gpu(mlx_array* a, mlx_stream s) {
     int rc = mlx_copy(&g, *a, s);
     if (rc == 0) { (void)mlx_array_eval(g); mlx_array_free(*a); *a = g; }
     else mlx_array_free(g);
-    if (getenv("LLM_MTP_DEBUG")) fprintf(stderr, "[mtp-gpu] rc=%d n=%zu\n", rc, a->ctx ? mlx_array_size(*a) : 0);
 }
 
 static void llm_mlx_mtp_take(mlx_array* dst, mlx_map_string_to_array map, const char* name) {
@@ -197,9 +196,7 @@ static int32_t llm_mlx_mtp_step_impl(LlmMlxModel* m, LlmMlxMtp* q, OutputTensors
     mlx_array oo=mlx_array_new();
     if (ok) ok = quantized_linear_cfg(&oo, oif, q->o_w,q->o_s,q->o_b, 64,4,mode, s);
     mlx_array x2=mlx_array_new(); if (ok) ok = mlx_add(&x2, res, oo, s)==0;
-    if (getenv("LLM_MTP_TIME")) { struct timespec _ta,_tb; clock_gettime(CLOCK_MONOTONIC,&_ta);
-        if (ok) (void)mlx_array_eval(x2); clock_gettime(CLOCK_MONOTONIC,&_tb);
-        fprintf(stderr,"[mtp-time] fino-attn=%.1fms\n",(_tb.tv_sec-_ta.tv_sec)*1e3+(_tb.tv_nsec-_ta.tv_nsec)/1e6); }
+    
     mlx_array xn2=mlx_array_new(); if (ok) ok = rms_norm_cfg(&xn2, x2, q->pln, eps, s);
     mlx_array gg=mlx_array_new(), uu=mlx_array_new();
     if (ok) ok = quantized_linear_cfg(&gg, xn2, q->g_w,q->g_s,q->g_b, 64,4,mode, s);
@@ -210,9 +207,7 @@ static int32_t llm_mlx_mtp_step_impl(LlmMlxModel* m, LlmMlxMtp* q, OutputTensors
     mlx_array dn=mlx_array_new();
     if (ok) ok = quantized_linear_cfg(&dn, act, q->d_w,q->d_s,q->d_b, 64,4,mode, s);
     mlx_array x3=mlx_array_new(); if (ok) ok = mlx_add(&x3, x2, dn, s)==0;
-    if (getenv("LLM_MTP_TIME")) { struct timespec _tc,_td; clock_gettime(CLOCK_MONOTONIC,&_tc);
-        if (ok) (void)mlx_array_eval(x3); clock_gettime(CLOCK_MONOTONIC,&_td);
-        fprintf(stderr,"[mtp-time] mlp=%.1fms\n",(_td.tv_sec-_tc.tv_sec)*1e3+(_td.tv_nsec-_tc.tv_nsec)/1e6); }
+    
     mlx_array fn=mlx_array_new(); if (ok) ok = rms_norm_cfg(&fn, x3, q->mnorm, eps, s);
     /* lm_head: bits derivati (8) dai tensori del target */
     struct timespec _tl0; clock_gettime(CLOCK_MONOTONIC,&_tl0);
@@ -220,22 +215,11 @@ static int32_t llm_mlx_mtp_step_impl(LlmMlxModel* m, LlmMlxMtp* q, OutputTensors
     llm_mlx_quant_derive(t.out_w, t.out_s, m->cfg.quant_group_size, m->cfg.quant_bits, mode, &og,&ob,omode,sizeof(omode));
     mlx_array logits=mlx_array_new();
     if (ok) ok = quantized_linear_cfg(&logits, fn, t.out_w,t.out_s,t.out_b, og,ob,omode, s);
-    if (ok && getenv("LLM_MTP_DEBUG")) {
-        mlx_array lf=mlx_array_new();
-        if (mlx_astype(&lf, logits, MLX_FLOAT32, s)==0 && mlx_array_eval(lf)==0) {
-            const float* d=mlx_array_data_float32(lf);
-            int V=(int)mlx_array_shape(lf)[2]; float mx=-1e30f; int mi=0;
-            for (int i=0;i<V;i++) if (d[i]>mx){mx=d[i];mi=i;}
-            fprintf(stderr, "[mtp-dbg] V=%d argmax=%d max=%.4f | logit[13]=%.4f logit[19]=%.4f logit[%d]=%.4f\n",
-                    V, mi, mx, d[13], d[19], mi, mx);
-        }
-        mlx_array_free(lf);
-    }
+    
     mlx_array am=mlx_array_new(); if (ok) ok = mlx_argmax_axis(&am, logits, -1, false, s)==0;
     int32_t out = -1;
     if (ok && mlx_array_eval(am)==0) { const uint32_t* d=mlx_array_data_uint32(am); if (d) out=(int32_t)d[0]; else out=-2; }
-    if (getenv("LLM_MTP_TIME")) { struct timespec _tl1; clock_gettime(CLOCK_MONOTONIC,&_tl1);
-        fprintf(stderr,"[mtp-time] lm_head(argmax)=%.1fms og=%d ob=%d\n",(_tl1.tv_sec-_tl0.tv_sec)*1e3+(_tl1.tv_nsec-_tl0.tv_nsec)/1e6, og, ob); }
+    
     if (ok && out_hidden) { (void)mlx_array_set(out_hidden, fn); }
     mlx_array_free(emb);mlx_array_free(he);mlx_array_free(hh);mlx_array_free(cat);mlx_array_free(x);
     mlx_array_free(res);mlx_array_free(xn);mlx_array_free(qg);mlx_array_free(kk);mlx_array_free(vv);
@@ -366,7 +350,7 @@ static int32_t llm_mlx_mtp_draft1_impl(LlmMlxModel* m, int32_t last_token, mlx_a
     mlx_array kc=mlx_array_new(), vc=mlx_array_new();
     int32_t out = llm_mlx_mtp_step_impl(m, q, &t, last_token, hidden, 1, 0, &kc, &vc, NULL);
     clock_gettime(CLOCK_MONOTONIC,&_w2);
-    if (getenv("LLM_MTP_TIME")) fprintf(stderr,"[mtp-wrap] load=%.1fms step=%.1fms\n",
+    if (0) fprintf(stderr,"[mtp-wrap] load=%.1fms step=%.1fms\n",
         (_w1.tv_sec-_w0.tv_sec)*1e3+(_w1.tv_nsec-_w0.tv_nsec)/1e6,
         (_w2.tv_sec-_w1.tv_sec)*1e3+(_w2.tv_nsec-_w1.tv_nsec)/1e6);
     mlx_array_free(kc); mlx_array_free(vc);

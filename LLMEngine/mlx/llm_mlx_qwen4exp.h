@@ -582,14 +582,7 @@ static bool llm_mlx_qwen4exp_gdn_block(mlx_array* out, mlx_array x,
     }
     mlx_array convolved = mlx_array_new();
     if (ok) ok = llm_mlx_qwen4exp_silu(&convolved, conv_out, stream);
-    if (ok && getenv("LLM_Q4_DBG")) {
-        mlx_array f = mlx_array_new();
-        if (mlx_astype(&f, convolved, MLX_FLOAT32, stream) == 0 && mlx_array_eval(f) == 0) {
-            const float* d = mlx_array_data_float32(f); size_t n = mlx_array_size(f);
-            fprintf(stderr, "[q4] conv_out[0:6] ="); for (size_t i=0;i<6 && i<n;i++) fprintf(stderr," %.6f",d[i]); fprintf(stderr,"\n");
-        }
-        mlx_array_free(f);
-    }
+    
 
     mlx_array q_part = mlx_array_new(), k_part = mlx_array_new(), v_part = mlx_array_new();
     if (ok) {
@@ -611,18 +604,7 @@ static bool llm_mlx_qwen4exp_gdn_block(mlx_array* out, mlx_array x,
 
     mlx_array q_n = mlx_array_new(), k_n = mlx_array_new();
     if (ok) ok = llm_mlx_qwen4exp_qk_l2norm(&q_n, &k_n, q4, k4, powf((float)head_k_dim, -0.5f), stream);
-    if (ok && getenv("LLM_Q4_DBG")) {
-        mlx_array f = mlx_array_new();
-        if (mlx_astype(&f, q_n, MLX_FLOAT32, stream) == 0 && mlx_array_eval(f) == 0) {
-            const float* d = mlx_array_data_float32(f); fprintf(stderr, "[q4] q_n[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",d[i]); fprintf(stderr,"\n");
-        }
-        mlx_array_free(f);
-        f = mlx_array_new();
-        if (mlx_astype(&f, v4, MLX_FLOAT32, stream) == 0 && mlx_array_eval(f) == 0) {
-            const float* d = mlx_array_data_float32(f); fprintf(stderr, "[q4] v4[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",d[i]); fprintf(stderr,"\n");
-        }
-        mlx_array_free(f);
-    }
+    
 
     /* g/beta: IDENTICO a qwen3_next -- beta=sigmoid(b); g=exp(-exp(A_log)*softplus(a+dt_bias)) */
     mlx_array beta = mlx_array_new();
@@ -679,38 +661,11 @@ static bool llm_mlx_qwen4exp_gdn_block(mlx_array* out, mlx_array x,
     }
     mlx_array y_stack = mlx_array_new();
     if (ok) ok = mlx_stack_axis(&y_stack, ys, /*axis=*/1, stream) == 0;
-    if (ok && getenv("LLM_Q4_DBG")) {
-        mlx_array f = mlx_array_new();
-        if (mlx_astype(&f, y_stack, MLX_FLOAT32, stream) == 0 && mlx_array_eval(f) == 0) {
-            const float* d = mlx_array_data_float32(f); fprintf(stderr, "[q4] y_stack[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",d[i]); fprintf(stderr,"\n");
-        }
-        mlx_array_free(f);
-        f = mlx_array_new();
-        if (mlx_astype(&f, g, MLX_FLOAT32, stream) == 0 && mlx_array_eval(f) == 0) {
-            const float* d = mlx_array_data_float32(f); fprintf(stderr, "[q4] g[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",d[i]); fprintf(stderr,"\n");
-        }
-        mlx_array_free(f);
-        f = mlx_array_new();
-        if (mlx_astype(&f, beta, MLX_FLOAT32, stream) == 0 && mlx_array_eval(f) == 0) {
-            const float* d = mlx_array_data_float32(f); fprintf(stderr, "[q4] beta[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",d[i]); fprintf(stderr,"\n");
-        }
-        mlx_array_free(f);
-    }
+    
 
     mlx_array gated = mlx_array_new();
     if (ok) ok = llm_mlx_sigmoid_rmsnorm_gated(&gated, y_stack, norm_w, z, use_silu, eps, stream);
-    if (ok && getenv("LLM_Q4_DBG")) {
-        mlx_array f = mlx_array_new();
-        if (mlx_astype(&f, z, MLX_FLOAT32, stream) == 0 && mlx_array_eval(f) == 0) {
-            const float* d = mlx_array_data_float32(f); fprintf(stderr, "[q4] z[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",d[i]); fprintf(stderr,"\n");
-        }
-        mlx_array_free(f);
-        f = mlx_array_new();
-        if (mlx_astype(&f, gated, MLX_FLOAT32, stream) == 0 && mlx_array_eval(f) == 0) {
-            const float* d = mlx_array_data_float32(f); fprintf(stderr, "[q4] gated[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",d[i]); fprintf(stderr,"\n");
-        }
-        mlx_array_free(f);
-    }
+    
     mlx_array gated_flat = mlx_array_new();
     if (ok) { const int fs[3] = {B, T, value_dim}; ok = mlx_reshape(&gated_flat, gated, fs, 3, stream) == 0; }
     if (ok) ok = llm_mlx_qwen4exp_plain_linear(out, gated_flat, w_out, stream);
@@ -1033,18 +988,8 @@ static bool llm_mlx_qwen4exp_ple_layer(mlx_array* out, mlx_array* conv_state_out
     if (ok) ok = mlx_multiply(&gate, gate_sqrt, gate_sign, stream) == 0;
     mlx_array gate_sig = mlx_array_new();
     if (ok) ok = mlx_sigmoid(&gate_sig, gate, stream) == 0;
-    if (ok && getenv("LLM_Q4_DBG")) {
-        mlx_array_eval(keys_n); mlx_array_eval(queries_n);
-        const float* dk = mlx_array_data_float32(keys_n); const float* dq = mlx_array_data_float32(queries_n);
-        if (dk) { fprintf(stderr, "[ple] keys_n[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",dk[i]); fprintf(stderr,"\n"); }
-        if (dq) { fprintf(stderr, "[ple] queries_n[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",dq[i]); fprintf(stderr,"\n"); }
-    }
-    if (ok && getenv("LLM_Q4_DBG")) {
-        mlx_array_eval(gate0); mlx_array_eval(gate_sig);
-        const float* d0 = mlx_array_data_float32(gate0); const float* ds = mlx_array_data_float32(gate_sig);
-        if (d0) { fprintf(stderr, "[ple] gate0[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",d0[i]); fprintf(stderr,"\n"); }
-        if (ds) { fprintf(stderr, "[ple] gate_sig[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",ds[i]); fprintf(stderr,"\n"); }
-    }
+    
+    
 
     mlx_array gated4 = mlx_array_new();
     if (ok) ok = mlx_multiply(&gated4, gate_sig, values_e, stream) == 0;
@@ -1076,12 +1021,7 @@ static bool llm_mlx_qwen4exp_ple_layer(mlx_array* out, mlx_array* conv_state_out
     mlx_array conv_silu = mlx_array_new();
     if (ok) ok = llm_mlx_qwen4exp_silu(&conv_silu, conv_out, stream);
     if (ok) ok = mlx_add(out, gated_flat, conv_silu, stream) == 0;
-    if (ok && getenv("LLM_Q4_DBG")) {
-        mlx_array_eval(gated_flat); mlx_array_eval(conv_silu);
-        const float* dg = mlx_array_data_float32(gated_flat); const float* dc = mlx_array_data_float32(conv_silu);
-        if (dg) { fprintf(stderr, "[ple] gated[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",dg[i]); fprintf(stderr,"\n"); }
-        if (dc) { fprintf(stderr, "[ple] conv_silu[0:6] ="); for(int i=0;i<6;i++) fprintf(stderr," %.6f",dc[i]); fprintf(stderr,"\n"); }
-    }
+    
     /* Stato per la chiamata successiva: ultimi conv_state_len passi di conv_input, stesso
      * schema esatto di qwen3_next_linear_block/qwen4_linear_gdn_block per il conv1d GDN. */
     if (ok && conv_state_out != NULL) {

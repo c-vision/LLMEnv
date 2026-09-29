@@ -685,7 +685,7 @@ bool qwen4_exp_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offse
 
     /* F3: dump dell'output ATTENTION (fine sub-blocco, prima del ffn) per-layer. */
     if (ok && llm_env_isset("LLM_QWEN4EXP_LAYER_DUMP")) {
-        const char* e = getenv("LLM_QWEN4EXP_LAYER_DUMP");
+        const char* e = 0;
         int lim = (e && *e) ? atoi(e) : 48;
         if (layer_idx < lim) {
             mlx_array dbga = mlx_array_new();
@@ -760,7 +760,7 @@ bool qwen4_exp_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arr
      * LLM_QWEN4EXP_LAYER_DUMP=<N> → stampa absmax/mean sui primi N layer. Confrontato col
      * reference lazy (tools/q4_ref_lazy.py). No-op se non impostato. */
     if (ok && llm_env_isset("LLM_QWEN4EXP_LAYER_DUMP")) {
-        const char* e = getenv("LLM_QWEN4EXP_LAYER_DUMP");
+        const char* e = 0;
         int lim = (e && *e) ? atoi(e) : 48;
         if (layer_idx < lim) {
             mlx_array dbg = mlx_array_new();

@@ -78,7 +78,7 @@ static bool llm_ai_mlx_session_generate_async_greedy(LlmMlxSession* s, LlmMlxMod
     /* LLM_ASYNC_TIME: timer PROPRI (non il profiler che cammina il grafo) per separare le fasi
      * del loop async: build (forward+final_step) / submit (async_eval) / wait (eval del token
      * precedente) / rest (read+history+pending_h+clear_cache). */
-    const bool atime = getenv("LLM_ASYNC_TIME") != NULL;
+    const bool atime = 0 != NULL;
     double at_build = 0, at_submit = 0, at_wait = 0, at_rest = 0; int at_n = 0;
     struct timespec at_a = {0, 0}, at_b = {0, 0}, at_c = {0, 0}, at_d = {0, 0}, at_e = {0, 0};
 #define AT_MS(x, y) ((double)((y).tv_sec - (x).tv_sec) * 1e3 + (double)((y).tv_nsec - (x).tv_nsec) * 1e-6)
@@ -595,7 +595,7 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
         }
         /* Debug parita' Fase B (default OFF): dump h fp32 di OGNI step. */
         {
-            const char* dh = getenv("LLM_DUMP_H");
+            const char* dh = 0;
             if (ok && dh) {
                 mlx_array hf = mlx_array_new();
                 if (mlx_astype(&hf, h, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(hf) == 0) {

@@ -125,7 +125,6 @@ bool llm_mlx_final_norm(LlmMlxModel* m, mlx_array h, mlx_array norm_w, mlx_array
 static bool final_step_sampling_dev(LlmMlxModel* m, mlx_array capped,
                                     const llm_mlx_sampling_t* sp, int32_t* out_id) {
     static int s_dbg = -1;
-    if (s_dbg < 0) s_dbg = (getenv("LLM_SAMPLER_ONDEVICE_DBG") != NULL) ? 1 : 0;
     if (sp == NULL || out_id == NULL) return false;
     if (sp->repetition_penalty > 1.0f || sp->frequency_penalty != 0.0f || sp->presence_penalty != 0.0f) {
         if (s_dbg) fprintf(stderr, "[sampler-ondevice] penalty attive -> path host\n");
@@ -257,8 +256,8 @@ bool final_step(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
         if (mlx_astype(&lf, capped, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(lf) == 0) {
             const float* ld = mlx_array_data_float32(lf);
             size_t n = mlx_array_size(lf);
-            const char* path = getenv("LLM_QWEN4EXP_LOGITS");
-            const char* dir = getenv("LLM_QWEN4EXP_LOGITS_DIR");
+            const char* path = 0;
+            const char* dir = 0;
             char pbuf[1200];
             if (dir != NULL) {
                 static int q4_logit_step = 0;

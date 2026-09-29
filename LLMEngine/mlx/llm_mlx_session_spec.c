@@ -114,13 +114,10 @@ int llm_ai_mlx_session_verify_draft_batch(llm_ai_mlx_session_handle handle,
         }
     }
     mlx_array h_batch = mlx_array_new();
-    struct timespec _st0,_st1; clock_gettime(CLOCK_MONOTONIC,&_st0);
     if (cap_ok) g_spec_capture = 1;
     ok = forward_tokens_batch(m, s, t.embed_w, t.embed_s, t.embed_b, draft_ids, n_draft,
                               n_prev, s->k_cache, s->v_cache, s->has_cache, &h_batch);
     if (cap_ok) g_spec_capture = 0;
-    clock_gettime(CLOCK_MONOTONIC,&_st1);
-    double _t_batch = (_st1.tv_sec-_st0.tv_sec)*1e3+(_st1.tv_nsec-_st0.tv_nsec)/1e6;
     if (!ok) {
         mlx_array_free(h_batch); free_output_tensors(&t);
         if (ck && cv) for (int l = 0; l < n_ck; l++) { llm_mlx_cache_commit(&ck[l], m->stream); llm_mlx_cache_commit(&cv[l], m->stream); }
@@ -142,8 +139,6 @@ int llm_ai_mlx_session_verify_draft_batch(llm_ai_mlx_session_handle handle,
     mlx_array am = mlx_array_new();
     if (ok) ok = mlx_argmax_axis(&am, capped, -1, /*keepdims=*/false, m->stream) == 0;
     if (ok) ok = mlx_array_eval(am) == 0;
-    struct timespec _st2; clock_gettime(CLOCK_MONOTONIC,&_st2);
-    double _t_head = (_st2.tv_sec-_st1.tv_sec)*1e3+(_st2.tv_nsec-_st1.tv_nsec)/1e6;
 
     int accepted = 0;
     int32_t next_token = greedy0;
@@ -307,11 +302,6 @@ int llm_ai_mlx_session_verify_draft_batch(llm_ai_mlx_session_handle handle,
     free_output_tensors(&t);
 
     if (!ok) return -1;
-    { struct timespec _st3; clock_gettime(CLOCK_MONOTONIC,&_st3);
-      double _t_roll = (_st3.tv_sec-_st2.tv_sec)*1e3+(_st3.tv_nsec-_st2.tv_nsec)/1e6;
-      if (getenv("LLM_SPEC_TIME"))
-          fprintf(stderr, "[spec-time] K=%d acc=%d | batch=%.1fms head(eval)=%.1fms rollback=%.1fms\n",
-                  n_draft, accepted, _t_batch, _t_head, _t_roll); }
     *out_accepted = accepted;
     *out_next_token = next_token;
     return 0;
@@ -505,10 +495,8 @@ int llm_ai_mlx_session_verify_draft_batch_multi(
         }
     }
     mlx_array out_h = mlx_array_new();
-    struct timespec _q0,_q1,_q2; clock_gettime(CLOCK_MONOTONIC,&_q0);
     if (ok) ok = forward_tokens_batch_multi(m, (LlmMlxSession**)handles, ks, n, toks, offs,
                                             t.embed_w, t.embed_s, t.embed_b, &out_h);
-    clock_gettime(CLOCK_MONOTONIC,&_q1);
     /* norm + lm_head sull'intero [1,total,hidden] -> argmax [total] (un solo grafo). */
     mlx_array normed = mlx_array_new(), logits = mlx_array_new(), capped = mlx_array_new(), am = mlx_array_new();
     if (ok) ok = mlx_fast_rms_norm(&normed, out_h, t.final_norm_w, m->cfg.rms_norm_eps, m->stream) == 0;
@@ -584,12 +572,6 @@ int llm_ai_mlx_session_verify_draft_batch_multi(
         s->cache_offset = nprev[i] + accepted;
         s->pending_next_id = out_next[i];
     }
-    clock_gettime(CLOCK_MONOTONIC,&_q2);
-    if (getenv("LLM_SPEC_TIME"))
-        fprintf(stderr, "[multi-time] N=%d total=%d fwd=%.1fms rollback=%.1fms\n", n, total,
-            (_q1.tv_sec-_q0.tv_sec)*1e3+(_q1.tv_nsec-_q0.tv_nsec)/1e6,
-            (_q2.tv_sec-_q1.tv_sec)*1e3+(_q2.tv_nsec-_q1.tv_nsec)/1e6);
-
     for (int i = 0; i < n; i++) for (int l = 0; l < n_ck; l++) {
         llm_mlx_cache_commit(&ck[(size_t)i * n_ck + l], m->stream);
         llm_mlx_cache_commit(&cv[(size_t)i * n_ck + l], m->stream);
