@@ -152,7 +152,7 @@ bool llm_mlx_dp_enabled(void) {
     Profile& d = p();
     if (!d.flag_read) {
         d.flag_read = true;
-        d.on = (getenv("LLM_DISPATCH") != nullptr);
+        d.on = 0;
     }
     return d.on;
 }

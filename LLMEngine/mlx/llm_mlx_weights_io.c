@@ -213,8 +213,6 @@ void llm_mlx_shards_to_gpu(MultiShardWeights* mw, mlx_stream gpu) {
         mlx_array_free(val);
         mlx_map_string_to_array_iterator_free(it);
     }
-    if (getenv("LLM_DF2_DEBUG") != NULL)
-        fprintf(stderr, "[df2] shards_to_gpu: %ld tensori copiati su GPU\n", n_copied);
 }
 
 bool multishard_get_triple(const MultiShardWeights* mw, const char* base, mlx_array* w, mlx_array* scales, mlx_array* biases) {
@@ -1022,15 +1020,8 @@ void llm_mlx_pretouch_weights(const MultiShardWeights* weights) {
         mlx_map_string_to_array_iterator_free(it);
     }
     if (n_tensors > 0) {
-        const bool verbose = getenv("LLM_PRETOUCH_WEIGHTS_TIME") != NULL;
-        struct timespec t0 = {0}, t1 = {0};
-        if (verbose) clock_gettime(CLOCK_MONOTONIC, &t0);
         int rc = mlx_eval(all);
-        if (verbose) {
-            clock_gettime(CLOCK_MONOTONIC, &t1);
-            double secs = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
-            fprintf(stderr, "[pretouch] %zu tensori, mlx_eval=%d, %.3fs\n", n_tensors, rc, secs);
-        }
+        (void)rc;
     }
     mlx_vector_array_free(all);
 }

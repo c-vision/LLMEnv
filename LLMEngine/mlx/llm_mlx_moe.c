@@ -90,12 +90,7 @@ bool llm_mlx_moe_gateup_gather(GmoeFfnQuant* fq, mlx_array x, mlx_array lhs_indi
     mlx_array_free(gate_up);
     /* Branch-first (todo MLX-Decode-Composizione §7): una riga UNA volta per processo che
      * prova che il ramo fuso e' davvero in uso (senza, "IDS identici" non distingue fused da
-     * fallback). LLMENGINE_MOE_GATEUP_DBG=1, zero overhead quando non impostata. */
-    if (ok) {
-        static int s_dbg = -1, s_printed = 0;
-        if (s_dbg < 0) s_dbg = (getenv("LLMENGINE_MOE_GATEUP_DBG") != NULL) ? 1 : 0;
-        if (s_dbg && !s_printed) { s_printed = 1; fprintf(stderr, "[moe-gateup] fusione ATTIVA (gather_qmm fuso gate+up)\n"); }
-    }
+     * fallback). */
     return ok;
 }
 /* MoE: matmul per-esperto. Percorso GGUF: pesi dequantizzati F16 (quant_mode=""), NIENTE
