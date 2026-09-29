@@ -1208,6 +1208,22 @@ static id<MTLBuffer> dsv4_view(LlmDsv4Metal* b, const void* p, size_t bytes, siz
     return [b->dev newBufferWithBytesNoCopy:(void*)ap length:vl options:MTLResourceStorageModeShared deallocator:nil];
 }
 
+/* Cache PERSISTENTE di viste (memoizzate per ptr+bytes): i tensori degli esperti sono fissi
+ * (mmap), quindi la vista si crea UNA volta e si riusa (niente alloc per-token). */
+static struct { const void* ptr; size_t bytes; id<MTLBuffer> buf; } g_tv_cache[512];
+static int g_tv_n = 0;
+static id<MTLBuffer> dsv4_view_cached(LlmDsv4Metal* b, const void* p, size_t bytes, size_t* out_lead) {
+    for (int i = 0; i < g_tv_n; i++)
+        if (g_tv_cache[i].ptr == p && g_tv_cache[i].bytes == bytes) {
+            if (out_lead) { const size_t page=(size_t)getpagesize(); *out_lead=(size_t)((uintptr_t)p & (page-1)); }
+            return g_tv_cache[i].buf;
+        }
+    size_t lead = 0; id<MTLBuffer> buf = dsv4_view(b, p, bytes, &lead);
+    if (out_lead) *out_lead = lead;
+    if (buf && g_tv_n < 512) { g_tv_cache[g_tv_n].ptr = p; g_tv_cache[g_tv_n].bytes = bytes; g_tv_cache[g_tv_n].buf = buf; g_tv_n++; }
+    return buf;
+}
+
 /* TAIL FUSO del layer (ds4): attn-out + mhc_post + mhc_pre + route + moe + mhc_post in UNA cb.
  * 0 = ok, <0 = fallback CPU. */
 int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
@@ -1231,9 +1247,9 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
     id<MTLBuffer> EXPB  = q->exp_probs_b ? (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->exp_probs_b, (size_t)q->n_expert*sizeof(float)) : nil;
     size_t rtw_lead = 0;
     size_t lg = 0, lu = 0, ld = 0;
-    id<MTLBuffer> GB = dsv4_view(b, q->gate_base, (size_t)q->n_expert * q->gate_stride, &lg);
-    id<MTLBuffer> UB = dsv4_view(b, q->up_base,   (size_t)q->n_expert * q->up_stride,   &lu);
-    id<MTLBuffer> DB = dsv4_view(b, q->down_base, (size_t)q->n_expert * q->down_stride, &ld);
+    id<MTLBuffer> GB = dsv4_view_cached(b, q->gate_base, (size_t)q->n_expert * q->gate_stride, &lg);
+    id<MTLBuffer> UB = dsv4_view_cached(b, q->up_base,   (size_t)q->n_expert * q->up_stride,   &lu);
+    id<MTLBuffer> DB = dsv4_view_cached(b, q->down_base, (size_t)q->n_expert * q->down_stride, &ld);
     id<MTLBuffer> RTW = dsv4_view(b, q->router_w, (size_t)q->n_expert*D*sizeof(float), &rtw_lead);
     size_t oa_lead = 0, ob_lead = 0;
     id<MTLBuffer> OUTA = dsv4_view(b, q->outa_w, (size_t)q->ng*q->rank*q->outa_row_bytes, &oa_lead);
@@ -1389,7 +1405,7 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
     if (HEADS) [HEADS release]; if (RES) [RES release]; if (POST) [POST release]; if (COMB) [COMB release];
     if (FN) [FN release]; if (SCALE) [SCALE release]; if (BASE) [BASE release]; if (NORMW) [NORMW release];
     if (EXPB) [EXPB release];
-    if (GB) [GB release]; if (UB) [UB release]; if (DB) [DB release];
+    /* GB/UB/DB: viste in cache persistente, NON rilasciate. */
     if (RTW) [RTW release]; if (OUTA) [OUTA release]; if (OUTB) [OUTB release];
     if (WG) [WG release]; if (WU) [WU release]; if (WD) [WD release];
     return rc;
