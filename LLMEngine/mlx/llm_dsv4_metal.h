@@ -64,7 +64,8 @@ int llm_dsv4_metal_pair_swiglu_batch(LlmDsv4Metal* b, const void* const* gates, 
 int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const void* const* ups,
                                const void* const* downs, const float* x, const float* rws, int n,
                                float clamp, uint32_t embd, uint32_t gu_nb01, uint32_t ff,
-                               uint32_t down_nb01, float* out);
+                               uint32_t down_nb01, const void* sg, const void* su, const void* sd,
+                               uint32_t s_nb_g, uint32_t s_nb_d, float* out);
 
 /* Output grouped-LoRA FUSO (ds4): out_a (ng gruppi) + out_b in UNA command buffer, `low` su device. */
 int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t outa_row_bytes,

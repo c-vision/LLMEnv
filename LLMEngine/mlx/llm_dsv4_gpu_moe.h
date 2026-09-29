@@ -72,6 +72,7 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
     float weight[LLM_DSV4_MAX_EXPERT_USED];
     llm_dsv4_moe_route(c, L, x, il, token, selected, weight);   /* riuso C */
     bool ok = true;
+    int shexp_gpu = 0;
 
     if (gt == 16 && ut == 16 && dt == 10) {
         /* PATH ds4: pair_swiglu + sum6 in UNA command buffer (mid f32 su device, nessun
@@ -94,10 +95,16 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
             }
             rw[i] = weight[i];
         }
+        const void* sg = (pe->shexp_gate && pe->shexp_up && pe->shexp_down) ? pe->shexp_gate : NULL;
         if (ok) ok = llm_dsv4_metal_moe_iq2_q2k(m->be, gp, upp, dp, x, rw, used,
                                                 c->swiglu_clamp_exp, (uint32_t)embd,
                                                 (uint32_t)m->gate[il].row_bytes, (uint32_t)ff,
-                                                (uint32_t)m->down[il].row_bytes, out) == 0;
+                                                (uint32_t)m->down[il].row_bytes,
+                                                sg, sg ? pe->shexp_up : NULL, sg ? pe->shexp_down : NULL,
+                                                (uint32_t)llm_ggml_nbytes(pe->shexp_gate_type, embd),
+                                                (uint32_t)llm_ggml_nbytes(pe->shexp_down_type, ff),
+                                                out) == 0;
+        if (ok && sg) shexp_gpu = 1;
     } else {
         float* midv  = (float*)malloc(sizeof(float) * (size_t)ff * used);
         float* downv = (float*)malloc(sizeof(float) * (size_t)embd * used);
@@ -174,7 +181,7 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
     }
 
     /* shared expert: Q8_0 packed (dot intero) se disponibile, altrimenti f32. */
-    if (ok) {
+    if (ok && !shexp_gpu) {
         float* g = (float*)malloc(sizeof(float) * (size_t)ff);
         float* u = (float*)malloc(sizeof(float) * (size_t)ff);
         float* mid = (float*)malloc(sizeof(float) * (size_t)ff);
