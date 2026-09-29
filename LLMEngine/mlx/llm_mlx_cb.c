@@ -8,6 +8,7 @@
 #include "llm_mlx_splash_store.h"
 #include "llm_mlx_splash_attn.h"   /* opt_env: registro */
 #include "llm_mlx_kvq_splash.h"        /* B7: store/quant Splash int8 */
+#include "llm_mlx_kvdisk_io.h"      /* tier SSD: round-trip blob int8 */
 #include "llm_mlx_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1351,4 +1352,49 @@ int llm_ai_mlx_kvq_splash_selftest(char* out, size_t cap) {
     mlx_array_free(ka); mlx_array_free(va); mlx_array_free(qa);
     free(kbuf); free(vbuf); free(qbuf);
     return (ref_ok && bad == 0) ? 0 : 1;
+}
+
+/* Self-test: serializzazione INT8 nel tier SSD (blob + round-trip su file). */
+int llm_ai_mlx_kvdisk_int8_selftest(char* out, size_t cap) {
+    if (out == NULL || cap == 0) return -1;
+    out[0] = '\0';
+    int sh[3] = {2, 64, 8};
+    size_t n = (size_t)sh[0]*sh[1]*sh[2];
+    int8_t* src = (int8_t*)malloc(n);
+    if (!src) return -1;
+    for (size_t i = 0; i < n; i++) src[i] = (int8_t)((int)((i*7) % 255) - 127);
+    int rc = 0;
+    mlx_array a = mlx_array_new_data(src, sh, 3, MLX_INT8);
+    uint8_t* blob = NULL; size_t len = 0, bcap = 0;
+    if (llm_kvdisk_blob_append_tensor(&blob, &len, &bcap, a, 0, 0) != 0) rc = -1;
+    int bad_n = -1;
+    if (rc == 0) {
+        size_t off = 0; mlx_array b = mlx_array_new(); int layer = -1, kind = -1;
+        if (llm_kvdisk_blob_read_tensor(blob, len, &off, &b, &layer, &kind) == 0 && mlx_array_eval(b) == 0) {
+            const int8_t* got = mlx_array_data_int8(b);
+            int bad = 0; if (mlx_array_size(b) != n) bad = 1;
+            else for (size_t i = 0; i < n; i++) if (got[i] != src[i]) bad = 1;
+            bad_n = bad;
+        } else bad_n = 2;
+        mlx_array_free(b);
+    }
+    /* round-trip su FILE tramite il tier esistente */
+    int tier_ok = -1;
+    if (rc == 0) {
+        KvDisk d = llm_kv_disk_open("/tmp/llm_kvdisk_int8test.scratch", 64, (uint64_t)4*1024*1024);
+        if (d.f && d.e) {
+            if (llm_kv_disk_put(&d, 0xABCDEF12ULL, blob, len) == 0) {
+                uint8_t* back = (uint8_t*)malloc(len); size_t got = 0;
+                if (back && llm_kv_disk_get(&d, 0xABCDEF12ULL, back, len, &got) == 0 && got == len)
+                    tier_ok = (memcmp(back, blob, len) == 0) ? 0 : 1;
+                else tier_ok = 2;
+                free(back);
+            } else tier_ok = 3;
+        }
+        llm_kv_disk_close(&d);
+    }
+    snprintf(out, cap, "kvdisk_int8 selftest: append_rc=%d blob_bad=%d tier_ok=%d %s",
+             rc, bad_n, tier_ok, (rc == 0 && bad_n == 0 && tier_ok == 0) ? "OK" : "FAIL");
+    mlx_array_free(a); free(blob); free(src);
+    return (rc == 0 && bad_n == 0 && tier_ok == 0) ? 0 : 1;
 }

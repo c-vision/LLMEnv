@@ -10,7 +10,7 @@
  *     i32 layer ; u8 kind (0=k,1=v) ; u8 dtype_code ; u8 ndim ; u8 pad
  *     i32 shape[4] ; u64 nbytes ; u8 data[nbytes]
  *
- * dtype_code: 1=FLOAT16, 2=BFLOAT16, 3=FLOAT32 (altri -> non serializzabile).
+ * dtype_code: 1=FLOAT16, 2=BFLOAT16, 3=FLOAT32, 4=INT32, 5=INT8 (altri -> non serializzabile).
  * `mlx_array_eval` PRIMA di leggere i dati; `mlx_array_new_data` COPIA il buffer
  * (quindi il blob temporaneo puo' essere liberato subito dopo il restore).
  * Dipende da mlx-c (quindi non e' puro); vedi llm_mlx_kvdisk.h per il tier disco puro.
@@ -34,6 +34,7 @@ static inline int llm_kvdisk_dtype_code(mlx_dtype d) {
         case MLX_BFLOAT16: return 2;
         case MLX_FLOAT32:  return 3;
         case MLX_INT32:    return 4;
+        case MLX_INT8:     return 5;
         default:           return 0;
     }
 }
@@ -43,6 +44,7 @@ static inline mlx_dtype llm_kvdisk_dtype_from_code(int c) {
         case 2: return MLX_BFLOAT16;
         case 3: return MLX_FLOAT32;
         case 4: return MLX_INT32;
+        case 5: return MLX_INT8;
         default: return MLX_FLOAT32;
     }
 }
@@ -79,10 +81,11 @@ static inline int llm_kvdisk_blob_append_tensor(uint8_t** buf, size_t* len, size
         case 2: ptr = (const void*)mlx_array_data_bfloat16(a); break;
         case 3: ptr = (const void*)mlx_array_data_float32(a);  break;
         case 4: ptr = (const void*)mlx_array_data_int32(a);    break;
+        case 5: ptr = (const void*)mlx_array_data_int8(a);     break;
         default: return -1;
     }
     if (!ptr) return -1;
-    size_t itemsize = (dc == 1 || dc == 2) ? 2u : 4u;
+    size_t itemsize = (dc == 1 || dc == 2) ? 2u : (dc == 5 ? 1u : 4u);
     uint64_t nbytes = (uint64_t)n * (uint64_t)itemsize;
     if (nbytes == 0) return -1;
     int32_t hdr[4] = { (int32_t)layer, (int32_t)kind, (int32_t)dc, (int32_t)nd };
