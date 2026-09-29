@@ -62,7 +62,8 @@ static inline bool llm_dsv4_gpu_moe_init(LlmDsv4MoeGpu* m, LlmDsv4Metal* be, con
 static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
                                     int il, const float* x, int token, float* out) {
     if (!llm_dsv4_gpu_enabled() || !m || !m->inited || il < 0 || il >= c->n_layer) return false;
-    if (m->gate[il].type != 16 || m->up[il].type != 16) return false;   /* pair kernel = solo IQ2_XXS */
+    const int gt = m->gate[il].type, ut = m->up[il].type;
+    if (!((gt == 16 && ut == 16) || ((gt == 10 || gt == 12) && (ut == 10 || ut == 12)))) return false;
     const int used = c->n_expert_used, ff = c->n_ff_exp, embd = c->n_embd;
     int selected[LLM_DSV4_MAX_EXPERT_USED];
     float weight[LLM_DSV4_MAX_EXPERT_USED];
@@ -82,23 +83,46 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
         const void* upp[LLM_DSV4_MAX_EXPERT_USED];
         float* mp[LLM_DSV4_MAX_EXPERT_USED];
         float rw[LLM_DSV4_MAX_EXPERT_USED];
-        for (int i = 0; ok && i < used; i++) {
-            int e = selected[i];
-            if (streaming) {
-                const uint8_t *g = NULL, *u = NULL, *d = NULL;
-                pe->store_get(pe->store, il, e, &g, &u, &d);
-                if (!g || !u) { ok = false; break; }
-                gp[i] = g; upp[i] = u;
-            } else {
-                gp[i]  = (const uint8_t*)m->gate[il].w + (size_t)e * (size_t)ff * m->gate[il].row_bytes;
-                upp[i] = (const uint8_t*)m->up[il].w   + (size_t)e * (size_t)ff * m->up[il].row_bytes;
+        for (int i = 0; ok && i < used; i++) { mp[i] = midv + (size_t)i * ff; rw[i] = weight[i]; }
+        if (gt == 16) {
+            for (int i = 0; ok && i < used; i++) {
+                int e = selected[i];
+                if (streaming) {
+                    const uint8_t *g = NULL, *u = NULL, *d = NULL;
+                    pe->store_get(pe->store, il, e, &g, &u, &d);
+                    if (!g || !u) { ok = false; break; }
+                    gp[i] = g; upp[i] = u;
+                } else {
+                    gp[i]  = (const uint8_t*)m->gate[il].w + (size_t)e * (size_t)ff * m->gate[il].row_bytes;
+                    upp[i] = (const uint8_t*)m->up[il].w   + (size_t)e * (size_t)ff * m->up[il].row_bytes;
+                }
             }
-            mp[i] = midv + (size_t)i * ff;
-            rw[i] = weight[i];
+            if (ok && llm_dsv4_metal_pair_swiglu_batch(m->be, gp, upp, x, mp, rw, used,
+                                                       c->swiglu_clamp_exp, (uint32_t)embd,
+                                                       (uint32_t)m->gate[il].row_bytes, (uint32_t)ff) != 0) ok = false;
+        } else {
+            /* gate/up Q4_K/Q2_K: niente pair kernel -> gemv Q8_K (x) + swiglu*peso su CPU. */
+            float* gbuf = (float*)malloc(sizeof(float) * (size_t)ff * used);
+            float* ubuf = (float*)malloc(sizeof(float) * (size_t)ff * used);
+            ok = gbuf && ubuf;
+            LlmDsv4GpuJob gj[2 * LLM_DSV4_MAX_EXPERT_USED]; int ng = 0;
+            for (int i = 0; ok && i < used; i++) {
+                int e = selected[i]; const uint8_t *g = NULL, *u = NULL, *d = NULL;
+                if (streaming) pe->store_get(pe->store, il, e, &g, &u, &d);
+                else { g  = (const uint8_t*)m->gate[il].w + (size_t)e * (size_t)ff * m->gate[il].row_bytes;
+                       u  = (const uint8_t*)m->up[il].w   + (size_t)e * (size_t)ff * m->up[il].row_bytes; }
+                if (!g || !u) { ok = false; break; }
+                gj[ng++] = (LlmDsv4GpuJob){ g, 0, gt, m->gate[il].row_bytes, (uint32_t)embd, (uint32_t)ff, x, gbuf + (size_t)i * ff };
+                gj[ng++] = (LlmDsv4GpuJob){ u, 0, ut, m->up[il].row_bytes,   (uint32_t)embd, (uint32_t)ff, x, ubuf + (size_t)i * ff };
+            }
+            if (ok) ok = llm_dsv4_metal_gemv_batch(m->be, gj, ng) == 0;
+            for (int i = 0; ok && i < used; i++) {
+                llm_dsv4_swiglu(mp[i], gbuf + (size_t)i * ff, ubuf + (size_t)i * ff, ff, c->swiglu_clamp_exp);
+                for (int j = 0; j < ff; j++) mp[i][j] *= rw[i];
+                for (int j = 0; j < ff; j++) if (!isfinite(mp[i][j])) mp[i][j] = 0.0f;
+            }
+            free(gbuf); free(ubuf);
         }
-        if (ok && llm_dsv4_metal_pair_swiglu_batch(m->be, gp, upp, x, mp, rw, used,
-                                                   c->swiglu_clamp_exp, (uint32_t)embd,
-                                                   (uint32_t)m->gate[il].row_bytes, (uint32_t)ff) != 0) ok = false;
     }
     /* batch 2: down dei used esperti in UNA command buffer (stessa cache/streaming). */
     if (ok) {
@@ -123,21 +147,44 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
     for (int i = 0; ok && i < used; i++)
         for (int o = 0; o < embd; o++) if (isfinite(downv[(size_t)i * embd + o])) out[o] += downv[(size_t)i * embd + o];
 
-    /* shared expert: f32 (riuso C); scratch dedicato */
+    /* shared expert: Q8_0 packed (dot intero) se disponibile, altrimenti f32. */
     if (ok) {
         float* g = (float*)malloc(sizeof(float) * (size_t)ff);
         float* u = (float*)malloc(sizeof(float) * (size_t)ff);
         float* mid = (float*)malloc(sizeof(float) * (size_t)ff);
         ok = g && u && mid;
         if (ok) {
-            llm_dsv4_linear(g, L->ffn_gate_shexp, ff, embd, x);
-            llm_dsv4_linear(u, L->ffn_up_shexp,   ff, embd, x);
-            llm_dsv4_swiglu(mid, g, u, ff, c->swiglu_clamp_exp);
-            for (int o = 0; o < embd; o++) {
-                const float* wr = L->ffn_down_shexp + (long)o * ff;
-                double acc = 0.0;
-                for (int j = 0; j < ff; j++) acc += (double)wr[j] * mid[j];
-                out[o] += (float)acc;
+            const LlmDsv4PackedExperts* pe = &m->exps[il];
+            if (pe->shexp_gate && pe->shexp_up && pe->shexp_down) {
+                /* Q8_0 packed: dot intero NEON (come il path C) — ~5x meno del f32 scalare. */
+                int64_t nb_g = llm_ggml_nbytes(pe->shexp_gate_type, embd);
+                int64_t nb_d = llm_ggml_nbytes(pe->shexp_down_type, ff);
+                int8_t* xq8 = (int8_t*)malloc((size_t)embd);
+                float*  xs8 = (float*)malloc(sizeof(float) * (size_t)((embd + 31) / 32));
+                llm_dsv4_q8_0_quantize_row(x, embd, xq8, xs8);
+                for (int o = 0; o < ff; o++) {
+                    g[o] = llm_dsv4_dot_q8_0_prequant(pe->shexp_gate + (int64_t)o * nb_g, embd, xq8, xs8);
+                    u[o] = llm_dsv4_dot_q8_0_prequant(pe->shexp_up   + (int64_t)o * nb_g, embd, xq8, xs8);
+                }
+                llm_dsv4_swiglu(mid, g, u, ff, c->swiglu_clamp_exp);
+                int8_t* mq8 = (int8_t*)malloc((size_t)ff);
+                float*  ms8 = (float*)malloc(sizeof(float) * (size_t)((ff + 31) / 32));
+                llm_dsv4_q8_0_quantize_row(mid, ff, mq8, ms8);
+                for (int o = 0; o < embd; o++) {
+                    float v = llm_dsv4_dot_q8_0_prequant(pe->shexp_down + (int64_t)o * nb_d, ff, mq8, ms8);
+                    if (isfinite(v)) out[o] += v;
+                }
+                free(ms8); free(mq8); free(xs8); free(xq8);
+            } else {
+                llm_dsv4_linear(g, L->ffn_gate_shexp, ff, embd, x);
+                llm_dsv4_linear(u, L->ffn_up_shexp,   ff, embd, x);
+                llm_dsv4_swiglu(mid, g, u, ff, c->swiglu_clamp_exp);
+                for (int o = 0; o < embd; o++) {
+                    const float* wr = L->ffn_down_shexp + (long)o * ff;
+                    double acc = 0.0;
+                    for (int j = 0; j < ff; j++) acc += (double)wr[j] * mid[j];
+                    out[o] += (float)acc;
+                }
             }
         }
         free(g); free(u); free(mid);
