@@ -62,11 +62,11 @@ int main(int argc, char** argv) {
     pe.up=llm_dsv4_bind_packed(&g,IL,"ffn_up_exps",&pe.up_type,&ok);
     pe.down=llm_dsv4_bind_packed(&g,IL,"ffn_down_exps",&pe.down_type,&ok);
     pe.in_dim=c.n_embd; pe.ff_dim=c.n_ff_exp;
-    pe.q_a=llm_dsv4_bind_packed(&g,IL,"attn_q_a.weight",&pe.q_a_type,&ok);
-    pe.q_b=llm_dsv4_bind_packed(&g,IL,"attn_q_b.weight",&pe.q_b_type,&ok);
-    pe.kv =llm_dsv4_bind_packed(&g,IL,"attn_kv.weight",&pe.kv_type,&ok);
-    pe.out_a=llm_dsv4_bind_packed(&g,IL,"attn_output_a.weight",&pe.out_a_type,&ok);
-    pe.out_b=llm_dsv4_bind_packed(&g,IL,"attn_output_b.weight",&pe.out_b_type,&ok);
+    pe.q_a=llm_dsv4_bind_packed(&g,IL,"attn_q_a",&pe.q_a_type,&ok);
+    pe.q_b=llm_dsv4_bind_packed(&g,IL,"attn_q_b",&pe.q_b_type,&ok);
+    pe.kv =llm_dsv4_bind_packed(&g,IL,"attn_kv",&pe.kv_type,&ok);
+    pe.out_a=llm_dsv4_bind_packed(&g,IL,"attn_output_a",&pe.out_a_type,&ok);
+    pe.out_b=llm_dsv4_bind_packed(&g,IL,"attn_output_b",&pe.out_b_type,&ok);
     pe.shexp_gate=llm_dsv4_bind_packed(&g,IL,"ffn_gate_shexp",&pe.shexp_gate_type,&ok);
     pe.shexp_up  =llm_dsv4_bind_packed(&g,IL,"ffn_up_shexp",&pe.shexp_up_type,&ok);
     pe.shexp_down=llm_dsv4_bind_packed(&g,IL,"ffn_down_shexp",&pe.shexp_down_type,&ok);
@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
     int rsel[64]; float rw[64];
     llm_dsv4_moe_route(&c, &L, rnrm, IL, 0, rsel, rw);
     float* rrout = (float*)malloc(sizeof(float)*D);
-    llm_dsv4_moe_forward_packed(&c, &L, &pe, rnrm, IL, 0, rrout);
+    if (!llm_dsv4_gpu_moe_try(&c, &L, IL, rnrm, 0, rrout)) { fprintf(stderr,"moe_try non eseguito\n"); return 3; }
     float* routc = (float*)malloc(sizeof(float)*HC*D);
     llm_dsv4_block_post(&c, rrout, rnxt, p2, c2, routc);
 
@@ -118,7 +118,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[TAIL] %-6s max|diff|=%.6g%s\n", nm, md, (md>1e-3)?"  <<< DIVERGE":""); \
         if (a && md>1e-3) fails++; free(a); } while(0)
     { int n=D; CMP("nxt", rnxt, HC*D); CMP("nrm", rnrm, D); CMP("rout", rrout, D); CMP("outc", routc, HC*D); (void)n; }
-    { float* a = rdbin("/tmp","sel",c.n_expert_used); if (a) { int mism=0; for (int i=0;i<c.n_expert_used;i++) if ((int)a[i]!=rsel[i]) mism++; fprintf(stderr,"[TAIL] sel    mism=%d\n", mism); if (mism) fails++; free(a);} }
+    { FILE* f=fopen("/tmp/d4_sel.bin","rb"); int a[64]={0}; size_t got=f?fread(a,sizeof(int),c.n_expert_used,f):0; if(f)fclose(f);
+      int mism=0; for (int i=0;i<c.n_expert_used && (int)i<(int)got;i++) if (a[i]!=rsel[i]) mism++;
+      fprintf(stderr,"[TAIL] sel    mism=%d%s\n", mism, mism?"  <<< DIVERGE":"");
+      if (mism) fails++; }
     fprintf(stderr, "%s layer %d tail: %s\n", fails?"FAIL":"PASS", IL, fails?"primo stadio divergente sopra":"tutti bit-exact");
     return fails?1:0;
 }

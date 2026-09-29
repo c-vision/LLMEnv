@@ -383,7 +383,7 @@ static const char* const LLM_DSV4_METAL_MOE =
 "kernel void dsv4_gemv_f32(device const float* W [[buffer(0)]], device const float* X [[buffer(1)]],\n"
 "    device float* O [[buffer(2)]], constant uint* P [[buffer(3)]],\n"
 "    uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n"
-"    const uint n = P[0]; device const float* wr = W + (ulong)row * n;\n"
+"    const uint n = P[0]; const uint lead = P[1]; device const float* wr = W + lead + (ulong)row * n;\n"
 "    float acc = 0.f; for (uint i = tid; i < n; i += 32u) acc += wr[i] * X[i];\n"
 "    acc = simd_sum(acc); if (tid == 0u) O[row] = acc;\n"
 "}\n"
@@ -1290,7 +1290,7 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
         [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
         [e setComputePipelineState:b->pso_gemv_f32];
         [e setBuffer:FN offset:0 atIndex:0]; [e setBuffer:FLAT offset:0 atIndex:1]; [e setBuffer:MIXES offset:0 atIndex:2];
-        { uint32_t P[1]={HCD}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        { uint32_t P[2]={HCD,0u}; [e setBytes:P length:sizeof(P) atIndex:3]; }
         [e dispatchThreadgroups:MTLSizeMake(SIZE,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
         [e setComputePipelineState:b->pso_sinkhorn];
         [e setBuffer:MIXES offset:0 atIndex:0]; [e setBuffer:SCALE offset:0 atIndex:1]; [e setBuffer:BASE offset:0 atIndex:2]; [e setBuffer:SPLIT offset:0 atIndex:3];
@@ -1307,7 +1307,7 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
         /* 5) route: logits=gemv_f32(router,NRM); SEL/RW */
         [e setComputePipelineState:b->pso_gemv_f32];
         [e setBuffer:RTW offset:0 atIndex:0]; [e setBuffer:NRM offset:0 atIndex:1]; [e setBuffer:LOGI offset:0 atIndex:2];
-        { uint32_t P[1]={D}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        { uint32_t P[2]={D,(uint32_t)(rtw_lead/sizeof(float))}; [e setBytes:P length:sizeof(P) atIndex:3]; }
         [e dispatchThreadgroups:MTLSizeMake((NSUInteger)q->n_expert,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
         [e setComputePipelineState:b->pso_route];
         [e setBuffer:LOGI offset:0 atIndex:0]; [e setBuffer:(EXPB?EXPB:SCALE) offset:0 atIndex:1]; [e setBuffer:SEL offset:0 atIndex:2]; [e setBuffer:RW offset:0 atIndex:3];
