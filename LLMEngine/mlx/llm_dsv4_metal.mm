@@ -372,6 +372,56 @@ static const char* const LLM_DSV4_METAL_MOE =
 "kernel void dsv4_add_inplace(device float* A [[buffer(0)]], device const float* B [[buffer(1)]],\n"
 "    constant uint* P [[buffer(2)]], uint gid [[thread_position_in_grid]]) {\n"
 "    const uint n = P[0]; if (gid >= n) return; A[gid] += B[gid];\n"
+"}\n"
+"kernel void dsv4_rms_no_w(device const float* X [[buffer(0)]], device float* O [[buffer(1)]],\n"
+"    constant uint* P [[buffer(2)]], constant float* CF [[buffer(3)]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
+"    const uint n = P[0]; const float eps = CF[0];\n"
+"    float s = 0.f; for (uint i = tiisg; i < n; i += 32u) { float v = X[i]; s += v*v; }\n"
+"    s = simd_sum(s); const float sc = 1.f / sqrt(s / (float)n + eps);\n"
+"    for (uint i = tiisg; i < n; i += 32u) O[i] = X[i] * sc;\n"
+"}\n"
+"kernel void dsv4_gemv_f32(device const float* W [[buffer(0)]], device const float* X [[buffer(1)]],\n"
+"    device float* O [[buffer(2)]], constant uint* P [[buffer(3)]],\n"
+"    uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n"
+"    const uint n = P[0]; device const float* wr = W + (ulong)row * n;\n"
+"    float acc = 0.f; for (uint i = tid; i < n; i += 32u) acc += wr[i] * X[i];\n"
+"    acc = simd_sum(acc); if (tid == 0u) O[row] = acc;\n"
+"}\n"
+"kernel void dsv4_hc_sinkhorn(device const float* MIX [[buffer(0)]], device const float* SCALE [[buffer(1)]],\n"
+"    device const float* BASE [[buffer(2)]], device float* OUT [[buffer(3)]],\n"
+"    constant uint* P [[buffer(4)]], constant float* CF [[buffer(5)]]) {\n"
+"    const uint n_hc = P[0], iters = P[1]; const float eps = CF[0];\n"
+"    const float pre_scale = SCALE[0], post_scale = SCALE[1], comb_scale = SCALE[2];\n"
+"    for (uint i = 0; i < n_hc; i++) { float z = MIX[i]*pre_scale + BASE[i]; OUT[i] = 1.f/(1.f+exp(-z)) + eps; }\n"
+"    for (uint i = 0; i < n_hc; i++) { uint off = n_hc+i; float z = MIX[off]*post_scale + BASE[off]; OUT[off] = 2.f/(1.f+exp(-z)); }\n"
+"    thread float c[256];\n"
+"    for (uint dst = 0; dst < n_hc; dst++) {\n"
+"        float rm = -INFINITY;\n"
+"        for (uint src = 0; src < n_hc; src++) { uint idx=src+dst*n_hc; uint off=2*n_hc+idx; float v=MIX[off]*comb_scale+BASE[off]; c[idx]=v; if(v>rm)rm=v; }\n"
+"        float rs=0.f; for(uint src=0;src<n_hc;src++){uint idx=src+dst*n_hc;float v=exp(c[idx]-rm);c[idx]=v;rs+=v;}\n"
+"        float iv=1.f/rs; for(uint src=0;src<n_hc;src++){uint idx=src+dst*n_hc;c[idx]=c[idx]*iv+eps;}\n"
+"    }\n"
+"    for (uint src=0;src<n_hc;src++){float sum=0.f;for(uint dst=0;dst<n_hc;dst++)sum+=c[src+dst*n_hc];float iv=1.f/(sum+eps);for(uint dst=0;dst<n_hc;dst++)c[src+dst*n_hc]*=iv;}\n"
+"    for (uint it=1;it<iters;it++){\n"
+"        for(uint dst=0;dst<n_hc;dst++){float sum=0.f;for(uint src=0;src<n_hc;src++)sum+=c[src+dst*n_hc];float iv=1.f/(sum+eps);for(uint src=0;src<n_hc;src++)c[src+dst*n_hc]*=iv;}\n"
+"        for(uint src=0;src<n_hc;src++){float sum=0.f;for(uint dst=0;dst<n_hc;dst++)sum+=c[src+dst*n_hc];float iv=1.f/(sum+eps);for(uint dst=0;dst<n_hc;dst++)c[src+dst*n_hc]*=iv;}\n"
+"    }\n"
+"    for (uint i=0;i<n_hc*n_hc;i++) OUT[2*n_hc+i]=c[i];\n"
+"}\n"
+"kernel void dsv4_hc_sum(device const float* RES [[buffer(0)]], device const float* PRE [[buffer(1)]],\n"
+"    device float* HIN [[buffer(2)]], constant uint* P [[buffer(3)]], uint gid [[thread_position_in_grid]]) {\n"
+"    const uint D = P[0], HC = P[1]; if (gid >= D) return;\n"
+"    float a = 0.f; for (uint h = 0; h < HC; h++) a += RES[(ulong)h*D + gid] * PRE[h];\n"
+"    HIN[gid] = a;\n"
+"}\n"
+"kernel void dsv4_hc_post(device const float* BO [[buffer(0)]], device const float* RES [[buffer(1)]],\n"
+"    device const float* POST [[buffer(2)]], device const float* COMB [[buffer(3)]], device float* OUT [[buffer(4)]],\n"
+"    constant uint* P [[buffer(5)]], uint gid [[thread_position_in_grid]]) {\n"
+"    const uint D = P[0], HC = P[1]; if (gid >= HC*D) return;\n"
+"    const uint dst = gid / D, d = gid % D;\n"
+"    float acc = BO[d] * POST[dst];\n"
+"    for (uint src = 0; src < HC; src++) acc += COMB[dst + src*HC] * RES[(ulong)src*D + d];\n"
+"    OUT[gid] = acc;\n"
 "}\n";
 
 struct LlmDsv4Metal {
@@ -386,6 +436,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
+    id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
     size_t sx_cap[64], so_cap[64], spb_cap[64];
@@ -433,6 +484,11 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     id<MTLFunction> f10 = [lib newFunctionWithName:@"dsv4_slots6_pair_swiglu_iq2"];
     id<MTLFunction> f12 = [lib newFunctionWithName:@"dsv4_swiglu"];
     id<MTLFunction> f13 = [lib newFunctionWithName:@"dsv4_add_inplace"];
+    id<MTLFunction> f15 = [lib newFunctionWithName:@"dsv4_rms_no_w"];
+    id<MTLFunction> f16 = [lib newFunctionWithName:@"dsv4_gemv_f32"];
+    id<MTLFunction> f17 = [lib newFunctionWithName:@"dsv4_hc_sinkhorn"];
+    id<MTLFunction> f18 = [lib newFunctionWithName:@"dsv4_hc_sum"];
+    id<MTLFunction> f19 = [lib newFunctionWithName:@"dsv4_hc_post"];
     if (!f7 || !f8 || !f9) fprintf(stderr, "dsv4_metal: kernel rms/rope NON compilato\n");
     if (!f10) fprintf(stderr, "dsv4_metal: kernel dsv4_slots6_pair_swiglu_iq2 NON compilato\n");
     LlmDsv4Metal* b = (LlmDsv4Metal*)calloc(1, sizeof *b);
@@ -450,8 +506,13 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_slots6   = f10 ? [dev newComputePipelineStateWithFunction:f10 error:&err] : nil;
     b->pso_swiglu   = f12 ? [dev newComputePipelineStateWithFunction:f12 error:&err] : nil;
     b->pso_add      = f13 ? [dev newComputePipelineStateWithFunction:f13 error:&err] : nil;
+    b->pso_rms_no_w = f15 ? [dev newComputePipelineStateWithFunction:f15 error:&err] : nil;
+    b->pso_gemv_f32 = f16 ? [dev newComputePipelineStateWithFunction:f16 error:&err] : nil;
+    b->pso_sinkhorn = f17 ? [dev newComputePipelineStateWithFunction:f17 error:&err] : nil;
+    b->pso_hc_sum   = f18 ? [dev newComputePipelineStateWithFunction:f18 error:&err] : nil;
+    b->pso_hc_post  = f19 ? [dev newComputePipelineStateWithFunction:f19 error:&err] : nil;
     [lib release];
-    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->queue) {
+    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
                 err ? [[err localizedDescription] UTF8String] : "?");
         llm_dsv4_metal_destroy(b); return NULL;
@@ -470,6 +531,11 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_slots6)   [b->pso_slots6 release];
     if (b->pso_swiglu)   [b->pso_swiglu release];
     if (b->pso_add)      [b->pso_add release];
+    if (b->pso_rms_no_w) [b->pso_rms_no_w release];
+    if (b->pso_gemv_f32) [b->pso_gemv_f32 release];
+    if (b->pso_sinkhorn) [b->pso_sinkhorn release];
+    if (b->pso_hc_sum)   [b->pso_hc_sum release];
+    if (b->pso_hc_post)  [b->pso_hc_post release];
     if (b->pso_rms_w)    [b->pso_rms_w release];
     if (b->pso_head_rms) [b->pso_head_rms release];
     if (b->pso_rope)     [b->pso_rope release];
