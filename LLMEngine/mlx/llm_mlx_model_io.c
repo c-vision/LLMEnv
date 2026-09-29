@@ -654,43 +654,11 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
         setenv("LLM_MXFP4_ACT_F16", "1", 0);     /* +7% prefill (misurato neutro su qwen3_5_moe) */
         fprintf(stderr, "[auto-policy] qwen3_next -> LLM_MXFP4_ACT_F16=1\n");
     }
-    /* B7 (2026-09-29): opzione di REGISTRO `kvquant` = off|4|8|16[:soglia]. Prima era registrata
-     * ma MAI consumata (solo le env legacy LLM_KVQUANT*): `--opt kvquant=8` non aveva effetto.
-     * `16` = KV in bf16 esplicito (nessuna quant). Precedenza: opzione di registro > env legacy >
-     * config.json. `llm_ai_mlx_model_kv_format()` espone l'identita' di formato risolta (per la
-     * futura prefix-cache: blocchi non attraversano formati). */
-    if (!m->cfg.kv_quantize) {
-        char kvs[64];
-        if (llm_ai_mlx_opt_get_str("kvquant", kvs, sizeof kvs) == 0 && kvs[0]) {
-            if (strncmp(kvs, "off", 3) == 0) {
-                /* resta bf16 (default) */
-            } else {
-                int bits = atoi(kvs);
-                int thr = 0;
-                const char* c = strchr(kvs, ':');
-                if (c) thr = atoi(c + 1);
-                if (bits == 16) {
-                    m->cfg.kv_quantize = false; m->cfg.kv_quantize_bits = 16; m->cfg.kv_quantize_threshold = 0;
-                    fprintf(stderr, "[kvquant] bf16 (nessuna quant, opzione di registro)\n");
-                } else if (bits == 4 || bits == 8) {
-                    /* B7 (2026-09-29): la KV-quant ATTUALE e' MEMORY-UNSAFE — misurato con
-                     * mlx_get_active_memory/phys_footprint su Llama-3.2-1B: 0.219 MB/token vs
-                     * 0.062 del path fp (≈3.5x; 2657 vs ~1300 MB fisici a 8192 token). Va
-                     * RI-IMPLEMENTATA (int8 preallocato + kernel fused, vedi TODO
-                     * Splash-Derived-Migliorie §B7) prima di poter essere usata. NON la attivo. */
-                    fprintf(stderr, "[kvquant] RIFIUTATA: la KV-quant attuale e' memory-unsafe "
-                                    "(~3.5x il path fp) e va ri-implementata — ignoro bits=%d.\n", bits);
-                } else {
-                    fprintf(stderr, "[kvquant] valore '%s' non valido (off|4|8|16[:soglia])\n", kvs);
-                }
-            }
-        }
-    }
     /* LLM_KVQUANT (=1 attiva; _BITS default 8; _THRESH default 2048): abilita la KV-quant T3.2
      * (cold block affine) via env, senza editare il config.json dei modelli (nessun config lo
      * imposta oggi). NB: il path e' DEQUANT-ON-READ (layer_forward dequantizza la cold all'inizio
      * e la ri-quantizza alla fine) -> riduce la memoria a contesto lungo ma costa 2xO(pos)/token. */
-    if (!m->cfg.kv_quantize && 0 && llm_ai_mlx_opt_env("LLM_KVQUANT") != NULL) {   /* B7: env disattivata (port Splash incompleto, vedi TODO) */
+    if (!m->cfg.kv_quantize && llm_ai_mlx_opt_env("LLM_KVQUANT") != NULL) {
         const char* b = llm_ai_mlx_opt_env("LLM_KVQUANT_BITS");
         const char* t = llm_ai_mlx_opt_env("LLM_KVQUANT_THRESH");
         m->cfg.kv_quantize = true;
