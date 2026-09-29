@@ -225,4 +225,51 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
     return ok;
 }
 
+/* MoE GPU per un CHUNK di `nt` token (X [nt*embd] -> OUT [nt*embd]) in UNA command buffer. Solo per i layer con
+ * gate/up IQ2_XXS + down Q2_K (path ds4); altrimenti false e il chiamante ricade sul per-token. Routing su CPU
+ * per token; gli esperti dell'unione sono letti dallo store una volta (puntatori stabili: cap >= 6*nt). */
+static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
+                                          int il, const float* X, const int* tokens, int nt, float* OUT) {
+    if (!llm_dsv4_gpu_enabled() || !m || !m->inited || il < 0 || il >= c->n_layer || nt <= 0) return false;
+    const int used = c->n_expert_used, ff = c->n_ff_exp, embd = c->n_embd;
+    if (m->gate[il].type != 16 || m->up[il].type != 16 || m->down[il].type != 10 || used != 6) return false;
+    const LlmDsv4PackedExperts* pe = &m->exps[il];
+    const int streaming = (pe->store && pe->store_get) != 0;
+    const void** gp = (const void**)malloc(sizeof(void*) * 3 * (size_t)nt * used);
+    float* rw = (float*)malloc(sizeof(float) * (size_t)nt * used);
+    if (!gp || !rw) { free(gp); free(rw); return false; }
+    const void** upp = gp + (size_t)nt * used; const void** dp = upp + (size_t)nt * used;
+    bool ok = true;
+    for (int t = 0; ok && t < nt; t++) {
+        int selected[LLM_DSV4_MAX_EXPERT_USED]; float weight[LLM_DSV4_MAX_EXPERT_USED];
+        llm_dsv4_moe_route(c, L, X + (size_t)t * embd, il, tokens[t], selected, weight);
+        for (int i = 0; ok && i < used; i++) {
+            const int e = selected[i], k = t * used + i;
+            if (streaming) {
+                const uint8_t *g = NULL, *u = NULL, *d = NULL;
+                pe->store_get(pe->store, il, e, &g, &u, &d);
+                if (!g || !u || !d) { ok = false; break; }
+                gp[k] = g; upp[k] = u; dp[k] = d;
+            } else {
+                gp[k]  = (const uint8_t*)m->gate[il].w + (size_t)e * (size_t)ff * m->gate[il].row_bytes;
+                upp[k] = (const uint8_t*)m->up[il].w   + (size_t)e * (size_t)ff * m->up[il].row_bytes;
+                dp[k]  = (const uint8_t*)m->down[il].w + (size_t)e * (size_t)embd * m->down[il].row_bytes;
+            }
+            rw[k] = weight[i];
+        }
+    }
+    if (ok) {
+        const void* sg = (pe->shexp_gate && pe->shexp_up && pe->shexp_down) ? pe->shexp_gate : NULL;
+        ok = llm_dsv4_metal_moe_iq2_q2k_batch(m->be, nt, gp, upp, dp, X, rw, used, c->swiglu_clamp_exp, (uint32_t)embd,
+                                              (uint32_t)m->gate[il].row_bytes, (uint32_t)ff, (uint32_t)m->down[il].row_bytes,
+                                              sg, sg ? pe->shexp_up : NULL, sg ? pe->shexp_down : NULL,
+                                              (uint32_t)llm_ggml_nbytes(pe->shexp_gate_type, embd),
+                                              (uint32_t)llm_ggml_nbytes(pe->shexp_down_type, ff), OUT) == 0;
+        /* senza shared expert su GPU il path per-token lo aggiunge su CPU: qui non e' coperto -> false */
+        if (ok && !sg) ok = false;
+    }
+    free(gp); free(rw);
+    return ok;
+}
+
 #endif /* LLM_DSV4_GPU_MOE_H */

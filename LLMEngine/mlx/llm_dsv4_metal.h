@@ -67,6 +67,13 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
                                uint32_t down_nb01, const void* sg, const void* su, const void* sd,
                                uint32_t s_nb_g, uint32_t s_nb_d, float* out);
 
+/* Come sopra per `nt` token in UNA command buffer: gates/ups/downs [nt*n], x [nt*embd], rws [nt*n], out [nt*embd]. */
+int llm_dsv4_metal_moe_iq2_q2k_batch(LlmDsv4Metal* b, int nt, const void* const* gates, const void* const* ups,
+                               const void* const* downs, const float* x, const float* rws, int n,
+                               float clamp, uint32_t embd, uint32_t gu_nb01, uint32_t ff,
+                               uint32_t down_nb01, const void* sg, const void* su, const void* sd,
+                               uint32_t s_nb_g, uint32_t s_nb_d, float* out);
+
 /* Attn mista (raw+comp) su KV device: replica llm_dsv4_attention_mixed. `allowed`/`comp_kv`/`raw_kv`
  * possono essere NULL se n_comp/n_raw = 0. Scrive out[n_head*hd]. 0 = ok. */
 int llm_dsv4_metal_attention_mixed(LlmDsv4Metal* b, const float* q, int n_head, int hd,
@@ -118,6 +125,8 @@ typedef struct {
 } LlmDsv4MidParams;
 
 int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p);
+/* `nt` token consecutivi (stesso layer, params in ordine di posizione) in UNA command buffer. */
+int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, int nt);
 
 /* Output grouped-LoRA FUSO (ds4): out_a (ng gruppi) + out_b in UNA command buffer, `low` su device. */
 int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t outa_row_bytes,
@@ -125,6 +134,17 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t ou
         size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
         const float* heads, float* out);
 
+/* Come attn_out_fused per `nt` token: heads [nt*heads_total] -> out [nt*embd]. */
+int llm_dsv4_metal_attn_out_fused_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes,
+        size_t outa_lead0, int ng, uint32_t gd, uint32_t rank, const void* outb_w,
+        size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
+        const float* heads, float* out);
+/* Come attn_proj_fused per `nt` token consecutivi (pos0..): xn [nt*embd] -> q_out [nt*qd], kv_out [nt*hd], qrn_out [nt*lq]. */
+int llm_dsv4_metal_attn_proj_fused_batch(LlmDsv4Metal* b, int nt, const void* qa_w, size_t qa_row_bytes,
+        const void* kv_w, size_t kv_row_bytes, const void* qb_w, size_t qb_row_bytes,
+        const float* xn, uint32_t embd, const float* qan_w, const float* kvan_w,
+        uint32_t lq, uint32_t hd, uint32_t qd, int n_head, int n_rot,
+        const float* rope_cfg, int pos0, float eps, float* q_out, float* kv_out, float* qrn_out);
 /* Proiezioni Q-LoRA + KV FUSE (ds4): q_a, kv, RMS, q_b, head_rms, RoPE in UNA command buffer. */
 int llm_dsv4_metal_attn_proj_fused(LlmDsv4Metal* b, const void* qa_w, size_t qa_row_bytes,
         const void* kv_w, size_t kv_row_bytes, const void* qb_w, size_t qb_row_bytes,

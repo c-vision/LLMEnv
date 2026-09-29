@@ -159,6 +159,47 @@ static int dsv4_mid_init(Dsv4Mid* m, const LlmDsv4Config* c, const LlmDsv4LayerW
     return 1;
 }
 
+/* Costruisce i parametri del middle per il token a `pos` dato lo stato corrente (n_raw/n_acomp/n_icomp) e
+ * restituisce il nuovo stato in *nr/*na/*ni (NON aggiorna m). */
+static void dsv4_mid_fill(const Dsv4Mid* m, const LlmDsv4Config* c, int ratio, int raw_cap, int comp_cap,
+        int n_raw0, int n_acomp0, int n_icomp0, const float* q, const float* kv, const float* qrn, const float* xn,
+        int pos, float* heads, LlmDsv4MidParams* p, int* nr_out, int* na_out, int* ni_out) {
+    const int hd = c->n_head_dim, ihd = c->n_indexer_head_dim;
+    int due = ((pos + 1) % ratio) == 0, pos_mod = pos % ratio;
+    int state_row = (ratio == 4) ? (ratio + pos_mod) : pos_mod;
+    int raw_full = (n_raw0 >= raw_cap);
+    int raw_off = raw_full ? (raw_cap - 1) * hd : n_raw0 * hd;
+    int na = (due && n_acomp0 < comp_cap) ? n_acomp0 + 1 : n_acomp0;
+    int ni = (due && n_icomp0 < comp_cap) ? n_icomp0 + 1 : n_icomp0;
+    int nr = raw_full ? raw_cap : n_raw0 + 1;
+    int compressed = ratio != 0;
+    float freq_base = (compressed && c->compress_rope_freq_base > 0.0f) ? c->compress_rope_freq_base : c->rope_freq_base;
+    float freq_scale = (!compressed || c->rope_scale_factor <= 0.0f) ? 1.0f : 1.0f / c->rope_scale_factor;
+    float ext_factor = (compressed && c->rope_scale_factor > 1.0f) ? 1.0f : 0.0f;
+    float attn_factor = 1.0f;
+    if (ext_factor != 0.0f && freq_scale > 0.0f) attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
+    LlmDsv4MidParams* pp = p; memset(pp, 0, sizeof *pp);
+    pp->embd = c->n_embd; pp->hd = hd; pp->ihd = ihd; pp->ratio = ratio; pp->co = m->co;
+    pp->n_head = c->n_head; pp->n_rot = c->n_rot; pp->rms_eps = c->rms_eps;
+    pp->idx_nh = c->n_indexer_head; pp->idx_hd = ihd; pp->idx_top_k = c->n_indexer_top_k; pp->lq = c->n_lora_q;
+    pp->qdim = c->n_indexer_head * c->n_indexer_head_dim;
+    pp->pos = pos; pp->due = due; pp->state_row = state_row; pp->ape_off = pos_mod; pp->has_idx = (ratio == 4);
+    pp->push_acomp = (due && n_acomp0 < comp_cap); pp->push_icomp = (due && n_icomp0 < comp_cap);
+    pp->rope_cfg[0] = freq_base; pp->rope_cfg[1] = freq_scale; pp->rope_cfg[2] = ext_factor; pp->rope_cfg[3] = attn_factor;
+    pp->rope_cfg[4] = c->rope_yarn_beta_fast; pp->rope_cfg[5] = c->rope_yarn_beta_slow; pp->rope_cfg[6] = (float)(compressed ? c->rope_orig_ctx : 0);
+    pp->w_ckv = m->w_ckv; pp->w_cgate = m->w_cgate; pp->w_cape = m->w_cape; pp->w_cnorm = m->w_cnorm;
+    pp->w_ickv = m->w_ickv; pp->w_icgate = m->w_icgate; pp->w_icape = m->w_icape; pp->w_icnorm = m->w_icnorm;
+    pp->w_iqb = m->w_iqb; pp->w_iproj = m->w_iproj; pp->sinks = m->sinks;
+    pp->st_akv = m->st_akv; pp->st_asc = m->st_asc; pp->st_ikv = m->st_ikv; pp->st_isc = m->st_isc;
+    pp->raw = m->raw; pp->raw_cap = raw_cap; pp->raw_off = raw_off; pp->raw_full = raw_full;
+    pp->acomp = m->acomp; pp->acomp_off = n_acomp0 * hd; pp->icomp = m->icomp; pp->icomp_off = n_icomp0 * ihd;
+    pp->allowed = m->allowed;
+    pp->xn = xn; pp->qrn = qrn; pp->q = q; pp->kv_cur = kv;
+    pp->n_raw = nr; pp->n_acomp = na; pp->n_icomp = ni;
+    pp->heads = heads;
+    *nr_out = nr; *na_out = na; *ni_out = ni;
+}
+
 int llm_dsv4_gpu_attn_mid_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
         int ratio, int raw_cap, int comp_cap,
         const float* q, const float* kv, const float* qrn, const float* xn, int pos, float* heads) {
@@ -167,43 +208,47 @@ int llm_dsv4_gpu_attn_mid_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights*
     if (il < c->n_hash_layer) return 0;
     Dsv4Mid* m = &g_mid[il];
     if (!m->inited && !dsv4_mid_init(m, c, L, ratio, raw_cap, comp_cap)) return 0;
-    const int hd = c->n_head_dim, ihd = c->n_indexer_head_dim;
-    int due = ((pos + 1) % ratio) == 0, pos_mod = pos % ratio;
-    int state_row = (ratio == 4) ? (ratio + pos_mod) : pos_mod;
-    int raw_full = (m->n_raw >= raw_cap);
-    int raw_off = raw_full ? (raw_cap - 1) * hd : m->n_raw * hd;
-    int na = (due && m->n_acomp < comp_cap) ? m->n_acomp + 1 : m->n_acomp;
-    int ni = (due && m->n_icomp < comp_cap) ? m->n_icomp + 1 : m->n_icomp;
-    int nr = raw_full ? raw_cap : m->n_raw + 1;
-    int compressed = ratio != 0;
-    float freq_base = (compressed && c->compress_rope_freq_base > 0.0f) ? c->compress_rope_freq_base : c->rope_freq_base;
-    float freq_scale = (!compressed || c->rope_scale_factor <= 0.0f) ? 1.0f : 1.0f / c->rope_scale_factor;
-    float ext_factor = (compressed && c->rope_scale_factor > 1.0f) ? 1.0f : 0.0f;
-    float attn_factor = 1.0f;
-    if (ext_factor != 0.0f && freq_scale > 0.0f) attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
-    LlmDsv4MidParams p; memset(&p, 0, sizeof p);
-    p.embd = c->n_embd; p.hd = hd; p.ihd = ihd; p.ratio = ratio; p.co = m->co;
-    p.n_head = c->n_head; p.n_rot = c->n_rot; p.rms_eps = c->rms_eps;
-    p.idx_nh = c->n_indexer_head; p.idx_hd = ihd; p.idx_top_k = c->n_indexer_top_k; p.lq = c->n_lora_q;
-    p.qdim = c->n_indexer_head * c->n_indexer_head_dim;
-    p.pos = pos; p.due = due; p.state_row = state_row; p.ape_off = pos_mod; p.has_idx = (ratio == 4);
-    p.push_acomp = (due && m->n_acomp < comp_cap); p.push_icomp = (due && m->n_icomp < comp_cap);
-    p.rope_cfg[0] = freq_base; p.rope_cfg[1] = freq_scale; p.rope_cfg[2] = ext_factor; p.rope_cfg[3] = attn_factor;
-    p.rope_cfg[4] = c->rope_yarn_beta_fast; p.rope_cfg[5] = c->rope_yarn_beta_slow; p.rope_cfg[6] = (float)(compressed ? c->rope_orig_ctx : 0);
-    p.w_ckv = m->w_ckv; p.w_cgate = m->w_cgate; p.w_cape = m->w_cape; p.w_cnorm = m->w_cnorm;
-    p.w_ickv = m->w_ickv; p.w_icgate = m->w_icgate; p.w_icape = m->w_icape; p.w_icnorm = m->w_icnorm;
-    p.w_iqb = m->w_iqb; p.w_iproj = m->w_iproj; p.sinks = m->sinks;
-    p.st_akv = m->st_akv; p.st_asc = m->st_asc; p.st_ikv = m->st_ikv; p.st_isc = m->st_isc;
-    p.raw = m->raw; p.raw_cap = raw_cap; p.raw_off = raw_off; p.raw_full = raw_full;
-    p.acomp = m->acomp; p.acomp_off = m->n_acomp * hd; p.icomp = m->icomp; p.icomp_off = m->n_icomp * ihd;
-    p.allowed = m->allowed;
-    p.xn = xn; p.qrn = qrn; p.q = q; p.kv_cur = kv;
-    p.n_raw = nr; p.n_acomp = na; p.n_icomp = ni;
-    p.heads = heads;
+    LlmDsv4MidParams p; int nr, na, ni;
+    dsv4_mid_fill(m, c, ratio, raw_cap, comp_cap, m->n_raw, m->n_acomp, m->n_icomp, q, kv, qrn, xn, pos, heads, &p, &nr, &na, &ni);
     if (llm_dsv4_metal_attn_mid(g_be, &p) != 0) return 0;
     m->n_raw = nr; m->n_acomp = na; m->n_icomp = ni;
     { static int logged = 0; if (!logged) { logged = 1; fprintf(stderr, "DSV4 GPU: middle attenzione eseguito su GPU\n"); } }
     return 1;
+}
+
+/* Attenzione di un CHUNK di `nt` token consecutivi (pos0..) del layer `il`: proiezioni, middle e output
+ * grouped-LoRA, ciascuna fase in UNA command buffer per tutto il chunk. xn [nt*embd] -> out [nt*embd].
+ * Tutto-o-niente: 1 = eseguito su GPU; 0 = nulla e' stato modificato (usare il path per-token). */
+int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
+        int ratio, int raw_cap, int comp_cap, const float* xn, int pos0, int nt, float* out) {
+    if (!g_on || !g_be || !c || !L || il < 0 || il >= LLM_DSV4_MAX_LAYER || nt <= 0) return 0;
+    if (ratio != 4 && ratio != 128) return 0;
+    if (il < c->n_hash_layer) return 0;
+    if (!llm_dsv4_gpu_attn_batch_ready(&g_attn, il)) return 0;
+    Dsv4Mid* m = &g_mid[il];
+    if (!m->inited && !dsv4_mid_init(m, c, L, ratio, raw_cap, comp_cap)) return 0;
+    const int hd = c->n_head_dim, qd = c->n_head * hd, lq = c->n_lora_q, D = c->n_embd;
+    float* q   = (float*)malloc(sizeof(float) * (size_t)nt * qd);
+    float* kv  = (float*)malloc(sizeof(float) * (size_t)nt * hd);
+    float* qrn = (float*)malloc(sizeof(float) * (size_t)nt * lq);
+    float* hds = (float*)malloc(sizeof(float) * (size_t)nt * qd);
+    LlmDsv4MidParams* ps = (LlmDsv4MidParams*)malloc(sizeof(LlmDsv4MidParams) * (size_t)nt);
+    int ok = q && kv && qrn && hds && ps;
+    if (ok) ok = llm_dsv4_gpu_attn_project_batch(&g_attn, c, L, il, xn, pos0, nt, q, kv, qrn);
+    int nr = m->n_raw, na = m->n_acomp, ni = m->n_icomp;
+    if (ok) {
+        for (int t = 0; t < nt; t++) {
+            int nr2, na2, ni2;
+            dsv4_mid_fill(m, c, ratio, raw_cap, comp_cap, nr, na, ni, q + (size_t)t * qd, kv + (size_t)t * hd,
+                          qrn + (size_t)t * lq, xn + (size_t)t * D, pos0 + t, hds + (size_t)t * qd, &ps[t], &nr2, &na2, &ni2);
+            nr = nr2; na = na2; ni = ni2;
+        }
+        ok = llm_dsv4_metal_attn_mid_batch(g_be, ps, nt) == 0;
+        if (ok) { m->n_raw = nr; m->n_acomp = na; m->n_icomp = ni; }
+    }
+    if (ok) ok = llm_dsv4_gpu_attn_finish_batch(&g_attn, c, L, il, hds, pos0, nt, out);
+    free(ps); free(hds); free(qrn); free(kv); free(q);
+    return ok ? 1 : 0;
 }
 
 int llm_dsv4_gpu_ctx_init(const LlmDsv4Config* c, const LlmDsv4PackedExperts* exps) {
@@ -272,6 +317,12 @@ int llm_dsv4_gpu_moe_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, i
     if (!logged) { logged = 1; fprintf(stderr, "DSV4 GPU: MoE %s\n",
                                        r ? "eseguito su GPU" : "FALLITO -> fallback CPU"); }
     return r;
+}
+
+int llm_dsv4_gpu_moe_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
+                               const float* x, const int* tokens, int nt, float* out) {
+    if (!g_on) return 0;
+    return llm_dsv4_gpu_moe_batch(&g_moe, c, L, il, x, tokens, nt, out) ? 1 : 0;
 }
 
 int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,

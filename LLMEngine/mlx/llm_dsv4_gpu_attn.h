@@ -138,4 +138,44 @@ static inline bool llm_dsv4_gpu_attn_finish(LlmDsv4AttnGpu* m, const LlmDsv4Conf
     return ok;
 }
 
+/* Il chunk-path richiede tutti i pesi Q8_0 (path fuso) su questo layer. */
+static inline bool llm_dsv4_gpu_attn_batch_ready(const LlmDsv4AttnGpu* m, int il) {
+    return llm_dsv4_gpu_enabled() && m && m->inited && m->qa[il].type == 8 && m->kv[il].type == 8 &&
+           m->qb[il].type == 8 && m->outa[il].type == 8 && m->outb[il].type == 8;
+}
+
+/* Come llm_dsv4_gpu_attn_project per `nt` token consecutivi (pos0..): xn [nt*embd] -> q [nt*qd], kv [nt*hd],
+ * qrn [nt*lq], in UNA command buffer. Solo path fuso (Q8_0). */
+static inline bool llm_dsv4_gpu_attn_project_batch(LlmDsv4AttnGpu* m, const LlmDsv4Config* c,
+        const LlmDsv4LayerWeights* L, int il, const float* xn, int pos0, int nt, float* q, float* kv, float* qrn) {
+    if (!llm_dsv4_gpu_attn_batch_ready(m, il)) return false;
+    const int lq = c->n_lora_q, embd = c->n_embd, qd = c->n_head * c->n_head_dim, hd = c->n_head_dim;
+    int compressed = llm_dsv4_layer_compress_ratio(c, il) != 0;
+    float freq_base = (compressed && c->compress_rope_freq_base > 0.0f) ? c->compress_rope_freq_base : c->rope_freq_base;
+    float freq_scale = (!compressed || c->rope_scale_factor <= 0.0f) ? 1.0f : 1.0f / c->rope_scale_factor;
+    float ext_factor = (compressed && c->rope_scale_factor > 1.0f) ? 1.0f : 0.0f;
+    float attn_factor = 1.0f;
+    if (ext_factor != 0.0f && freq_scale > 0.0f) attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
+    float rope_cfg[7] = { freq_base, freq_scale, ext_factor, attn_factor, c->rope_yarn_beta_fast,
+                          c->rope_yarn_beta_slow, (float)(compressed ? c->rope_orig_ctx : 0) };
+    return llm_dsv4_metal_attn_proj_fused_batch(m->be, nt, m->qa[il].w, m->qa[il].row_bytes, m->kv[il].w, m->kv[il].row_bytes,
+                                                m->qb[il].w, m->qb[il].row_bytes, xn, (uint32_t)embd, L->attn_q_a_norm,
+                                                L->attn_kv_a_norm, (uint32_t)lq, (uint32_t)hd, (uint32_t)qd, c->n_head,
+                                                c->n_rot, rope_cfg, pos0, c->rms_eps, q, kv, qrn) == 0;
+}
+
+/* Come llm_dsv4_gpu_attn_finish per `nt` token: RoPE inversa sulle head (host), poi out_a/out_b in UNA cb. */
+static inline bool llm_dsv4_gpu_attn_finish_batch(LlmDsv4AttnGpu* m, const LlmDsv4Config* c,
+        const LlmDsv4LayerWeights* L, int il, float* heads, int pos0, int nt, float* out) {
+    (void)L;
+    if (!llm_dsv4_gpu_attn_batch_ready(m, il)) return false;
+    const int ng = c->n_out_group, rank = c->n_lora_o, embd = c->n_embd;
+    const int gd = c->n_head_dim * (c->n_head / ng), ol = ng * rank, ht = c->n_head * c->n_head_dim;
+    for (int t = 0; t < nt; t++)
+        llm_dsv4_rope_tail_layer_inplace(c, heads + (size_t)t * ht, c->n_head, c->n_head_dim, c->n_rot, pos0 + t, il, 1);
+    return llm_dsv4_metal_attn_out_fused_batch(m->be, nt, m->outa[il].w, m->outa[il].row_bytes, 0, ng, (uint32_t)gd,
+                                               (uint32_t)rank, m->outb[il].w, m->outb[il].row_bytes, (uint32_t)ol,
+                                               (uint32_t)embd, (uint32_t)ht, heads, out) == 0;
+}
+
 #endif /* LLM_DSV4_GPU_ATTN_H */
