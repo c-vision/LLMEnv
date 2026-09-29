@@ -1142,10 +1142,22 @@ int llm_mlx_session_generate_draftmodel(LlmMlxSession* s, int max_out, int32_t e
     if (acc < 0) acc = 0; if (acc > nd) acc = nd;
     for (int i = 0; i < acc; i++) { out[i] = draft[i]; session_history_append(s, &draft[i], 1); }
     if (acc < nd) {   /* parziale: riallinea la sessione draft alla history del target */
-        llm_ai_mlx_destroy_session((llm_ai_mlx_session_handle)s->draft_sess);
-        s->draft_sess = llm_ai_mlx_create_session((llm_ai_mlx_model_handle)g_draft_model);
-        if (s->draft_sess != NULL && s->history_len > 0)
-            (void)llm_ai_mlx_session_append((llm_ai_mlx_session_handle)s->draft_sess, s->history, s->history_len);
+        int done = 0;
+        if (acc >= 1) {
+            /* O(1): tronca il draft a (base+acc-1) e ri-aggiunge l'ULTIMO accettato -> il pending
+             * viene ricalcolato dal forward di 1 token, SENZA re-prefillare tutta la history. */
+            int keep = s->history_len - 1;
+            if (llm_ai_mlx_session_truncate((llm_ai_mlx_session_handle)s->draft_sess, keep) == 0) {
+                (void)llm_ai_mlx_session_append((llm_ai_mlx_session_handle)s->draft_sess, &draft[acc - 1], 1);
+                done = 1;
+            }
+        }
+        if (!done) {
+            llm_ai_mlx_destroy_session((llm_ai_mlx_session_handle)s->draft_sess);
+            s->draft_sess = llm_ai_mlx_create_session((llm_ai_mlx_model_handle)g_draft_model);
+            if (s->draft_sess != NULL && s->history_len > 0)
+                (void)llm_ai_mlx_session_append((llm_ai_mlx_session_handle)s->draft_sess, s->history, s->history_len);
+        }
     }
     return acc;
 }
