@@ -58,6 +58,14 @@ int llm_dsv4_metal_pair_swiglu_batch(LlmDsv4Metal* b, const void* const* gates, 
                                      const float* x, float* const* mids, const float* rws, int n,
                                      float clamp, uint32_t ne00, uint32_t nb01, uint32_t ne0);
 
+/* MoE ds4 fuso: `n`=6 esperti (gate/up IQ2_XXS, down Q2_K) in UNA command buffer.
+ * pair_swiglu (gate+up+swiglu*peso -> mid f32 su device) + sum6 (down dei 6 + somma -> out).
+ * Nessun round-trip CPU. `out[embd]` scritto per intero. 0 = ok. */
+int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const void* const* ups,
+                               const void* const* downs, const float* x, const float* rws, int n,
+                               float clamp, uint32_t embd, uint32_t gu_nb01, uint32_t ff,
+                               uint32_t down_nb01, float* out);
+
 #ifdef __cplusplus
 }
 #endif

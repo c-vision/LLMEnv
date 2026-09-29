@@ -173,7 +173,7 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    threadgroup char* shmem [[threadgroup(0)]]) {\n"
 "    const int nr0 = 4; const short NSG = 4;\n"
 "    const int ne00 = (int)P[0], nb01 = (int)P[1], ne0 = (int)P[2];\n"
-"    const uint leadg = P[3], leadu = P[4];\n"
+"    const uint leadg = P[3], leadu = P[4]; const int mid_off = (int)P[5];\n"
 "    const int nb = ne00 / 256; const int first_row = (tgpig.x * NSG + sgitg) * nr0;\n"
 "    const float clampv = CF[0];\n"
 "    device const char* xg = SG + (ulong)leadg + (ulong)first_row * (ulong)nb01;\n"
@@ -229,8 +229,64 @@ static const char* const LLM_DSV4_METAL_MOE =
 "            float gg = g, uu = u;\n"
 "            if (clampv > 1.0e-6f) { gg = min(gg, clampv); uu = clamp(uu, -clampv, clampv); }\n"
 "            const float silu = gg / (1.f + exp(-gg));\n"
-"            MID[first_row + row] = silu * uu * RW[0];\n"
+"            MID[mid_off + first_row + row] = silu * uu * RW[0];\n"
 "        }\n"
+"    }\n"
+"}\n"
+"kernel void dsv4_sum6_q2k(\n"
+"    device const char* S0 [[buffer(0)]], device const char* S1 [[buffer(1)]],\n"
+"    device const char* S2 [[buffer(2)]], device const char* S3 [[buffer(3)]],\n"
+"    device const char* S4 [[buffer(4)]], device const char* S5 [[buffer(5)]],\n"
+"    device const float* MID [[buffer(6)]], device float* OUT [[buffer(7)]],\n"
+"    constant uint* P [[buffer(8)]],\n"
+"    uint3 tgpig [[threadgroup_position_in_grid]],\n"
+"    ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) {\n"
+"    const short NSG = 4; const short nr0 = 4;\n"
+"    const int nb = (int)P[0]; const uint nb01 = P[1];\n"
+"    const int ne0 = (int)P[2]; const int ne00 = (int)P[3];\n"
+"    const int first_row = (tgpig.x * NSG + sgitg) * nr0;\n"
+"    float sumf[4] = {0.f,0.f,0.f,0.f};\n"
+"    const short ix = tiisg / 8; const short it = tiisg % 8;\n"
+"    const short iq = it / 4; const short ir = it % 4; const short is = (8 * ir) / 16;\n"
+"    for (int slot = 0; slot < 6; slot++) {\n"
+"        device const char* s0 = (slot==0)?S0:(slot==1)?S1:(slot==2)?S2:(slot==3)?S3:(slot==4)?S4:S5;\n"
+"        device const float* y = MID + (ulong)slot * (ulong)ne00;\n"
+"        device const float* y4 = y + ix * 256 + 128 * iq + 8 * ir;\n"
+"        for (int ib = ix; ib < nb; ib += 4) {\n"
+"            float yl[32]; float4 sumy = {0.f,0.f,0.f,0.f};\n"
+"            for (short i = 0; i < 8; ++i) {\n"
+"                yl[i+0]=y4[i+0]; sumy[0]+=yl[i+0]; yl[i+8]=y4[i+32]; sumy[1]+=yl[i+8];\n"
+"                yl[i+16]=y4[i+64]; sumy[2]+=yl[i+16]; yl[i+24]=y4[i+96]; sumy[3]+=yl[i+24]; }\n"
+"            for (short row = 0; row < nr0; row++) {\n"
+"                if (first_row + row < ne0) {\n"
+"                    device const uchar* blk = (device const uchar*)s0 + (ulong)(first_row+row) * (ulong)nb01 + (ulong)ib * 84u;\n"
+"                    device const uint8_t* scr = blk + 8*iq + is;\n"
+"                    device const uint16_t* qsr = (device const uint16_t*)(blk + 16u) + 16*iq + 4*ir;\n"
+"                    ushort dh0 = (ushort)blk[80] | ((ushort)blk[81] << 8);\n"
+"                    ushort dh1 = (ushort)blk[82] | ((ushort)blk[83] << 8);\n"
+"                    const float dall = (float)as_type<half>(dh0);\n"
+"                    const float dmin = (float)as_type<half>(dh1) * (1.f/16.f);\n"
+"                    float4 acc1 = {0.f,0.f,0.f,0.f}; float4 acc2 = {0.f,0.f,0.f,0.f};\n"
+"                    for (int i = 0; i < 8; i += 2) {\n"
+"                        acc1[0] += yl[i+0]*(qsr[i/2]&0x0003); acc2[0] += yl[i+1]*(qsr[i/2]&0x0300);\n"
+"                        acc1[1] += yl[i+8]*(qsr[i/2]&0x000c); acc2[1] += yl[i+9]*(qsr[i/2]&0x0c00);\n"
+"                        acc1[2] += yl[i+16]*(qsr[i/2]&0x0030); acc2[2] += yl[i+17]*(qsr[i/2]&0x3000);\n"
+"                        acc1[3] += yl[i+24]*(qsr[i/2]&0x00c0); acc2[3] += yl[i+25]*(qsr[i/2]&0xc000);\n"
+"                    }\n"
+"                    sumf[row] += dall * ((acc1[0]+1.f/256.f*acc2[0])*(scr[0]&0xF)\n"
+"                                       + (acc1[1]+1.f/256.f*acc2[1])*(scr[2]&0xF)*0.25f\n"
+"                                       + (acc1[2]+1.f/256.f*acc2[2])*(scr[4]&0xF)*0.0625f\n"
+"                                       + (acc1[3]+1.f/256.f*acc2[3])*(scr[6]&0xF)*0.015625f)\n"
+"                               - dmin * (sumy[0]*(scr[0]&0xF0) + sumy[1]*(scr[2]&0xF0)\n"
+"                                       + sumy[2]*(scr[4]&0xF0) + sumy[3]*(scr[6]&0xF0));\n"
+"                }\n"
+"            }\n"
+"            y4 += 4 * 256;\n"
+"        }\n"
+"    }\n"
+"    for (int row = 0; row < nr0 && first_row + row < ne0; row++) {\n"
+"        const float s = simd_sum(sumf[row]);\n"
+"        if (tiisg == 0) OUT[first_row + row] = s;\n"
 "    }\n"
 "}\n";
 
@@ -242,6 +298,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_q8k_q2k;
     id<MTLComputePipelineState> pso_q8k_q4k;
     id<MTLComputePipelineState> pso_pair;   /* MoE fuso gate+up+swiglu (ds4 pair) */
+    id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
     size_t sx_cap[64], so_cap[64], spb_cap[64];
@@ -281,6 +338,8 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     if (!f1 || !f2 || !f3 || !f4) { fprintf(stderr, "dsv4_metal: funzioni mancanti\n"); [lib release]; [dev release]; return NULL; }
     id<MTLFunction> f5 = [lib newFunctionWithName:@"dsv4_pair_swiglu_iq2"];
     if (!f5) fprintf(stderr, "dsv4_metal: kernel dsv4_pair_swiglu_iq2 NON compilato\n");
+    id<MTLFunction> f6 = [lib newFunctionWithName:@"dsv4_sum6_q2k"];
+    if (!f6) fprintf(stderr, "dsv4_metal: kernel dsv4_sum6_q2k NON compilato\n");
     LlmDsv4Metal* b = (LlmDsv4Metal*)calloc(1, sizeof *b);
     b->dev = [dev retain];
     b->queue = [dev newCommandQueue];
@@ -289,8 +348,9 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_q8k_q2k = [dev newComputePipelineStateWithFunction:f3 error:&err];
     b->pso_q8k_q4k = [dev newComputePipelineStateWithFunction:f4 error:&err];
     b->pso_pair    = f5 ? [dev newComputePipelineStateWithFunction:f5 error:&err] : nil;
+    b->pso_sum6_q2k = f6 ? [dev newComputePipelineStateWithFunction:f6 error:&err] : nil;
     [lib release];
-    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->queue) {
+    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
                 err ? [[err localizedDescription] UTF8String] : "?");
         llm_dsv4_metal_destroy(b); return NULL;
@@ -305,6 +365,7 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_q8k_q2k)  [b->pso_q8k_q2k release];
     if (b->pso_q8k_q4k)  [b->pso_q8k_q4k release];
     if (b->pso_pair)     [b->pso_pair release];
+    if (b->pso_sum6_q2k) [b->pso_sum6_q2k release];
     for (int i = 0; i < 64; i++) {
         if (b->sx[i])  [b->sx[i] release];
         if (b->so[i])  [b->so[i] release];
@@ -480,10 +541,9 @@ int llm_dsv4_metal_pair_swiglu(LlmDsv4Metal* b, const void* gate, const void* up
     id<MTLBuffer> MID = [b->dev newBufferWithLength:(NSUInteger)ne0 * sizeof(float) options:MTLResourceStorageModeShared];
     id<MTLBuffer> RW = [b->dev newBufferWithBytes:&route_w length:sizeof(float) options:MTLResourceStorageModeShared];
     id<MTLBuffer> CF = [b->dev newBufferWithBytes:&clamp length:sizeof(float) options:MTLResourceStorageModeShared];
-    uint32_t P[5] = { ne00, nb01, ne0, (uint32_t)leadg, (uint32_t)leadu };
+    uint32_t P[6] = { ne00, nb01, ne0, (uint32_t)leadg, (uint32_t)leadu, 0u };
     id<MTLBuffer> PB = [b->dev newBufferWithBytes:P length:sizeof P options:MTLResourceStorageModeShared];
-    if (!BG || !BU || !Y || !MID || !RW || !CF || !PB) {
-        if (BG) [BG release]; if (BU) [BU release]; if (Y) [Y release];
+    if (!BG || !BU || !Y || !MID || !RW || !CF || !PB) {        if (BG) [BG release]; if (BU) [BU release]; if (Y) [Y release];
         if (MID) [MID release]; if (RW) [RW release]; if (CF) [CF release]; if (PB) [PB release];
         return -2;
     }
@@ -534,7 +594,7 @@ int llm_dsv4_metal_pair_swiglu_batch(LlmDsv4Metal* b, const void* const* gates, 
         MID[i] = [b->dev newBufferWithLength:(NSUInteger)ne0*sizeof(float) options:MTLResourceStorageModeShared];
         RW[i] = [b->dev newBufferWithBytes:&rws[i] length:sizeof(float) options:MTLResourceStorageModeShared];
         CF[i] = [b->dev newBufferWithBytes:&clamp length:sizeof(float) options:MTLResourceStorageModeShared];
-        uint32_t P[5] = { ne00, nb01, ne0, (uint32_t)leadg, (uint32_t)leadu };
+        uint32_t P[6] = { ne00, nb01, ne0, (uint32_t)leadg, (uint32_t)leadu, 0u };
         PB[i] = [b->dev newBufferWithBytes:P length:sizeof P options:MTLResourceStorageModeShared];
         if (!BG[i]||!BU[i]||!MID[i]||!RW[i]||!CF[i]||!PB[i]||!Y) rc = -2;
     }
@@ -566,5 +626,87 @@ int llm_dsv4_metal_pair_swiglu_batch(LlmDsv4Metal* b, const void* const* gates, 
         if (RW[i]) [RW[i] release]; if (CF[i]) [CF[i] release]; if (PB[i]) [PB[i] release];
     }
     if (Y) [Y release];
+    return rc;
+}
+
+/* MoE ds4 FUSO (gate/up IQ2_XXS + down Q2_K): `n`=6 esperti.
+ * UNA command buffer: pair_swiglu (gate+up+swiglu*peso -> mid f32 su device) per i 6,
+ * poi sum6 (down dei 6 + somma -> out). Un solo commit+wait, nessun round-trip CPU. 0 = ok. */
+int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const void* const* ups,
+                               const void* const* downs, const float* x, const float* rws, int n,
+                               float clamp, uint32_t embd, uint32_t gu_nb01, uint32_t ff,
+                               uint32_t down_nb01, float* out) {
+    if (!b || !b->pso_pair || !b->pso_sum6_q2k || n != 6 || !gates || !ups || !downs || !x || !rws || !out) return -1;
+    if ((ff % 256u) != 0u) return -1;
+    const size_t page = (size_t)getpagesize();
+    id<MTLBuffer> X   = dsv4_scratch(b, &b->sx[0], &b->sx_cap[0], (size_t)embd * sizeof(float));
+    id<MTLBuffer> MID = dsv4_scratch(b, &b->sx[1], &b->sx_cap[1], (size_t)n * (size_t)ff * sizeof(float));
+    id<MTLBuffer> OUT = dsv4_scratch(b, &b->sx[2], &b->sx_cap[2], (size_t)embd * sizeof(float));
+    if (!X || !MID || !OUT) return -2;
+    memcpy([X contents], x, (size_t)embd * sizeof(float));
+    id<MTLBuffer> BG[6], BU[6], BD[6], RW[6], PB[6];
+    for (int i = 0; i < 6; i++) { BG[i] = BU[i] = BD[i] = RW[i] = PB[i] = nil; }
+    id<MTLBuffer> CF = [b->dev newBufferWithBytes:&clamp length:sizeof(float) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> PSUM = nil;
+    int rc = (CF == nil) ? -2 : 0;
+    for (int i = 0; i < n; i++) {
+        size_t gbytes = (size_t)ff * gu_nb01, dbytes = (size_t)embd * down_nb01;
+        uintptr_t apg = (uintptr_t)gates[i] & ~(uintptr_t)(page-1); size_t lg = (size_t)((uintptr_t)gates[i]-apg);
+        uintptr_t apu = (uintptr_t)ups[i]   & ~(uintptr_t)(page-1); size_t lu = (size_t)((uintptr_t)ups[i]-apu);
+        uintptr_t apd = (uintptr_t)downs[i] & ~(uintptr_t)(page-1); size_t ld = (size_t)((uintptr_t)downs[i]-apd);
+        size_t vlg = ((lg+gbytes+page-1)/page)*page, vlu = ((lu+gbytes+page-1)/page)*page, vld = ((ld+dbytes+page-1)/page)*page;
+        BG[i] = [b->dev newBufferWithBytesNoCopy:(void*)apg length:vlg options:MTLResourceStorageModeShared deallocator:nil];
+        BU[i] = [b->dev newBufferWithBytesNoCopy:(void*)apu length:vlu options:MTLResourceStorageModeShared deallocator:nil];
+        BD[i] = [b->dev newBufferWithBytesNoCopy:(void*)apd length:vld options:MTLResourceStorageModeShared deallocator:nil];
+        float rw = rws[i];
+        RW[i] = [b->dev newBufferWithBytes:&rw length:sizeof(float) options:MTLResourceStorageModeShared];
+        uint32_t P[6] = { embd, gu_nb01, ff, (uint32_t)lg, (uint32_t)lu, (uint32_t)((size_t)i * ff) };
+        PB[i] = [b->dev newBufferWithBytes:P length:sizeof(P) options:MTLResourceStorageModeShared];
+        if (!BG[i] || !BU[i] || !BD[i] || !RW[i] || !PB[i]) { rc = -2; break; }
+    }
+    { uint32_t P[4] = { ff / 256u, down_nb01, embd, ff };
+      PSUM = [b->dev newBufferWithBytes:P length:sizeof(P) options:MTLResourceStorageModeShared];
+      if (!PSUM) rc = -2; }
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        const uint32_t NSG = 4, nr0 = 4;
+        for (int i = 0; i < n; i++) {
+            [e setComputePipelineState:b->pso_pair];
+            [e setBuffer:BG[i] offset:0 atIndex:0];
+            [e setBuffer:BU[i] offset:0 atIndex:1];
+            [e setBuffer:X offset:0 atIndex:2];
+            [e setBuffer:MID offset:0 atIndex:3];
+            [e setBuffer:RW[i] offset:0 atIndex:4];
+            [e setBuffer:CF offset:0 atIndex:5];
+            [e setBuffer:PB[i] offset:0 atIndex:6];
+            [e setThreadgroupMemoryLength:256 * 8 + 128 atIndex:0];
+            [e dispatchThreadgroups:MTLSizeMake((ff + NSG*nr0 - 1) / (NSG*nr0), 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(32*NSG, 1, 1)];
+        }
+        [e setComputePipelineState:b->pso_sum6_q2k];
+        [e setBuffer:BD[0] offset:0 atIndex:0];
+        [e setBuffer:BD[1] offset:0 atIndex:1];
+        [e setBuffer:BD[2] offset:0 atIndex:2];
+        [e setBuffer:BD[3] offset:0 atIndex:3];
+        [e setBuffer:BD[4] offset:0 atIndex:4];
+        [e setBuffer:BD[5] offset:0 atIndex:5];
+        [e setBuffer:MID offset:0 atIndex:6];
+        [e setBuffer:OUT offset:0 atIndex:7];
+        [e setBuffer:PSUM offset:0 atIndex:8];
+        [e dispatchThreadgroups:MTLSizeMake((embd + NSG*nr0 - 1) / (NSG*nr0), 1, 1)
+         threadsPerThreadgroup:MTLSizeMake(32*NSG, 1, 1)];
+        [e endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) memcpy(out, [OUT contents], (size_t)embd * sizeof(float));
+    }
+    for (int i = 0; i < n; i++) {
+        if (BG[i]) [BG[i] release]; if (BU[i]) [BU[i] release]; if (BD[i]) [BD[i] release];
+        if (RW[i]) [RW[i] release]; if (PB[i]) [PB[i] release];
+    }
+    if (CF) [CF release];
+    if (PSUM) [PSUM release];
     return rc;
 }

@@ -65,87 +65,113 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
     const int gt = m->gate[il].type, ut = m->up[il].type;
     if (!((gt == 16 && ut == 16) || ((gt == 10 || gt == 12) && (ut == 10 || ut == 12)))) return false;
     const int used = c->n_expert_used, ff = c->n_ff_exp, embd = c->n_embd;
+    const int dt = m->down[il].type;
+    const LlmDsv4PackedExperts* pe = &m->exps[il];
+    const int streaming = (pe->store && pe->store_get) != 0;
     int selected[LLM_DSV4_MAX_EXPERT_USED];
     float weight[LLM_DSV4_MAX_EXPERT_USED];
     llm_dsv4_moe_route(c, L, x, il, token, selected, weight);   /* riuso C */
+    bool ok = true;
 
-    float* midv  = (float*)malloc(sizeof(float) * (size_t)ff * used);   /* swiglu*peso per esperto */
-    float* downv = (float*)malloc(sizeof(float) * (size_t)embd * used);
-    bool ok = midv && downv;
-    for (int o = 0; ok && o < embd; o++) out[o] = 0.0f;
-
-    /* MoE FUSO ds4 (kernel verificato bit-exact vs path C): gate+up in un pass + swiglu*peso
-     * in-kernel -> midv[i]. Esperto dalla CACHE (store_get) se streaming, altrimenti da mmap. */
-    {
-        const LlmDsv4PackedExperts* pe = &m->exps[il];
-        int streaming = (pe->store && pe->store_get);
+    if (gt == 16 && ut == 16 && dt == 10) {
+        /* PATH ds4: pair_swiglu + sum6 in UNA command buffer (mid f32 su device, nessun
+         * round-trip CPU). 37/43 layer di ds4flash (gate/up IQ2_XXS, down Q2_K). */
         const void* gp[LLM_DSV4_MAX_EXPERT_USED];
         const void* upp[LLM_DSV4_MAX_EXPERT_USED];
-        float* mp[LLM_DSV4_MAX_EXPERT_USED];
+        const void* dp[LLM_DSV4_MAX_EXPERT_USED];
         float rw[LLM_DSV4_MAX_EXPERT_USED];
-        for (int i = 0; ok && i < used; i++) { mp[i] = midv + (size_t)i * ff; rw[i] = weight[i]; }
-        if (gt == 16) {
-            for (int i = 0; ok && i < used; i++) {
-                int e = selected[i];
-                if (streaming) {
-                    const uint8_t *g = NULL, *u = NULL, *d = NULL;
-                    pe->store_get(pe->store, il, e, &g, &u, &d);
-                    if (!g || !u) { ok = false; break; }
-                    gp[i] = g; upp[i] = u;
-                } else {
-                    gp[i]  = (const uint8_t*)m->gate[il].w + (size_t)e * (size_t)ff * m->gate[il].row_bytes;
-                    upp[i] = (const uint8_t*)m->up[il].w   + (size_t)e * (size_t)ff * m->up[il].row_bytes;
-                }
-            }
-            if (ok && llm_dsv4_metal_pair_swiglu_batch(m->be, gp, upp, x, mp, rw, used,
-                                                       c->swiglu_clamp_exp, (uint32_t)embd,
-                                                       (uint32_t)m->gate[il].row_bytes, (uint32_t)ff) != 0) ok = false;
-        } else {
-            /* gate/up Q4_K/Q2_K: niente pair kernel -> gemv Q8_K (x) + swiglu*peso su CPU. */
-            float* gbuf = (float*)malloc(sizeof(float) * (size_t)ff * used);
-            float* ubuf = (float*)malloc(sizeof(float) * (size_t)ff * used);
-            ok = gbuf && ubuf;
-            LlmDsv4GpuJob gj[2 * LLM_DSV4_MAX_EXPERT_USED]; int ng = 0;
-            for (int i = 0; ok && i < used; i++) {
-                int e = selected[i]; const uint8_t *g = NULL, *u = NULL, *d = NULL;
-                if (streaming) pe->store_get(pe->store, il, e, &g, &u, &d);
-                else { g  = (const uint8_t*)m->gate[il].w + (size_t)e * (size_t)ff * m->gate[il].row_bytes;
-                       u  = (const uint8_t*)m->up[il].w   + (size_t)e * (size_t)ff * m->up[il].row_bytes; }
-                if (!g || !u) { ok = false; break; }
-                gj[ng++] = (LlmDsv4GpuJob){ g, 0, gt, m->gate[il].row_bytes, (uint32_t)embd, (uint32_t)ff, x, gbuf + (size_t)i * ff };
-                gj[ng++] = (LlmDsv4GpuJob){ u, 0, ut, m->up[il].row_bytes,   (uint32_t)embd, (uint32_t)ff, x, ubuf + (size_t)i * ff };
-            }
-            if (ok) ok = llm_dsv4_metal_gemv_batch(m->be, gj, ng) == 0;
-            for (int i = 0; ok && i < used; i++) {
-                llm_dsv4_swiglu(mp[i], gbuf + (size_t)i * ff, ubuf + (size_t)i * ff, ff, c->swiglu_clamp_exp);
-                for (int j = 0; j < ff; j++) mp[i][j] *= rw[i];
-                for (int j = 0; j < ff; j++) if (!isfinite(mp[i][j])) mp[i][j] = 0.0f;
-            }
-            free(gbuf); free(ubuf);
-        }
-    }
-    /* batch 2: down dei used esperti in UNA command buffer (stessa cache/streaming). */
-    if (ok) {
-        LlmDsv4GpuJob jobs[LLM_DSV4_MAX_EXPERT_USED];
-        int nj = 0;
-        const LlmDsv4PackedExperts* pe = &m->exps[il];
-        int streaming = (pe->store && pe->store_get);
-        for (int i = 0; i < used; i++) {
+        for (int i = 0; ok && i < used; i++) {
             int e = selected[i];
-            const uint8_t *wd = m->down[il].w;
-            size_t od = (size_t)e * (size_t)embd * m->down[il].row_bytes;
             if (streaming) {
                 const uint8_t *g = NULL, *u = NULL, *d = NULL;
                 pe->store_get(pe->store, il, e, &g, &u, &d);
-                if (!d) { ok = false; break; }
-                wd = d; od = 0;
+                if (!g || !u || !d) { ok = false; break; }
+                gp[i] = g; upp[i] = u; dp[i] = d;
+            } else {
+                gp[i]  = (const uint8_t*)m->gate[il].w + (size_t)e * (size_t)ff * m->gate[il].row_bytes;
+                upp[i] = (const uint8_t*)m->up[il].w   + (size_t)e * (size_t)ff * m->up[il].row_bytes;
+                dp[i]  = (const uint8_t*)m->down[il].w + (size_t)e * (size_t)embd * m->down[il].row_bytes;
             }
-            jobs[nj++] = (LlmDsv4GpuJob){ wd, od, m->down[il].type, m->down[il].row_bytes, (uint32_t)ff, (uint32_t)embd, midv + (size_t)i * ff, downv + (size_t)i * embd };
+            rw[i] = weight[i];
         }
-        if (ok) ok = llm_dsv4_metal_gemv_batch(m->be, jobs, nj) == 0;
+        if (ok) ok = llm_dsv4_metal_moe_iq2_q2k(m->be, gp, upp, dp, x, rw, used,
+                                                c->swiglu_clamp_exp, (uint32_t)embd,
+                                                (uint32_t)m->gate[il].row_bytes, (uint32_t)ff,
+                                                (uint32_t)m->down[il].row_bytes, out) == 0;
+    } else {
+        float* midv  = (float*)malloc(sizeof(float) * (size_t)ff * used);
+        float* downv = (float*)malloc(sizeof(float) * (size_t)embd * used);
+        ok = midv && downv;
+        for (int o = 0; ok && o < embd; o++) out[o] = 0.0f;
+        /* batch 1: gate+up (+swiglu). */
+        if (ok) {
+            const void* gp[LLM_DSV4_MAX_EXPERT_USED];
+            const void* upp[LLM_DSV4_MAX_EXPERT_USED];
+            float* mp[LLM_DSV4_MAX_EXPERT_USED];
+            float rw[LLM_DSV4_MAX_EXPERT_USED];
+            for (int i = 0; ok && i < used; i++) { mp[i] = midv + (size_t)i * ff; rw[i] = weight[i]; }
+            if (gt == 16) {
+                for (int i = 0; ok && i < used; i++) {
+                    int e = selected[i];
+                    if (streaming) {
+                        const uint8_t *g = NULL, *u = NULL, *d = NULL;
+                        pe->store_get(pe->store, il, e, &g, &u, &d);
+                        if (!g || !u) { ok = false; break; }
+                        gp[i] = g; upp[i] = u;
+                    } else {
+                        gp[i]  = (const uint8_t*)m->gate[il].w + (size_t)e * (size_t)ff * m->gate[il].row_bytes;
+                        upp[i] = (const uint8_t*)m->up[il].w   + (size_t)e * (size_t)ff * m->up[il].row_bytes;
+                    }
+                }
+                if (ok && llm_dsv4_metal_pair_swiglu_batch(m->be, gp, upp, x, mp, rw, used,
+                                                           c->swiglu_clamp_exp, (uint32_t)embd,
+                                                           (uint32_t)m->gate[il].row_bytes, (uint32_t)ff) != 0) ok = false;
+            } else {
+                /* gate/up Q4_K/Q2_K: niente pair kernel -> gemv Q8_K (x) + swiglu*peso su CPU. */
+                float* gbuf = (float*)malloc(sizeof(float) * (size_t)ff * used);
+                float* ubuf = (float*)malloc(sizeof(float) * (size_t)ff * used);
+                ok = gbuf && ubuf;
+                LlmDsv4GpuJob gj[2 * LLM_DSV4_MAX_EXPERT_USED]; int ng = 0;
+                for (int i = 0; ok && i < used; i++) {
+                    int e = selected[i]; const uint8_t *g = NULL, *u = NULL, *d = NULL;
+                    if (streaming) pe->store_get(pe->store, il, e, &g, &u, &d);
+                    else { g  = (const uint8_t*)m->gate[il].w + (size_t)e * (size_t)ff * m->gate[il].row_bytes;
+                           u  = (const uint8_t*)m->up[il].w   + (size_t)e * (size_t)ff * m->up[il].row_bytes; }
+                    if (!g || !u) { ok = false; break; }
+                    gj[ng++] = (LlmDsv4GpuJob){ g, 0, gt, m->gate[il].row_bytes, (uint32_t)embd, (uint32_t)ff, x, gbuf + (size_t)i * ff };
+                    gj[ng++] = (LlmDsv4GpuJob){ u, 0, ut, m->up[il].row_bytes,   (uint32_t)embd, (uint32_t)ff, x, ubuf + (size_t)i * ff };
+                }
+                if (ok) ok = llm_dsv4_metal_gemv_batch(m->be, gj, ng) == 0;
+                for (int i = 0; ok && i < used; i++) {
+                    llm_dsv4_swiglu(mp[i], gbuf + (size_t)i * ff, ubuf + (size_t)i * ff, ff, c->swiglu_clamp_exp);
+                    for (int j = 0; j < ff; j++) mp[i][j] *= rw[i];
+                    for (int j = 0; j < ff; j++) if (!isfinite(mp[i][j])) mp[i][j] = 0.0f;
+                }
+                free(gbuf); free(ubuf);
+            }
+        }
+        /* batch 2: down dei used esperti in UNA command buffer (stessa cache/streaming). */
+        if (ok) {
+            LlmDsv4GpuJob jobs[LLM_DSV4_MAX_EXPERT_USED];
+            int nj = 0;
+            for (int i = 0; i < used; i++) {
+                int e = selected[i];
+                const uint8_t *wd = m->down[il].w;
+                size_t od = (size_t)e * (size_t)embd * m->down[il].row_bytes;
+                if (streaming) {
+                    const uint8_t *g = NULL, *u = NULL, *d = NULL;
+                    pe->store_get(pe->store, il, e, &g, &u, &d);
+                    if (!d) { ok = false; break; }
+                    wd = d; od = 0;
+                }
+                jobs[nj++] = (LlmDsv4GpuJob){ wd, od, m->down[il].type, m->down[il].row_bytes, (uint32_t)ff, (uint32_t)embd, midv + (size_t)i * ff, downv + (size_t)i * embd };
+            }
+            if (ok) ok = llm_dsv4_metal_gemv_batch(m->be, jobs, nj) == 0;
+        }
+        for (int i = 0; ok && i < used; i++)
+            for (int o = 0; o < embd; o++) if (isfinite(downv[(size_t)i * embd + o])) out[o] += downv[(size_t)i * embd + o];
+        free(downv); free(midv);
     }
-    for (int i = 0; ok && i < used; i++)
-        for (int o = 0; o < embd; o++) if (isfinite(downv[(size_t)i * embd + o])) out[o] += downv[(size_t)i * embd + o];
 
     /* shared expert: Q8_0 packed (dot intero) se disponibile, altrimenti f32. */
     if (ok) {
@@ -189,7 +215,6 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
         }
         free(g); free(u); free(mid);
     }
-    free(downv); free(midv);
     return ok;
 }
 
