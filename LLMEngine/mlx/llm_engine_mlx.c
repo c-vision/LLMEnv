@@ -61,7 +61,6 @@ static int mlx_embed_ids(LlmEngineLlmModel m, const int32_t* ids, int n, float* 
 
 /* ABI v5 — EXPERT SWAP: offload esperti da disco (scelta del consumer, nessun env). */
 static void mlx_set_expert_swap(const char* dir) { llm_ai_mlx_set_moe_swap_dir(dir); }
-static void mlx_set_tq_memory_opt(int on) { llm_ai_mlx_set_tq_memory_opt(on); }
 
 /* ABI v2 — KV: reset in-place + stats. */
 static int mlx_kv_clear(LlmEngineLlmSession s) {
@@ -140,7 +139,6 @@ static const LlmEngineLlmEngine LLM_MLX_ENGINE = {
     .embed_ids = mlx_embed_ids,
     /* ABI v5 (in coda): offload esperti da disco. */
     .set_expert_swap = mlx_set_expert_swap,
-    .set_tq_memory_opt = mlx_set_tq_memory_opt,
 };
 
 const LlmEngineLlmEngine* llmengine_llm_engine_mlx(void) { return &LLM_MLX_ENGINE; }

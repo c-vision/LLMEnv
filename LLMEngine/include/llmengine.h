@@ -22,9 +22,8 @@
  * disponibile, PRIMA di dereferenziarla. v2 = logprobs + constrained + kv_stats/kv_clear (MLX).
  * v3 = token_topk (distribuzione top-k alla posizione pending, MLX).
  * v4 = embed_ids (embedding IDS-based, MLX).
- * v5 = set_expert_swap (offload esperti MoE da disco, MLX).
- * v6 = set_tq_memory_opt (TurboQuant: memoria vs velocita' per gli esperti). */
-#define LLMENGINE_ABI_VERSION 6u
+ * v5 = set_expert_swap (offload esperti MoE da disco, MLX). */
+#define LLMENGINE_ABI_VERSION 5u
 
 #ifdef __cplusplus
 extern "C" {
@@ -168,7 +167,6 @@ typedef struct LlmEngineLlmEngine {
      * o "" disattiva. E' la controparte API dell'opzione di offload degli altri engine (niente
      * variabili d'ambiente). Per modelli senza esperti (dense) è un no-op. */
     void  (*set_expert_swap)(const char* dir);
-    void  (*set_tq_memory_opt)(int on);   /* v6: TurboQuant memoria (1) vs velocita' (0) */
 } LlmEngineLlmEngine;
 
 /* Versione dell'ABI esportata dal runner (== LLMENGINE_ABI_VERSION dell'header con cui e' stato
