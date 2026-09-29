@@ -50,17 +50,6 @@ static bool llama_attention_block_batch(LlmMlxModel* m, int layer_idx, LlmMlxSes
     int rope_dims = hd;
     if (is_glm4 && m->cfg.partial_rotary_factor > 0.0f && m->cfg.partial_rotary_factor < 1.0f)
         rope_dims = (int)(hd * m->cfg.partial_rotary_factor);
-    if (llm_env_isset("LLM_BATCH_VARLEN_DEBUG")) {
-        static int g_varlen_dbg_once = 0;
-        if (!g_varlen_dbg_once) { g_varlen_dbg_once = 1;
-            fprintf(stderr, "[varlen-dbg] n_sess=%d model=%s kv_max=%d kvq=%d kvslice=%d kvseg=%d kvmetal=%d auth=%d ver=%d ac=%p valid=%d has_v=%d hc0=%d lora=%d\n",
-                n_sess, m->cfg.model_type, m->cfg.kv_max_tokens, (int)m->cfg.kv_quantize,
-                (int)llm_mlx_kvslice_enabled(), (int)llm_mlx_kvseg_enabled(),
-                (int)llm_mlx_kvmetal_enabled(), (int)llm_mlx_kvmetal_auth_enabled(),
-                (int)llm_mlx_kvmetal_verify_enabled(), (void*)ac, (int)(ac?ac->valid:0), (int)(ac?ac->has_v:0),
-                (int)(sess && sess[0] ? sess[0]->has_cache[layer_idx] : -1),
-                (int)(llm_mlx_model_lora_get(m, layer_idx, "q_proj") >= 0)); }
-    }
     if (n_sess < 2 || nh <= 0 || nkv <= 0 || hd <= 0) return false;
     if (m->cfg.nsa_sparse) return false;
     if (is_mixtral && llm_mlx_fixkv_enabled()) return false; /* cache statica mixtral non coperta */
