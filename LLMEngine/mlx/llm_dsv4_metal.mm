@@ -260,7 +260,7 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    device const char* G3 [[buffer(3)]], device const char* G4 [[buffer(4)]], device const char* G5 [[buffer(5)]],\n"
 "    device const char* U0 [[buffer(6)]], device const char* U1 [[buffer(7)]], device const char* U2 [[buffer(8)]],\n"
 "    device const char* U3 [[buffer(9)]], device const char* U4 [[buffer(10)]], device const char* U5 [[buffer(11)]],\n"
-"    device const float* Y [[buffer(12)]], device float* MID [[buffer(13)]], device const float* RW [[buffer(14)]],\n"
+"    device const float* Y [[buffer(12)]], device float* MID [[buffer(13)]], constant float* RW [[buffer(14)]],\n"
 "    constant float* CF [[buffer(15)]], constant uint* P [[buffer(16)]],\n"
 "    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]],\n"
 "    ushort sgitg [[simdgroup_index_in_threadgroup]], threadgroup char* shmem [[threadgroup(0)]]) {\n"
@@ -762,6 +762,10 @@ struct LlmDsv4Metal {
     id<MTLResidencySet> residency;  /* CONDIVISO da tutti gli argbuf (limite 32 set/coda) */
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
+    /* Cache PERSISTENTE delle view no-copy (base pagina -> MTLBuffer): creare una view costa decine
+     * di µs e nel MoE ne servono ~20 per layer; l'esperto in store/mmap ha un indirizzo stabile. */
+    struct { uintptr_t base; size_t len; id<MTLBuffer> buf; } *nc;
+    uint32_t nc_cap, nc_n;
     size_t sx_cap[64], so_cap[64], spb_cap[64];
 };
 
@@ -773,6 +777,42 @@ static id<MTLBuffer> dsv4_scratch(LlmDsv4Metal* b, id<MTLBuffer>* slot, size_t* 
         if (*slot) *cap = need;
     }
     return *slot;
+}
+
+/* View no-copy della memoria [ptr, ptr+bytes): base allineata a pagina, `*lead` = scarto di `ptr`
+ * dalla base. Cached e persistente (rilasciata in destroy): NON va rilasciata dal chiamante.
+ * Tabella piena/allocazione fallita -> nil. */
+static id<MTLBuffer> dsv4_nocopy_view(LlmDsv4Metal* b, const void* ptr, size_t bytes, size_t* lead) {
+    const size_t page = (size_t)getpagesize();
+    uintptr_t base = (uintptr_t)ptr & ~(uintptr_t)(page - 1);
+    *lead = (size_t)((uintptr_t)ptr - base);
+    size_t len = ((*lead + bytes + page - 1) / page) * page;
+    if (!b->nc) {
+        b->nc_cap = 1u << 17;
+        b->nc = (__typeof__(b->nc))calloc(b->nc_cap, sizeof *b->nc);
+        if (!b->nc) { b->nc_cap = 0; return nil; }
+    }
+    uint32_t mask = b->nc_cap - 1, h = (uint32_t)((base >> 14) * 2654435761u) & mask;
+    for (uint32_t p = 0; p < b->nc_cap; p++) {
+        uint32_t i = (h + p) & mask;
+        if (b->nc[i].buf == nil) {
+            if (b->nc_n >= b->nc_cap / 2) return nil;
+            id<MTLBuffer> v = [b->dev newBufferWithBytesNoCopy:(void*)base length:len
+                                                       options:MTLResourceStorageModeShared deallocator:nil];
+            if (!v) return nil;
+            b->nc[i].base = base; b->nc[i].len = len; b->nc[i].buf = v; b->nc_n++;
+            return v;
+        }
+        if (b->nc[i].base == base) {
+            if (b->nc[i].len >= len) return b->nc[i].buf;
+            id<MTLBuffer> v = [b->dev newBufferWithBytesNoCopy:(void*)base length:len
+                                                       options:MTLResourceStorageModeShared deallocator:nil];
+            if (!v) return nil;
+            [b->nc[i].buf release]; b->nc[i].buf = v; b->nc[i].len = len;
+            return v;
+        }
+    }
+    return nil;
 }
 
 int llm_dsv4_metal_available(void) {
@@ -920,6 +960,7 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
         if (b->so[i])  [b->so[i] release];
         if (b->spb[i]) [b->spb[i] release];
     }
+    if (b->nc) { for (uint32_t i = 0; i < b->nc_cap; i++) if (b->nc[i].buf) [b->nc[i].buf release]; free(b->nc); }
     if (b->residency) [b->residency release];
     if (b->queue)   [b->queue release];
     if (b->dev)     [b->dev release];
@@ -1013,12 +1054,8 @@ int llm_dsv4_metal_gemv_batch(LlmDsv4Metal* b, const LlmDsv4GpuJob* jobs, int n_
         uint32_t blk_elems = (t == 8) ? 32u : 256u;
         if ((t != 16 && t != 10 && t != 12 && t != 8) || (j->n % blk_elems) != 0 || j->out_dim == 0 || j->n == 0) { rc = -1; break; }
         const uint8_t* p = (const uint8_t*)j->w + j->byte_off;
-        uintptr_t ap = (uintptr_t)p & ~(uintptr_t)(page - 1);
-        size_t lead = (size_t)((uintptr_t)p - ap);
-        size_t slice = (size_t)j->out_dim * j->row_bytes;
-        size_t view_len = ((lead + slice + page - 1) / page) * page;
-        ws[i] = [b->dev newBufferWithBytesNoCopy:(void*)ap length:view_len
-                    options:MTLResourceStorageModeShared deallocator:nil];
+        size_t lead;
+        ws[i] = dsv4_nocopy_view(b, p, (size_t)j->out_dim * j->row_bytes, &lead);
         if (t == 8) {
             xs[i] = dsv4_scratch(b, &b->sx[i], &b->sx_cap[i], (size_t)j->n * sizeof(float));
             if (xs[i]) memcpy([xs[i] contents], j->x, (size_t)j->n * sizeof(float));
@@ -1069,7 +1106,6 @@ int llm_dsv4_metal_gemv_batch(LlmDsv4Metal* b, const LlmDsv4GpuJob* jobs, int n_
         for (int i = 0; i < nq; i++)
             memcpy((void*)jobs[i].out, [os[i] contents], (size_t)jobs[i].out_dim * sizeof(float));
     for (int i = 0; i < 64; i++)
-        if (ws[i]) [ws[i] release];   /* xs/os/pbs: buffer PERSISTENTI, non rilasciati */
     return rc;
 }
 
@@ -1189,54 +1225,40 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
                                uint32_t s_nb_g, uint32_t s_nb_d, float* out) {
     if (!b || !b->pso_slots6 || !b->pso_sum6_q2k || n != 6 || !gates || !ups || !downs || !x || !rws || !out) return -1;
     if ((ff % 256u) != 0u) return -1;
-    const size_t page = (size_t)getpagesize();
     id<MTLBuffer> X   = dsv4_scratch(b, &b->sx[0], &b->sx_cap[0], (size_t)embd * sizeof(float));
     id<MTLBuffer> MID = dsv4_scratch(b, &b->sx[1], &b->sx_cap[1], (size_t)n * (size_t)ff * sizeof(float));
     id<MTLBuffer> OUT = dsv4_scratch(b, &b->sx[2], &b->sx_cap[2], (size_t)embd * sizeof(float));
     if (!X || !MID || !OUT) return -2;
     memcpy([X contents], x, (size_t)embd * sizeof(float));
+    /* View persistenti (cache): nessuna creazione/rilascio per chiamata. */
     id<MTLBuffer> BG[6], BU[6], BD[6];
-    for (int i = 0; i < 6; i++) { BG[i] = BU[i] = BD[i] = nil; }
     uint32_t PV[15]; PV[0] = embd; PV[1] = gu_nb01; PV[2] = ff;
-    int rc = 0;
+    const size_t gbytes = (size_t)ff * gu_nb01, dbytes = (size_t)embd * down_nb01;
     for (int i = 0; i < n; i++) {
-        size_t gbytes = (size_t)ff * gu_nb01, dbytes = (size_t)embd * down_nb01;
-        uintptr_t apg = (uintptr_t)gates[i] & ~(uintptr_t)(page-1); size_t lg = (size_t)((uintptr_t)gates[i]-apg);
-        uintptr_t apu = (uintptr_t)ups[i]   & ~(uintptr_t)(page-1); size_t lu = (size_t)((uintptr_t)ups[i]-apu);
-        uintptr_t apd = (uintptr_t)downs[i] & ~(uintptr_t)(page-1); size_t ld = (size_t)((uintptr_t)downs[i]-apd);
-        size_t vlg = ((lg+gbytes+page-1)/page)*page, vlu = ((lu+gbytes+page-1)/page)*page, vld = ((ld+dbytes+page-1)/page)*page;
+        size_t lg, lu, ld;
+        BG[i] = dsv4_nocopy_view(b, gates[i], gbytes, &lg);
+        BU[i] = dsv4_nocopy_view(b, ups[i],   gbytes, &lu);
+        BD[i] = dsv4_nocopy_view(b, downs[i], dbytes, &ld);
+        if (!BG[i] || !BU[i] || !BD[i]) return -2;
         PV[3+i] = (uint32_t)lg; PV[9+i] = (uint32_t)lu;
-        BG[i] = [b->dev newBufferWithBytesNoCopy:(void*)apg length:vlg options:MTLResourceStorageModeShared deallocator:nil];
-        BU[i] = [b->dev newBufferWithBytesNoCopy:(void*)apu length:vlu options:MTLResourceStorageModeShared deallocator:nil];
-        BD[i] = [b->dev newBufferWithBytesNoCopy:(void*)apd length:vld options:MTLResourceStorageModeShared deallocator:nil];
-        if (!BG[i] || !BU[i] || !BD[i]) { rc = -2; break; }
     }
-    id<MTLBuffer> RWV  = [b->dev newBufferWithBytes:rws length:(NSUInteger)n*sizeof(float) options:MTLResourceStorageModeShared];
-    id<MTLBuffer> PBV  = [b->dev newBufferWithBytes:PV length:sizeof(PV) options:MTLResourceStorageModeShared];
-    id<MTLBuffer> CF   = [b->dev newBufferWithBytes:&clamp length:sizeof(float) options:MTLResourceStorageModeShared];
-    id<MTLBuffer> PSUM = nil;
-    if (rc == 0 && (!RWV || !PBV || !CF)) rc = -2;
-    { uint32_t P[4] = { ff / 256u, down_nb01, embd, ff };
-      PSUM = [b->dev newBufferWithBytes:P length:sizeof(P) options:MTLResourceStorageModeShared];
-      if (!PSUM) rc = -2; }
+    uint32_t PS[4] = { ff / 256u, down_nb01, embd, ff };
     id<MTLBuffer> WG = nil, WU = nil, WD = nil, G = nil, U = nil, MID2 = nil, D = nil;
     uint32_t lg_g = 0, lu_g = 0, ld_g = 0;
     if (sg && su && sd) {
-        size_t sbg = (size_t)ff * s_nb_g, sbd = (size_t)embd * s_nb_d;
-        uintptr_t apg = (uintptr_t)sg & ~(uintptr_t)(page-1); lg_g = (uint32_t)((uintptr_t)sg-apg);
-        uintptr_t apu = (uintptr_t)su & ~(uintptr_t)(page-1); lu_g = (uint32_t)((uintptr_t)su-apu);
-        uintptr_t apd = (uintptr_t)sd & ~(uintptr_t)(page-1); ld_g = (uint32_t)((uintptr_t)sd-apd);
-        size_t vlg = ((lg_g+sbg+page-1)/page)*page, vlu = ((lu_g+sbg+page-1)/page)*page, vld = ((ld_g+sbd+page-1)/page)*page;
-        WG = [b->dev newBufferWithBytesNoCopy:(void*)apg length:vlg options:MTLResourceStorageModeShared deallocator:nil];
-        WU = [b->dev newBufferWithBytesNoCopy:(void*)apu length:vlu options:MTLResourceStorageModeShared deallocator:nil];
-        WD = [b->dev newBufferWithBytesNoCopy:(void*)apd length:vld options:MTLResourceStorageModeShared deallocator:nil];
+        size_t sbg = (size_t)ff * s_nb_g, sbd = (size_t)embd * s_nb_d, l0, l1, l2;
+        WG = dsv4_nocopy_view(b, sg, sbg, &l0);
+        WU = dsv4_nocopy_view(b, su, sbg, &l1);
+        WD = dsv4_nocopy_view(b, sd, sbd, &l2);
+        lg_g = (uint32_t)l0; lu_g = (uint32_t)l1; ld_g = (uint32_t)l2;
         G    = dsv4_scratch(b, &b->sx[15], &b->sx_cap[15], (size_t)ff * sizeof(float));
         U    = dsv4_scratch(b, &b->sx[16], &b->sx_cap[16], (size_t)ff * sizeof(float));
         MID2 = dsv4_scratch(b, &b->sx[17], &b->sx_cap[17], (size_t)ff * sizeof(float));
         D    = dsv4_scratch(b, &b->sx[18], &b->sx_cap[18], (size_t)embd * sizeof(float));
-        if (!WG || !WU || !WD || !G || !U || !MID2 || !D) rc = -2;
-      }
-    if (rc == 0) {
+        if (!WG || !WU || !WD || !G || !U || !MID2 || !D) return -2;
+    }
+    int rc = 0;
+    {
         id<MTLCommandBuffer> cb = [b->queue commandBuffer];
         id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
         const uint32_t NSG = 4, nr0 = 4;
@@ -1245,22 +1267,17 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
         for (int i = 0; i < 6; i++) [e setBuffer:BU[i] offset:0 atIndex:6+i];
         [e setBuffer:X   offset:0 atIndex:12];
         [e setBuffer:MID offset:0 atIndex:13];
-        [e setBuffer:RWV offset:0 atIndex:14];
-        [e setBuffer:CF  offset:0 atIndex:15];
-        [e setBuffer:PBV offset:0 atIndex:16];
+        [e setBytes:rws length:(NSUInteger)n*sizeof(float) atIndex:14];
+        [e setBytes:&clamp length:sizeof(float) atIndex:15];
+        [e setBytes:PV length:sizeof(PV) atIndex:16];
         [e setThreadgroupMemoryLength:256 * 8 + 128 atIndex:0];
         [e dispatchThreadgroups:MTLSizeMake((ff + NSG*nr0 - 1) / (NSG*nr0), 1, 6)
          threadsPerThreadgroup:MTLSizeMake(32*NSG, 1, 1)];
         [e setComputePipelineState:b->pso_sum6_q2k];
-        [e setBuffer:BD[0] offset:0 atIndex:0];
-        [e setBuffer:BD[1] offset:0 atIndex:1];
-        [e setBuffer:BD[2] offset:0 atIndex:2];
-        [e setBuffer:BD[3] offset:0 atIndex:3];
-        [e setBuffer:BD[4] offset:0 atIndex:4];
-        [e setBuffer:BD[5] offset:0 atIndex:5];
+        for (int i = 0; i < 6; i++) [e setBuffer:BD[i] offset:0 atIndex:i];
         [e setBuffer:MID offset:0 atIndex:6];
         [e setBuffer:OUT offset:0 atIndex:7];
-        [e setBuffer:PSUM offset:0 atIndex:8];
+        [e setBytes:PS length:sizeof(PS) atIndex:8];
         [e dispatchThreadgroups:MTLSizeMake((embd + NSG*nr0 - 1) / (NSG*nr0), 1, 1)
          threadsPerThreadgroup:MTLSizeMake(32*NSG, 1, 1)];
         if (WG) {
@@ -1292,14 +1309,6 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(out, [OUT contents], (size_t)embd * sizeof(float));
     }
-    for (int i = 0; i < n; i++) {
-        if (BG[i]) [BG[i] release]; if (BU[i]) [BU[i] release]; if (BD[i]) [BD[i] release];
-    }
-    if (RWV) [RWV release];
-    if (PBV) [PBV release];
-    if (CF) [CF release];
-    if (PSUM) [PSUM release];
-    if (WG) [WG release]; if (WU) [WU release]; if (WD) [WD release];
     return rc;
 }
 
@@ -1315,12 +1324,9 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b,
     const size_t page = (size_t)getpagesize();
     size_t abytes = (size_t)ng * rank * outa_row_bytes;
     size_t bbytes = (size_t)embd * outb_row_bytes;
-    uintptr_t apa = (uintptr_t)outa_w & ~(uintptr_t)(page-1); size_t la = (size_t)((uintptr_t)outa_w-apa);
-    uintptr_t apb = (uintptr_t)outb_w & ~(uintptr_t)(page-1); size_t lb = (size_t)((uintptr_t)outb_w-apb);
-    size_t vla = ((la+abytes+page-1)/page)*page;
-    size_t vlb = ((lb+bbytes+page-1)/page)*page;
-    id<MTLBuffer> WA  = [b->dev newBufferWithBytesNoCopy:(void*)apa length:vla options:MTLResourceStorageModeShared deallocator:nil];
-    id<MTLBuffer> WB  = [b->dev newBufferWithBytesNoCopy:(void*)apb length:vlb options:MTLResourceStorageModeShared deallocator:nil];
+    size_t la, lb;
+    id<MTLBuffer> WA  = dsv4_nocopy_view(b, outa_w, abytes, &la);
+    id<MTLBuffer> WB  = dsv4_nocopy_view(b, outb_w, bbytes, &lb);
     id<MTLBuffer> H   = dsv4_scratch(b, &b->sx[3], &b->sx_cap[3], (size_t)heads_total * sizeof(float));
     id<MTLBuffer> LOW = dsv4_scratch(b, &b->sx[4], &b->sx_cap[4], (size_t)ol * sizeof(float));
     id<MTLBuffer> OUT = dsv4_scratch(b, &b->sx[5], &b->sx_cap[5], (size_t)embd * sizeof(float));
@@ -1352,8 +1358,6 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b,
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(out, [OUT contents], (size_t)embd * sizeof(float));
     }
-    if (WA) [WA release];
-    if (WB) [WB release];
     return rc;
 }
 
@@ -1761,13 +1765,10 @@ int llm_dsv4_metal_attn_proj_fused(LlmDsv4Metal* b,
     if ((lq % 32u) || (qd % 32u) || (embd % 32u) || n_head <= 0) return -1;
     const size_t page = (size_t)getpagesize();
     size_t qasz = (size_t)lq * qa_row_bytes, kvsz = (size_t)hd * kv_row_bytes, qbsz = (size_t)qd * qb_row_bytes;
-    uintptr_t ap_qa = (uintptr_t)qa_w & ~(uintptr_t)(page-1); size_t l_qa = (size_t)((uintptr_t)qa_w-ap_qa);
-    uintptr_t ap_kv = (uintptr_t)kv_w & ~(uintptr_t)(page-1); size_t l_kv = (size_t)((uintptr_t)kv_w-ap_kv);
-    uintptr_t ap_qb = (uintptr_t)qb_w & ~(uintptr_t)(page-1); size_t l_qb = (size_t)((uintptr_t)qb_w-ap_qb);
-    size_t vl_qa = ((l_qa+qasz+page-1)/page)*page, vl_kv = ((l_kv+kvsz+page-1)/page)*page, vl_qb = ((l_qb+qbsz+page-1)/page)*page;
-    id<MTLBuffer> WA  = [b->dev newBufferWithBytesNoCopy:(void*)ap_qa length:vl_qa options:MTLResourceStorageModeShared deallocator:nil];
-    id<MTLBuffer> WK  = [b->dev newBufferWithBytesNoCopy:(void*)ap_kv length:vl_kv options:MTLResourceStorageModeShared deallocator:nil];
-    id<MTLBuffer> WQ  = [b->dev newBufferWithBytesNoCopy:(void*)ap_qb length:vl_qb options:MTLResourceStorageModeShared deallocator:nil];
+    size_t l_qa, l_kv, l_qb;
+    id<MTLBuffer> WA  = dsv4_nocopy_view(b, qa_w, qasz, &l_qa);
+    id<MTLBuffer> WK  = dsv4_nocopy_view(b, kv_w, kvsz, &l_kv);
+    id<MTLBuffer> WQ  = dsv4_nocopy_view(b, qb_w, qbsz, &l_qb);
     id<MTLBuffer> WQAN = [b->dev newBufferWithBytes:qan_w length:(NSUInteger)lq*sizeof(float) options:MTLResourceStorageModeShared];
     id<MTLBuffer> WKAN = [b->dev newBufferWithBytes:kvan_w length:(NSUInteger)hd*sizeof(float) options:MTLResourceStorageModeShared];
     id<MTLBuffer> X   = dsv4_scratch(b, &b->sx[6],  &b->sx_cap[6],  (size_t)embd*sizeof(float));
@@ -1833,7 +1834,6 @@ int llm_dsv4_metal_attn_proj_fused(LlmDsv4Metal* b,
             memcpy(qrn_out, [QRN contents], (size_t)lq*sizeof(float));
         }
     }
-    if (WA) [WA release]; if (WK) [WK release]; if (WQ) [WQ release];
     if (WQAN) [WQAN release]; if (WKAN) [WKAN release];
     return rc;
 }
