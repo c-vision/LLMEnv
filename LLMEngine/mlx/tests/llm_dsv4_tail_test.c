@@ -125,6 +125,11 @@ int main(int argc, char** argv) {
     llm_dsv4_moe_route(&c, &L, rnrm, IL, 0, rsel, rw);
     float* rrout = (float*)malloc(sizeof(float)*D);
     if (!llm_dsv4_gpu_moe_try(&c, &L, IL, rnrm, 0, rrout)) { fprintf(stderr,"moe_try non eseguito\n"); return 3; }
+    { float* rcpu = (float*)malloc(sizeof(float)*D);
+      llm_dsv4_moe_forward_packed(&c, &L, &pe, rnrm, IL, 0, rcpu);
+      double mg=0,mc=0; for(int i=0;i<D;i++){double v=fabs(rrout[i]); if(v>mg)mg=v; double w=fabs(rcpu[i]); if(w>mc)mc=w;}
+      fprintf(stderr,"[TAIL] moe_ref gpu-vs-cpu max|diff|=%.6g (|gpu|max=%.4g |cpu|max=%.4g)\n", maxdiff(rrout, rcpu, D), mg, mc);
+      free(rcpu); }
     float* routc = (float*)malloc(sizeof(float)*HC*D);
     llm_dsv4_block_post(&c, rrout, rnxt, p2, c2, routc);
 

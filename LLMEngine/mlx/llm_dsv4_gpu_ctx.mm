@@ -9,6 +9,8 @@
 #include "llm_dsv4_gpu_attn.h"
 #include "llm_dsv4_store.h"
 
+#include "llm_dsv4_store.h"
+
 static LlmDsv4Metal*  g_be = NULL;
 static LlmDsv4MoeGpu  g_moe;
 static LlmDsv4AttnGpu g_attn;
@@ -17,10 +19,12 @@ static int g_ref = 0;
 
 /* Tabella gpuAddress per-esperto (buffer piccoli, registrati, PERSISTENTI), per layer. */
 static uint64_t* g_gaddr[LLM_DSV4_MAX_LAYER]; static uint64_t* g_uaddr[LLM_DSV4_MAX_LAYER]; static uint64_t* g_daddr[LLM_DSV4_MAX_LAYER];
-static int g_tbl_ready[LLM_DSV4_MAX_LAYER]; static int g_tbl_ne = -1;
+static int g_tbl_ready[LLM_DSV4_MAX_LAYER]; static int g_tbl_ne = -1; static uint64_t g_tbl_ep[LLM_DSV4_MAX_LAYER];
 static int dsv4_build_tables(const LlmDsv4PackedExperts* pe, int il, int n_expert) {
     if (il < 0 || il >= LLM_DSV4_MAX_LAYER) return 0;
-    if (g_tbl_ready[il] && g_tbl_ne == n_expert) return 1;
+    LlmDsv4Store* st = (LlmDsv4Store*)pe->store;
+    uint64_t ep = st ? st->evictions : 0;
+    if (g_tbl_ready[il] && g_tbl_ne == n_expert && g_tbl_ep[il] == ep) return 1;
     free(g_gaddr[il]); free(g_uaddr[il]); free(g_daddr[il]);
     g_gaddr[il] = (uint64_t*)malloc((size_t)n_expert*sizeof(uint64_t));
     g_uaddr[il] = (uint64_t*)malloc((size_t)n_expert*sizeof(uint64_t));
@@ -28,13 +32,19 @@ static int dsv4_build_tables(const LlmDsv4PackedExperts* pe, int il, int n_exper
     if (!g_gaddr[il] || !g_uaddr[il] || !g_daddr[il]) return 0;
     size_t nbg = (size_t)llm_ggml_nbytes(pe->gate_type, pe->in_dim);
     size_t nbd = (size_t)llm_ggml_nbytes(pe->down_type, pe->ff_dim);
-    size_t sg = (size_t)pe->ff_dim * nbg, sd = (size_t)pe->in_dim * nbd;
+    size_t gbytes = (size_t)pe->ff_dim * nbg, dbytes = (size_t)pe->in_dim * nbd;
+    size_t sg = gbytes, sd = dbytes;
     for (int e = 0; e < n_expert; e++) {
-        g_gaddr[il][e] = llm_dsv4_metal_expert_gaddr(g_be, pe->gate + (size_t)e*sg, sg);
-        g_uaddr[il][e] = llm_dsv4_metal_expert_gaddr(g_be, pe->up   + (size_t)e*sg, sg);
-        g_daddr[il][e] = llm_dsv4_metal_expert_gaddr(g_be, pe->down + (size_t)e*sd, sd);
+        /* Preferisci i buffer dello STORE (RAM, residenti); il mmap sotto streaming e' non-residente. */
+        const uint8_t *g = NULL, *u = NULL, *d = NULL;
+        if (pe->store && pe->store_get) pe->store_get(pe->store, il, e, &g, &u, &d);
+        else { g = pe->gate + (size_t)e*sg; u = pe->up + (size_t)e*sg; d = pe->down + (size_t)e*sd; }
+        if (!g || !u || !d) { return 0; }
+        g_gaddr[il][e] = llm_dsv4_metal_expert_gaddr(g_be, g, gbytes);
+        g_uaddr[il][e] = llm_dsv4_metal_expert_gaddr(g_be, u, gbytes);
+        g_daddr[il][e] = llm_dsv4_metal_expert_gaddr(g_be, d, dbytes);
     }
-    g_tbl_ready[il] = 1; g_tbl_ne = n_expert;
+    g_tbl_ready[il] = 1; g_tbl_ne = n_expert; g_tbl_ep[il] = ep;
     return 1;
 }
 
