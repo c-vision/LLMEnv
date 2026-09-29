@@ -266,6 +266,9 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
      * (il kernel fuso non espone un `act`/`down_out` intermedio su cui il LoRA per-esperto
      * possa agganciarsi). Fallback silenzioso al path gather_qmm sotto in ogni altro caso. */
     bool moe_fused_done = false;
+    /* STREAM-AWARE: nessuna guardia per-modello. Il kernel fuso riceve i tensori giusti in
+     * entrambe le modalità (completi se OFF, stacked degli esperti attivi se ON) tramite
+     * `llm_mlx_moe_fused_stream_aware`. */
     if (ok && n_tokens == 1 && !has_moe_down_lora && llm_mlx_fuse_moe_decode_enabled()
         && strcmp(eg_mode, "affine") == 0 && strcmp(eu_mode, "affine") == 0 && strcmp(ed_mode, "affine") == 0
         && eg_bits == eu_bits && eg_group == eu_group
@@ -282,10 +285,10 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
         prep = prep && mlx_astype(&sc_flat, pr1, MLX_FLOAT32, m->stream) == 0;
         if (prep) {
             mlx_array fused_summed = mlx_array_new();
-            bool fok = llm_mlx_moe_fused_decode(&fused_summed, x_flat, idx_flat,
+            bool fok = llm_mlx_moe_fused_stream_aware(&m->cfg, layer_idx, x_flat, top_inds_arr,
                 gate_proj_w, gate_proj_s, gate_proj_b, up_proj_w, up_proj_s, up_proj_b,
-                down_proj_w, down_proj_s, down_proj_b, sc_flat,
-                din, dff, k, eg_bits, eg_group, ed_bits, ed_group, /*act=SwiGLU*/0, m->stream);
+                down_proj_w, down_proj_s, down_proj_b,
+                eg_bits, eg_group, ed_bits, ed_group, /*act=SwiGLU*/0, sc_flat, &fused_summed, m->stream);
             if (fok) {
                 mlx_array cast = mlx_array_new();
                 fok = mlx_astype(&cast, fused_summed, mlx_array_dtype(h), m->stream) == 0;
@@ -295,7 +298,7 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
                 }
                 mlx_array_free(cast);
             }
-            if (fok && llm_mlx_fuse_moe_decode_verify_enabled()) {
+            if (fok && llm_mlx_fuse_moe_decode_verify_enabled() && !llm_mlx_moe_swap_on()) {
                 /* _VERIFY: non usato per calcolare il risultato, solo per stampare il diff --
                  * zero rischio. Stesso schema di qwen3_moe_ffn_block, con bits/group per
                  * proiezione (eg/eu/ed_*) invece del gsz/bts globale. */
@@ -375,6 +378,18 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
         }
     }
     if (ok && !moe_fused_done) ok = llm_mlx_moe_gather_streamed(&m->cfg, layer_idx, 2, &down_out, act, down_proj_w, down_proj_s, down_proj_b, no_lhs, top_inds_arr, true, (mlx_optional_int){ed_group,true}, (mlx_optional_int){ed_bits,true}, ed_mode, false, m->stream) == 0;
+    if (ok && !moe_fused_done) {
+        /* down_out esce dalla gather come [n_tokens*top_k, 1, H]: normalizza a [n_tokens, top_k, H]
+         * cosi' il broadcast con scores [n_tokens, top_k, 1, 1] e la somma su axis=1 sono corretti
+         * per OGNI n_tokens. Senza questa normalizza il ramo UNSORTED (n_tokens in 2..7) moltiplica
+         * [T*K,1,H] x [T,K,1,1] -> mismatch (T*K != K) -> fallisce; per n_tokens==1 il flatten
+         * coincide con top_k e funzionava per caso (il ramo SORTED, n_tokens>=8, gia' normalizza). */
+        mlx_array d3 = mlx_array_new();
+        const int dsh[3] = { n_tokens, m->cfg.top_k, m->cfg.hidden_size };
+        if (mlx_reshape(&d3, down_out, dsh, 3, m->stream) == 0) mlx_array_set(&down_out, d3);
+        else ok = false;
+        mlx_array_free(d3);
+    }
     /* LoRA per-esperto MoE (fase 4): per ogni modulo su (layer, "moe_down", expert=j),
      * aggiunge contrib = act @ A_j @ B_j * scale SOLO alle posizioni dove l'esperto j e'
      * nel top-k (mask da top_inds_host). Adapter per-esperto del down_proj degli esperti.
@@ -407,13 +422,13 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
     /* score (probs) gia' calcolato piu' sopra, prima del tentativo di kernel fuso -- non
      * ricalcolarlo qui. */
     if (ok && !moe_fused_done) {
-        const int sc_shape[4] = {n_tokens, m->cfg.top_k, 1, 1};
+        const int sc_shape[3] = {n_tokens, m->cfg.top_k, 1};
         if (llm_mlx_reshape_canonical_enabled()) {
             /* `probs` contiene gia' T*K elementi: il reshape intermedio [T,K] non
              * modifica ordine o dtype e aggiungeva una primitive per layer/token. */
-            ok = mlx_reshape(&scores_arr, probs, sc_shape, 4, m->stream) == 0;
+            ok = mlx_reshape(&scores_arr, probs, sc_shape, 3, m->stream) == 0;
         } else {
-            ok = mlx_reshape(&scores_arr, probs, sc_shape, 4, m->stream) == 0;   /* canonico: [T,K] intermedio ridondante */
+            ok = mlx_reshape(&scores_arr, probs, sc_shape, 3, m->stream) == 0;   /* canonico: [T,K] intermedio ridondante */
         }
         if (ok) ok = mlx_multiply(&scaled, down_out, scores_arr, m->stream) == 0;
     }
