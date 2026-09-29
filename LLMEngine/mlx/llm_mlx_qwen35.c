@@ -197,20 +197,7 @@ bool qwen3_next_linear_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
     if (ok) { ok = mlx_reshape(&q4, q_part, q_shape, 4, s) == 0 &&
                     mlx_reshape(&k4, k_part, q_shape, 4, s) == 0 &&
                     mlx_reshape(&v4, v_part, v_shape, 4, s) == 0; CHK(ok, "reshape q/k/v"); }
-    if (ok && layer_idx == 0 && getenv("LLM_BONSAI_DBG")) {
-        mlx_array vf = mlx_array_new();
-        if (mlx_astype(&vf, q4, MLX_FLOAT32, s) == 0 && mlx_array_eval(vf) == 0) {
-            const float* d = mlx_array_data_float32(vf);
-            if (d) { fprintf(stderr, "[gdn] q4 ="); for (int q=0;q<6;q++) fprintf(stderr, " %.6f", d[q]); fprintf(stderr, "\n"); }
-        }
-        mlx_array_free(vf);
-        vf = mlx_array_new();
-        if (mlx_astype(&vf, v4, MLX_FLOAT32, s) == 0 && mlx_array_eval(vf) == 0) {
-            const float* d = mlx_array_data_float32(vf);
-            if (d) { fprintf(stderr, "[gdn] v4 ="); for (int q=0;q<6;q++) fprintf(stderr, " %.6f", d[q]); fprintf(stderr, "\n"); }
-        }
-        mlx_array_free(vf);
-    }
+    
 
     /* inv_scale = Dk**-0.5; q = inv^2 * rms_norm(q); k = inv * rms_norm(k). eps=1e-6
      * come il riferimento (mx.fast.rms_norm(..., None, 1e-6)). */
@@ -223,14 +210,7 @@ bool qwen3_next_linear_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
     mlx_array q_s=mlx_array_new(), k_s=mlx_array_new();
     if (ok) { ok = mlx_multiply(&q_s, q_n, inv2, s) == 0 &&
                     mlx_multiply(&k_s, k_n, inv1, s) == 0; CHK(ok, "inv_scale q/k"); }
-    if (ok && layer_idx == 0 && getenv("LLM_BONSAI_DBG")) {
-        mlx_array vf = mlx_array_new();
-        if (mlx_astype(&vf, q_s, MLX_FLOAT32, s) == 0 && mlx_array_eval(vf) == 0) {
-            const float* d = mlx_array_data_float32(vf);
-            if (d) { fprintf(stderr, "[gdn] q_s ="); for (int q=0;q<6;q++) fprintf(stderr, " %.6f", d[q]); fprintf(stderr, "\n"); }
-        }
-        mlx_array_free(vf);
-    }
+    
 
     /* beta = sigmoid(b); g = compute_g(A_log, a, dt_bias) = exp(-exp(A_log)*softplus(a+dt_bias)) */
     mlx_array A_log=mlx_array_new(), dt_bias=mlx_array_new();
@@ -325,13 +305,7 @@ bool qwen3_next_linear_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
         mlx_array_free(state_new_k);
       }
     }
-    if (getenv("LLM_GDN_TIME")) {
-        struct timespec _g0,_g1; clock_gettime(CLOCK_MONOTONIC,&_g0);
-        if (ok) (void)mlx_array_eval(y_stack);
-        clock_gettime(CLOCK_MONOTONIC,&_g1);
-        fprintf(stderr, "[gdn-time] layer=%d S=%d %.2fms\n", layer_idx, S,
-                (_g1.tv_sec-_g0.tv_sec)*1e3+(_g1.tv_nsec-_g0.tv_nsec)/1e6);
-    }
+    
     if (llm_mlx_gdn_kernel_dbg_enabled())
         fprintf(stderr, "[gdn-kernel] layer=%d S=%d -> %s\n", layer_idx, S,
                 kernel_done ? "KERNEL FUSO" : "LOOP per-token");
@@ -440,14 +414,7 @@ bool qwen3_next_linear_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
     CHK(ok, "out_proj lookup");
     mlx_array r=mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&r, gated_flat, out_w, out_sc, out_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "out_proj");
-        if (ok && layer_idx == 0 && getenv("LLM_BONSAI_DBG")) {
-            mlx_array vf = mlx_array_new();
-            if (mlx_astype(&vf, r, MLX_FLOAT32, s) == 0 && mlx_array_eval(vf) == 0) {
-                const float* d = mlx_array_data_float32(vf);
-                if (d) { fprintf(stderr, "[gdn] r_out[:6] ="); for (int q=0;q<6;q++) fprintf(stderr, " %.6f", d[q]); fprintf(stderr, "\n"); }
-            }
-            mlx_array_free(vf);
-        } }
+         }
     { int li = llm_mlx_model_lora_get(m, layer_idx, "out_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&r, gated_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     /* residual: h = x + r (il layer lineare ritorna la somma, come DecoderLayer.__call__). */
     mlx_array h_out=mlx_array_new();
