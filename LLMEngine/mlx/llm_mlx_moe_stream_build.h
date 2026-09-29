@@ -263,6 +263,69 @@ static inline int llm_mlx_tq_rotate_input(const LlmEngineMoeTsIngest* s, int lay
     return r == 0 ? 0 : -1;
 }
 
+/* Self-test ISOLATO del kernel mode 1 (`kg`, gather multi-esperto): y[kk,row] deve coincidere col
+ * decode di riferimento dell'esperto indices[kk]. Env LLM_TQ_KG_TEST=1. Isola il kernel dal resto. */
+static inline void llm_mlx_tq_kg_selftest(const LlmEngineMoeTsIngest* s, int layer, int proj, mlx_stream st) {
+    static int done[8] = { 0 };
+    if (proj < 0 || proj >= 8 || done[proj]) return;
+    done[proj] = 1;
+    const LlmEngineMoeTsSlice* tw = llmengine_moe_ts_slice(s, layer, proj, 0);
+    const LlmEngineMoeTsSlice* ts = llmengine_moe_ts_slice(s, layer, proj, 1);
+    uint32_t cbb = 0, sgb = 0; int cbn = 0, in_dim = 0;
+    const uint8_t* cbp = llmengine_moe_ts_aux_get(s, layer, proj, 1, &cbb, &cbn);
+    const uint8_t* sgp = llmengine_moe_ts_aux_get(s, layer, proj, 0, &sgb, &in_dim);
+    if (!tw || !ts || !cbp || !sgp || in_dim <= 0) { fprintf(stderr, "[tq-kg-test] dati mancanti\n"); return; }
+    const int E = tw->n, O = tw->d1, PW = tw->d2, NG = ts->d2;
+    const int trit = (cbn == 3);
+    const int bits = trit ? 3 : (cbn == 8 ? 3 : (cbn == 4 ? 2 : 4));
+    const int grp = (NG > 0) ? in_dim / NG : 64;
+    const int tk = (E >= 2) ? 2 : 1;
+    const uint8_t* w0 = llmengine_moe_ts_get(s, layer, proj, 0, 0, NULL);
+    const uint8_t* s0 = llmengine_moe_ts_get(s, layer, proj, 1, 0, NULL);
+    if (!w0 || !s0) { fprintf(stderr, "[tq-kg-test] base mancante\n"); return; }
+    int wsh[3] = { E, O, PW }, ssh[3] = { E, O, NG }, csh[1] = { cbn };
+    mlx_array W = mlx_array_new_data((const void*)w0, wsh, 3, MLX_UINT32);
+    mlx_array S = mlx_array_new_data((const void*)s0, ssh, 3, MLX_FLOAT16);
+    mlx_array CB = mlx_array_new_data((const void*)cbp, csh, 1, MLX_FLOAT16);
+    float* x0 = (float*)malloc((size_t)tk * in_dim * sizeof(float));
+    for (int kk = 0; kk < tk; kk++) for (int i = 0; i < in_dim; i++)
+        x0[kk * in_dim + i] = ((float)(((unsigned)(kk * 7919 + i) * 2654435761u) >> 9 & 0x1ffu) / 256.0f) - 1.0f;
+    int xsh[2] = { tk, in_dim };
+    mlx_array X0 = mlx_array_new_data(x0, xsh, 2, MLX_FLOAT32);
+    uint32_t* idb = (uint32_t*)malloc((size_t)tk * sizeof(uint32_t));
+    for (int kk = 0; kk < tk; kk++) idb[kk] = (uint32_t)(kk % E);
+    int ish[1] = { tk };
+    mlx_array IDX = mlx_array_new_data(idb, ish, 1, MLX_UINT32);
+    mlx_array Xr = mlx_array_new(), Y = mlx_array_new();
+    int rc = llm_mlx_tq_rotate_input(s, layer, proj, X0, st, MLX_FLOAT32, &Xr);
+    if (rc == 0) rc = llm_mlx_tq_qmv_kg(&Y, W, S, CB, Xr, IDX, tk, in_dim, O, NG, PW, bits, grp, trit, st);
+    if (rc != 0 || mlx_array_eval(Y) != 0 || (int)mlx_array_size(Y) != tk * O) {
+        fprintf(stderr, "[tq-kg-test] kernel fallito rc=%d size=%d\n", rc, (int)mlx_array_size(Y));
+    } else {
+        float cbf[16];
+        for (int i = 0; i < cbn; i++) cbf[i] = llmcodec_f16_to_f32(((const uint16_t*)(const void*)cbp)[i]);
+        float* sgf = (float*)malloc((size_t)in_dim * sizeof(float));
+        for (int i = 0; i < in_dim; i++) sgf[i] = llmcodec_f16_to_f32(((const uint16_t*)(const void*)sgp)[i]);
+        float* f = (float*)malloc((size_t)in_dim * sizeof(float));
+        const float* yv = mlx_array_data_float32(Y);
+        double maxd = 0, ref2 = 0;
+        for (int kk = 0; kk < tk; kk++) {
+            const uint32_t* we = (const uint32_t*)(const void*)w0 + (size_t)idb[kk] * O * PW;
+            const uint16_t* se = (const uint16_t*)(const void*)s0 + (size_t)idb[kk] * O * NG;
+            for (int r = 0; r < O; r++) {
+                llm_mlx_tq_decode_row(we + (size_t)r * PW, se + (size_t)r * NG, cbf, sgf, in_dim, NG, trit, bits, f);
+                double acc = 0; for (int c = 0; c < in_dim; c++) acc += (double)f[c] * x0[kk * in_dim + c];
+                double d = fabs(acc - (double)yv[kk * O + r]); if (d > maxd) maxd = d; ref2 += acc * acc;
+            }
+        }
+        fprintf(stderr, "[tq-kg-test] layer=%d proj=%d E=%d O=%d in=%d trit=%d grp=%d max_abs_diff=%.6g rms_ref=%.4g\n",
+                layer, proj, E, O, in_dim, trit, grp, maxd, sqrt(ref2 / (tk * O)));
+        free(sgf); free(f);
+    }
+    mlx_array_free(W); mlx_array_free(S); mlx_array_free(CB); mlx_array_free(X0); mlx_array_free(IDX);
+    mlx_array_free(Xr); mlx_array_free(Y); free(x0); free(idb);
+}
+
 /* Stack TurboQuant degli esperti `uniq[]` per (layer,proj): decodifica on-the-fly da packed
  * (indici→codebook→scala→Hadamard inversa→signs) nel dominio NON ruotato, F16 [k, out, in].
  * Riusa il decode CONDIVISO (`llm_mlx_tq_decode.h`, stessa sorgente del path residente). */

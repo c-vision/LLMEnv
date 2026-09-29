@@ -170,6 +170,7 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
         llmengine_moe_ts_aux_get(ing, layer, proj, 1, &cbb, &cbn);
         if (cbn == 3) {
             if (getenv("LLM_TQ_QMV_TEST") != NULL) llm_mlx_tq_qmv_selftest(ing, layer, proj, st);
+            if (getenv("LLM_TQ_KG_TEST") != NULL) llm_mlx_tq_kg_selftest(ing, layer, proj, st);
             /* DECODE (T==1): gather FUSO a UN launch (mode kg). OPT-IN (`LLM_TQ_QMV=1`): il kernel
              * naïf (32 thread/riga scalare) e' 13 tok/s vs 22 del `gather_qmm` MLX -> il default
              * resta il path affine. Utile solo come base per un kernel ottimizzato (tile/MIA). */
