@@ -17,6 +17,8 @@
 #include "llm_mlx_kvq_splash.h"
 #include "llm_mlx_splash_store.h"    /* store int8 verificato */
 #include "llm_mlx_kvpage_store.h"    /* page table + allocator (Splash-like) */
+#include "llm_mlx_memgov.h"          /* B9: memory governor */
+#include "llm_engine_opts.h"         /* registro opzioni (memgov_*) */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -37,6 +39,7 @@ typedef struct {
     mlx_array* valueScales;   /* f32   [nkv, cap, 1] */
     mlx_array* bias;          /* f32 ZERO [nkv, cap, 1] per layer */
     LlmKvPageTable pt;        /* page table logical->physical (condivisa fra i layer) */
+    LlmMemGov gov;            /* B9: budget memoria (reserve/grow/timeout) */
     mlx_array ptab;           /* int32 [phys_pages] mirror della page table (per il kernel) */
 } llm_kvq_pool;
 
@@ -90,6 +93,12 @@ static inline bool llm_kvq_pool_init(llm_kvq_pool* p, int layers, int kv_heads, 
     memset(p, 0, sizeof *p);
     p->layers = layers; p->kv_heads = kv_heads; p->head_dim = head_dim; p->fmt = fmt;
     p->page_tokens = (int)LLM_KV_PAGE_TOKENS;
+    p->gov = llm_memgov_default();
+    { int v = 0;
+      if (llm_ai_mlx_opt_get_int("memgov", &v) == 0) p->gov.on = (v != 0);
+      if (llm_ai_mlx_opt_get_int("memgov_reserve_mb", &v) == 0 && v >= 0) p->gov.reserve_bytes = (uint64_t)v * 1024ull * 1024ull;
+      if (llm_ai_mlx_opt_get_int("memgov_grow_min_free_mb", &v) == 0 && v >= 0) p->gov.grow_min_free_bytes = (uint64_t)v * 1024ull * 1024ull;
+      if (llm_ai_mlx_opt_get_int("memgov_timeout_ms", &v) == 0 && v >= 0) p->gov.timeout_ms = v; }
     if (cap_tokens < (int)LLM_KVQ_PAGE_TOKENS) cap_tokens = (int)LLM_KVQ_PAGE_TOKENS;
     cap_tokens = ((cap_tokens + (int)LLM_KVQ_PAGE_TOKENS - 1) / (int)LLM_KVQ_PAGE_TOKENS) * (int)LLM_KVQ_PAGE_TOKENS;
     p->cap_tokens = cap_tokens;
@@ -111,6 +120,10 @@ static inline bool llm_kvq_pool_init(llm_kvq_pool* p, int layers, int kv_heads, 
 /* Raddoppia la capacita' fisica ricopiando i layer allocati e allargando la page table. */
 static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
     if (!p) return false;
+    /* B9: prima di crescere, chiedi memoria al governor (attende -> resource_timeout). */
+    { uint64_t grew = llm_kv_page_bytes(p->fmt == LLM_KVQ_FMT_INT8, (uint32_t)p->kv_heads, (uint32_t)p->head_dim)
+                    * (uint64_t)(p->pt.phys_capacity);  /* pagine aggiunte (doppio) */
+      if (llm_memgov_wait(&p->gov, grew) != 0) return false; }
     if (!llm_kv_pt_grow(&p->pt, p->pt.phys_capacity * 2, p->pt.phys_capacity * 2)) return false;
     const int ncap = p->cap_tokens * 2;
     const mlx_dtype edt = (p->fmt == LLM_KVQ_FMT_INT8) ? MLX_INT8 : MLX_BFLOAT16;

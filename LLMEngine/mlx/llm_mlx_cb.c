@@ -1447,3 +1447,28 @@ int llm_ai_mlx_kvq_page_tier_selftest(char* out, size_t cap) {
     mlx_array_free(K); mlx_array_free(V); llm_kvq_pool_free(&p);
     return (stored && tier_ok) ? 0 : 1;
 }
+
+/* Self-test: memory governor (decisioni pure + misura + resource_timeout). */
+int llm_ai_mlx_memgov_selftest(char* out, size_t cap) {
+    if (out == NULL || cap == 0) return -1;
+    out[0] = '\0';
+    LlmMemGov g = llm_memgov_default();
+    int ok = (g.on == 1 && g.reserve_bytes == 2ull*1024*1024*1024 && g.grow_min_free_bytes == 1ull*1024*1024*1024);
+    /* decisioni pure: senza libero non c'e' spazio; con abbastanza si' */
+    uint64_t need = 100ull*1024*1024;                 /* 100 MB */
+    int no_room = !llm_memgov_has_room(&g, 0, need);   /* deve dare false */
+    int room = llm_memgov_has_room(&g, llm_memgov_need_free(&g, need) + 1, need); /* true */
+    /* governor OFF => sempre spazio */
+    LlmMemGov off = g; off.on = 0;
+    int off_room = llm_memgov_has_room(&off, 0, need);
+    /* timeout: con timeout piccolo e richiesta enorme -> resource_timeout */
+    LlmMemGov gt = g; gt.timeout_ms = 30;
+    uint64_t free_b = llm_memgov_system_free_bytes();
+    int to = -9;
+    if (free_b > 0) to = llm_memgov_wait(&gt, free_b + 3ull*1024*1024*1024);   /* impossibile -> -2 */
+    else to = LLM_MEMGOV_RESOURCE_TIMEOUT;                   /* non misurabile: accetta come riferimento */
+    int pass = ok && no_room && room && off_room && (to == LLM_MEMGOV_RESOURCE_TIMEOUT);
+    snprintf(out, cap, "memgov selftest: def=%d no_room=%d room=%d off_room=%d free=%lluMB timeout_rc=%d %s",
+             ok, no_room, room, off_room, (unsigned long long)(free_b >> 20), to, pass ? "OK" : "FAIL");
+    return pass ? 0 : 1;
+}
