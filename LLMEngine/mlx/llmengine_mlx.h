@@ -578,6 +578,9 @@ int llm_ai_mlx_model_set_kv_max(llm_ai_mlx_model_handle handle, int n);
  * Parametro `kvquant` del registro. 0 ok / -1. */
 int llm_ai_mlx_model_set_kv_quantize(llm_ai_mlx_model_handle handle, bool enabled, int threshold, int bits);
 
+/* B7 (2026-09-29): identita' di formato della KV → "bf16" oppure "int{4|8}:{threshold}". */
+int llm_ai_mlx_model_kv_format(llm_ai_mlx_model_handle handle, char* out, int cap);
+
 /* Dtype di calcolo scelto dall'alto (host/BASIC), da chiamare DOPO
  * llm_ai_mlx_load_model: i bit bf16 sono letti solo a forward-time, quindi applicarli dopo
  * il load equivale -- e vince sul default architetturale e su LLM_BF16_DENSE perche' arriva
