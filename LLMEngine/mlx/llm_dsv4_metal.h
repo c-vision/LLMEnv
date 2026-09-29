@@ -84,4 +84,30 @@ int llm_dsv4_metal_attn_proj_fused(LlmDsv4Metal* b, const void* qa_w, size_t qa_
 }
 #endif
 
+/* ── Tail FUSO del layer (ds4): fin + mhc + route + moe in UNA command buffer ── */
+typedef struct {
+    const void* outa_w; size_t outa_row_bytes; int ng; uint32_t gd, rank;
+    const void* outb_w; size_t outb_row_bytes; uint32_t ol;
+    int n_head, hd, n_rot, pos; float rope_cfg[7];
+    const float* res_attn;    /* [HC*D]  (residual prima di mhc_pre_attn) */
+    const float* post_attn;   /* [HC] */
+    const float* comb_attn;   /* [HC*HC] */
+    const float* fn;          /* [SIZE*HCD] (hc_ffn_fn, f32) */
+    const float* scale;       /* [3] */
+    const float* base;        /* [SIZE] */
+    const float* norm_w;      /* [D] (ffn_norm) */
+    const void* router_w;     /* f32 [n_expert, D] (ffn_gate_inp) */
+    const float* exp_probs_b; /* [n_expert] o NULL */
+    int n_expert, used; float expert_scale;
+    const uint64_t* gaddr; const uint64_t* uaddr; const uint64_t* daddr;  /* [n_expert] */
+    float clamp; uint32_t gu_nb01, ff, down_nb01;
+    const void* sg; const void* su; const void* sd; uint32_t s_nb_g, s_nb_d;
+    int HC, D, SIZE, HCD, sinkhorn_iters; float hc_eps, rms_eps;
+    const float* heads;       /* [n_head*hd] */
+    float* out_hc;            /* [HC*D] */
+} LlmDsv4TailParams;
+
+/* Esegue l'intero tail del layer in UNA command buffer. 0 = ok, <0 = fallback CPU. */
+int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q);
+
 #endif /* LLM_DSV4_METAL_H */

@@ -1169,3 +1169,195 @@ int llm_dsv4_metal_attn_proj_fused(LlmDsv4Metal* b,
     if (WQAN) [WQAN release]; if (WKAN) [WKAN release];
     return rc;
 }
+
+/* Upload di un blocco host in un buffer device (ritorna MTLBuffer "retained", da rilasciare). */
+void* llm_dsv4_metal_upload(LlmDsv4Metal* b, const void* data, size_t bytes) {
+    if (!b || !data || !bytes) return NULL;
+    return (void*)[b->dev newBufferWithBytes:data length:bytes options:MTLResourceStorageModeShared];
+}
+void llm_dsv4_metal_buffer_release(void* h) { if (h) [(id<MTLBuffer>)h release]; }
+
+/* Vista zero-copy pagina-allineata su un blocco pesi (f32 o packed). Ritorna MTLBuffer retained. */
+static id<MTLBuffer> dsv4_view(LlmDsv4Metal* b, const void* p, size_t bytes, size_t* out_lead) {
+    const size_t page = (size_t)getpagesize();
+    uintptr_t ap = (uintptr_t)p & ~(uintptr_t)(page-1);
+    size_t lead = (size_t)((uintptr_t)p - ap);
+    size_t vl = ((lead + bytes + page - 1) / page) * page;
+    if (out_lead) *out_lead = lead;
+    return [b->dev newBufferWithBytesNoCopy:(void*)ap length:vl options:MTLResourceStorageModeShared deallocator:nil];
+}
+
+/* TAIL FUSO del layer (ds4): attn-out + mhc_post + mhc_pre + route + moe + mhc_post in UNA cb.
+ * 0 = ok, <0 = fallback CPU. */
+int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
+    if (!b || !q) return -1;
+    if (!b->pso || !b->pso_rope || !b->pso_hc_post || !b->pso_rms_no_w || !b->pso_gemv_f32 ||
+        !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_rms_w || !b->pso_route ||
+        !b->pso_addr_pair || !b->pso_addr_sum6 || !b->pso_swiglu || !b->pso_add) return -1;
+    const uint32_t D = (uint32_t)q->D, HC = (uint32_t)q->HC, SIZE = (uint32_t)q->SIZE, HCD = (uint32_t)q->HCD;
+    if (!q->heads || !q->out_hc || !q->res_attn || !q->post_attn || !q->comb_attn || !q->fn ||
+        !q->scale || !q->base || !q->norm_w || !q->router_w || !q->gaddr || !q->uaddr || !q->daddr) return -1;
+    if ((q->hd % 1) || (D % 32u)) return -1;
+
+    id<MTLBuffer> HEADS = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->heads, (size_t)q->n_head*q->hd*sizeof(float));
+    id<MTLBuffer> RES   = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->res_attn, (size_t)HC*D*sizeof(float));
+    id<MTLBuffer> POST  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->post_attn, (size_t)HC*sizeof(float));
+    id<MTLBuffer> COMB  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->comb_attn, (size_t)HC*HC*sizeof(float));
+    id<MTLBuffer> FN    = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->fn, (size_t)SIZE*HCD*sizeof(float));
+    id<MTLBuffer> SCALE = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->scale, 3*sizeof(float));
+    id<MTLBuffer> BASE  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->base, (size_t)SIZE*sizeof(float));
+    id<MTLBuffer> NORMW = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->norm_w, (size_t)D*sizeof(float));
+    id<MTLBuffer> GADR  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->gaddr, (size_t)q->n_expert*sizeof(uint64_t));
+    id<MTLBuffer> UADR  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->uaddr, (size_t)q->n_expert*sizeof(uint64_t));
+    id<MTLBuffer> DADR  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->daddr, (size_t)q->n_expert*sizeof(uint64_t));
+    id<MTLBuffer> EXPB  = q->exp_probs_b ? (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->exp_probs_b, (size_t)q->n_expert*sizeof(float)) : nil;
+    size_t rtw_lead = 0;
+    id<MTLBuffer> RTW = dsv4_view(b, q->router_w, (size_t)q->n_expert*D*sizeof(float), &rtw_lead);
+    size_t oa_lead = 0, ob_lead = 0;
+    id<MTLBuffer> OUTA = dsv4_view(b, q->outa_w, (size_t)q->ng*q->rank*q->outa_row_bytes, &oa_lead);
+    id<MTLBuffer> OUTB = dsv4_view(b, q->outb_w, (size_t)D*q->outb_row_bytes, &ob_lead);
+    size_t sg_lead = 0, su_lead = 0, sd_lead = 0;
+    id<MTLBuffer> WG = q->sg ? dsv4_view(b, q->sg, (size_t)q->ff*q->s_nb_g, &sg_lead) : nil;
+    id<MTLBuffer> WU = q->su ? dsv4_view(b, q->su, (size_t)q->ff*q->s_nb_g, &su_lead) : nil;
+    id<MTLBuffer> WD = q->sd ? dsv4_view(b, q->sd, (size_t)D*q->s_nb_d, &sd_lead) : nil;
+
+    id<MTLBuffer> ATTN = dsv4_scratch(b, &b->sx[21], &b->sx_cap[21], (size_t)D*sizeof(float));
+    id<MTLBuffer> NXT  = dsv4_scratch(b, &b->sx[22], &b->sx_cap[22], (size_t)HC*D*sizeof(float));
+    id<MTLBuffer> FLAT = dsv4_scratch(b, &b->sx[23], &b->sx_cap[23], (size_t)HCD*sizeof(float));
+    id<MTLBuffer> MIXES= dsv4_scratch(b, &b->sx[24], &b->sx_cap[24], (size_t)SIZE*sizeof(float));
+    id<MTLBuffer> SPLIT= dsv4_scratch(b, &b->sx[25], &b->sx_cap[25], (size_t)SIZE*sizeof(float));
+    id<MTLBuffer> HIN  = dsv4_scratch(b, &b->sx[26], &b->sx_cap[26], (size_t)D*sizeof(float));
+    id<MTLBuffer> NRM  = dsv4_scratch(b, &b->sx[27], &b->sx_cap[27], (size_t)D*sizeof(float));
+    id<MTLBuffer> LOGI = dsv4_scratch(b, &b->sx[28], &b->sx_cap[28], (size_t)q->n_expert*sizeof(float));
+    id<MTLBuffer> SEL  = dsv4_scratch(b, &b->sx[29], &b->sx_cap[29], (size_t)q->used*sizeof(int));
+    id<MTLBuffer> RW   = dsv4_scratch(b, &b->sx[30], &b->sx_cap[30], (size_t)q->used*sizeof(float));
+    id<MTLBuffer> MID  = dsv4_scratch(b, &b->sx[31], &b->sx_cap[31], (size_t)q->used*q->ff*sizeof(float));
+    id<MTLBuffer> ROUT = dsv4_scratch(b, &b->sx[32], &b->sx_cap[32], (size_t)D*sizeof(float));
+    id<MTLBuffer> OUTC = dsv4_scratch(b, &b->sx[33], &b->sx_cap[33], (size_t)HC*D*sizeof(float));
+    id<MTLBuffer> HLOW = dsv4_scratch(b, &b->sx[34], &b->sx_cap[34], (size_t)q->ol*sizeof(float));
+    id<MTLBuffer> G    = dsv4_scratch(b, &b->sx[35], &b->sx_cap[35], (size_t)q->ff*sizeof(float));
+    id<MTLBuffer> U    = dsv4_scratch(b, &b->sx[36], &b->sx_cap[36], (size_t)q->ff*sizeof(float));
+    id<MTLBuffer> MID2 = dsv4_scratch(b, &b->sx[37], &b->sx_cap[37], (size_t)q->ff*sizeof(float));
+    id<MTLBuffer> D2   = dsv4_scratch(b, &b->sx[38], &b->sx_cap[38], (size_t)D*sizeof(float));
+
+    int rc = (HEADS&&RES&&POST&&COMB&&FN&&SCALE&&BASE&&NORMW&&GADR&&UADR&&DADR&&RTW&&OUTA&&OUTB&&
+              ATTN&&NXT&&FLAT&&MIXES&&SPLIT&&HIN&&NRM&&LOGI&&SEL&&RW&&MID&&ROUT&&OUTC&&HLOW&&
+              (q->sg?(WG&&WU&&WD&&G&&U&&MID2&&D2):1)) ? 0 : -2;
+
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        const uint32_t NSG = 4, nr0 = 4;
+        /* 1) RoPE inversa su heads (n_head) */
+        [e setComputePipelineState:b->pso_rope];
+        [e setBuffer:HEADS offset:0 atIndex:0];
+        { uint32_t P[4]={(uint32_t)q->n_rot,(uint32_t)q->hd,(uint32_t)q->pos,1u}; [e setBytes:P length:sizeof(P) atIndex:1]; }
+        [e setBytes:q->rope_cfg length:7*sizeof(float) atIndex:2];
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)q->n_head,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        /* 2) out_a (ng) + out_b -> ATTN */
+        for (int g = 0; g < q->ng; g++) {
+            [e setComputePipelineState:b->pso];
+            [e setBuffer:OUTA offset:0 atIndex:0];
+            [e setBuffer:HEADS offset:(NSUInteger)((size_t)g*q->gd*sizeof(float)) atIndex:1];
+            [e setBuffer:HLOW offset:(NSUInteger)((size_t)g*q->rank*sizeof(float)) atIndex:2];
+            uint32_t P[7]={(uint32_t)(oa_lead+(size_t)g*q->rank*q->outa_row_bytes),(uint32_t)q->outa_row_bytes,(uint32_t)(q->gd/32u),(uint32_t)q->rank,8u,34u,32u};
+            [e setBytes:P length:sizeof(P) atIndex:3];
+            [e dispatchThreadgroups:MTLSizeMake(q->rank,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        }
+        [e setComputePipelineState:b->pso];
+        [e setBuffer:OUTB offset:0 atIndex:0]; [e setBuffer:HLOW offset:0 atIndex:1]; [e setBuffer:ATTN offset:0 atIndex:2];
+        { uint32_t P[7]={(uint32_t)ob_lead,(uint32_t)q->outb_row_bytes,(uint32_t)(q->ol/32u),D,8u,34u,32u}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake(D,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        /* 3) hc_post_attn: NXT = post*ATTN + comb*RES */
+        [e setComputePipelineState:b->pso_hc_post];
+        [e setBuffer:ATTN offset:0 atIndex:0]; [e setBuffer:RES offset:0 atIndex:1]; [e setBuffer:POST offset:0 atIndex:2];
+        [e setBuffer:COMB offset:0 atIndex:3]; [e setBuffer:NXT offset:0 atIndex:4];
+        { uint32_t P[2]={D,HC}; [e setBytes:P length:sizeof(P) atIndex:5]; }
+        [e dispatchThreadgroups:MTLSizeMake((HC*D+63)/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
+        /* 4) mhc_pre_ffn: rms_no_w(NXT)->FLAT; gemv_f32(fn)->MIXES; sinkhorn->SPLIT; hc_sum->HIN; rms_w->NRM */
+        [e setComputePipelineState:b->pso_rms_no_w];
+        [e setBuffer:NXT offset:0 atIndex:0]; [e setBuffer:FLAT offset:0 atIndex:1];
+        { uint32_t P[1]={HCD}; [e setBytes:P length:sizeof(P) atIndex:2]; float cf[1]={q->rms_eps}; [e setBytes:cf length:sizeof(cf) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        [e setComputePipelineState:b->pso_gemv_f32];
+        [e setBuffer:FN offset:0 atIndex:0]; [e setBuffer:FLAT offset:0 atIndex:1]; [e setBuffer:MIXES offset:0 atIndex:2];
+        { uint32_t P[1]={HCD}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake(SIZE,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        [e setComputePipelineState:b->pso_sinkhorn];
+        [e setBuffer:MIXES offset:0 atIndex:0]; [e setBuffer:SCALE offset:0 atIndex:1]; [e setBuffer:BASE offset:0 atIndex:2]; [e setBuffer:SPLIT offset:0 atIndex:3];
+        { uint32_t P[2]={HC,(uint32_t)q->sinkhorn_iters}; [e setBytes:P length:sizeof(P) atIndex:4]; float cf[1]={q->hc_eps}; [e setBytes:cf length:sizeof(cf) atIndex:5]; }
+        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+        [e setComputePipelineState:b->pso_hc_sum];
+        [e setBuffer:NXT offset:0 atIndex:0]; [e setBuffer:SPLIT offset:0 atIndex:1]; [e setBuffer:HIN offset:0 atIndex:2];
+        { uint32_t P[2]={D,HC}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake((D+63)/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
+        [e setComputePipelineState:b->pso_rms_w];
+        [e setBuffer:HIN offset:0 atIndex:0]; [e setBuffer:NORMW offset:0 atIndex:1]; [e setBuffer:NRM offset:0 atIndex:2];
+        { uint32_t P[1]={D}; [e setBytes:P length:sizeof(P) atIndex:3]; float cf[1]={q->rms_eps}; [e setBytes:cf length:sizeof(cf) atIndex:4]; }
+        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        /* 5) route: logits=gemv_f32(router,NRM); SEL/RW */
+        [e setComputePipelineState:b->pso_gemv_f32];
+        [e setBuffer:RTW offset:0 atIndex:0]; [e setBuffer:NRM offset:0 atIndex:1]; [e setBuffer:LOGI offset:0 atIndex:2];
+        { uint32_t P[1]={D}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)q->n_expert,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        [e setComputePipelineState:b->pso_route];
+        [e setBuffer:LOGI offset:0 atIndex:0]; [e setBuffer:(EXPB?EXPB:SCALE) offset:0 atIndex:1]; [e setBuffer:SEL offset:0 atIndex:2]; [e setBuffer:RW offset:0 atIndex:3];
+        { uint32_t P[3]={(uint32_t)q->n_expert,(uint32_t)q->used,(EXPB?1u:0u)}; [e setBytes:P length:sizeof(P) atIndex:4]; float cf[1]={q->expert_scale}; [e setBytes:cf length:sizeof(cf) atIndex:5]; }
+        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+        /* 6) MoE addr: pair slots6 (grid z=used) + sum6 -> ROUT */
+        [e setComputePipelineState:b->pso_addr_pair];
+        [e setBuffer:SEL offset:0 atIndex:0]; [e setBuffer:GADR offset:0 atIndex:1]; [e setBuffer:UADR offset:0 atIndex:2];
+        [e setBuffer:NRM offset:0 atIndex:3]; [e setBuffer:MID offset:0 atIndex:4]; [e setBuffer:RW offset:0 atIndex:5];
+        { float cf[1]={q->clamp}; [e setBytes:cf length:sizeof(cf) atIndex:6]; }
+        { uint32_t P[3]={D,q->gu_nb01,q->ff}; [e setBytes:P length:sizeof(P) atIndex:7]; }
+        [e setThreadgroupMemoryLength:256*8+128 atIndex:0];
+        [e dispatchThreadgroups:MTLSizeMake((q->ff+NSG*nr0-1)/(NSG*nr0),1,(NSUInteger)q->used) threadsPerThreadgroup:MTLSizeMake(32*NSG,1,1)];
+        [e setComputePipelineState:b->pso_addr_sum6];
+        [e setBuffer:SEL offset:0 atIndex:0]; [e setBuffer:DADR offset:0 atIndex:1]; [e setBuffer:MID offset:0 atIndex:2]; [e setBuffer:ROUT offset:0 atIndex:3];
+        { uint32_t P[4]={q->ff/256u,q->down_nb01,D,q->ff}; [e setBytes:P length:sizeof(P) atIndex:4]; }
+        [e dispatchThreadgroups:MTLSizeMake((D+NSG*nr0-1)/(NSG*nr0),1,1) threadsPerThreadgroup:MTLSizeMake(32*NSG,1,1)];
+        /* shared expert -> ROUT += D2 */
+        if (q->sg) {
+            [e setComputePipelineState:b->pso];
+            [e setBuffer:WG offset:0 atIndex:0]; [e setBuffer:NRM offset:0 atIndex:1]; [e setBuffer:G offset:0 atIndex:2];
+            { uint32_t P[7]={(uint32_t)sg_lead,q->s_nb_g,D/32u,q->ff,8u,34u,32u}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+            [e dispatchThreadgroups:MTLSizeMake(q->ff,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+            [e setComputePipelineState:b->pso];
+            [e setBuffer:WU offset:0 atIndex:0]; [e setBuffer:NRM offset:0 atIndex:1]; [e setBuffer:U offset:0 atIndex:2];
+            { uint32_t P[7]={(uint32_t)su_lead,q->s_nb_g,D/32u,q->ff,8u,34u,32u}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+            [e dispatchThreadgroups:MTLSizeMake(q->ff,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+            [e setComputePipelineState:b->pso_swiglu];
+            [e setBuffer:G offset:0 atIndex:0]; [e setBuffer:U offset:0 atIndex:1]; [e setBuffer:MID2 offset:0 atIndex:2];
+            { uint32_t P[1]={q->ff}; [e setBytes:P length:sizeof(P) atIndex:3]; float cf[1]={q->clamp}; [e setBytes:cf length:sizeof(cf) atIndex:4]; }
+            [e dispatchThreadgroups:MTLSizeMake((q->ff+63)/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
+            [e setComputePipelineState:b->pso];
+            [e setBuffer:WD offset:0 atIndex:0]; [e setBuffer:MID2 offset:0 atIndex:1]; [e setBuffer:D2 offset:0 atIndex:2];
+            { uint32_t P[7]={(uint32_t)sd_lead,q->s_nb_d,q->ff/32u,D,8u,34u,32u}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+            [e dispatchThreadgroups:MTLSizeMake(D,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+            [e setComputePipelineState:b->pso_add];
+            [e setBuffer:ROUT offset:0 atIndex:0]; [e setBuffer:D2 offset:0 atIndex:1];
+            { uint32_t P[1]={D}; [e setBytes:P length:sizeof(P) atIndex:2]; }
+            [e dispatchThreadgroups:MTLSizeMake((D+63)/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
+        }
+        /* 7) hc_post_ffn: OUTC = routed-post + comb*NXT  (post/comb = SPLIT[HC..2HC), SPLIT[2HC..)) */
+        [e setComputePipelineState:b->pso_hc_post];
+        [e setBuffer:ROUT offset:0 atIndex:0]; [e setBuffer:NXT offset:0 atIndex:1];
+        [e setBuffer:SPLIT offset:(NSUInteger)((size_t)HC*sizeof(float)) atIndex:2];
+        [e setBuffer:SPLIT offset:(NSUInteger)((size_t)2*HC*sizeof(float)) atIndex:3];
+        [e setBuffer:OUTC offset:0 atIndex:4];
+        { uint32_t P[2]={D,HC}; [e setBytes:P length:sizeof(P) atIndex:5]; }
+        [e dispatchThreadgroups:MTLSizeMake((HC*D+63)/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
+        [e endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) memcpy(q->out_hc, [OUTC contents], (size_t)HC*D*sizeof(float));
+    }
+
+    if (HEADS) [HEADS release]; if (RES) [RES release]; if (POST) [POST release]; if (COMB) [COMB release];
+    if (FN) [FN release]; if (SCALE) [SCALE release]; if (BASE) [BASE release]; if (NORMW) [NORMW release];
+    if (GADR) [GADR release]; if (UADR) [UADR release]; if (DADR) [DADR release]; if (EXPB) [EXPB release];
+    if (RTW) [RTW release]; if (OUTA) [OUTA release]; if (OUTB) [OUTB release];
+    if (WG) [WG release]; if (WU) [WU release]; if (WD) [WD release];
+    return rc;
+}
