@@ -469,6 +469,7 @@ typedef struct {
     mlx_array kw, ks, kb, vw, vs, vb;   /* cold quantizzati [1,nkv,nc,l] / [1,nkv,nc,hd/64] */
     int nc;                             /* token cold (K == V) */
     int kbits, vbits;                   /* bit affine K / V (Hetero-KV) */
+    mlx_array ptab;                     /* page table logical->physical (int32), per il kernel paged */
 } LlmKvqCold;
 
 typedef struct {

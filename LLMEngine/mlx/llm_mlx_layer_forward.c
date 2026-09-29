@@ -83,7 +83,7 @@ static bool llm_kvq_sdpa_hook_dispatch(mlx_array* out, mlx_array q, mlx_array k,
               mlx_reshape(&vs, c->vs, cs, 3, s) == 0 &&
               mlx_reshape(&vb, c->vb, cs, 3, s) == 0;
     mlx_array o2 = mlx_array_new();
-    if (ok) ok = llm_mlx_kvq_sdpa_decode(&o2, q2, kw, ks, kb, vw, vs, vb, k2, v2, c->nc, c->kbits, c->vbits, scale, hd, s);
+    if (ok) ok = llm_mlx_kvq_sdpa_decode(&o2, q2, kw, ks, kb, vw, vs, vb, k2, v2, c->nc, c->kbits, c->vbits, scale, hd, c->ptab, s);
     if (ok) {
         mlx_array o2c = mlx_array_new();
         ok = (mlx_array_dtype(o2) == mlx_array_dtype(q)) ? (mlx_array_set(&o2c, o2) == 0)
@@ -336,6 +336,7 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
         g_kvq_cold.vb = kvqp->bias[layer_idx];
         g_kvq_cold.nc = kvqp->committed_l[layer_idx];
         g_kvq_cold.kbits = 8; g_kvq_cold.vbits = 8;
+        g_kvq_cold.ptab = kvqp->ptab;
         llm_kvq_hook.fn = llm_kvq_sdpa_hook_dispatch;
         llm_kvq_hook.ctx = &g_kvq_cold;
         kvq_read_used = true;

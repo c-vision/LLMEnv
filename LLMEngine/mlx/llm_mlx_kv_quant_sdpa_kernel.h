@@ -64,10 +64,11 @@ static const char llm_kvq_sdpa_kernel_src[] =
     "    uint c0 = split * nci / SPLITS;\n"
     "    uint c1 = (split + 1) * nci / SPLITS;\n"
     "    for (uint t = c0; t < c1; ++t) {\n"
-    "        const device uint*   kw  = (const device uint*)((const device uint8_t*)Kc_w + (size_t)(kh * capi + t) * KWB);\n"
+    "        const uint pt = (uint)ptab[t / PT] * PT + (t % PT);  /* logical->physical */\n"
+    "        const device uint*   kw  = (const device uint*)((const device uint8_t*)Kc_w + (size_t)(kh * capi + pt) * KWB);\n"
     "        const device uint8_t* kwb = (const device uint8_t*)kw;\n"
-    "        const device ST*     ks  = Kc_s + (kh * capi + t) * (Dhead / G);\n"
-    "        const device ST*     kb  = Kc_b + (kh * capi + t) * (Dhead / G);\n"
+    "        const device ST*     ks  = Kc_s + (kh * capi + pt) * (Dhead / G);\n"
+    "        const device ST*     kb  = Kc_b + (kh * capi + pt) * (Dhead / G);\n"
     "        float p = 0.0f;\n"
     "        for (uint i = 0; i < DPL; ++i) {\n"
     "            uint d = lane + 32u * i;\n"
@@ -78,10 +79,10 @@ static const char llm_kvq_sdpa_kernel_src[] =
     "        float f = exp(m - mn);\n"
     "        float e = exp(s - mn);\n"
     "        l = l * f + e;\n"
-    "        const device uint*   vw  = (const device uint*)((const device uint8_t*)Vc_w + (size_t)(kh * capi + t) * VWB);\n"
+    "        const device uint*   vw  = (const device uint*)((const device uint8_t*)Vc_w + (size_t)(kh * capi + pt) * VWB);\n"
     "        const device uint8_t* vwb = (const device uint8_t*)vw;\n"
-    "        const device ST*     vs  = Vc_s + (kh * capi + t) * (Dhead / G);\n"
-    "        const device ST*     vb  = Vc_b + (kh * capi + t) * (Dhead / G);\n"
+    "        const device ST*     vs  = Vc_s + (kh * capi + pt) * (Dhead / G);\n"
+    "        const device ST*     vb  = Vc_b + (kh * capi + pt) * (Dhead / G);\n"
     "        for (uint i = 0; i < DPL; ++i) {\n"
     "            uint d = lane + 32u * i;\n"
     "            acc[i] = acc[i] * f + e * llm_kv_dq(llm_kv_val<BV, SYM>(vw, vwb, d), (float)vs[d / G], (float)vb[d / G]);\n"
@@ -138,19 +139,20 @@ static const char llm_kvq_sdpa_kernel_src_gqa[] =
     "    uint c0 = split * nci / SPLITS;\n"
     "    uint c1 = (split + 1) * nci / SPLITS;\n"
     "    for (uint t = c0; t < c1; ++t) {\n"
-    "        const device uint*   kw  = (const device uint*)((const device uint8_t*)Kc_w + (size_t)(kh * capi + t) * KWB);\n"
+    "        const uint pt = (uint)ptab[t / PT] * PT + (t % PT);  /* logical->physical */\n"
+    "        const device uint*   kw  = (const device uint*)((const device uint8_t*)Kc_w + (size_t)(kh * capi + pt) * KWB);\n"
     "        const device uint8_t* kwb = (const device uint8_t*)kw;\n"
-    "        const device ST*     ks  = Kc_s + (kh * capi + t) * (Dhead / G);\n"
-    "        const device ST*     kb  = Kc_b + (kh * capi + t) * (Dhead / G);\n"
+    "        const device ST*     ks  = Kc_s + (kh * capi + pt) * (Dhead / G);\n"
+    "        const device ST*     kb  = Kc_b + (kh * capi + pt) * (Dhead / G);\n"
     "        float kd[DPL];\n"
     "        for (uint i = 0; i < DPL; ++i) {\n"
     "            uint d = lane + 32u * i;\n"
     "            kd[i] = llm_kv_dq(llm_kv_val<BK, SYM>(kw, kwb, d), (float)ks[d / G], (float)kb[d / G]);\n"
     "        }\n"
-    "        const device uint*   vw  = (const device uint*)((const device uint8_t*)Vc_w + (size_t)(kh * capi + t) * VWB);\n"
+    "        const device uint*   vw  = (const device uint*)((const device uint8_t*)Vc_w + (size_t)(kh * capi + pt) * VWB);\n"
     "        const device uint8_t* vwb = (const device uint8_t*)vw;\n"
-    "        const device ST*     vs  = Vc_s + (kh * capi + t) * (Dhead / G);\n"
-    "        const device ST*     vb  = Vc_b + (kh * capi + t) * (Dhead / G);\n"
+    "        const device ST*     vs  = Vc_s + (kh * capi + pt) * (Dhead / G);\n"
+    "        const device ST*     vb  = Vc_b + (kh * capi + pt) * (Dhead / G);\n"
     "        float vd[DPL];\n"
     "        for (uint i = 0; i < DPL; ++i) {\n"
     "            uint d = lane + 32u * i;\n"
@@ -282,10 +284,10 @@ static bool llm_kvq_gqa(void) {
 static int llm_mlx_kvq_sdpa_kernel_build(void) {
     if (llm_kvq_sdpa_singleton.built) return 0;
     {
-        const char* in_names[] = {"q", "scale", "nci", "capi", "Kc_w", "Kc_s", "Kc_b", "Vc_w", "Vc_s", "Vc_b", "Kr", "Vr"};
+        const char* in_names[] = {"q", "scale", "nci", "capi", "Kc_w", "Kc_s", "Kc_b", "Vc_w", "Vc_s", "Vc_b", "Kr", "Vr", "ptab"};
         const char* out_names[] = {"pm", "pl", "pacc"};
         mlx_vector_string iv = mlx_vector_string_new();
-        for (int i = 0; i < 12; i++) mlx_vector_string_append_value(iv, in_names[i]);
+        for (int i = 0; i < 13; i++) mlx_vector_string_append_value(iv, in_names[i]);
         mlx_vector_string ov = mlx_vector_string_new();
         for (int i = 0; i < 3; i++) mlx_vector_string_append_value(ov, out_names[i]);
         llm_kvq_sdpa_singleton.part = mlx_fast_metal_kernel_new(
@@ -316,7 +318,7 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
                                     mlx_array Kc_w, mlx_array Kc_s, mlx_array Kc_b,
                                     mlx_array Vc_w, mlx_array Vc_s, mlx_array Vc_b,
                                     mlx_array Kr, mlx_array Vr, int nc, int kbits, int vbits,
-                                    float scale, int gval, mlx_stream stream) {
+                                    float scale, int gval, mlx_array ptab, mlx_stream stream) {
     if (llm_mlx_kvq_sdpa_kernel_build() != 0) return false;
     if (mlx_array_ndim(q) != 2) return false;
     if (kbits < 2 || kbits > 8 || vbits < 2 || vbits > 8) return false;
@@ -357,6 +359,18 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     int splits_max = llm_mlx_kvq_splits_max();
     if (splits > splits_max) splits = splits_max;
 
+    /* page table: se il chiamante non ne fornisce una, usa l'IDENTITA' (pool contiguo). */
+    mlx_array ptab_own = mlx_array_new();
+    if (ptab.ctx == NULL) {
+        int np = cap / 32; if (np < 1) np = 1;
+        int32_t* ib = (int32_t*)malloc((size_t)np * sizeof(int32_t));
+        if (!ib) return false;
+        for (int i = 0; i < np; i++) ib[i] = i;
+        int psh[1] = {np};
+        ptab_own = mlx_array_new_data(ib, psh, 1, MLX_INT32); free(ib);
+        if (ptab_own.ctx == NULL) return false;
+        ptab = ptab_own;
+    }
     mlx_vector_array inputs = mlx_vector_array_new();
     mlx_array scale_arr = mlx_array_new_float(scale);
     mlx_array nci_arr = mlx_array_new_int(nc);
@@ -373,6 +387,7 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     mlx_vector_array_append_value(inputs, Vc_b);
     mlx_vector_array_append_value(inputs, Kr);
     mlx_vector_array_append_value(inputs, Vr);
+    mlx_vector_array_append_value(inputs, ptab);
 
     mlx_fast_metal_kernel_config cfg = mlx_fast_metal_kernel_config_new();
     mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, "T", T);
@@ -387,6 +402,7 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "BV", vbits);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "NR", nr);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "SPLITS", splits);
+    mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "PT", 32);
     int pmsh[2] = {nh, splits}, plsh[2] = {nh, splits}, pash[3] = {nh, splits, hd};
     mlx_fast_metal_kernel_config_add_output_arg(cfg, pmsh, 2, MLX_FLOAT32);
     mlx_fast_metal_kernel_config_add_output_arg(cfg, plsh, 2, MLX_FLOAT32);
@@ -431,6 +447,7 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     mlx_vector_array_free(inputs);
     mlx_vector_array_free(outputs);
     mlx_array_free(scale_arr); mlx_array_free(nci_arr); mlx_array_free(capi_arr);
+    mlx_array_free(ptab_own);
     return ok;
 }
 

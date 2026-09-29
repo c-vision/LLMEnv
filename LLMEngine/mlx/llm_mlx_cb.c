@@ -155,7 +155,7 @@ static bool llm_cb_kvq_raw(mlx_array* o, void* c) {
 static bool llm_cb_kvq_llm(mlx_array* o, void* c) {
     llm_cb_kvq_ctx* p = (llm_cb_kvq_ctx*)c;
     return llm_mlx_kvq_sdpa_decode(o, p->q, p->Kc_w, p->Kc_s, p->Kc_b, p->Vc_w, p->Vc_s, p->Vc_b,
-                                   p->Kr, p->Vr, 0, p->bits, p->vbits, p->scale, 0, p->s);
+                                   p->Kr, p->Vr, 0, p->bits, p->vbits, p->scale, 0, mlx_array_new(), p->s);
 }
 
 static mlx_array llm_cb_scalar_bf16(float v, mlx_stream s) {
@@ -827,7 +827,7 @@ int llm_ai_mlx_core_bench(const char* op, int iters, char* out, size_t cap) {
             if (mok) mok = mlx_softmax_axis(&sm,scl,-1,true,s)==0;
             if (mok) mok = mlx_matmul(&om,sm,v4,s)==0;
             if (mok) { int o2[2]={nh,hd}; mok = mlx_reshape(&man,om,o2,2,s)==0; }
-            if (mok) mok = llm_mlx_kvq_sdpa_decode(&ko, c.q, c.Kc_w, c.Kc_s, c.Kc_b, c.Vc_w, c.Vc_s, c.Vc_b, c.Kr, c.Vr, 0, 4, 4, c.scale, 0, s);
+            if (mok) mok = llm_mlx_kvq_sdpa_decode(&ko, c.q, c.Kc_w, c.Kc_s, c.Kc_b, c.Vc_w, c.Vc_s, c.Vc_b, c.Kr, c.Vr, 0, 4, 4, c.scale, 0, mlx_array_new(), s);
             double dk=-1, dr=-1;
             if (mok) { mlx_array mf=mlx_array_new(), kf=mlx_array_new();
                 if (mlx_astype(&mf,man,MLX_FLOAT32,s)==0 && mlx_astype(&kf,ko,MLX_FLOAT32,s)==0 && mlx_array_eval(mf)==0 && mlx_array_eval(kf)==0) {
@@ -1242,7 +1242,7 @@ int llm_ai_mlx_kvq_splash_selftest(char* out, size_t cap) {
     mlx_stream s = mlx_default_gpu_stream_new();
     mlx_array kq = mlx_array_new(), vq = mlx_array_new(), ks = mlx_array_new(), vs = mlx_array_new();
     int rc = llm_splash_store_run(&kq, &vq, &ks, &vs, ka, va, s);
-    int bad = 0; double maxdiff = 0; int ref_ok = 0;
+    int bad = 0; double maxdiff = 0; int ref_ok = 0; int paged_ok = 0; double g_id_md = -2, g_rev_md = -2;
     if (rc == 0 && mlx_array_eval(kq) == 0 && mlx_array_eval(vq) == 0 && mlx_array_eval(ks) == 0) {
         const int8_t* KQ = mlx_array_data_int8(kq);
         const int8_t* VQ = mlx_array_data_int8(vq);
@@ -1279,17 +1279,74 @@ int llm_ai_mlx_kvq_splash_selftest(char* out, size_t cap) {
         mlx_zeros(&kb, (int[]){nkv, n, 1}, 3, MLX_FLOAT32, s);
         mlx_zeros(&vb, (int[]){nkv, n, 1}, 3, MLX_FLOAT32, s);
         mlx_array o = mlx_array_new();
-        bool dok = llm_mlx_kvq_sdpa_decode(&o, qa, kq, ks, kb, vq, vs, vb, kr, vr, n, 8, 8, attn, hd, s);
+        bool dok = llm_mlx_kvq_sdpa_decode(&o, qa, kq, ks, kb, vq, vs, vb, kr, vr, n, 8, 8, attn, hd, mlx_array_new(), s);
         if (dok && mlx_array_eval(o) == 0 && ref) {
             const float* od = mlx_array_data_float32(o);
             for (int i = 0; i < nh*hd; i++) { double df = fabs((double)od[i] - (double)ref[i]); if (df > 1e-3) bad++; if (df > maxdiff) maxdiff = df; }
             ref_ok = 1;
         }
+        /* PAGE-TABLE check: mapping logico->fisico PERMUTATO (pagine invertite) deve dare lo
+         * STESSO output dell'identita' (prova che il kernel raccoglie le pagine). */
+        {
+            const int PT = 32, npg = n / PT;
+            int8_t* kqr = (int8_t*)malloc((size_t)nkv*n*hd);
+            int8_t* vqr = (int8_t*)malloc((size_t)nkv*n*hd);
+            float*  ksr = (float*)malloc((size_t)nkv*n);
+            float*  vsr = (float*)malloc((size_t)nkv*n);
+            int32_t* ptr = (int32_t*)malloc((size_t)npg*sizeof(int32_t));
+            if (kqr && vqr && ksr && vsr && ptr) {
+                for (int kh = 0; kh < nkv; kh++)
+                    for (int pp = 0; pp < npg; pp++) {
+                        int sp = npg-1-pp;
+                        for (int r = 0; r < PT; r++) {
+                            int stt = sp*PT + r, dtt = pp*PT + r;
+                            memcpy(&kqr[((size_t)kh*n+dtt)*hd], &KQ[((size_t)kh*n+stt)*hd], (size_t)hd);
+                            memcpy(&vqr[((size_t)kh*n+dtt)*hd], &VQ[((size_t)kh*n+stt)*hd], (size_t)hd);
+                            ksr[(size_t)kh*n+dtt] = SC[(size_t)kh*n+stt];
+                            vsr[(size_t)kh*n+dtt] = SC[(size_t)kh*n+stt];
+                        }
+                    }
+                for (int lp = 0; lp < npg; lp++) ptr[lp] = npg-1-lp;
+                mlx_array kqrA = mlx_array_new_data(kqr, (int[]){nkv,n,hd}, 3, MLX_INT8);
+                mlx_array vqrA = mlx_array_new_data(vqr, (int[]){nkv,n,hd}, 3, MLX_INT8);
+                mlx_array ksrA = mlx_array_new_data(ksr, (int[]){nkv,n}, 2, MLX_FLOAT32);
+                mlx_array vsrA = mlx_array_new_data(vsr, (int[]){nkv,n}, 2, MLX_FLOAT32);
+                mlx_array ptrA = mlx_array_new_data(ptr, (int[]){npg}, 1, MLX_INT32);
+                mlx_array orv = mlx_array_new();
+                bool rok = llm_mlx_kvq_sdpa_decode(&orv, qa, kqrA, ksrA, kb, vqrA, vsrA, vb, kr, vr, n, 8, 8, attn, hd, ptrA, s);
+                if (rok && mlx_array_eval(orv) == 0 && mlx_array_eval(o) == 0) {
+                    const float* aa = mlx_array_data_float32(o);
+                    const float* bb = mlx_array_data_float32(orv);
+                    double md = 0; for (int i = 0; i < nh*hd; i++) { double d = fabs((double)aa[i]-(double)bb[i]); if (d>md) md=d; }
+                    g_rev_md = md; paged_ok = (md < 1e-3);
+                }
+                mlx_array_free(kqrA); mlx_array_free(vqrA); mlx_array_free(ksrA); mlx_array_free(vsrA); mlx_array_free(ptrA); mlx_array_free(orv);
+            }
+            free(kqr); free(vqr); free(ksr); free(vsr); free(ptr);
+        }
+        if (!paged_ok) bad++;
+        /* diagnosi: ptab IDENTITA' esplicita sugli array originali (deve == o) */
+        {
+            int npg = n / 32; int32_t* pid = (int32_t*)malloc((size_t)npg*4);
+            for (int lp = 0; lp < npg; lp++) pid[lp] = lp;
+            mlx_array pA = mlx_array_new_data(pid, (int[]){npg}, 1, MLX_INT32);
+            mlx_array oid = mlx_array_new();
+            bool iok = llm_mlx_kvq_sdpa_decode(&oid, qa, kq, ks, kb, vq, vs, vb, kr, vr, n, 8, 8, attn, hd, pA, s);
+            double md = -1;
+            if (iok && mlx_array_eval(oid) == 0 && mlx_array_eval(o) == 0) {
+                const float* aa = mlx_array_data_float32(o);
+                const float* bb = mlx_array_data_float32(oid);
+                md = 0; for (int i = 0; i < nh*hd; i++) { double d = fabs((double)aa[i]-(double)bb[i]); if (d>md) md=d; }
+            }
+            g_id_md = md;
+            if (!(md >= 0 && md < 1e-3)) bad++;
+            mlx_array_free(pA); mlx_array_free(oid); free(pid);
+        }
         free(ref);
         mlx_array_free(kr); mlx_array_free(vr); mlx_array_free(kb); mlx_array_free(vb); mlx_array_free(o);
     }
-    snprintf(out, cap, "kvq_splash selftest: rc=%d ref=%d bad=%d/%d maxdiff=%.4g %s",
-             rc, ref_ok, bad, ref_ok ? nh*hd : 0, maxdiff, (ref_ok && bad == 0) ? "OK" : "FAIL");
+    snprintf(out, cap, "kvq_splash selftest: rc=%d ref=%d paged=%d id_md=%.3g rev_md=%.3g bad=%d/%d maxdiff=%.4g %s",
+             rc, ref_ok, paged_ok, g_id_md, g_rev_md, bad, ref_ok ? nh*hd : 0, maxdiff, (ref_ok && bad == 0) ? "OK" : "FAIL");
     mlx_array_free(kq); mlx_array_free(vq); mlx_array_free(ks); mlx_array_free(vs);
     mlx_array_free(ka); mlx_array_free(va); mlx_array_free(qa);
     free(kbuf); free(vbuf); free(qbuf);

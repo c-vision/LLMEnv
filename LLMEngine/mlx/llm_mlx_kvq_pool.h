@@ -1,54 +1,50 @@
-/* llm_mlx_kvq_pool.h — KV page pool int8 come STORAGE PRIMARIO del cold.
+/* llm_mlx_kvq_pool.h — KV page pool int8 PAGED (storage primario del cold).
  *
- * Architettura (port Splash `runtime/ops/PageStorage.*` + `PagedKv.hpp`):
- * NON e' un add-on sopra la cache fp. Il cold della KV vive SOLO qui, in pagine
- * int8 preallocate; `k_cache`/`v_cache` contengono SOLO la finestra recente (W
- * token, dimensione FISSA). Cosi' la memoria fp e' O(W) e il cold e' int8 in
- * pagine (nessun Concat O(pos), nessuno shrink da liberare).
+ * Port dell'architettura `PageStorage`/`PagedKv.hpp` di Splash: il cold della KV vive in
+ * pagine fisiche int8; i blocchi logici (32 token) sono mappati su pagine fisiche da una
+ * **page table** (`llm_mlx_kvpage_store.h`), quindi i blocchi contigui del prefisso possono
+ * stare in pagine NON contigue (basi per prefix-cache/eviction/tier). La cache fp contiene
+ * SOLO la finestra recente (via layer_forward).
  *
- * Layout pagina (Splash, page = LLM_KVQ_PAGE_TOKENS=32):
- *   keyData   int8  [kv-head][token][hd]   (token-major)
- *   valueData int8  [kv-head][token][hd]   (token-major, come il kernel read)
- *   keyScales/valueScales f32 [kv-head][token] (1 scala simmetrica per token-head)
- *
- * Capacita': cresce per POTENZE DI 2. L'append scrive sul posto (slice_update), mai Concat.
- * LE ALLOCAZIONI SONO PER-LAYER E LAZY: i modelli ibridi (linear_attention + full_attention,
- * es. Qwen3.5/Qwen3.6) non allocano il pool per i layer senza KV.
+ * Layout per pagina (token-major, [nkv, cap, hd]): la pagina fisica `phys` occupa i token
+ * [phys*32, phys*32+32); il token logico `t` sta in `ptab[t/32]*32 + (t%32)`.
+ * Allocazione LAZY per-layer (i modelli ibridi non allocano i layer senza KV).
  */
 #ifndef LLM_MLX_KVQ_POOL_H
 #define LLM_MLX_KVQ_POOL_H
 
 #include "mlx/c/mlx.h"
 #include "llm_mlx_kvq_splash.h"
-#include "llm_mlx_splash_store.h"   /* store int8 verificato (splash_store.h) */
+#include "llm_mlx_splash_store.h"    /* store int8 verificato */
+#include "llm_mlx_kvpage_store.h"    /* page table + allocator (Splash-like) */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Stato del pool per (sessione, modello). Un array per campo, [layer]; allocazione lazy. */
 typedef struct {
     int layers;
     int kv_heads;
     int head_dim;
     llm_kvq_fmt fmt;
-    int  cap_tokens;          /* capacita' allocata (multiplo di page_tokens) */
-    int* committed_l;         /* token scritti PER LAYER */
-    mlx_array* keyData;       /* int8  [nkv, cap, hd]  (token-major) */
+    int  cap_tokens;          /* capacita' FISICA (multiplo di page_tokens) */
+    int  page_tokens;         /* token per pagina (32) */
+    int* committed_l;         /* token logici scritti PER LAYER */
+    mlx_array* keyData;       /* int8  [nkv, cap, hd]  (token-major, physical) */
     mlx_array* keyScales;     /* f32   [nkv, cap, 1] */
-    mlx_array* valueData;     /* int8  [nkv, cap, hd]  (token-major) */
+    mlx_array* valueData;     /* int8  [nkv, cap, hd]  (token-major, physical) */
     mlx_array* valueScales;   /* f32   [nkv, cap, 1] */
-    mlx_array* bias;          /* f32 ZERO [nkv, cap, 1] per layer: Splash e' simmetrico (q*scala) */
+    mlx_array* bias;          /* f32 ZERO [nkv, cap, 1] per layer */
+    LlmKvPageTable pt;        /* page table logical->physical (condivisa fra i layer) */
+    mlx_array ptab;           /* int32 [phys_pages] mirror della page table (per il kernel) */
 } llm_kvq_pool;
 
 static inline int llm_kvq_pool_bytes_per_token(llm_kvq_pool* p) {
     const int d = p->fmt == LLM_KVQ_FMT_INT8 ? 1 : 2;
-    return 2 * p->kv_heads * p->head_dim * d                 /* K + V data */
-         + 2 * p->kv_heads * (int)sizeof(float);             /* scale K + V */
+    return 2 * p->kv_heads * p->head_dim * d + 2 * p->kv_heads * (int)sizeof(float);
 }
 
-/* Alloca gli array di UN layer alla capacita' corrente. */
 static inline bool llm_kvq_pool_alloc_layer(llm_kvq_pool* p, int l, int cap, mlx_stream s) {
     const mlx_dtype edt = (p->fmt == LLM_KVQ_FMT_INT8) ? MLX_INT8 : MLX_BFLOAT16;
     int ksh[3] = {p->kv_heads, cap, p->head_dim};
@@ -70,14 +66,36 @@ static inline bool llm_kvq_pool_ensure(llm_kvq_pool* p, int l, mlx_stream s) {
     return llm_kvq_pool_alloc_layer(p, l, p->cap_tokens, s);
 }
 
+/* Riallinea l'array `ptab` (int32) alla page table corrente. */
+static inline bool llm_kvq_pool_export_ptab(llm_kvq_pool* p, mlx_stream s) {
+    int np = p->pt.phys_capacity;
+    int32_t* buf = (int32_t*)malloc((size_t)np * sizeof(int32_t));
+    if (!buf) return false;
+    llm_kv_pt_export(&p->pt, buf, np);
+    int sh[1] = {np};
+    mlx_array a = mlx_array_new_data(buf, sh, 1, MLX_INT32);
+    free(buf);
+    if (a.ctx == NULL) return false;
+    if (p->ptab.ctx != NULL) mlx_array_free(p->ptab);
+    p->ptab = mlx_array_new();
+    bool ok = mlx_array_set(&p->ptab, a) == 0;
+    mlx_array_free(a);
+    (void)s;
+    return ok;
+}
+
 static inline bool llm_kvq_pool_init(llm_kvq_pool* p, int layers, int kv_heads, int head_dim,
                                      llm_kvq_fmt fmt, int cap_tokens, mlx_stream s) {
     if (!p || layers <= 0 || kv_heads <= 0 || head_dim <= 0) return false;
     memset(p, 0, sizeof *p);
     p->layers = layers; p->kv_heads = kv_heads; p->head_dim = head_dim; p->fmt = fmt;
-    if (cap_tokens < LLM_KVQ_PAGE_TOKENS) cap_tokens = LLM_KVQ_PAGE_TOKENS;
-    cap_tokens = ((cap_tokens + LLM_KVQ_PAGE_TOKENS - 1) / LLM_KVQ_PAGE_TOKENS) * LLM_KVQ_PAGE_TOKENS;
+    p->page_tokens = (int)LLM_KV_PAGE_TOKENS;
+    if (cap_tokens < (int)LLM_KVQ_PAGE_TOKENS) cap_tokens = (int)LLM_KVQ_PAGE_TOKENS;
+    cap_tokens = ((cap_tokens + (int)LLM_KVQ_PAGE_TOKENS - 1) / (int)LLM_KVQ_PAGE_TOKENS) * (int)LLM_KVQ_PAGE_TOKENS;
     p->cap_tokens = cap_tokens;
+    int nphys = cap_tokens / p->page_tokens;
+    p->pt = llm_kv_pt_new(nphys, nphys);
+    if (!p->pt.table) return false;
     p->keyData   = (mlx_array*)calloc((size_t)layers, sizeof(mlx_array));
     p->keyScales = (mlx_array*)calloc((size_t)layers, sizeof(mlx_array));
     p->valueData = (mlx_array*)calloc((size_t)layers, sizeof(mlx_array));
@@ -85,16 +103,19 @@ static inline bool llm_kvq_pool_init(llm_kvq_pool* p, int layers, int kv_heads, 
     p->bias      = (mlx_array*)calloc((size_t)layers, sizeof(mlx_array));
     p->committed_l = (int*)calloc((size_t)layers, sizeof(int));
     if (!p->keyData || !p->keyScales || !p->valueData || !p->valueScales || !p->bias || !p->committed_l) return false;
-    return true;   /* NESSUNA allocazione per-layer qui: lazy in ensure() */
+    p->ptab = mlx_array_new();
+    if (!llm_kvq_pool_export_ptab(p, s)) return false;
+    return true;
 }
 
-/* Raddoppia la capacita' ricopiando solo i layer GIA' allocati. */
+/* Raddoppia la capacita' fisica ricopiando i layer allocati e allargando la page table. */
 static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
     if (!p) return false;
+    if (!llm_kv_pt_grow(&p->pt, p->pt.phys_capacity * 2, p->pt.phys_capacity * 2)) return false;
     const int ncap = p->cap_tokens * 2;
     const mlx_dtype edt = (p->fmt == LLM_KVQ_FMT_INT8) ? MLX_INT8 : MLX_BFLOAT16;
     for (int l = 0; l < p->layers; l++) {
-        if (p->keyData[l].ctx == NULL) continue;   /* non allocato -> resta lazy */
+        if (p->keyData[l].ctx == NULL) continue;
         int committed = p->committed_l[l];
         int ksh[3] = {p->kv_heads, ncap, p->head_dim};
         int ssh[3] = {p->kv_heads, ncap, 1};
@@ -130,10 +151,11 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
         p->keyData[l] = nk; p->valueData[l] = nv; p->keyScales[l] = nks; p->valueScales[l] = nvs; p->bias[l] = nb;
     }
     p->cap_tokens = ncap;
-    return true;
+    return llm_kvq_pool_export_ptab(p, s);
 }
 
-/* Store n token (fp [1,nkv,n,hd] o [nkv,n,hd]) nel pool alla posizione `pos`. */
+/* Store n token (fp [1,nkv,n,hd] o [nkv,n,hd]) nel pool alla posizione LOGICA assoluta `pos`.
+ * Scrive per segmenti di pagina, agli indici FISICI dati dalla page table. */
 static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
                                       mlx_array k, mlx_array v, int pos, int n, mlx_stream s) {
     if (!p || layer < 0 || layer >= p->layers || n <= 0) return false;
@@ -143,27 +165,46 @@ static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
     mlx_array k3 = mlx_array_new(), v3 = mlx_array_new();
     bool ok = mlx_reshape(&k3, k, sh3, 3, s) == 0 && mlx_reshape(&v3, v, sh3, 3, s) == 0;
     mlx_array kq = mlx_array_new(), vq = mlx_array_new(), ks = mlx_array_new(), vs = mlx_array_new();
-    if (ok) ok = llm_splash_store_run(&kq, &vq, &ks, &vs, k3, v3, s) == 0;   /* store VERIFICATO */
+    if (ok) ok = llm_splash_store_run(&kq, &vq, &ks, &vs, k3, v3, s) == 0;
     mlx_array_free(k3); mlx_array_free(v3);
     mlx_array sc2 = mlx_array_new(), vsc2 = mlx_array_new(), vqt = mlx_array_new();
     if (ok) { int s2[3] = {p->kv_heads, n, 1};
               ok = mlx_reshape(&sc2, ks, s2, 3, s) == 0 && mlx_reshape(&vsc2, vs, s2, 3, s) == 0; }
-    if (ok) ok = mlx_array_set(&vqt, vq) == 0;   /* V token-major */
-    if (ok) {
-        mlx_array nk = mlx_array_new(), nv = mlx_array_new(), nks = mlx_array_new(), nvs = mlx_array_new();
-        int k0[3] = {0,pos,0},  k1[3] = {p->kv_heads,pos+n,p->head_dim}, kst[3] = {1,1,1};
-        int s0[3] = {0,pos,0},  s1[3] = {p->kv_heads,pos+n,1}, sst[3] = {1,1,1};
-        ok = mlx_slice_update(&nk, p->keyData[layer], kq, k0,3,k1,3,kst,3, s) == 0 &&
-             mlx_slice_update(&nv, p->valueData[layer], vqt, k0,3,k1,3,kst,3, s) == 0 &&
-             mlx_slice_update(&nks, p->keyScales[layer], sc2, s0,3,s1,3,sst,3, s) == 0 &&
-             mlx_slice_update(&nvs, p->valueScales[layer], vsc2, s0,3,s1,3,sst,3, s) == 0;
-        if (ok) { mlx_array_set(&p->keyData[layer], nk); mlx_array_set(&p->valueData[layer], nv);
-                  mlx_array_set(&p->keyScales[layer], nks); mlx_array_set(&p->valueScales[layer], nvs); }
-        mlx_array_free(nk); mlx_array_free(nv); mlx_array_free(nks); mlx_array_free(nvs);
+    if (ok) ok = mlx_array_set(&vqt, vq) == 0;
+    /* scrittura per segmenti di pagina: token logico `pos+j` -> fisico `ptab[lp]*32 + r` */
+    int j = 0;
+    while (ok && j < n) {
+        int abs = pos + j, lp = abs / p->page_tokens, r = abs % p->page_tokens;
+        int phys = llm_kv_pt_map(&p->pt, lp);
+        if (phys < 0) { ok = false; break; }
+        int ptok = phys * p->page_tokens + r;
+        int seg = n - j; if (seg > p->page_tokens - r) seg = p->page_tokens - r;
+        mlx_array ks_seg = mlx_array_new(), kq_seg = mlx_array_new();
+        mlx_array vq_seg = mlx_array_new(), sc_seg = mlx_array_new(), vsc_seg = mlx_array_new();
+        int a0[3] = {0,j,0}, a1[3] = {p->kv_heads, j+seg, p->head_dim}, ast[3] = {1,1,1};
+        int c0[3] = {0,ptok,0}, c1[3] = {p->kv_heads, ptok+seg, p->head_dim}, cst[3] = {1,1,1};
+        int d0[3] = {0,j,0}, d1[3] = {p->kv_heads, j+seg, 1};
+        ok = mlx_slice(&kq_seg, kq, a0,3,a1,3,ast,3, s) == 0 &&
+             mlx_slice(&vq_seg, vqt, a0,3,a1,3,ast,3, s) == 0 &&
+             mlx_slice(&sc_seg, sc2, d0,3,d1,3,ast,3, s) == 0 &&
+             mlx_slice(&vsc_seg, vsc2, d0,3,d1,3,ast,3, s) == 0;
+        if (ok) {
+            mlx_array nk = mlx_array_new(), nv = mlx_array_new(), nks = mlx_array_new(), nvs = mlx_array_new();
+            ok = mlx_slice_update(&nk, p->keyData[layer], kq_seg, c0,3,c1,3,cst,3, s) == 0 &&
+                 mlx_slice_update(&nv, p->valueData[layer], vq_seg, c0,3,c1,3,cst,3, s) == 0 &&
+                 mlx_slice_update(&nks, p->keyScales[layer], sc_seg, c0,3,c1,3,cst,3, s) == 0 &&
+                 mlx_slice_update(&nvs, p->valueScales[layer], vsc_seg, c0,3,c1,3,cst,3, s) == 0;
+            if (ok) { mlx_array_set(&p->keyData[layer], nk); mlx_array_set(&p->valueData[layer], nv);
+                      mlx_array_set(&p->keyScales[layer], nks); mlx_array_set(&p->valueScales[layer], nvs); }
+            mlx_array_free(nk); mlx_array_free(nv); mlx_array_free(nks); mlx_array_free(nvs);
+        }
+        mlx_array_free(kq_seg); mlx_array_free(vq_seg); mlx_array_free(sc_seg); mlx_array_free(vsc_seg);
+        j += seg;
     }
     if (ok) p->committed_l[layer] = pos + n;
     mlx_array_free(sc2); mlx_array_free(vsc2); mlx_array_free(vqt);
     mlx_array_free(kq); mlx_array_free(vq); mlx_array_free(ks); mlx_array_free(vs);
+    if (ok) ok = llm_kvq_pool_export_ptab(p, s);
     return ok;
 }
 
@@ -174,8 +215,10 @@ static inline void llm_kvq_pool_free(llm_kvq_pool* p) {
         mlx_array_free(p->keyScales[l]); mlx_array_free(p->valueScales[l]);
         if (p->bias) mlx_array_free(p->bias[l]);
     }
-    free(p->keyData); free(p->keyScales); free(p->valueData); free(p->valueScales);
-    free(p->bias); free(p->committed_l);
+    free(p->keyData); free(p->keyScales); free(p->valueData); free(p->valueScales); free(p->bias);
+    free(p->committed_l);
+    if (p->ptab.ctx) mlx_array_free(p->ptab);
+    llm_kv_pt_free(&p->pt);
     memset(p, 0, sizeof *p);
 }
 
