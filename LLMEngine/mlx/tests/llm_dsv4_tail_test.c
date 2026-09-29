@@ -158,7 +158,7 @@ int main(int argc, char** argv) {
       double mx=0, ss=0; for(size_t i=0;i<got;i++){ double v=fabs(a[i]); if(v>mx)mx=v; ss+=v*v; }
       fprintf(stderr,"[TAIL] mid    n=%zu max|.|=%.4g rms=%.4g%s\n", got, mx, got?sqrt(ss/(double)got):0.0, (mx>1e3)?"  <<< GARBAGE":"");
       free(a); }
-    { float* a = rdbin("/tmp","rw",c.n_expert_used); if(a){ double mx=0; for(int i=0;i<c.n_expert_used;i++){double v=fabs(a[i]); if(v>mx)mx=v;} fprintf(stderr,"[TAIL] rw     max|.|=%.4g\n", mx); free(a);} }
+    { float* a = rdbin("/tmp","rw",c.n_expert_used); if(a){ double mx=0,md=0; for(int i=0;i<c.n_expert_used;i++){double v=fabs(a[i]); if(v>mx)mx=v; double w=fabs(a[i]-rw[i]); if(w>md)md=w;} fprintf(stderr,"[TAIL] rw     |gpu|max=%.4g |gpu-cpu|max=%.4g (cpu0=%.4g)\n", mx, md, rw[0]); free(a);} }
     { float* t = rdbin("/tmp","rout",D); double mxt=0; if(t){ for(int i=0;i<D;i++){double v=fabs(t[i]); if(v>mxt)mxt=v;} free(t);} double mxr=0; for(int i=0;i<D;i++){double v=fabs(rrout[i]); if(v>mxr)mxr=v;}
       fprintf(stderr,"[TAIL] rout   |tail|max=%.6g  |cpu|max=%.6g\n", mxt, mxr); }
     { int nf=0; for(int i=0;i<HC*D;i++) if(!isfinite(out_tail[i])) nf++; if(nf){ fprintf(stderr,"[TAIL] out_hc non-finiti=%d\n", nf); fails++; } }
