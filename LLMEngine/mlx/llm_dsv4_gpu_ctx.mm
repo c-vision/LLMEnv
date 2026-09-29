@@ -7,12 +7,87 @@
 #include "llm_dsv4_gpu.h"
 #include "llm_dsv4_gpu_moe.h"
 #include "llm_dsv4_gpu_attn.h"
+#include "llm_dsv4_store.h"
 
 static LlmDsv4Metal*  g_be = NULL;
 static LlmDsv4MoeGpu  g_moe;
 static LlmDsv4AttnGpu g_attn;
 static int g_on = 0;
 static int g_ref = 0;
+
+/* Tabella indirizzi esperti per layer (gate|up|down), riusata finche' lo store non sfratta. */
+static uint64_t* g_addr_tbl[LLM_DSV4_MAX_LAYER];
+static uint64_t  g_addr_ep[LLM_DSV4_MAX_LAYER];
+static int       g_addr_ne = -1;
+
+static const uint64_t* dsv4_addr_table(const LlmDsv4PackedExperts* pe, int il, int n_expert, int embd) {
+    LlmDsv4Store* st = (LlmDsv4Store*)pe->store;
+    uint64_t ep = st ? st->evictions : 0;
+    if (il < 0 || il >= LLM_DSV4_MAX_LAYER) return NULL;
+    if (g_addr_tbl[il] && g_addr_ep[il] == ep && g_addr_ne == n_expert) return g_addr_tbl[il];
+    free(g_addr_tbl[il]);
+    uint64_t* t = (uint64_t*)malloc(3 * (size_t)n_expert * sizeof(uint64_t));
+    if (!t) return NULL;
+    size_t nbg = (size_t)llm_ggml_nbytes(pe->gate_type, pe->in_dim);
+    size_t nbu = (size_t)llm_ggml_nbytes(pe->up_type,   pe->in_dim);
+    size_t nbd = (size_t)llm_ggml_nbytes(pe->down_type, pe->ff_dim);
+    for (int e = 0; e < n_expert; e++) {
+        const uint8_t *g = NULL, *u = NULL, *d = NULL;
+        if (pe->store && pe->store_get) pe->store_get(pe->store, il, e, &g, &u, &d);
+        else {
+            g = pe->gate + (size_t)e * (size_t)pe->ff_dim * nbg;
+            u = pe->up   + (size_t)e * (size_t)pe->ff_dim * nbu;
+            d = pe->down + (size_t)e * (size_t)embd * nbd;
+        }
+        t[e] = (uint64_t)(uintptr_t)g;
+        t[n_expert + e] = (uint64_t)(uintptr_t)u;
+        t[2*n_expert + e] = (uint64_t)(uintptr_t)d;
+    }
+    g_addr_tbl[il] = t; g_addr_ep[il] = ep; g_addr_ne = n_expert;
+    return t;
+}
+
+int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
+        const LlmDsv4PackedExperts* pe, int il, const float* heads, const float* saved_attn,
+        const float* post_attn, const float* comb_attn, int pos, float* out_hc) {
+    if (!g_on || !g_be || !g_attn.inited || !c || !L || !pe) return 0;
+    if (il < c->n_hash_layer) return 0;                          /* hash routing: path C */
+    if (g_attn.outa[il].type != 8 || g_attn.outb[il].type != 8) return 0;
+    int n_expert = c->n_expert;
+    const uint64_t* tbl = dsv4_addr_table(pe, il, n_expert, c->n_embd);
+    if (!tbl) return 0;
+    const int ng = c->n_out_group, rank = c->n_lora_o, embd = c->n_embd, HC = c->n_hc;
+    const int gd = c->n_head_dim * (c->n_head / ng), ol = ng * rank;
+    int compressed = llm_dsv4_layer_compress_ratio(c, il) != 0;
+    float freq_base = (compressed && c->compress_rope_freq_base > 0.0f) ? c->compress_rope_freq_base : c->rope_freq_base;
+    float freq_scale = (!compressed || c->rope_scale_factor <= 0.0f) ? 1.0f : 1.0f / c->rope_scale_factor;
+    float ext_factor = (compressed && c->rope_scale_factor > 1.0f) ? 1.0f : 0.0f;
+    float attn_factor = 1.0f;
+    if (ext_factor != 0.0f && freq_scale > 0.0f) attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
+    LlmDsv4TailParams q; memset(&q, 0, sizeof q);
+    q.outa_w = g_attn.outa[il].w; q.outa_row_bytes = g_attn.outa[il].row_bytes; q.ng = ng; q.gd = (uint32_t)gd; q.rank = (uint32_t)rank;
+    q.outb_w = g_attn.outb[il].w; q.outb_row_bytes = g_attn.outb[il].row_bytes; q.ol = (uint32_t)ol;
+    q.n_head = c->n_head; q.hd = c->n_head_dim; q.n_rot = c->n_rot; q.pos = pos;
+    q.rope_cfg[0]=freq_base; q.rope_cfg[1]=freq_scale; q.rope_cfg[2]=ext_factor; q.rope_cfg[3]=attn_factor;
+    q.rope_cfg[4]=c->rope_yarn_beta_fast; q.rope_cfg[5]=c->rope_yarn_beta_slow;
+    q.rope_cfg[6]=(float)(compressed ? c->rope_orig_ctx : 0);
+    q.res_attn = saved_attn; q.post_attn = post_attn; q.comb_attn = comb_attn;
+    q.fn = L->hc_ffn_fn; q.scale = L->hc_ffn_scale; q.base = L->hc_ffn_base; q.norm_w = L->ffn_norm;
+    q.router_w = L->ffn_gate_inp; q.exp_probs_b = L->exp_probs_b;
+    q.n_expert = n_expert; q.used = c->n_expert_used; q.expert_scale = c->expert_weight_scale;
+    q.gaddr = tbl; q.uaddr = tbl + n_expert; q.daddr = tbl + 2*n_expert;
+    q.clamp = c->swiglu_clamp_exp;
+    q.gu_nb01 = (uint32_t)llm_ggml_nbytes(pe->gate_type, pe->in_dim);
+    q.ff = (uint32_t)c->n_ff_exp;
+    q.down_nb01 = (uint32_t)llm_ggml_nbytes(pe->down_type, c->n_ff_exp);
+    q.sg = pe->shexp_gate; q.su = pe->shexp_up; q.sd = pe->shexp_down;
+    q.s_nb_g = (uint32_t)llm_ggml_nbytes(pe->shexp_gate_type, embd);
+    q.s_nb_d = (uint32_t)llm_ggml_nbytes(pe->shexp_down_type, c->n_ff_exp);
+    q.HC = HC; q.D = embd; q.SIZE = (2 + HC) * HC; q.HCD = HC * embd;
+    q.sinkhorn_iters = c->n_hc_sinkhorn_iter; q.hc_eps = c->hc_eps; q.rms_eps = c->rms_eps;
+    q.heads = heads; q.out_hc = out_hc;
+    return llm_dsv4_metal_layer_tail(g_be, &q) == 0;
+}
 
 int llm_dsv4_gpu_ctx_active(void) { return g_on; }
 

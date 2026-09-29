@@ -216,20 +216,19 @@ static inline int* llm_dsv4_indexer_allowed(const LlmDsv4Config* c, const LlmDsv
 
 /* Attenzione di un layer con cache: proiezioni, push raw, compressor (attn+indexer), indexer
  * top-k, attenzione mista, RoPE inversa + grouped out. `xn` = input già normalizzato (attn_norm). */
-static inline void llm_dsv4_attn_cached(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
-        const LlmDsv4PackedExperts* pe, LlmDsv4LayerCache* k, const float* xn, int pos, int il, float* out) {
-    int q_dim = c->n_head * c->n_head_dim, hd = c->n_head_dim;
-    float* q = (float*)malloc(sizeof(float) * (size_t)q_dim);
+/* Proiezioni + mid (compressor/indexer/attention) -> `heads` (n_head*hd), SENZA il finish. */
+static inline int llm_dsv4_attn_cached_mid(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
+        const LlmDsv4PackedExperts* pe, LlmDsv4LayerCache* k, const float* xn, int pos, int il, float* heads) {
+    int hd = c->n_head_dim, lq = c->n_lora_q, q_dim = c->n_head * c->n_head_dim;
+    (void)q_dim;
+    float* q = (float*)malloc(sizeof(float) * (size_t)(c->n_head * hd));
     float* kv = (float*)malloc(sizeof(float) * (size_t)hd);
-    float* qrn = (float*)malloc(sizeof(float) * (size_t)c->n_lora_q);
-    float* heads = (float*)malloc(sizeof(float) * (size_t)q_dim);
+    float* qrn = (float*)malloc(sizeof(float) * (size_t)lq);
+    if (!q || !kv || !qrn) { free(q); free(kv); free(qrn); return 0; }
     if (!llm_dsv4_gpu_attn_project_try(c, L, il, xn, pos, q, kv, qrn))
         llm_dsv4_attn_project(c, L, pe, xn, pos, il, q, kv, qrn);
     llm_dsv4_fp8_kv_quantize_row(kv, c->n_head_dim, c->n_rot);
-    { const char* df = getenv("LLM_DSV4_DUMP_KVF");
-      if (df && df[0] && il == 0) { FILE* f = fopen(df, "ab"); if (f) { fwrite(kv, sizeof(float), (size_t)c->n_head_dim, f); fclose(f); } } }
     llm_dsv4_cache_push_raw(k, kv);
-
     int ratio = k->compress_ratio;
     int* allowed = NULL;
     if (ratio) {
@@ -247,21 +246,25 @@ static inline void llm_dsv4_attn_cached(const LlmDsv4Config* c, const LlmDsv4Lay
             free(ic);
             allowed = llm_dsv4_indexer_allowed(c, L, xn, qrn, k->index_comp, k->n_index_comp, il, pos);
         }
-        { const char* dc = getenv("LLM_DSV4_DUMP_COMP");
-          if (dc && dc[0] && il == 2) { FILE* f = fopen(dc, "wb"); if (f) { fwrite(k->attn_comp, sizeof(float), (size_t)k->n_comp * hd, f); fclose(f); } } }
         llm_dsv4_attention_mixed(heads, c, q, k->raw_kv, k->n_raw, k->attn_comp, k->n_comp, allowed,
                                  L->attn_sinks, c->n_head, hd);
-        free(allowed);
     } else {
         llm_dsv4_attention_rows(heads, q, k->raw_kv, k->n_raw, L->attn_sinks, c->n_head, hd);
     }
-    { const char* dc = getenv("LLM_DSV4_DUMP_CACHE");
-      if (dc && dc[0] && il == 0) { FILE* f = fopen(dc, "wb"); if (f) { fwrite(k->raw_kv, sizeof(float), (size_t)k->n_raw * hd, f); fclose(f); } } }
-    { const char* dr = getenv("LLM_DSV4_DUMP_RAWHEADS");
-      if (dr && dr[0] && il == 0) { FILE* f = fopen(dr, "wb"); if (f) { fwrite(heads, sizeof(float), (size_t)q_dim, f); fclose(f); } } }
-    if (!llm_dsv4_gpu_attn_finish_try(c, L, il, heads, pos, out))
-        llm_dsv4_attn_finish(c, L, pe, heads, pos, il, out);
-    free(heads); free(qrn); free(kv); free(q);
+    free(allowed); free(qrn); free(kv); free(q);
+    return 1;
+}
+
+static inline void llm_dsv4_attn_cached(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
+        const LlmDsv4PackedExperts* pe, LlmDsv4LayerCache* k, const float* xn, int pos, int il, float* out) {
+    int q_dim = c->n_head * c->n_head_dim;
+    float* heads = (float*)malloc(sizeof(float) * (size_t)q_dim);
+    if (!heads) return;
+    if (llm_dsv4_attn_cached_mid(c, L, pe, k, xn, pos, il, heads)) {
+        if (!llm_dsv4_gpu_attn_finish_try(c, L, il, heads, pos, out))
+            llm_dsv4_attn_finish(c, L, pe, heads, pos, il, out);
+    }
+    free(heads);
 }
 
 #endif /* LLM_DSV4_CACHE_H */

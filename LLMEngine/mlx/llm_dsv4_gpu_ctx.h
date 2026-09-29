@@ -26,6 +26,10 @@ int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeig
                                   const float* xn, int pos, float* q, float* kv, float* qrn);
 int llm_dsv4_gpu_attn_finish_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                  float* heads, int pos, float* out);
+/* Tail fuso del layer (fin+mhc+route+moe+mhc) in UNA command buffer (1 = eseguito). */
+int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
+        const LlmDsv4PackedExperts* pe, int il, const float* heads, const float* saved_attn,
+        const float* post_attn, const float* comb_attn, int pos, float* out_hc);
 
 #ifdef __cplusplus
 }
