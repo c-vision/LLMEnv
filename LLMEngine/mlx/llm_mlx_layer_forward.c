@@ -410,42 +410,6 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
     static double ph_attn = 0.0, ph_ffn = 0.0; static int ph_layers = 0;
     struct timespec t0, t1;
     if (gprof) clock_gettime(CLOCK_MONOTONIC, &t0);
-    {   /* Dump dell'INPUT del layer 0 (= embedding) per isolare la prima divergenza. */
-        const char* dl = llm_env_get("LLM_DUMP_LAYERS");
-        if (dl && layer_idx == 0) {
-            mlx_array hf = mlx_array_new();
-            if (mlx_astype(&hf, x, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(hf) == 0) {
-                const float* d = mlx_array_data_float32(hf);
-                size_t nh = (size_t)n_tokens * (size_t)m->cfg.hidden_size;
-                char p[512]; snprintf(p, sizeof(p), "%s/in_00_n%d.bin", dl, n_tokens);
-                FILE* f = fopen(p, "wb");
-                if (f) { fwrite(d, sizeof(float), nh, f); fclose(f); }
-            }
-            mlx_array_free(hf);
-        }
-    }
-    /* F3-bis (qwen4_exp): dump dell'INPUT del layer 0 = embedding post-tile (hc_width reale,
-     * non cfg.hidden_size). LLM_QWEN4EXP_LAYER_DUMP attiva il dump per-layer; questo stampa
-     * [Q4_EMB] con gli stessi campi (absmax/mean/sum/first4) per il confronto col reference. */
-    if (layer_idx == 0 && llm_env_isset("LLM_QWEN4EXP_LAYER_DUMP")) {
-        mlx_array hf = mlx_array_new();
-        if (mlx_astype(&hf, x, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(hf) == 0) {
-            const float* d = mlx_array_data_float32(hf);
-            int nd = mlx_array_ndim(hf);
-            if (d && nd >= 2) {
-                int W = (int)mlx_array_shape(hf)[nd - 1];
-                int S = (int)mlx_array_shape(hf)[nd - 2];
-                if (W > 0 && S > 0) {
-                    const float* last = d + (size_t)(S - 1) * (size_t)W;
-                    float am = 0.0f; double sum = 0.0;
-                    for (int i = 0; i < W; i++) { float a = fabsf(last[i]); if (a > am) am = a; sum += (double)last[i]; }
-                    fprintf(stderr, "[Q4_EMB] absmax=%.6f mean=%.6f sum=%.6f first4=%.6f,%.6f,%.6f,%.6f W=%d\n",
-                            am, sum / (double)W, sum, last[0], last[1], last[2], last[3], W);
-                }
-            }
-        }
-        mlx_array_free(hf);
-    }
     /* §G-bis leva 1: aggiorna i summary di pagina (prefill+decode) e, al decode, installa
      * l'hook sparse page-level attorno alla chiamata del blocco attn. Skip per layer sliding
      * (il trim della cache renderrebbe le posizioni incoerenti) e per la KV-quant cold. */
@@ -473,20 +437,6 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
             if (kvq_read_used) { llm_kvq_hook.fn = NULL; llm_kvq_hook.ctx = NULL; }
             if (gprof) { clock_gettime(CLOCK_MONOTONIC, &t1); prof_attn += (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9; }
             if (gphase && ok) { clock_gettime(CLOCK_MONOTONIC, &t0); ok = mlx_array_eval(h) == 0; clock_gettime(CLOCK_MONOTONIC, &t1); ph_attn += (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9; }
-            {   /* Dump per-layer del hidden POST-ATTENTION (pre-FFN, fp32). */
-                const char* dl = llm_env_get("LLM_DUMP_LAYERS");
-                if (ok && dl) {
-                    mlx_array hf = mlx_array_new();
-                    if (mlx_astype(&hf, h, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(hf) == 0) {
-                        const float* d = mlx_array_data_float32(hf);
-                        size_t nh = (size_t)n_tokens * (size_t)m->cfg.hidden_size;
-                        char p[512]; snprintf(p, sizeof(p), "%s/attn_%02d_n%d.bin", dl, layer_idx, n_tokens);
-                        FILE* f = fopen(p, "wb");
-                        if (f) { fwrite(d, sizeof(float), nh, f); fclose(f); }
-                    }
-                    mlx_array_free(hf);
-                }
-            }
         } else if (strcmp(lopn, "ffn") == 0) {
             if (gprof) clock_gettime(CLOCK_MONOTONIC, &t0);
             ok = m->arch->ffn(m, layer_idx, n_tokens, h, out);
@@ -518,58 +468,7 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
     ph_layers++;
     if (gphase && layer_idx + 1 >= m->cfg.n_layers)
         fprintf(stderr, "[LLM_PHASE] layers=%d attn=%.3fs ffn=%.3fs total=%.3fs\n", ph_layers, ph_attn, ph_ffn, ph_attn + ph_ffn);
-    {   /* Dump per-layer del hidden post-FFN (fp32) per il confronto con mlx_lm. */
-        const char* dl = llm_env_get("LLM_DUMP_LAYERS");
-        if (ok && dl) {
-            mlx_array hf = mlx_array_new();
-            if (mlx_astype(&hf, *out, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(hf) == 0) {
-                const float* d = mlx_array_data_float32(hf);
-                size_t nh = (size_t)n_tokens * (size_t)m->cfg.hidden_size;
-                char p[512]; snprintf(p, sizeof(p), "%s/layer_%02d_n%d.bin", dl, layer_idx, n_tokens);
-                FILE* f = fopen(p, "wb");
-                if (f) { fwrite(d, sizeof(float), nh, f); fclose(f); }
-            }
-            mlx_array_free(hf);
-        }
-    }
-    static int dump_attn_done = 0;
-    if (ok && !dump_attn_done && llm_env_get("LLM_DEBUG_POSTATTN") && layer_idx == 0) {
-        mlx_array hf = mlx_array_new();
-        if (mlx_astype(&hf, *out, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(hf) == 0) {
-            const float* d = mlx_array_data_float32(hf);
-            size_t nh = (size_t)n_tokens * (size_t)m->cfg.hidden_size;
-            char p[512]; snprintf(p, sizeof(p), "%s.postffn", llm_env_get("LLM_DEBUG_POSTATTN"));
-            FILE* f = fopen(p, "wb");
-            if (f) { fwrite(d, sizeof(float), nh, f); fclose(f); }
-        }
-        mlx_array_free(hf);
-        mlx_array hb = mlx_array_new();
-        if (mlx_astype(&hb, h, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(hb) == 0) {
-            const float* d = mlx_array_data_float32(hb);
-            size_t nh = (size_t)n_tokens * (size_t)m->cfg.hidden_size;
-            FILE* f = fopen(llm_env_get("LLM_DEBUG_POSTATTN"), "wb");
-            if (f) { fwrite(d, sizeof(float), nh, f); fclose(f); }
-        }
-        mlx_array_free(hb);
-        dump_attn_done = 1;
-    }
     if (gprof) { clock_gettime(CLOCK_MONOTONIC, &t1); prof_ffn += (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9; }
-    static int dump_layer_max = -1;
-    const char* dh = llm_env_get("LLM_DEBUG_HIDDIR");
-    /* LLM_DEBUG_HIDDIR_ALL=1: dumpa OGNI passata (sovrascrive) -> per la diagnosi batch-vs-seq
-     * serve l'ultimo token della sequenza (la guardia static coprirebbe solo la prima passata). */
-    if (ok && dh && (llm_env_isset("LLM_DEBUG_HIDDIR_ALL") || layer_idx > dump_layer_max) && layer_idx < 32) {
-        mlx_array hf = mlx_array_new();
-        if (mlx_astype(&hf, *out, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(hf) == 0) {
-            const float* d = mlx_array_data_float32(hf);
-            size_t nh = (size_t)n_tokens * (size_t)m->cfg.hidden_size;
-            char p[512]; snprintf(p, sizeof(p), "%s/l%d.bin", dh, layer_idx);
-            FILE* f = fopen(p, "wb");
-            if (f) { fwrite(d, sizeof(float), nh, f); fclose(f); }
-        }
-        mlx_array_free(hf);
-        dump_layer_max = layer_idx;
-    }
     if (gprof && layer_idx + 1 >= m->cfg.n_layers) { fprintf(stderr, "[LLM_PROF] attn=%.2fs ffn=%.2fs total=%.2fs\n", prof_attn, prof_ffn, prof_attn + prof_ffn); prof_attn = prof_ffn = 0.0; (void)prof_run; }
     /* KV quant: DOPO l'attn (cache aggiornata con i nuovi token), se supera la soglia quantizza la
      * parte COLD e la salva in kvq_*[layer] (persistente quantizzata); k_cache resta SOLO i recenti. */
