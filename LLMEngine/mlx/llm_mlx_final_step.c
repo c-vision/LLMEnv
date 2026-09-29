@@ -251,24 +251,6 @@ bool final_step(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
      * LLM_QWEN4EXP_LOGITS=<path>. LLM_QWEN4EXP_LOGITS_DIR=<dir> scrive una chiamata per
      * file numerato (`logits_%04d.bin`, nell'ordine di final_step: prefill + ogni decode),
      * cosi' si confronta il logit di OGNI passo di decode con la reference. */
-    if (ok && (llm_env_isset("LLM_QWEN4EXP_LOGITS") || llm_env_isset("LLM_QWEN4EXP_LOGITS_DIR"))) {
-        mlx_array lf = mlx_array_new();
-        if (mlx_astype(&lf, capped, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(lf) == 0) {
-            const float* ld = mlx_array_data_float32(lf);
-            size_t n = mlx_array_size(lf);
-            const char* path = 0;
-            const char* dir = 0;
-            char pbuf[1200];
-            if (dir != NULL) {
-                static int q4_logit_step = 0;
-                snprintf(pbuf, sizeof(pbuf), "%s/logits_%04d.bin", dir, q4_logit_step++);
-                path = pbuf;
-            }
-            FILE* fp = path ? fopen(path, "wb") : NULL;
-            if (fp) { fwrite(ld, sizeof(float), n, fp); fclose(fp); }
-        }
-        mlx_array_free(lf);
-    }
 
     /* S1 (todo MLX-Decode-Composizione §11, opt-in LLM_SAMPLER_ONDEVICE=1): campionamento
      * ON-DEVICE (niente lettura del vocabolario in host). Se le penalty sono attive o il
