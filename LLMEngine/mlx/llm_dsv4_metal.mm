@@ -446,6 +446,69 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    float sum=0.f; for(uint i=0;i<used;i++) sum+=probs[SELECTED[i]];\n"
 "    if (sum<6.103515625e-5f) sum=6.103515625e-5f;\n"
 "    for(uint i=0;i<used;i++) WEIGHT[i]=probs[SELECTED[i]]/sum*scale;\n"
+"}\n"
+"kernel void dsv4_slots6_addr_pair_swiglu_iq2(\n"
+"    device const int* SEL [[buffer(0)]], device const ulong* GADDR [[buffer(1)]], device const ulong* UADDR [[buffer(2)]],\n"
+"    device const float* Y [[buffer(3)]], device float* MID [[buffer(4)]], device const float* RW [[buffer(5)]],\n"
+"    constant float* CF [[buffer(6)]], constant uint* P [[buffer(7)]],\n"
+"    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]],\n"
+"    ushort sgitg [[simdgroup_index_in_threadgroup]], threadgroup char* shmem [[threadgroup(0)]]) {\n"
+"    const int idx = (int)tgpig.z; const int e = SEL[idx];\n"
+"    device const char* SG = (device const char*)(ulong)GADDR[e];\n"
+"    device const char* SU = (device const char*)(ulong)UADDR[e];\n"
+"    const int ne00=(int)P[0], nb01=(int)P[1], ne0=(int)P[2];\n"
+"    dsv4_pair_core(SG, SU, Y, MID, RW[idx], idx*ne0, CF[0], ne00, nb01, ne0, 0u, 0u, tgpig.x, tiisg, sgitg, shmem);\n"
+"}\n"
+"kernel void dsv4_sum6_addr_q2k(device const int* SEL [[buffer(0)]], device const ulong* DADDR [[buffer(1)]],\n"
+"    device const float* MID [[buffer(2)]], device float* OUT [[buffer(3)]], constant uint* P [[buffer(4)]],\n"
+"    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) {\n"
+"    const short NSG = 4; const short nr0 = 4;\n"
+"    const int nb = (int)P[0]; const uint nb01 = P[1];\n"
+"    const int ne0 = (int)P[2]; const int ne00 = (int)P[3];\n"
+"    const int first_row = (tgpig.x * NSG + sgitg) * nr0;\n"
+"    float sumf[4] = {0.f,0.f,0.f,0.f};\n"
+"    const short ix = tiisg / 8; const short it = tiisg % 8;\n"
+"    const short iq = it / 4; const short ir = it % 4; const short is = (8 * ir) / 16;\n"
+"    for (int slot = 0; slot < 6; slot++) {\n"
+"        device const char* s0 = (device const char*)(ulong)DADDR[SEL[slot]];\n"
+"        device const float* y = MID + (ulong)slot * (ulong)ne00;\n"
+"        device const float* y4 = y + ix * 256 + 128 * iq + 8 * ir;\n"
+"        for (int ib = ix; ib < nb; ib += 4) {\n"
+"            float yl[32]; float4 sumy = {0.f,0.f,0.f,0.f};\n"
+"            for (short i = 0; i < 8; ++i) {\n"
+"                yl[i+0]=y4[i+0]; sumy[0]+=yl[i+0]; yl[i+8]=y4[i+32]; sumy[1]+=yl[i+8];\n"
+"                yl[i+16]=y4[i+64]; sumy[2]+=yl[i+16]; yl[i+24]=y4[i+96]; sumy[3]+=yl[i+24]; }\n"
+"            for (short row = 0; row < nr0; row++) {\n"
+"                if (first_row + row < ne0) {\n"
+"                    device const uchar* blk = (device const uchar*)s0 + (ulong)(first_row+row) * (ulong)nb01 + (ulong)ib * 84u;\n"
+"                    device const uint8_t* scr = blk + 8*iq + is;\n"
+"                    device const uint16_t* qsr = (device const uint16_t*)(blk + 16u) + 16*iq + 4*ir;\n"
+"                    ushort dh0 = (ushort)blk[80] | ((ushort)blk[81] << 8);\n"
+"                    ushort dh1 = (ushort)blk[82] | ((ushort)blk[83] << 8);\n"
+"                    const float dall = (float)as_type<half>(dh0);\n"
+"                    const float dmin = (float)as_type<half>(dh1) * (1.f/16.f);\n"
+"                    float4 acc1 = {0.f,0.f,0.f,0.f}; float4 acc2 = {0.f,0.f,0.f,0.f};\n"
+"                    for (int i = 0; i < 8; i += 2) {\n"
+"                        acc1[0] += yl[i+0]*(qsr[i/2]&0x0003); acc2[0] += yl[i+1]*(qsr[i/2]&0x0300);\n"
+"                        acc1[1] += yl[i+8]*(qsr[i/2]&0x000c); acc2[1] += yl[i+9]*(qsr[i/2]&0x0c00);\n"
+"                        acc1[2] += yl[i+16]*(qsr[i/2]&0x0030); acc2[2] += yl[i+17]*(qsr[i/2]&0x3000);\n"
+"                        acc1[3] += yl[i+24]*(qsr[i/2]&0x00c0); acc2[3] += yl[i+25]*(qsr[i/2]&0xc000);\n"
+"                    }\n"
+"                    sumf[row] += dall * ((acc1[0]+1.f/256.f*acc2[0])*(scr[0]&0xF)\n"
+"                                       + (acc1[1]+1.f/256.f*acc2[1])*(scr[2]&0xF)*0.25f\n"
+"                                       + (acc1[2]+1.f/256.f*acc2[2])*(scr[4]&0xF)*0.0625f\n"
+"                                       + (acc1[3]+1.f/256.f*acc2[3])*(scr[6]&0xF)*0.015625f)\n"
+"                               - dmin * (sumy[0]*(scr[0]&0xF0) + sumy[1]*(scr[2]&0xF0)\n"
+"                                       + sumy[2]*(scr[4]&0xF0) + sumy[3]*(scr[6]&0xF0));\n"
+"                }\n"
+"            }\n"
+"            y4 += 4 * 256;\n"
+"        }\n"
+"    }\n"
+"    for (int row = 0; row < nr0 && first_row + row < ne0; row++) {\n"
+"        const float s = simd_sum(sumf[row]);\n"
+"        if (tiisg == 0) OUT[first_row + row] = s;\n"
+"    }\n"
 "}\n";
 
 struct LlmDsv4Metal {
@@ -462,6 +525,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
     id<MTLComputePipelineState> pso_route;   /* router su GPU (softplus/top-k) */
+    id<MTLComputePipelineState> pso_addr_pair, pso_addr_sum6; /* MoE via tabella indirizzi (ds4 addr) */
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
     size_t sx_cap[64], so_cap[64], spb_cap[64];
@@ -515,6 +579,8 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     id<MTLFunction> f18 = [lib newFunctionWithName:@"dsv4_hc_sum"];
     id<MTLFunction> f19 = [lib newFunctionWithName:@"dsv4_hc_post"];
     id<MTLFunction> f20 = [lib newFunctionWithName:@"dsv4_route"];
+    id<MTLFunction> f21 = [lib newFunctionWithName:@"dsv4_slots6_addr_pair_swiglu_iq2"];
+    id<MTLFunction> f22 = [lib newFunctionWithName:@"dsv4_sum6_addr_q2k"];
     if (!f7 || !f8 || !f9) fprintf(stderr, "dsv4_metal: kernel rms/rope NON compilato\n");
     if (!f10) fprintf(stderr, "dsv4_metal: kernel dsv4_slots6_pair_swiglu_iq2 NON compilato\n");
     LlmDsv4Metal* b = (LlmDsv4Metal*)calloc(1, sizeof *b);
@@ -538,8 +604,10 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_hc_sum   = f18 ? [dev newComputePipelineStateWithFunction:f18 error:&err] : nil;
     b->pso_hc_post  = f19 ? [dev newComputePipelineStateWithFunction:f19 error:&err] : nil;
     b->pso_route    = f20 ? [dev newComputePipelineStateWithFunction:f20 error:&err] : nil;
+    b->pso_addr_pair = f21 ? [dev newComputePipelineStateWithFunction:f21 error:&err] : nil;
+    b->pso_addr_sum6 = f22 ? [dev newComputePipelineStateWithFunction:f22 error:&err] : nil;
     [lib release];
-    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->pso_route || !b->queue) {
+    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->pso_route || !b->pso_addr_pair || !b->pso_addr_sum6 || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
                 err ? [[err localizedDescription] UTF8String] : "?");
         llm_dsv4_metal_destroy(b); return NULL;
@@ -564,6 +632,8 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_hc_sum)   [b->pso_hc_sum release];
     if (b->pso_hc_post)  [b->pso_hc_post release];
     if (b->pso_route)    [b->pso_route release];
+    if (b->pso_addr_pair) [b->pso_addr_pair release];
+    if (b->pso_addr_sum6) [b->pso_addr_sum6 release];
     if (b->pso_rms_w)    [b->pso_rms_w release];
     if (b->pso_head_rms) [b->pso_head_rms release];
     if (b->pso_rope)     [b->pso_rope release];
