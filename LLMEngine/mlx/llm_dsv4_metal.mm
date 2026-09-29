@@ -615,6 +615,36 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    }\n"
 "    float inv = 1.f / den;\n"
 "    { uint k = 0; for (uint i = tiisg; i < hd; i += 32u) { oh[i] = accE[k] * inv; k++; } }\n"
+"}\n"
+/* Compressor pool (port di llm_dsv4_compressor_pool_state). P = {hd, ratio, co}. */
+"kernel void dsv4_comp_pool(device const float* SKV [[buffer(0)]], device const float* SSC [[buffer(1)]],\n"
+"    device float* OUT [[buffer(2)]], constant uint* P [[buffer(3)]], uint tid [[thread_position_in_grid]]) {\n"
+"    const uint hd = P[0], ratio = P[1], co = P[2]; const uint width = co * hd;\n"
+"    if (tid >= hd) return;\n"
+"    float mx = -1.0e30f;\n"
+"    if (co == 2u) { for (uint r = 0; r < ratio; r++) { float sp = SSC[r*width+tid]; float sc = SSC[(ratio+r)*width+hd+tid]; if (sp > mx) mx = sp; if (sc > mx) mx = sc; } }\n"
+"    else { for (uint r = 0; r < ratio; r++) { float s = SSC[r*width+tid]; if (s > mx) mx = s; } }\n"
+"    if (mx <= -1.0e30f * 0.5f) { OUT[tid] = 0.f; return; }\n"
+"    float den = 0.f, sum = 0.f;\n"
+"    if (co == 2u) { for (uint r = 0; r < ratio; r++) { float wp = exp(SSC[r*width+tid]-mx), wc = exp(SSC[(ratio+r)*width+hd+tid]-mx); den += wp + wc; sum += wp*SKV[r*width+tid]; sum += wc*SKV[(ratio+r)*width+hd+tid]; } }\n"
+"    else { for (uint r = 0; r < ratio; r++) { float w = exp(SSC[r*width+tid]-mx); den += w; sum += w*SKV[r*width+tid]; } }\n"
+"    OUT[tid] = sum / den;\n"
+"}\n"
+/* Quantizzazione fp8 e4m3 per blocco di 64 (port di llm_dsv4_fp8_kv_quantize_row). P = {n_nope}. */
+"kernel void dsv4_comp_fp8(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], uint gid [[thread_position_in_grid]]) {\n"
+"    const uint n_nope = P[0]; const uint off = gid * 64u; if (off + 64u > n_nope) return;\n"
+"    float amax = 0.f;\n"
+"    for (uint i = 0; i < 64u; i++) { float av = fabs(X[off+i]); if (av > amax) amax = av; }\n"
+"    if (amax < 1.0e-4f) amax = 1.0e-4f;\n"
+"    float scale = exp2(ceil(log2(amax / 448.f)));\n"
+"    for (uint i = 0; i < 64u; i++) {\n"
+"        float v = X[off+i] / scale; if (v > 448.f) v = 448.f; if (v < -448.f) v = -448.f;\n"
+"        float a = fabs(v); if (a > 448.f) a = 448.f;\n"
+"        float am = a < 1.953125e-3f ? 1.953125e-3f : a;\n"
+"        int e = (int)floor(log2(am)); int ste = e - 3; if (ste < -9) ste = -9;\n"
+"        float stp = exp2((float)ste); float q = rint(a / stp) * stp; if (q > 448.f) q = 448.f;\n"
+"        X[off+i] = (v < 0.f ? -q : q) * scale;\n"
+"    }\n"
 "}\n";
 
 struct LlmDsv4Metal {
@@ -634,6 +664,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_addr_pair, pso_addr_sum6; /* MoE via tabella indirizzi (ds4 addr) */
     id<MTLComputePipelineState> pso_tbl_pair, pso_tbl_sum6;  /* MoE via argument buffer (ds4 table) */
     id<MTLComputePipelineState> pso_attn_mixed;  /* attn mista raw+comp su device (ds4) */
+    id<MTLComputePipelineState> pso_comp_pool, pso_comp_fp8;  /* compressor su device (ds4) */
     id<MTLArgumentEncoder> enc_pair, enc_down;
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
@@ -726,6 +757,11 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     id<MTLFunction> f25 = [lib newFunctionWithName:@"dsv4_attn_mixed"];
     b->pso_attn_mixed = f25 ? [dev newComputePipelineStateWithFunction:f25 error:&err] : nil;
     if (!f25) fprintf(stderr, "dsv4_metal: kernel dsv4_attn_mixed NON compilato\n");
+    id<MTLFunction> f26 = [lib newFunctionWithName:@"dsv4_comp_pool"];
+    id<MTLFunction> f27 = [lib newFunctionWithName:@"dsv4_comp_fp8"];
+    b->pso_comp_pool = f26 ? [dev newComputePipelineStateWithFunction:f26 error:&err] : nil;
+    b->pso_comp_fp8  = f27 ? [dev newComputePipelineStateWithFunction:f27 error:&err] : nil;
+    if (!f26 || !f27) fprintf(stderr, "dsv4_metal: kernel compressor NON compilato\n");
     [lib release];
     if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->pso_route || !b->pso_addr_pair || !b->pso_addr_sum6 || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
@@ -1244,6 +1280,53 @@ int llm_dsv4_metal_attention_mixed(LlmDsv4Metal* b, const float* q, int n_head, 
     if (BC) [BC release];
     if (BA) [BA release];
     if (BO) [BO release];
+    return rc;
+}
+
+/* Compressor: pool dello stato -> pooled[hd]. 0 = ok. */
+int llm_dsv4_metal_comp_pool(LlmDsv4Metal* b, const float* state_kv, const float* state_score,
+        float* pooled, int hd, int ratio, int co) {
+    if (!b || !b->pso_comp_pool || !state_kv || !state_score || !pooled) return -1;
+    if (hd <= 0 || ratio <= 0 || (co != 1 && co != 2)) return -1;
+    int width = co * hd, rows = co * ratio * width;
+    id<MTLBuffer> SKV = [b->dev newBufferWithBytes:state_kv length:(NSUInteger)((size_t)rows*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> SSC = [b->dev newBufferWithBytes:state_score length:(NSUInteger)((size_t)rows*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> OUT = [b->dev newBufferWithLength:(NSUInteger)((size_t)hd*sizeof(float)) options:MTLResourceStorageModeShared];
+    int rc = (SKV && SSC && OUT) ? 0 : -2;
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:b->pso_comp_pool];
+        [e setBuffer:SKV offset:0 atIndex:0]; [e setBuffer:SSC offset:0 atIndex:1]; [e setBuffer:OUT offset:0 atIndex:2];
+        uint32_t P[3] = { (uint32_t)hd, (uint32_t)ratio, (uint32_t)co }; [e setBytes:P length:sizeof(P) atIndex:3];
+        [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)hd + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) memcpy(pooled, [OUT contents], (size_t)hd * sizeof(float));
+    }
+    if (SKV) [SKV release]; if (SSC) [SSC release]; if (OUT) [OUT release];
+    return rc;
+}
+
+/* Compressor: quantizzazione fp8 e4m3 in-place di una riga (n_nope multiplo di 64). 0 = ok. */
+int llm_dsv4_metal_comp_fp8(LlmDsv4Metal* b, float* x, int hd, int n_rot) {
+    if (!b || !b->pso_comp_fp8 || !x) return -1;
+    int n_nope = hd - n_rot;
+    if (n_nope <= 0 || (n_nope % 64) != 0) return 0;   /* come la reference: no-op */
+    id<MTLBuffer> X = [b->dev newBufferWithBytes:x length:(NSUInteger)((size_t)hd*sizeof(float)) options:MTLResourceStorageModeShared];
+    int rc = X ? 0 : -2;
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:b->pso_comp_fp8];
+        [e setBuffer:X offset:0 atIndex:0];
+        uint32_t P[1] = { (uint32_t)n_nope }; [e setBytes:P length:sizeof(P) atIndex:1];
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)(n_nope / 64), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) memcpy(x, [X contents], (size_t)hd * sizeof(float));
+    }
+    if (X) [X release];
     return rc;
 }
 

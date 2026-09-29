@@ -73,6 +73,13 @@ int llm_dsv4_metal_attention_mixed(LlmDsv4Metal* b, const float* q, int n_head, 
         const float* raw_kv, int n_raw, const float* comp_kv, int n_comp,
         const int* allowed, const float* sinks, float* out);
 
+/* Compressor su device (replica llm_dsv4_compressor_*): pool dello stato -> pooled[hd]. 0 = ok. */
+int llm_dsv4_metal_comp_pool(LlmDsv4Metal* b, const float* state_kv, const float* state_score,
+        float* pooled, int hd, int ratio, int co);
+
+/* Compressor: fp8 e4m3 in-place di una riga (n_nope = hd - n_rot, multiplo di 64). 0 = ok. */
+int llm_dsv4_metal_comp_fp8(LlmDsv4Metal* b, float* x, int hd, int n_rot);
+
 /* Output grouped-LoRA FUSO (ds4): out_a (ng gruppi) + out_b in UNA command buffer, `low` su device. */
 int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t outa_row_bytes,
         size_t outa_lead0, int ng, uint32_t gd, uint32_t rank, const void* outb_w,
