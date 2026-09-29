@@ -72,6 +72,13 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t ou
         size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
         const float* heads, float* out);
 
+/* Proiezioni Q-LoRA + KV FUSE (ds4): q_a, kv, RMS, q_b, head_rms, RoPE in UNA command buffer. */
+int llm_dsv4_metal_attn_proj_fused(LlmDsv4Metal* b, const void* qa_w, size_t qa_row_bytes,
+        const void* kv_w, size_t kv_row_bytes, const void* qb_w, size_t qb_row_bytes,
+        const float* xn, uint32_t embd, const float* qan_w, const float* kvan_w,
+        uint32_t lq, uint32_t hd, uint32_t qd, int n_head, int n_rot,
+        const float* rope_cfg, int pos, float eps, float* q_out, float* kv_out, float* qrn_out);
+
 #ifdef __cplusplus
 }
 #endif

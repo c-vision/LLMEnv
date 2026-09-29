@@ -58,6 +58,24 @@ static inline bool llm_dsv4_gpu_attn_project(LlmDsv4AttnGpu* m, const LlmDsv4Con
         const LlmDsv4LayerWeights* L, int il, const float* xn, int pos, float* q, float* kv, float* qrn) {
     if (!llm_dsv4_gpu_enabled() || !m || !m->inited) return false;
     const int lq = c->n_lora_q, embd = c->n_embd, qd = c->n_head * c->n_head_dim, hd = c->n_head_dim;
+    if (m->qa[il].type == 8 && m->kv[il].type == 8 && m->qb[il].type == 8) {
+        /* FUSO ds4: q_a + kv + RMS + q_b + head_rms + RoPE in UNA command buffer. */
+        int compressed = llm_dsv4_layer_compress_ratio(c, il) != 0;
+        float freq_base = (compressed && c->compress_rope_freq_base > 0.0f) ? c->compress_rope_freq_base : c->rope_freq_base;
+        float freq_scale = (!compressed || c->rope_scale_factor <= 0.0f) ? 1.0f : 1.0f / c->rope_scale_factor;
+        float ext_factor = (compressed && c->rope_scale_factor > 1.0f) ? 1.0f : 0.0f;
+        float attn_factor = 1.0f;
+        if (ext_factor != 0.0f && freq_scale > 0.0f) attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
+        float rope_cfg[7] = { freq_base, freq_scale, ext_factor, attn_factor,
+                              c->rope_yarn_beta_fast, c->rope_yarn_beta_slow,
+                              (float)(compressed ? c->rope_orig_ctx : 0) };
+        return llm_dsv4_metal_attn_proj_fused(m->be, m->qa[il].w, m->qa[il].row_bytes,
+                                              m->kv[il].w, m->kv[il].row_bytes, m->qb[il].w, m->qb[il].row_bytes,
+                                              xn, (uint32_t)embd, L->attn_q_a_norm, L->attn_kv_a_norm,
+                                              (uint32_t)lq, (uint32_t)hd, (uint32_t)qd,
+                                              c->n_head, c->n_rot, rope_cfg, pos, c->rms_eps,
+                                              q, kv, qrn) == 0;
+    }
     float* qr = (float*)malloc(sizeof(float) * (size_t)lq);
     float* kv_raw = (float*)malloc(sizeof(float) * (size_t)hd);
     bool ok = qr && kv_raw;

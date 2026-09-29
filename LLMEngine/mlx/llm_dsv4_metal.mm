@@ -288,6 +288,60 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        const float s = simd_sum(sumf[row]);\n"
 "        if (tiisg == 0) OUT[first_row + row] = s;\n"
 "    }\n"
+"}\n"
+"kernel void dsv4_rms_norm_w(device const float* X [[buffer(0)]], device const float* W [[buffer(1)]],\n"
+"    device float* O [[buffer(2)]], constant uint* P [[buffer(3)]], constant float* CF [[buffer(4)]],\n"
+"    ushort tiisg [[thread_index_in_simdgroup]]) {\n"
+"    const uint n = P[0]; const float eps = CF[0];\n"
+"    float s = 0.f;\n"
+"    for (uint i = tiisg; i < n; i += 32u) { float v = X[i]; s += v*v; }\n"
+"    s = simd_sum(s);\n"
+"    const float scale = 1.f / sqrt(s / (float)n + eps);\n"
+"    for (uint i = tiisg; i < n; i += 32u) O[i] = X[i] * scale * W[i];\n"
+"}\n"
+"kernel void dsv4_head_rms(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], constant float* CF [[buffer(2)]],\n"
+"    uint h [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
+"    const uint hd = P[0]; const float eps = CF[0];\n"
+"    device float* x = X + (ulong)h * (ulong)hd;\n"
+"    float s = 0.f;\n"
+"    for (uint i = tiisg; i < hd; i += 32u) { float v = x[i]; s += v*v; }\n"
+"    s = simd_sum(s);\n"
+"    const float scale = 1.f / sqrt(s / (float)hd + eps);\n"
+"    for (uint i = tiisg; i < hd; i += 32u) x[i] *= scale;\n"
+"}\n"
+"kernel void dsv4_rope_tail_ext(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], constant float* CF [[buffer(2)]],\n"
+"    uint h [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
+"    const int n_rot = (int)P[0], head_dim = (int)P[1], pos = (int)P[2], inverse = (int)P[3];\n"
+"    const float freq_base = CF[0], freq_scale = CF[1], ext_factor = CF[2], attn_factor = CF[3];\n"
+"    const float beta_fast = CF[4], beta_slow = CF[5]; const float n_ctx_orig = CF[6];\n"
+"    const int n_nope = head_dim - n_rot;\n"
+"    const float theta_scale = pow(freq_base, -2.f / (float)n_rot);\n"
+"    const float sin_sign = inverse ? -1.f : 1.f;\n"
+"    float corr0 = 0.f, corr1 = 0.f;\n"
+"    const float TWO_PI = 6.28318530717958647692f;\n"
+"    if (ext_factor != 0.f) {\n"
+"        float start = floor((float)n_rot * log(n_ctx_orig / (beta_fast * TWO_PI)) / (2.f * log(freq_base)));\n"
+"        float end = ceil((float)n_rot * log(n_ctx_orig / (beta_slow * TWO_PI)) / (2.f * log(freq_base)));\n"
+"        corr0 = max(0.f, start); corr1 = min((float)(n_rot - 1), end);\n"
+"    }\n"
+"    device float* tail = X + (ulong)h * (ulong)head_dim + n_nope;\n"
+"    for (int i = (int)tiisg * 2; i < n_rot; i += 64) {\n"
+"        float theta_extrap = (float)pos;\n"
+"        for (int t = 0; t < i; t += 2) theta_extrap *= theta_scale;\n"
+"        float theta_interp = freq_scale * theta_extrap;\n"
+"        float theta = theta_interp, mscale = attn_factor;\n"
+"        if (ext_factor != 0.f) {\n"
+"            float y = ((float)(i / 2) - corr0) / max(0.001f, corr1 - corr0);\n"
+"            float ramp = 1.f - min(1.f, max(0.f, y));\n"
+"            float ramp_mix = ramp * ext_factor;\n"
+"            theta = theta_interp * (1.f - ramp_mix) + theta_extrap * ramp_mix;\n"
+"            mscale *= 1.f + 0.1f * log(1.f / freq_scale);\n"
+"        }\n"
+"        float c = cos(theta) * mscale, s = sin_sign * sin(theta) * mscale;\n"
+"        float x0 = tail[i], x1 = tail[i + 1];\n"
+"        tail[i] = x0 * c - x1 * s;\n"
+"        tail[i + 1] = x0 * s + x1 * c;\n"
+"    }\n"
 "}\n";
 
 struct LlmDsv4Metal {
@@ -299,6 +353,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_q8k_q4k;
     id<MTLComputePipelineState> pso_pair;   /* MoE fuso gate+up+swiglu (ds4 pair) */
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
+    id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
     size_t sx_cap[64], so_cap[64], spb_cap[64];
@@ -340,6 +395,10 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     if (!f5) fprintf(stderr, "dsv4_metal: kernel dsv4_pair_swiglu_iq2 NON compilato\n");
     id<MTLFunction> f6 = [lib newFunctionWithName:@"dsv4_sum6_q2k"];
     if (!f6) fprintf(stderr, "dsv4_metal: kernel dsv4_sum6_q2k NON compilato\n");
+    id<MTLFunction> f7 = [lib newFunctionWithName:@"dsv4_rms_norm_w"];
+    id<MTLFunction> f8 = [lib newFunctionWithName:@"dsv4_head_rms"];
+    id<MTLFunction> f9 = [lib newFunctionWithName:@"dsv4_rope_tail_ext"];
+    if (!f7 || !f8 || !f9) fprintf(stderr, "dsv4_metal: kernel rms/rope NON compilato\n");
     LlmDsv4Metal* b = (LlmDsv4Metal*)calloc(1, sizeof *b);
     b->dev = [dev retain];
     b->queue = [dev newCommandQueue];
@@ -349,8 +408,11 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_q8k_q4k = [dev newComputePipelineStateWithFunction:f4 error:&err];
     b->pso_pair    = f5 ? [dev newComputePipelineStateWithFunction:f5 error:&err] : nil;
     b->pso_sum6_q2k = f6 ? [dev newComputePipelineStateWithFunction:f6 error:&err] : nil;
+    b->pso_rms_w    = f7 ? [dev newComputePipelineStateWithFunction:f7 error:&err] : nil;
+    b->pso_head_rms = f8 ? [dev newComputePipelineStateWithFunction:f8 error:&err] : nil;
+    b->pso_rope     = f9 ? [dev newComputePipelineStateWithFunction:f9 error:&err] : nil;
     [lib release];
-    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->queue) {
+    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
                 err ? [[err localizedDescription] UTF8String] : "?");
         llm_dsv4_metal_destroy(b); return NULL;
@@ -366,6 +428,9 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_q8k_q4k)  [b->pso_q8k_q4k release];
     if (b->pso_pair)     [b->pso_pair release];
     if (b->pso_sum6_q2k) [b->pso_sum6_q2k release];
+    if (b->pso_rms_w)    [b->pso_rms_w release];
+    if (b->pso_head_rms) [b->pso_head_rms release];
+    if (b->pso_rope)     [b->pso_rope release];
     for (int i = 0; i < 64; i++) {
         if (b->sx[i])  [b->sx[i] release];
         if (b->so[i])  [b->so[i] release];
@@ -762,5 +827,97 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b,
     }
     if (WA) [WA release];
     if (WB) [WB release];
+    return rc;
+}
+
+/* Proiezioni Q-LoRA + KV FUSE (ds4): q_a, kv, RMS, q_b, head_rms, RoPE in UNA command buffer.
+ * Pesi Q8_0. `q_out[qd]`, `kv_out[hd]`, `qrn_out[lq]` (per l'indexer). 0 = ok. */
+int llm_dsv4_metal_attn_proj_fused(LlmDsv4Metal* b,
+        const void* qa_w, size_t qa_row_bytes,
+        const void* kv_w, size_t kv_row_bytes,
+        const void* qb_w, size_t qb_row_bytes,
+        const float* xn, uint32_t embd,
+        const float* qan_w, const float* kvan_w, uint32_t lq, uint32_t hd, uint32_t qd,
+        int n_head, int n_rot, const float* rope_cfg, int pos, float eps,
+        float* q_out, float* kv_out, float* qrn_out) {
+    if (!b || !b->pso || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope) return -1;
+    if (!qa_w || !kv_w || !qb_w || !xn || !qan_w || !kvan_w || !q_out || !kv_out || !qrn_out) return -1;
+    if ((lq % 32u) || (qd % 32u) || (embd % 32u) || n_head <= 0) return -1;
+    const size_t page = (size_t)getpagesize();
+    size_t qasz = (size_t)lq * qa_row_bytes, kvsz = (size_t)hd * kv_row_bytes, qbsz = (size_t)qd * qb_row_bytes;
+    uintptr_t ap_qa = (uintptr_t)qa_w & ~(uintptr_t)(page-1); size_t l_qa = (size_t)((uintptr_t)qa_w-ap_qa);
+    uintptr_t ap_kv = (uintptr_t)kv_w & ~(uintptr_t)(page-1); size_t l_kv = (size_t)((uintptr_t)kv_w-ap_kv);
+    uintptr_t ap_qb = (uintptr_t)qb_w & ~(uintptr_t)(page-1); size_t l_qb = (size_t)((uintptr_t)qb_w-ap_qb);
+    size_t vl_qa = ((l_qa+qasz+page-1)/page)*page, vl_kv = ((l_kv+kvsz+page-1)/page)*page, vl_qb = ((l_qb+qbsz+page-1)/page)*page;
+    id<MTLBuffer> WA  = [b->dev newBufferWithBytesNoCopy:(void*)ap_qa length:vl_qa options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> WK  = [b->dev newBufferWithBytesNoCopy:(void*)ap_kv length:vl_kv options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> WQ  = [b->dev newBufferWithBytesNoCopy:(void*)ap_qb length:vl_qb options:MTLResourceStorageModeShared deallocator:nil];
+    id<MTLBuffer> WQAN = [b->dev newBufferWithBytes:qan_w length:(NSUInteger)lq*sizeof(float) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> WKAN = [b->dev newBufferWithBytes:kvan_w length:(NSUInteger)hd*sizeof(float) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> X   = dsv4_scratch(b, &b->sx[6],  &b->sx_cap[6],  (size_t)embd*sizeof(float));
+    id<MTLBuffer> QR  = dsv4_scratch(b, &b->sx[7],  &b->sx_cap[7],  (size_t)lq*sizeof(float));
+    id<MTLBuffer> KVR = dsv4_scratch(b, &b->sx[8],  &b->sx_cap[8],  (size_t)hd*sizeof(float));
+    id<MTLBuffer> QB  = dsv4_scratch(b, &b->sx[9],  &b->sx_cap[9],  (size_t)qd*sizeof(float));
+    id<MTLBuffer> QRN = dsv4_scratch(b, &b->sx[10], &b->sx_cap[10], (size_t)lq*sizeof(float));
+    int rc = (WA && WK && WQ && WQAN && WKAN && X && QR && KVR && QB && QRN) ? 0 : -2;
+    if (rc == 0) memcpy([X contents], xn, (size_t)embd*sizeof(float));
+    if (rc == 0) {
+        const uint32_t hdim = (uint32_t)(qd / (uint32_t)n_head);
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> en = [cb computeCommandEncoder];
+        /* gemv q_a: X -> QR */
+        [en setComputePipelineState:b->pso];
+        [en setBuffer:WA offset:0 atIndex:0]; [en setBuffer:X offset:0 atIndex:1]; [en setBuffer:QR offset:0 atIndex:2];
+        { uint32_t P[7]={(uint32_t)l_qa,(uint32_t)qa_row_bytes,embd/32u,lq,8u,34u,32u}; [en setBytes:P length:sizeof(P) atIndex:3]; }
+        [en dispatchThreadgroups:MTLSizeMake(lq,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        /* gemv kv: X -> KVR */
+        [en setComputePipelineState:b->pso];
+        [en setBuffer:WK offset:0 atIndex:0]; [en setBuffer:X offset:0 atIndex:1]; [en setBuffer:KVR offset:0 atIndex:2];
+        { uint32_t P[7]={(uint32_t)l_kv,(uint32_t)kv_row_bytes,embd/32u,hd,8u,34u,32u}; [en setBytes:P length:sizeof(P) atIndex:3]; }
+        [en dispatchThreadgroups:MTLSizeMake(hd,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        /* rms q_a_norm: QRN = rms(QR)*qan */
+        [en setComputePipelineState:b->pso_rms_w];
+        [en setBuffer:QR offset:0 atIndex:0]; [en setBuffer:WQAN offset:0 atIndex:1]; [en setBuffer:QRN offset:0 atIndex:2];
+        { uint32_t P[1]={lq}; [en setBytes:P length:sizeof(P) atIndex:3]; float cf[1]={eps}; [en setBytes:cf length:sizeof(cf) atIndex:4]; }
+        [en dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        /* gemv q_b: QRN -> QB */
+        [en setComputePipelineState:b->pso];
+        [en setBuffer:WQ offset:0 atIndex:0]; [en setBuffer:QRN offset:0 atIndex:1]; [en setBuffer:QB offset:0 atIndex:2];
+        { uint32_t P[7]={(uint32_t)l_qb,(uint32_t)qb_row_bytes,lq/32u,qd,8u,34u,32u}; [en setBytes:P length:sizeof(P) atIndex:3]; }
+        [en dispatchThreadgroups:MTLSizeMake(qd,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        /* head_rms Q */
+        [en setComputePipelineState:b->pso_head_rms];
+        [en setBuffer:QB offset:0 atIndex:0];
+        { uint32_t P[1]={hdim}; [en setBytes:P length:sizeof(P) atIndex:1]; float cf[1]={eps}; [en setBytes:cf length:sizeof(cf) atIndex:2]; }
+        [en dispatchThreadgroups:MTLSizeMake((NSUInteger)n_head,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        /* rope Q */
+        [en setComputePipelineState:b->pso_rope];
+        [en setBuffer:QB offset:0 atIndex:0];
+        { uint32_t P[4]={(uint32_t)n_rot,hdim,(uint32_t)pos,0u}; [en setBytes:P length:sizeof(P) atIndex:1]; }
+        [en setBytes:rope_cfg length:7*sizeof(float) atIndex:2];
+        [en dispatchThreadgroups:MTLSizeMake((NSUInteger)n_head,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        /* rms kv_a_norm in-place */
+        [en setComputePipelineState:b->pso_rms_w];
+        [en setBuffer:KVR offset:0 atIndex:0]; [en setBuffer:WKAN offset:0 atIndex:1]; [en setBuffer:KVR offset:0 atIndex:2];
+        { uint32_t P[1]={hd}; [en setBytes:P length:sizeof(P) atIndex:3]; float cf[1]={eps}; [en setBytes:cf length:sizeof(cf) atIndex:4]; }
+        [en dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        /* rope KV (1 head) */
+        [en setComputePipelineState:b->pso_rope];
+        [en setBuffer:KVR offset:0 atIndex:0];
+        { uint32_t P[4]={(uint32_t)n_rot,hd,(uint32_t)pos,0u}; [en setBytes:P length:sizeof(P) atIndex:1]; }
+        [en setBytes:rope_cfg length:7*sizeof(float) atIndex:2];
+        [en dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        [en endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) {
+            memcpy(q_out,   [QB contents],  (size_t)qd*sizeof(float));
+            memcpy(kv_out,  [KVR contents], (size_t)hd*sizeof(float));
+            memcpy(qrn_out, [QRN contents], (size_t)lq*sizeof(float));
+        }
+    }
+    if (WA) [WA release]; if (WK) [WK release]; if (WQ) [WQ release];
+    if (WQAN) [WQAN release]; if (WKAN) [WKAN release];
     return rc;
 }
