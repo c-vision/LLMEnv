@@ -24,6 +24,7 @@
 #define LLM_MLX_DECODE_AUDIT_H
 
 #include <stdio.h>
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include <stdlib.h>
 #include <string.h>
 #include "mlx/c/mlx.h"
@@ -50,7 +51,7 @@ static LlmDecodeAudit g_da;
 static long g_da_state = -1;
 
 static inline int llm_da_enabled(void) {
-    if (g_da_state < 0) g_da_state = (getenv("LLM_DECODE_AUDIT") != NULL) ? 1 : 0;
+    if (g_da_state < 0) g_da_state = (llm_ai_mlx_opt_env("LLM_DECODE_AUDIT") != NULL) ? 1 : 0;
     return g_da_state == 1;
 }
 static inline void llm_da_reset(void) { memset(&g_da, 0, sizeof(g_da)); }

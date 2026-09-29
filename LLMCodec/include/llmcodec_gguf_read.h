@@ -7,6 +7,10 @@
 #include <stddef.h>
 #include "llmcodec_gguf_status.h"   /* TASSONOMIA D'ERRORE (contratto stabile): LlmCodecGgufStatus */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Tipi valore metadata GGUF (sottoinsieme; numerazione = GGUF spec). */
 enum {
     LLMCODEC_GGUF_MT_U32 = 4, LLMCODEC_GGUF_MT_I32 = 5, LLMCODEC_GGUF_MT_F32 = 6,
@@ -88,5 +92,9 @@ void llmcodec_gguf_meta_free(LlmCodecGgufMetaKVOwned* kv, int n);
 
 /* Serializza i KV posseduti nel formato del writer (per il round-trip/template). */
 void llmcodec_gguf_meta_to_writer(const LlmCodecGgufMetaKVOwned* src, LlmCodecGgufMetaKV* dst);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -21,7 +21,17 @@ add_subdirectory(LLMModelIO)  # 6 (usa 1,2,3 + il plugin engine)
 # Attivare con -DLLMENV_BUILD_ENGINE=ON (sub-layer: plugin, moe, llama, mlx).
 option(LLMENV_BUILD_ENGINE "Build LLMEngine (mlx/llama/moe/plugin)" OFF)
 if(LLMENV_BUILD_ENGINE)
-  add_subdirectory(LLMEngine/plugin)
+  # `LLMEngine/llama` contiene sorgenti Objective-C (`llm_vision_apple.m`, Vision/OCR): senza
+  # `enable_language(OBJC)` la generazione fallisce con `CMAKE_OBJC_COMPILE_OBJECT` non definito.
+  if(APPLE)
+    enable_language(OBJC)
+  endif()
+  # `LLMModelIO` (aggiunto sopra) porta già `llmengine_plugin` con la sua guardia: senza questa
+  # guardia il superbuild chiamerebbe `project()`/`add_library()` una SECONDA volta e CMake
+  # fallirebbe con "target already exists". Lo standalone `cmake -S LLMEngine/plugin` resta valido.
+  if(NOT TARGET llmengine_plugin)
+    add_subdirectory(LLMEngine/plugin)
+  endif()
   add_subdirectory(LLMEngine/moe)
   add_subdirectory(LLMEngine/llama)
   add_subdirectory(LLMEngine/mlx)

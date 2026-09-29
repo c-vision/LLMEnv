@@ -1,6 +1,7 @@
 /* llm_dsv4_chat.c — driver DS4 end-to-end con testo, 100% dal GGUF: tokenizer DeepSeek letto
  * dal GGUF (llm_dsv4_tokenizer) + engine DS4 (packed) + decode. Uso: <gguf> "<prompt>" [n_new] [ctx] */
 #include <stdio.h>
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include <stdlib.h>
 #include <string.h>
 #include "llm_dsv4_engine.h"
@@ -12,7 +13,7 @@ int main(int argc, char** argv) {
     int n_new = argc > 3 ? atoi(argv[3]) : 4;
     int ctx = argc > 4 ? atoi(argv[4]) : 256;
 
-    const char* sw = getenv("LLM_DSV4_SWAP");
+    const char* sw = llm_ai_mlx_opt_env("LLM_DSV4_SWAP");
     int swap_cap = sw ? atoi(sw) : 0;
     LlmDsv4Engine* e = swap_cap > 0 ? llm_dsv4_engine_load_swap(gguf, ctx, swap_cap)
                                     : llm_dsv4_engine_load(gguf, ctx);

@@ -21,6 +21,7 @@
 #define LLM_MLX_KERNEL_FALLBACK_H
 
 #include <stdbool.h>
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +32,7 @@ extern "C" {
 
 static bool llm_mlx_kfallback_enabled(void) {
     static int st = -1;
-    if (st < 0) st = (getenv("LLM_KERNEL_FALLBACK") != NULL) ? 1 : 0;
+    if (st < 0) st = (llm_ai_mlx_opt_env("LLM_KERNEL_FALLBACK") != NULL) ? 1 : 0;
     return st == 1;
 }
 

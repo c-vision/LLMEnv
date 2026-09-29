@@ -3,6 +3,7 @@
  * e applicazione YaRN (mscale). Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 
 #include <stdio.h>
@@ -196,7 +197,7 @@ bool llm_mlx_yarn_rope_apply(mlx_array* q_out, mlx_array* k_out,
      * i byte di K). */
     static int rope16 = -1;
     if (rope16 < 0) {
-        const char* e = getenv("LLM_GPTOSS_ROPE16");
+        const char* e = llm_ai_mlx_opt_env("LLM_GPTOSS_ROPE16");
         rope16 = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1;   /* PROMOSSO a default 2026-09-16 */
     }
     mlx_dtype xdt = mlx_array_dtype(q_t);

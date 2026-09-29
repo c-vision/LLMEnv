@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_qwen4exp.h"
@@ -498,7 +499,7 @@ bool qwen3_5_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
      * Il timer NON e' utilizzabile per-layer con LLM_GDN_TIME (che sincronizza dentro il layer e
      * in un path a eval unico flusha lavoro di piu' layer): qui il sync e' al confine del blocco. */
     static double ph_g = 0.0, ph_f = 0.0; static long n_g = 0, n_f = 0;
-    const bool gphase_a = getenv("LLM_PHASE_ATTN") != NULL;
+    const bool gphase_a = llm_ai_mlx_opt_env("LLM_PHASE_ATTN") != NULL;
     struct timespec _a0, _a1;
     bool gdn = (m->cfg.is_linear_layer && layer_idx < m->cfg.n_layers && m->cfg.is_linear_layer[layer_idx]);
     bool oka;

@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include <cJSON.h>
 
@@ -361,11 +362,11 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         /* Fallback ENV per la CAMPAGNA MISURATA (senza toccare la config del provider):
          * LLM_MLX_NSA_SPARSE=1 [+ LLM_MLX_NSA_TOPK=N, LLM_MLX_NSA_WINDOW=M]. Solo se la config
          * non l'ha gia' deciso: default invariato (OFF) per gli altri path. */
-        if (!cfg->nsa_sparse && getenv("LLM_MLX_NSA_SPARSE") != NULL) {
+        if (!cfg->nsa_sparse && llm_ai_mlx_opt_env("LLM_MLX_NSA_SPARSE") != NULL) {
             cfg->nsa_sparse = true;
-            const char* t = getenv("LLM_MLX_NSA_TOPK");
+            const char* t = llm_ai_mlx_opt_env("LLM_MLX_NSA_TOPK");
             if (cfg->nsa_topk <= 0 && t != NULL) cfg->nsa_topk = atoi(t);
-            const char* w = getenv("LLM_MLX_NSA_WINDOW");
+            const char* w = llm_ai_mlx_opt_env("LLM_MLX_NSA_WINDOW");
             if (cfg->nsa_window <= 0 && w != NULL) cfg->nsa_window = atoi(w);
         }
         if (cfg->full_attention_interval > 0) {
@@ -513,7 +514,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
      * diagnostico: se impostato, forza la capacita' KV (una cap >= lunghezza contestuale
      * NON tronca nulla, quindi e' corretto per il full-attention e attiva il paging).
      * Nessun effetto se la variabile manca (comportamento identico a prima). */
-    const char* kve = getenv("LLM_KV_MAX_TOKENS");
+    const char* kve = llm_ai_mlx_opt_env("LLM_KV_MAX_TOKENS");
     if (kve) {
         int v = atoi(kve);
         if (v > 0) cfg->kv_max_tokens = v;

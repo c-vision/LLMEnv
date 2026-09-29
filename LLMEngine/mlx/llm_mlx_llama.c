@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_fused_rope_append.h"
@@ -19,7 +20,7 @@ mlx_array llm_mlx_llama3_freqs_cached(LlmMlxModel* m) {
     mlx_array out = mlx_array_new();
     if (m == NULL || m->cfg.head_dim <= 0 || !m->cfg.use_llama3_rope) return out;
     static int nocache = -1; /* LLM_ROPE_FREQS_NOCACHE=1: comportamento PRE-fix (A/B) */
-    if (nocache < 0) nocache = (getenv("LLM_ROPE_FREQS_NOCACHE") != NULL) ? 1 : 0;
+    if (nocache < 0) nocache = (llm_ai_mlx_opt_env("LLM_ROPE_FREQS_NOCACHE") != NULL) ? 1 : 0;
     if (nocache) {
         mlx_array_free(out);
         return llm_mlx_llama3_rope_freqs(

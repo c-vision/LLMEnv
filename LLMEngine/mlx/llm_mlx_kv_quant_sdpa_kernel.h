@@ -18,6 +18,7 @@
 #define LLM_MLX_KV_QUANT_SDPA_KERNEL_H
 
 #include "mlx/c/mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 
 static const char llm_kvq_sdpa_kernel_header[] =
     "\n"
@@ -255,7 +256,7 @@ static llm_kvq_sdpa_cache llm_kvq_sdpa_singleton = { {0}, {0}, false };
 static int llm_mlx_kvq_splits_max(void) {
     static int v = 0;
     if (v == 0) {
-        const char* e = getenv("LLM_KVQ_SPLITS_MAX");
+        const char* e = llm_ai_mlx_opt_env("LLM_KVQ_SPLITS_MAX");
         v = (e != NULL && atoi(e) > 0) ? atoi(e) : LLM_KVQ_SPLITS_MAX;
     }
     return v;
@@ -263,7 +264,7 @@ static int llm_mlx_kvq_splits_max(void) {
 static int llm_mlx_kvq_split_tokens(void) {
     static int v = 0;
     if (v == 0) {
-        const char* e = getenv("LLM_KVQ_SPLIT_TOKENS");
+        const char* e = llm_ai_mlx_opt_env("LLM_KVQ_SPLIT_TOKENS");
         v = (e != NULL && atoi(e) > 0) ? atoi(e) : LLM_KVQ_SPLIT_TOKENS;
     }
     return v;
@@ -274,7 +275,7 @@ static int llm_mlx_kvq_split_tokens(void) {
  * NON e' il collo di bottiglia (la riduzione di grid da nh=32 a nkv=8 costa piu' di quanto
  * il riuso renda). Tenuto come esperimento riproducibile dietro LLM_KVQ_GQA=1. */
 static bool llm_kvq_gqa(void) {
-    return getenv("LLM_KVQ_GQA") != NULL;
+    return llm_ai_mlx_opt_env("LLM_KVQ_GQA") != NULL;
 }
 
 static int llm_mlx_kvq_sdpa_kernel_build(void) {

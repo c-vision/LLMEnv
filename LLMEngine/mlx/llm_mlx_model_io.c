@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llmengine_plugin.h"
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
@@ -23,6 +24,10 @@
 #include <math.h>
 #include <dlfcn.h>
 #include <sys/sysctl.h>
+
+/* Store/cache esperti DS4 (LRU): bundle (gate+up+down) tenuti in RAM quando l'offload esperti è
+ * attivo (parametro --offload-experts -> set_expert_swap). Nessuna variabile d'ambiente. */
+#define LLM_DSV4_STORE_BUNDLES 2048
 
 extern const LlmEnginePluginPrimMLX* g_primmlx_norm;
 extern void* g_primmlx_norm_h;
@@ -148,10 +153,53 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
         if (dn > 5 && strcmp(model_dir + dn - 5, ".gguf") == 0) {
             LlmDsv4Engine* e = llm_dsv4_engine_load(model_dir, 4096);
             if (e != NULL) {
-                const char* sw = getenv("LLM_DSV4_SWAP");
-                if (sw && sw[0]) llm_dsv4_engine_enable_swap(e, atoi(sw));
+                /* Store/cache esperti DS4 attivato dal PARAMETRO di offload (--offload-experts ->
+                 * set_expert_swap), non da una variabile d'ambiente. LRU di N bundle in RAM. */
+                /* DS4 e' 97.6 GB: lo streaming degli esperti e' il DEFAULT (nessun flag).
+                 * `offload=0` esplicito lo disattiva. La cache usa offload_cache_mb. */
+                int want_swap = llm_mlx_moe_swap_on();
+                if (llm_ai_mlx_opt_is_set("offload") != 1) want_swap = 1;
+                if (want_swap) {
+                    int mb = 0, bundles = LLM_DSV4_STORE_BUNDLES;
+                    if (llm_ai_mlx_opt_is_set("offload_cache_mb") == 1 &&
+                        llm_ai_mlx_opt_get_int("offload_cache_mb", &mb) == 0 && mb > 0) {
+                        bundles = mb / 7;   /* un bundle gate+up+down DS4 ~ 7 MB */
+                    } else {
+                        /* AUTO-SIZING (come ds4 originale): tutta la RAM libera DOPO i pesi
+                         * NON-esperto va alla cache esperti. Prima era fissa a 2048 (~14 GB):
+                         * ogni token rileggeva da SSD -> ~1 tok/s. */
+                        const LlmDsv4Config* cc = &e->w.cfg;
+                        uint64_t eb = 0;
+                        for (int il = 0; il < cc->n_layer && e->w.exps; il++) {
+                            const LlmDsv4PackedExperts* pe = &e->w.exps[il];
+                            uint64_t rg = (uint64_t)llm_ggml_nbytes(pe->gate_type, pe->in_dim);
+                            uint64_t rd = (uint64_t)llm_ggml_nbytes(pe->down_type, pe->ff_dim);
+                            eb += (uint64_t)cc->n_expert *
+                                  ((uint64_t)cc->n_ff_exp * rg * 2ull + (uint64_t)cc->n_embd * rd);
+                        }
+                        uint64_t maplen = (uint64_t)e->maplen;
+                        uint64_t nonexp = (eb > 0 && maplen > eb) ? (maplen - eb) : maplen;
+                        uint64_t ram = 0; size_t sz = sizeof ram;
+                        if (sysctlbyname("hw.memsize", &ram, &sz, NULL, 0) != 0) ram = 0;
+                        uint64_t limit = ram ? (ram / 4ull) * 3ull : 0;
+                        int32_t wired = 0; sz = sizeof wired;
+                        if (sysctlbyname("iogpu.wired_limit_mb", &wired, &sz, NULL, 0) == 0 && wired > 0)
+                            limit = (uint64_t)wired * 1024ull * 1024ull;
+                        uint64_t reserve = 2ull * 1024 * 1024 * 1024;
+                        uint64_t avail = (limit > nonexp + reserve) ? (limit - nonexp - reserve) : 0;
+                        int b = (int)(avail / (7ull * 1024 * 1024));
+                        if (b > 256) bundles = b;
+                        fprintf(stderr, "DSV4 cache: esperti=%.1fGB non-esperto=%.1fGB limit=%.1fGB -> %d bundle (~%.1fGB)\n",
+                                eb / 1073741824.0, nonexp / 1073741824.0, limit / 1073741824.0,
+                                bundles, (double)bundles * 7.0 / 1024.0);
+                    }
+                    llm_dsv4_engine_enable_swap(e, bundles);
+                    /* Lo swap (cache esperti) e' ora attivo: re-init GPU per usare la cache. */
+                    llm_dsv4_gpu_ctx_reinit(&e->w.cfg, e->w.exps);
+                }
                 m->arch = find_arch_ops("deepseek_v4");
                 m->dsv4 = e;
+                m->gguf_mmap_bytes = (uint64_t)e->maplen;   /* pesi zero-copy: il planner li conti */
                 m->cfg.n_layers = e->w.cfg.n_layer;
                 m->cfg.vocab_size = e->w.cfg.n_vocab;
                 m->cfg.hidden_size = e->w.cfg.n_embd;
@@ -226,7 +274,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                         }
                         LlmDsv41Config* dc = &((LlmDsv41Engine*)m->dsv41)->w.cfg;
                         {
-                            const char* mtp = getenv("LLM_DSV41_MTP");
+                            const char* mtp = llm_ai_mlx_opt_env("LLM_DSV41_MTP");
                             if (mtp && mtp[0] && mtp[0] != '0' && ((LlmDsv41Engine*)m->dsv41)->has_dspark)
                                 ((LlmDsv41Engine*)m->dsv41)->mtp_enabled = true;
                         }
@@ -339,7 +387,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * stati esclusi da misura. Le guardie plain-tensor sotto bf16 (:445-451) coprono l'attenzione
      * plain del 120b. Escape hatch per A/B e kill-switch: LLM_GPTOSS_BF16=0 forza fp32 (= stato
      * pre-promozione). payoff definitivo da confermare on-load sul 120b. */
-    const char* goss_bf16_env = getenv("LLM_GPTOSS_BF16");
+    const char* goss_bf16_env = llm_ai_mlx_opt_env("LLM_GPTOSS_BF16");
     const bool goss_bf16_off = (goss_bf16_env != NULL && goss_bf16_env[0] == '0');
     if (strncmp(m->cfg.model_type, "gpt_oss", 7) == 0)
         want_bf16 = m->cfg.per_tensor_quant
@@ -366,7 +414,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
          * il "10x o crash" NON era di MLX. gpt-oss mxfp4 era GIA' promosso (policy sotto): stessa
          * regola. Kill-switch per A/B e rollback: LLM_MXFP4_PURE_FP32=1 riporta a fp32. */
         want_bf16 = strcmp(m->cfg.quant_mode, "affine") == 0
-                    || (strcmp(m->cfg.quant_mode, "mxfp4") == 0 && getenv("LLM_MXFP4_PURE_FP32") == NULL);
+                    || (strcmp(m->cfg.quant_mode, "mxfp4") == 0 && llm_ai_mlx_opt_env("LLM_MXFP4_PURE_FP32") == NULL);
     else if (strcmp(m->cfg.model_type, "mixtral") == 0) {
         /* FIX 2026-09-17 (bug MLX-Mixtral-8x22B-Prefill-Decode-Spazzatura): le scale/biases del
          * checkpoint Mixtral sono **F16** (3138 tensori verificati) -> il flavour ACCOPPIATO e' **f16**.
@@ -453,7 +501,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * Qwen3.6-27B-4bit; la COMBINAZIONE produce spazzatura silenziosa SOLO su llama (head_dim 64),
      * mentre su qwen3_5 (head_dim 256) resta identica -> il difetto e' locale a
      * llama_attention_block, NON un "bf16 denso rotto". */
-    const char* bf16_dense = getenv("LLM_BF16_DENSE");
+    const char* bf16_dense = llm_ai_mlx_opt_env("LLM_BF16_DENSE");
     /* La richiesta esplicita dell'ospite VINCE sull'accoppiamento automatico del flavor (che
      * comunque non si applica se i bit a 16 bit sono gia' accesi): questo flag vive fino al punto
      * dopo load_all_shards dove il dtype delle scale diventa leggibile. */
@@ -496,7 +544,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * restano nel cache allocator e la memoria active cresce a dismisura (Mixtral: +2,7GB/
      * layer -> ~150GB -> thrash). Override diagnostico: LLM_MLX_CACHE_LIMIT_MB. */
     size_t cache_lim = (size_t)8 << 30; /* 8 GiB */
-    const char* clim_env = getenv("LLM_MLX_CACHE_LIMIT_MB");
+    const char* clim_env = llm_ai_mlx_opt_env("LLM_MLX_CACHE_LIMIT_MB");
     if (clim_env && clim_env[0]) {
         long mb = atol(clim_env);
         if (mb > 0) cache_lim = (size_t)mb << 20;
@@ -523,8 +571,8 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * Ora il cap AUTO = min(massimo OS, footprint+8 GiB), con floor 64 GiB: si alza quel tanto che
      * serve a pinnare il modello senza sovra-pin. Si salta SOLO se nemmeno il massimo OS copre il
      * footprint (allora il wired non e' applicabile). */
-    { const char* we = getenv("LLM_MLX_WIRED_GB");
-      const char* nw = getenv("LLM_NO_WIRE");
+    { const char* we = llm_ai_mlx_opt_env("LLM_MLX_WIRED_GB");
+      const char* nw = llm_ai_mlx_opt_env("LLM_NO_WIRE");
       const size_t mbytes = llm_mlx_dir_safetensors_bytes(model_dir);
       const long fp_gib = mbytes > 0 ? (long)(mbytes >> 30) : 0;
       long gb = 0;
@@ -573,7 +621,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * order-invarianti + parità IDS, SOLO per il modello che ne beneficia (mai globale).
      * `setenv(..., overwrite=0)`: non sovrascrive una scelta esplicita dell'utente.
      * Kill-switch: LLM_NO_<LEVA> (il loader salta l'abilitazione). */
-    if (strcmp(m->cfg.model_type, "gemma4") == 0 && getenv("LLMMETAL_NO_FUSE_GEGLU_METAL") == NULL) {
+    if (strcmp(m->cfg.model_type, "gemma4") == 0 && llm_ai_mlx_opt_env("LLMMETAL_NO_FUSE_GEGLU_METAL") == NULL) {
         setenv("LLMMETAL_FUSE_GEGLU_METAL", "1", 0);  /* +1,2% decode (unico dense_geglu_ffn) */
         fprintf(stderr, "[auto-policy] gemma4 -> LLMMETAL_FUSE_GEGLU_METAL=1\n");
     }
@@ -581,7 +629,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * → bf16 e' il dtype NATIVO (LLM girava f32 = "leak fp32"; rapid/mlx-lm usano bf16). Misurato
      * +21% decode; il bit `embed` e' piu' lento e `both` aveva argmax 9,0% -> solo `matmul`
      * (argmax 7,4%, acc 2,0% = livello accettato; gate §44). Kill-switch LLM_NO_BF16. */
-    if (strcmp(m->cfg.model_type, "gemma4") == 0 && getenv("LLM_NO_BF16") == NULL) {
+    if (strcmp(m->cfg.model_type, "gemma4") == 0 && llm_ai_mlx_opt_env("LLM_NO_BF16") == NULL) {
         llm_mlx_apply_bf16_mode(m, "matmul", "auto-policy gemma4");
         fprintf(stderr, "[auto-policy] gemma4 -> bf16 matmul\n");
     }
@@ -597,12 +645,12 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * W8A8 ma la combo con bf16-mode OFF (guard in llm_mlx_oq_a8_active_for). Con bf16 ON la
      * qualita' e' identica a MLX (score 256 pos: W8A8 89,8% vs MLX 90,6%) -> il W8A8 resta
      * attivo di default sui qwen3 come deciso il 2026-09-18. */
-    if (strcmp(m->cfg.model_type, "qwen3") == 0 && getenv("LLMMETAL_OQ_A8") == NULL) {
+    if (strcmp(m->cfg.model_type, "qwen3") == 0 && llm_ai_mlx_opt_env("LLMMETAL_OQ_A8") == NULL) {
         setenv("LLMMETAL_OQ_A8", "1", 0);
         fprintf(stderr, "[auto-policy] qwen3 -> LLMMETAL_OQ_A8=1 (misurato +16-28% prefill N>=1024; "
                         "su llama sarebbe -2/-6x)\n");
     }
-    if (strcmp(m->cfg.model_type, "qwen3_next") == 0 && getenv("LLM_NO_MXFP4_ACT_F16") == NULL) {
+    if (strcmp(m->cfg.model_type, "qwen3_next") == 0 && llm_ai_mlx_opt_env("LLM_NO_MXFP4_ACT_F16") == NULL) {
         setenv("LLM_MXFP4_ACT_F16", "1", 0);     /* +7% prefill (misurato neutro su qwen3_5_moe) */
         fprintf(stderr, "[auto-policy] qwen3_next -> LLM_MXFP4_ACT_F16=1\n");
     }
@@ -610,9 +658,9 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * (cold block affine) via env, senza editare il config.json dei modelli (nessun config lo
      * imposta oggi). NB: il path e' DEQUANT-ON-READ (layer_forward dequantizza la cold all'inizio
      * e la ri-quantizza alla fine) -> riduce la memoria a contesto lungo ma costa 2xO(pos)/token. */
-    if (!m->cfg.kv_quantize && getenv("LLM_KVQUANT") != NULL) {
-        const char* b = getenv("LLM_KVQUANT_BITS");
-        const char* t = getenv("LLM_KVQUANT_THRESH");
+    if (!m->cfg.kv_quantize && llm_ai_mlx_opt_env("LLM_KVQUANT") != NULL) {
+        const char* b = llm_ai_mlx_opt_env("LLM_KVQUANT_BITS");
+        const char* t = llm_ai_mlx_opt_env("LLM_KVQUANT_THRESH");
         m->cfg.kv_quantize = true;
         m->cfg.kv_quantize_bits = b ? atoi(b) : 8;
         m->cfg.kv_quantize_threshold = t ? atoi(t) : 2048;
@@ -662,6 +710,21 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
         }
         if (qn > 0) {
             fprintf(stderr, "[quant] dequantizzati %d tensori GPTQ/NF4 -> <base>.weight F16\n", qn);
+            llm_mlx_wcache_clear();
+        }
+    }
+    /* TurboQuant (PolarQuant-MLX, mode:"turboquant"): dequant `<base>.weight U32 + scales + signs
+     * + codebook` in F16 plain. Stesso hook (PRIMA di auto_pair/pretouch). */
+    {
+        int tqn = turboquant_synthesize_weights(&m->weights, m->stream);
+        if (tqn < 0) {
+            fprintf(stderr, "llm_ai_mlx_load_model: turboquant_synthesize_weights fallita\n");
+            llm_mlx_model_destroy(m);
+            free(m);
+            return NULL;
+        }
+        if (tqn > 0) {
+            fprintf(stderr, "[turboquant] dequantizzati %d tensori -> <base>.weight F16\n", tqn);
             llm_mlx_wcache_clear();
         }
     }
@@ -767,6 +830,12 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
         fprintf(stderr, "[packed-qkv] model=%s packed=%d/%d%s\n", m->cfg.model_type,
                 packed, m->cfg.n_layers, packed ? "" : " fallback: architecture/quantization/cache ineligible");
     }
+    /* P4 memory plan: calcolato e stampato ORA al load (a pesi materializzati, KV ancora assente),
+     * non alla prima `append`. Il piano e' a livello MODELLO (dipende solo da cfg e dai pesi), quindi
+     * anticiparlo non cambia i numeri ma fa uscire la diagnostica all'avvio — prima del prompt in
+     * `fastllm chat`, non dopo il primo messaggio. Idempotente: `p4_plan_done` rende la chiamata in
+     * session_append un no-op. */
+    llm_p4_plan_init(m);
     llm_mlx_dp_memory("post-load"); /* dopo lo stacking: il delta da post-shard-load e' nostro */
     /* W1 (2026-09-18) — DUMP DEL RAMO ATTIVO, una volta per load, dietro LLM_WHICH_PATH=1.
      * REGOLA branch-first (AGENTS §0sexies / Hard-Lessons/Ramo-Sbagliato-Prima-Del-Kernel.md):
@@ -784,34 +853,34 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
         wp.kv_quant = m->cfg.kv_quantize;
         wp.kv_quant_bits = m->cfg.kv_quantize_bits;
         wp.kv_quant_thresh = m->cfg.kv_quantize_threshold;
-        wp.kv_read = (m->cfg.kv_quantize && getenv("LLM_KV_DEQUANT_READ")) ? 1 : 0;
-        wp.kv_read_src = getenv("LLM_KV_DEQUANT_READ") ? 1 : (m->cfg.kv_quantize ? 0 : 2);
-        wp.kv_slice = getenv("LLM_KVSLICE") != NULL;
-        wp.kv_seg = getenv("LLM_KVSEG") != NULL;
-        wp.kv_f16 = getenv("LLM_KVF16") != NULL;
-        wp.kv_metal = getenv("LLMMETAL_KVMETAL") != NULL;
-        wp.kv_max_tokens = getenv("LLM_KV_MAX_TOKENS") ? atoi(getenv("LLM_KV_MAX_TOKENS")) : 0;
-        wp.moe_fuse = getenv("LLMENGINE_MOE_FUSE_MOE_DECODE") != NULL;
-        wp.moe_mxfp4 = getenv("LLMENGINE_MOE_FUSE_MOE_MXFP4") != NULL;
-        wp.moe_gateup = getenv("LLMENGINE_MOE_GATEUP_FUSE") != NULL;
+        wp.kv_read = (m->cfg.kv_quantize && llm_ai_mlx_opt_env("LLM_KV_DEQUANT_READ")) ? 1 : 0;
+        wp.kv_read_src = llm_ai_mlx_opt_env("LLM_KV_DEQUANT_READ") ? 1 : (m->cfg.kv_quantize ? 0 : 2);
+        wp.kv_slice = llm_ai_mlx_opt_env("LLM_KVSLICE") != NULL;
+        wp.kv_seg = llm_ai_mlx_opt_env("LLM_KVSEG") != NULL;
+        wp.kv_f16 = llm_ai_mlx_opt_env("LLM_KVF16") != NULL;
+        wp.kv_metal = llm_ai_mlx_opt_env("LLMMETAL_KVMETAL") != NULL;
+        wp.kv_max_tokens = llm_ai_mlx_opt_env("LLM_KV_MAX_TOKENS") ? atoi(llm_ai_mlx_opt_env("LLM_KV_MAX_TOKENS")) : 0;
+        wp.moe_fuse = llm_ai_mlx_opt_env("LLMENGINE_MOE_FUSE_MOE_DECODE") != NULL;
+        wp.moe_mxfp4 = llm_ai_mlx_opt_env("LLMENGINE_MOE_FUSE_MOE_MXFP4") != NULL;
+        wp.moe_gateup = llm_ai_mlx_opt_env("LLMENGINE_MOE_GATEUP_FUSE") != NULL;
         wp.moe_n = m->cfg.n_experts;
         wp.moe_topk = m->cfg.top_k;
-        wp.at_flash_decode = getenv("LLM_GEMMA_FLASH_DECODE") != NULL;
-        wp.at_flash_prefill = getenv("LLM_GEMMA_FLASH_PREFILL") != NULL;
-        wp.at_fuse_rope = getenv("LLM_FUSE_ROPE") != NULL;
+        wp.at_flash_decode = llm_ai_mlx_opt_env("LLM_GEMMA_FLASH_DECODE") != NULL;
+        wp.at_flash_prefill = llm_ai_mlx_opt_env("LLM_GEMMA_FLASH_PREFILL") != NULL;
+        wp.at_fuse_rope = llm_ai_mlx_opt_env("LLM_FUSE_ROPE") != NULL;
         wp.at_sliding = m->cfg.sliding_window > 0;
         wp.w_packed_qkv = (strcmp(m->cfg.quant_mode, "affine") == 0 &&
                            (strcmp(m->cfg.model_type, "llama") == 0 || strcmp(m->cfg.model_type, "qwen3") == 0));
-        wp.w_wcache = getenv("LLM_WCACHE") != NULL;
-        wp.w_reshape_canon = getenv("LLM_RESHAPE_CANONICAL") != NULL;
+        wp.w_wcache = llm_ai_mlx_opt_env("LLM_WCACHE") != NULL;
+        wp.w_reshape_canon = llm_ai_mlx_opt_env("LLM_RESHAPE_CANONICAL") != NULL;
         wp.w_scales_bf16 = want_bf16 ? 1 : 0;
-        wp.w_gemvq4 = getenv("LLM_GEMVQ4") != NULL;
-        wp.w_oq_a8 = getenv("LLMMETAL_OQ_A8") != NULL;
-        wp.x_compile = getenv("LLM_COMPILE") != NULL;
-        wp.x_fixkv = getenv("LLM_FIXKV") != NULL;
-        wp.x_compile_dense = getenv("LLM_COMPILE_DENSE") != NULL;
-        wp.x_async = getenv("LLM_ASYNC_DECODE") != NULL && getenv("LLM_NO_ASYNC_DECODE") == NULL;
-        wp.x_sampler_legacy = getenv("LLM_SAMPLER_LEGACY") != NULL;
+        wp.w_gemvq4 = llm_ai_mlx_opt_env("LLM_GEMVQ4") != NULL;
+        wp.w_oq_a8 = llm_ai_mlx_opt_env("LLMMETAL_OQ_A8") != NULL;
+        wp.x_compile = llm_ai_mlx_opt_env("LLM_COMPILE") != NULL;
+        wp.x_fixkv = llm_ai_mlx_opt_env("LLM_FIXKV") != NULL;
+        wp.x_compile_dense = llm_ai_mlx_opt_env("LLM_COMPILE_DENSE") != NULL;
+        wp.x_async = llm_ai_mlx_opt_env("LLM_ASYNC_DECODE") != NULL && llm_ai_mlx_opt_env("LLM_NO_ASYNC_DECODE") == NULL;
+        wp.x_sampler_legacy = llm_ai_mlx_opt_env("LLM_SAMPLER_LEGACY") != NULL;
         llm_mlx_which_path_dump(&wp);
     }
     return m;

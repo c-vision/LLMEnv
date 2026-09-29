@@ -8,6 +8,7 @@
 #include <string.h>
 #include "llm_dsv4_generate.h"
 #include "llm_dsv4_store.h"
+#include "llm_dsv4_gpu_ctx.h"
 #include "llm_gguf.h"
 
 typedef struct {
@@ -60,10 +61,13 @@ static inline LlmDsv4Engine* llm_dsv4_engine_load_ex(const char* path, int n_ctx
     e->n_ctx = n_ctx > 0 ? n_ctx : 4096;
     int raw_cap = e->w.cfg.n_swa > 0 ? e->w.cfg.n_swa : 128;
     llm_dsv4_caches_init(&e->caches, &e->w.cfg, raw_cap, e->n_ctx);
+    /* GPU (F4): attiva il contesto Metal (esperti + attn) — di default. */
+    if (packed && e->w.exps) llm_dsv4_gpu_ctx_init(&e->w.cfg, e->w.exps);
     return e;
 }
 static inline void llm_dsv4_engine_free(LlmDsv4Engine* e) {
     if (!e) return;
+    llm_dsv4_gpu_ctx_close();
     free(e->logits);
     llm_dsv4_caches_free(&e->caches);
     llm_dsv4_store_free(e->store);

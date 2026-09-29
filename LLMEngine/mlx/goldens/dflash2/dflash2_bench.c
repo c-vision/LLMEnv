@@ -1,5 +1,6 @@
 /* Benchmark DFlash2: 120 token greedy — acceptance (DF2_STATS) e tempo vs plain. */
 #include <stdio.h>
+#include "llm_engine_opts.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -8,9 +9,9 @@
 static double now(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec/1e9; }
 
 int main(int argc, char** argv) {
-    const char* TARGET = getenv("LLM_DF2_TARGET");
+    const char* TARGET = llm_ai_mlx_opt_env("LLM_DF2_TARGET");
     if (!TARGET) TARGET = "/Volumes/Armor5TB/LocalLLM/ai/models/Qwen3.8-27B-8bit";
-    const char* DRAFT = getenv("LLM_DF2_DRAFT");
+    const char* DRAFT = llm_ai_mlx_opt_env("LLM_DF2_DRAFT");
     if (!DRAFT) DRAFT = "/Volumes/Armor5TB/LocalLLM/ai/models/Qwen3.8-27B-DFlash2-mxfp4";
     const int32_t prompt5[]={760,6511,314,9338,369};
     const int N = argc>1 ? atoi(argv[1]) : 120;

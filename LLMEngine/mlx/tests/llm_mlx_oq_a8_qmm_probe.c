@@ -16,6 +16,7 @@
  * Uso: /tmp/llmmetal_oq_a8_qmm_probe [K] [N] [reps] [qmm.metallib] [quantize.metallib]
  */
 #include "mlx/c/mlx.h"
+#include "llm_engine_opts.h"
 #include "llmmetal_oq_a8_bridge.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,7 +50,7 @@ int main(int argc, char** argv) {
 
     const double wbytes = (double)nw * 4.0;
     printf("# OQ-A8 QMM W8A8 (int8 act x Q4 w) K=%d N=%d reps=%d  pesi=%.1f MB  NOTM1=%s\n",
-           K, N, reps, wbytes / 1e6, getenv("LLMMETAL_OQ_A8_NOTM1") ? "1" : "0");
+           K, N, reps, wbytes / 1e6, llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_NOTM1") ? "1" : "0");
     printf("%6s | %10s %10s %8s\n", "M", "ms", "TFLOPs", "GB/s");
     for (int M = 1; M <= 64; M *= 2) {
         int ash[2] = {M, K};

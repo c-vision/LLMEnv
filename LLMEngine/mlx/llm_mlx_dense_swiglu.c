@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_lora.h"
@@ -29,7 +30,7 @@ bool llm_mlx_fuse_swiglu_metal_enabled(void) {
      * 512/2048/8192. Opt-out LLMMETAL_FUSE_SWIGLU_METAL=0. (La nota storica "falsificato per
      * parita'" era su un kernel/GEGLU diverso: qui la parita' IDS e' verificata.) */
     if (g_fuse_swiglu_metal_state < 0) {
-        const char* e = getenv("LLMMETAL_FUSE_SWIGLU_METAL");
+        const char* e = llm_ai_mlx_opt_env("LLMMETAL_FUSE_SWIGLU_METAL");
         g_fuse_swiglu_metal_state = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1;
     }
     return g_fuse_swiglu_metal_state == 1;
@@ -44,7 +45,7 @@ bool llm_mlx_fuse_swiglu_metal_enabled(void) {
  * di qualunque promozione. */
 static int g_fuse_swiglu_compile_state = -1;
 static bool llm_mlx_fuse_swiglu_compile_enabled(void) {
-    if (g_fuse_swiglu_compile_state < 0) g_fuse_swiglu_compile_state = (getenv("LLM_FUSE_SWIGLU_COMPILE") != NULL) ? 1 : 0;
+    if (g_fuse_swiglu_compile_state < 0) g_fuse_swiglu_compile_state = (llm_ai_mlx_opt_env("LLM_FUSE_SWIGLU_COMPILE") != NULL) ? 1 : 0;
     return g_fuse_swiglu_compile_state == 1;
 }
 
@@ -64,7 +65,7 @@ static bool llm_mlx_fuse_swiglu_compile_enabled(void) {
 GdenseFfnQuant* llm_mlx_dense_ffn_quant(LlmMlxModel* m, int layer_idx, int gemma4) {
     static int off = -1;
     if (off < 0) {
-        const char* e = getenv("LLM_FFN_WCACHE");
+        const char* e = llm_ai_mlx_opt_env("LLM_FFN_WCACHE");
         off = (e != NULL && atoi(e) == 0) ? 1 : 0;
     }
     if (off || m == NULL || !llm_mlx_wcache_enabled()) return NULL;
@@ -153,7 +154,7 @@ bool llm_bonsai_rotate(mlx_array* x, LlmMlxModel* m, int layer_idx, const char* 
     if (signs == NULL) return true;
     mlx_array r = mlx_array_new();
     bool dir_inv = invert;
-    if (kind == 1 && getenv("LLM_BONSAI_FWD_INV") != NULL && atoi(getenv("LLM_BONSAI_FWD_INV")) != 0) dir_inv = !dir_inv;   /* A/B direzione forward */
+    if (kind == 1 && llm_ai_mlx_opt_env("LLM_BONSAI_FWD_INV") != NULL && atoi(llm_ai_mlx_opt_env("LLM_BONSAI_FWD_INV")) != 0) dir_inv = !dir_inv;   /* A/B direzione forward */
     if (getenv("LLM_BONSAI_DBG") && strstr(name, "embed_tokens") != NULL) {
         mlx_array vf = mlx_array_new();
         if (mlx_astype(&vf, *x, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(vf) == 0) {
@@ -177,7 +178,7 @@ bool llm_bonsai_rotate(mlx_array* x, LlmMlxModel* m, int layer_idx, const char* 
         }
         if (getenv("LLM_BONSAI_DBG"))
             fprintf(stderr, "[bonsai] ruotata %s (width=%d invert=%d)%s\n", name, width, (int)invert,
-                    getenv("LLM_BONSAI_ONCE") ? "" : "");
+                    llm_ai_mlx_opt_env("LLM_BONSAI_ONCE") ? "" : "");
     }
     else if (getenv("LLM_BONSAI_DBG"))
         fprintf(stderr, "[bonsai] rotate FALLITA %s width=%d invert=%d\n", name, width, (int)invert);
@@ -251,7 +252,7 @@ bool dense_swiglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
              * volte. Default OFF; NON riattivare senza una ragione nuova (es. il layout
              * weight-major contiguo invece di [N,K]). */
             bool gu_fused = false;
-            if (getenv("LLMMETAL_OQ_A8_FUSE_MLP") && gate_b.ctx != NULL && up_b.ctx != NULL) {
+            if (llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_FUSE_MLP") && gate_b.ctx != NULL && up_b.ctx != NULL) {
                 mlx_array gu = mlx_array_new();
                 const int wb = (mlx_array_dtype(normed2) == MLX_BFLOAT16) ? 1 : 0;
                 if (llmmetal_oq_a8_qmm_fused2(&gu, s_qa, s_sa, s_ra, gate_w, gate_s, gate_b,

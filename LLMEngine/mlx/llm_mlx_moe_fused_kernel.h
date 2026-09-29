@@ -26,6 +26,7 @@
 #define LLM_MLX_MOE_FUSED_KERNEL_H
 
 #include "mlx/c/mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_kernel_fallback.h"
 
 static const char llm_moe_fused_kernel_header[] =
@@ -208,7 +209,7 @@ static bool llm_mlx_moe_fused_decode(
      * detto sia ottimale su altro hardware. Override runtime per sweep senza ricompilare. */
     static int s_sgy = 0;
     if (s_sgy == 0) {
-        const char* e = getenv("LLMENGINE_MOE_FUSE_MOE_SGY");
+        const char* e = llm_ai_mlx_opt_env("LLMENGINE_MOE_FUSE_MOE_SGY");
         int v = e ? atoi(e) : 8;
         s_sgy = (v >= 1 && v <= 32) ? v : 8;
     }
@@ -518,7 +519,7 @@ static bool llm_mlx_moe_fused_decode_mxfp4(
 
     static int s_sgy = 0;
     if (s_sgy == 0) {
-        const char* e = getenv("LLMENGINE_MOE_FUSE_MOE_SGY");
+        const char* e = llm_ai_mlx_opt_env("LLMENGINE_MOE_FUSE_MOE_SGY");
         int v = e ? atoi(e) : 8;
         s_sgy = (v >= 1 && v <= 32) ? v : 8;
     }

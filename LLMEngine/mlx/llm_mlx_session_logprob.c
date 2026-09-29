@@ -119,6 +119,38 @@ int llm_ai_mlx_session_last_logprob(llm_ai_mlx_session_handle handle, float* out
     return 0;
 }
 
+int llm_ai_mlx_session_topk(llm_ai_mlx_session_handle handle, int k, int32_t* out_ids,
+                            float* out_logprobs) {
+    if (handle == NULL || k <= 0 || out_ids == NULL || out_logprobs == NULL) return -1;
+    LlmMlxSession* s = (LlmMlxSession*)handle;
+    float* lg = NULL;
+    double lse = 0.0;
+    int V = position_logits_host(s, &lg, &lse);
+    if (V <= 0) { free(lg); return -1; }
+    if (k > V) k = V;
+    /* Selezione dei k logits maggiori mantenendo l'ordine decrescente per inserimento: i k
+     * migliori finora stanno in [0,k) e l'ultimo e' il minimo del gruppo. O(V*k), con k
+     * richiesto piccolo (top_logprobs tipico <= 20). */
+    for (int i = 0; i < k; i++) { out_ids[i] = -1; out_logprobs[i] = -INFINITY; }
+    for (int v = 0; v < V; v++) {
+        float x = lg[v];
+        if (x <= out_logprobs[k - 1]) continue;
+        int j = k - 1;
+        while (j > 0 && out_logprobs[j - 1] < x) {
+            out_logprobs[j] = out_logprobs[j - 1];
+            out_ids[j] = out_ids[j - 1];
+            j--;
+        }
+        out_logprobs[j] = x;
+        out_ids[j] = v;
+    }
+    /* Da logit a log-softmax: log p = logit - logsumexp (stesso denominatore del campione). */
+    for (int i = 0; i < k; i++)
+        if (out_ids[i] >= 0) out_logprobs[i] = (float)((double)out_logprobs[i] - lse);
+    free(lg);
+    return k;
+}
+
 int llm_ai_mlx_session_generate_probs(llm_ai_mlx_session_handle handle, int max_new, int32_t eos,
                                       int32_t* out_ids, float* out_logprobs) {
     if (handle == NULL || max_new <= 0 || out_ids == NULL || out_logprobs == NULL) return -1;

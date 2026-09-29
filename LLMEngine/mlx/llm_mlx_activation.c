@@ -4,6 +4,7 @@
  * VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 
 #include <stdio.h>
@@ -27,7 +28,7 @@
  * con la fusione reale). */
 static int g_fuse_geglu_state = -1;
 bool llm_mlx_fuse_geglu_enabled(void) {
-    if (g_fuse_geglu_state < 0) g_fuse_geglu_state = (getenv("LLM_FUSE_GEGLU") != NULL) ? 1 : 0;
+    if (g_fuse_geglu_state < 0) g_fuse_geglu_state = (llm_ai_mlx_opt_env("LLM_FUSE_GEGLU") != NULL) ? 1 : 0;
     return g_fuse_geglu_state == 1;
 }
 /* PROVATO CONTROPRODUCENTE (2026-09-06, verificato col profiler xctrace/Time Profiler):
@@ -41,7 +42,7 @@ bool llm_mlx_fuse_geglu_enabled(void) {
  * passaggio da mlx_compile/closure). Un dispatch invece di 9, thread-per-elemento. */
 static int g_fuse_geglu_metal_state = -1;
 bool llm_mlx_fuse_geglu_metal_enabled(void) {
-    if (g_fuse_geglu_metal_state < 0) g_fuse_geglu_metal_state = (getenv("LLMMETAL_FUSE_GEGLU_METAL") != NULL) ? 1 : 0;
+    if (g_fuse_geglu_metal_state < 0) g_fuse_geglu_metal_state = (llm_ai_mlx_opt_env("LLMMETAL_FUSE_GEGLU_METAL") != NULL) ? 1 : 0;
     return g_fuse_geglu_metal_state == 1;
 }
 static int llm_mlx_geglu_fn(mlx_vector_array* out, const mlx_vector_array in, void* payload) {
@@ -124,7 +125,7 @@ bool llm_mlx_fuse_swiglu_prefill_enabled(void) {
      * Quindi ora vale SOLO per il prefill battezzato (sorted, n_tokens>1); il decode usa
      * l'eager. Default ON; kill-switch LLM_FUSE_SWIGLU_PREFILL=0 per l'A/B. */
     if (g_fuse_swiglu_prefill_state < 0) {
-        const char* e = getenv("LLM_FUSE_SWIGLU_PREFILL");
+        const char* e = llm_ai_mlx_opt_env("LLM_FUSE_SWIGLU_PREFILL");
         g_fuse_swiglu_prefill_state = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1;
     }
     return g_fuse_swiglu_prefill_state == 1;

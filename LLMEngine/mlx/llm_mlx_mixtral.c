@@ -245,7 +245,10 @@ bool mixtral_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h,
      * affine o dtype mismatch -> fallback silenzioso al path gather_qmm qui sotto. Stesso
      * schema di qwen3_moe_ffn_block (vedi llm_mlx_moe_fused_kernel.h). */
     bool moe_fused_done = false;
-    if (ok && n_tokens == 1 && (bts == 4 || bts == 8) && llm_mlx_fuse_moe_decode_enabled()) {
+    /* Sotto SWAP il kernel fuso userebbe i tensori completi invece degli stacked locali. Port del
+     * fix GMBasic acacd768a (stessa guardia gia' in llm_mlx_moe_gateup_gather). */
+    if (ok && n_tokens == 1 && (bts == 4 || bts == 8) && llm_mlx_fuse_moe_decode_enabled() &&
+        !llm_mlx_moe_swap_on()) {
         const int din = m->cfg.hidden_size, dff = m->cfg.moe_intermediate_size;
         const int k = m->cfg.top_k;
         mlx_array x_flat = mlx_array_new(), idx_flat = mlx_array_new();
@@ -331,7 +334,7 @@ bool mixtral_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h,
         mlx_array gu_w = mlx_array_new(), gu_s = mlx_array_new(), gu_b = mlx_array_new();
         char gubase[256];
         tname(m->cfg.layer_prefix, layer_idx, "block_sparse_moe.switch_mlp.gate_up_proj", gubase, sizeof(gubase));
-        bool have_gu = getenv("LLMENGINE_MOE_MLX_MOE_SWAP_DIR") == NULL && multishard_get_triple(&m->weights, gubase, &gu_w, &gu_s, &gu_b) && (gu_s.ctx != NULL);
+        bool have_gu = !llm_mlx_moe_swap_on() && multishard_get_triple(&m->weights, gubase, &gu_w, &gu_s, &gu_b) && (gu_s.ctx != NULL);
         if (have_gu) {
             mlx_array gu_out = mlx_array_new();
             ok = llm_mlx_moe_gather_mm(&m->cfg, &gu_out, x1, gu_w, gu_s, gu_b, no_lhs, top_inds_arr,

@@ -1,4 +1,5 @@
 /* llmengine_moe_provider.c — registro multi-modello (M14). */
+#include "llm_engine_opts.h"   /* registro opzioni condiviso (parametri senza env) */
 #include "llmengine_moe_provider.h"
 #include "llmengine_moe_backend.h"
 #include "llmengine_moe_adapter_gguf.h"
@@ -13,7 +14,7 @@
 /* M18: la persistenza `.stats` scrive accanto al container → OPT-IN (env LLMENGINE_MOE_STATS=1), per NON
  * sporcare le fixture (`samples/Fixtures/...`, che per AGENTS §11 non vanno mai modificate). */
 static int moe_stats_enabled(void) {
-    const char* e = getenv("LLMENGINE_MOE_STATS");
+    const char* e = llm_ai_mlx_opt_env("LLMENGINE_MOE_STATS");
     return e != NULL && *e && strcmp(e, "0") != 0;
 }
 

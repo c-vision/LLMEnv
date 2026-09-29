@@ -4,6 +4,7 @@
  * DFlash2DecoderLayer (df2_layer), backbone, CandidateSelector (df2_selector) e i timer
  * g_df2_* condivisi con l'API esportata rimasta nel monolite. */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -512,7 +513,7 @@ static bool df2_mlp_swiglu(DFlash2Runtime* rt, int layer_idx, mlx_array h, mlx_a
      * Selezionato con la metrica deterministica --per-op: Sigmoid 687 + Multiply 718 dispatch. */
     bool sw_fused = false;
     { static int _sw = -1;
-      if (_sw < 0) { const char* e = getenv("LLMMETAL_DF2_SWIGLU_METAL"); _sw = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1; }
+      if (_sw < 0) { const char* e = llm_ai_mlx_opt_env("LLMMETAL_DF2_SWIGLU_METAL"); _sw = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1; }
       if (_sw == 1) sw_fused = llm_mlx_swiglu_metal(gate_out, up_out, &act, st); }
     if (ok && !sw_fused) {
         if (ok) ok = mlx_sigmoid(&sig, gate_out, st) == 0;

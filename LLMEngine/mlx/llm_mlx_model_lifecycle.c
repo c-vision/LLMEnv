@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_lora.h"
@@ -125,17 +126,17 @@ void llm_mlx_model_init(LlmMlxModel* m) {
     m->kvpool = llm_kv_page_pool_new(/*n_pages=*/1024, /*block_size=*/16);
     m->kvdisk_state = -1; /* §G: tier SSD KV non inizializzato (lazy su LLM_KVDISK) */
     m->kvckpt_block = 256; /* §G-ter: checkpoint del rewind ogni 256 token (LLM_KVCHECKPOINT_BLOCK) */
-    { const char* kb = getenv("LLM_KVCHECKPOINT_BLOCK"); if (kb) m->kvckpt_block = atoi(kb); }
+    { const char* kb = llm_ai_mlx_opt_env("LLM_KVCHECKPOINT_BLOCK"); if (kb) m->kvckpt_block = atoi(kb); }
     /* §G-bis leva 1 — sparse page-level attention (default OFF) */
-    m->pagesel_on = (getenv("LLM_PAGESEL") != NULL);
+    m->pagesel_on = (llm_ai_mlx_opt_env("LLM_PAGESEL") != NULL);
     m->ps_page = 64; m->ps_topk = 8; m->ps_window = 2; m->ps_min = 1024; m->ps_cap = 512; m->ps_verify = 0;
     { const char* e;
-      if ((e = getenv("LLM_PAGESEL_PAGE"))) m->ps_page = atoi(e);
-      if ((e = getenv("LLM_PAGESEL_TOPK"))) m->ps_topk = atoi(e);
-      if ((e = getenv("LLM_PAGESEL_WINDOW"))) m->ps_window = atoi(e);
-      if ((e = getenv("LLM_PAGESEL_MIN"))) m->ps_min = atoi(e);
-      if ((e = getenv("LLM_PAGESEL_CAP"))) m->ps_cap = atoi(e);
-      if ((e = getenv("LLM_PAGESEL_VERIFY"))) m->ps_verify = 1;
+      if ((e = llm_ai_mlx_opt_env("LLM_PAGESEL_PAGE"))) m->ps_page = atoi(e);
+      if ((e = llm_ai_mlx_opt_env("LLM_PAGESEL_TOPK"))) m->ps_topk = atoi(e);
+      if ((e = llm_ai_mlx_opt_env("LLM_PAGESEL_WINDOW"))) m->ps_window = atoi(e);
+      if ((e = llm_ai_mlx_opt_env("LLM_PAGESEL_MIN"))) m->ps_min = atoi(e);
+      if ((e = llm_ai_mlx_opt_env("LLM_PAGESEL_CAP"))) m->ps_cap = atoi(e);
+      if ((e = llm_ai_mlx_opt_env("LLM_PAGESEL_VERIFY"))) m->ps_verify = 1;
       if (m->ps_page < 1) m->ps_page = 1;
       if (m->ps_cap < 4) m->ps_cap = 4;
     }

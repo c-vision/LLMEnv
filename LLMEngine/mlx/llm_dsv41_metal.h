@@ -8,6 +8,7 @@
 #define LLM_DSV41_METAL_H
 
 #include <stdlib.h>
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include <stdbool.h>
 
 #include <mlx/c/mlx.h>
@@ -16,7 +17,7 @@
 static inline int llm_dsv41_metal_enabled(void) {
     static int e = -1;
     if (e < 0) {
-        const char* v = getenv("LLMMETAL_DSV41_METAL");
+        const char* v = llm_ai_mlx_opt_env("LLMMETAL_DSV41_METAL");
         e = (v && v[0] && v[0] != '0') ? 1 : 0;
     }
     return e;

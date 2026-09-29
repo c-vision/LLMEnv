@@ -4,6 +4,7 @@
  * da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include <cJSON.h>
 
@@ -777,7 +778,7 @@ bool qwen4_exp_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arr
                         fprintf(stderr, "[Q4_DUMP] layer=%d type=%s absmax=%.6f mean=%.6f sum=%.6f first4=%.6f,%.6f,%.6f,%.6f W=%d\n",
                                 layer_idx, lty, am, sum / (double)W, sum, last[0], last[1], last[2], last[3], W);
                         /* F3: dump vettoriale (ultimo token, f32) per il confronto di correlazione. */
-                        const char* vp = getenv("LLM_QWEN4EXP_LAYER_VEC");
+                        const char* vp = llm_ai_mlx_opt_env("LLM_QWEN4EXP_LAYER_VEC");
                         if (vp && *vp && n_tokens > 1) {
                             char vpath[1024];
                             snprintf(vpath, sizeof vpath, "%s.%d.bin", vp, layer_idx);

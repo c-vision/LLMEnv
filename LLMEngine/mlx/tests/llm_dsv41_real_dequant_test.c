@@ -2,6 +2,7 @@
  * reale (fp8 32x32, fp4 e2m1, bf16/f32 plain). Richiede shard reali + index.
  * Build: tools/dsv41_real_dequant_test.sh */
 #include <stdio.h>
+#include "llm_engine_opts.h"
 #include <math.h>
 #include <stdlib.h>
 #include <mlx/c/mlx.h>
@@ -10,7 +11,7 @@
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("llm_dsv41_real_dequant — dequant su pesi reali (layer 0 + vision)\n");
-    const char* dir = getenv("DSV41_MODEL_DIR");
+    const char* dir = llm_ai_mlx_opt_env("DSV41_MODEL_DIR");
     if (!dir) dir = "/Volumes/Armor5TB/LocalLLM/ai/models/DeepSeek-V4.1-Flash";
     mlx_stream s = mlx_default_cpu_stream_new();
     LlmDsv41Ckpt ck;

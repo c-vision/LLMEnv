@@ -85,8 +85,10 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
             { const char* da = getenv("LLM_DSV4_DUMP_AOUT");
               if (da && da[0] && il == 0) { FILE* f = fopen(da, "wb"); if (f) { fwrite(proj, sizeof(float), (size_t)D, f); fclose(f); } } }
         } else if (strcmp(op, "moe") == 0) {
-            if (pe && pe->gate) llm_dsv4_moe_forward_packed(c, L, pe, normed, il, token, proj);
-            else                llm_dsv4_moe_forward(c, L, normed, il, token, proj);
+            if (!llm_dsv4_gpu_moe_try(c, L, il, normed, token, proj)) {
+                if (pe && pe->gate) llm_dsv4_moe_forward_packed(c, L, pe, normed, il, token, proj);
+                else                llm_dsv4_moe_forward(c, L, normed, il, token, proj);
+            }
         } else if (strcmp(op, "mhc_post_attn") == 0 || strcmp(op, "mhc_post_ffn") == 0) {
             llm_dsv4_block_post(c, proj, saved, post, comb, nxt);
             memcpy(cur, nxt, sizeof(float) * (size_t)HC * D);

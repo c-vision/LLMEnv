@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_gdn_gate_kernel.h"
@@ -345,7 +346,7 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
         mlx_array_free(vf);
     }
     /* Diagnostica: confronta kernel vs catena di riferimento (max|diff|). Stampa una volta. */
-    if (gate_fused && ok && getenv("LLMMETAL_GDN_GATE_METAL_VERIFY") != NULL) {
+    if (gate_fused && ok && llm_ai_mlx_opt_env("LLMMETAL_GDN_GATE_METAL_VERIFY") != NULL) {
         mlx_array gr=mlx_array_new(), br=mlx_array_new();
         mlx_array apd=mlx_array_new(), spe=mlx_array_new(), sp1=mlx_array_new(), spl=mlx_array_new();
         mlx_array ne=mlx_array_new(), ng2=mlx_array_new();

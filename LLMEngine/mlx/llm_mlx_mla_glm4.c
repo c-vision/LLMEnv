@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_lora.h"
@@ -26,7 +27,7 @@
 static int g_mla_inplace_state = -1;
 static bool llm_mla_inplace_enabled(void) {
     if (g_mla_inplace_state < 0) {
-        const char* e = getenv("LLM_MLA_INPLACE");
+        const char* e = llm_ai_mlx_opt_env("LLM_MLA_INPLACE");
         g_mla_inplace_state = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1;
     }
     return g_mla_inplace_state == 1;

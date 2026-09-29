@@ -110,10 +110,18 @@ static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, i
         }
         LlmDsv4StoreEnt* en = &s->ents[idx];
         size_t len = L->nb_g + L->nb_u + L->nb_d;
-        if (en->cap < len) { free(en->buf); en->buf = NULL; en->cap = 0; }
-        if (!en->buf) en->buf = (uint8_t*)malloc(len);
+        /* Buffer ALLINEATO a pagina + paddato: le view Metal zero-copy (newBufferWithBytesNoCopy)
+         * mappano pagine intere [align_down, align_up) → il buffer deve coprirle, altrimenti la
+         * view esce dall'allocazione. Necessario per usare la cache nel path GPU. */
+        const size_t page = 16384;
+        size_t padded = ((len + page - 1) / page) * page + page;
+        if (en->cap < padded) { free(en->buf); en->buf = NULL; en->cap = 0; }
+        if (!en->buf) {
+            void* p = NULL;
+            if (posix_memalign(&p, page, padded) == 0) { en->buf = (uint8_t*)p; en->cap = padded; }
+        }
         if (!en->buf) { *gate = r_g; *up = r_u; *down = r_d; return r_g; }
-        en->cap = len; en->len = len;
+        en->len = len;
         if (pread(s->fd, en->buf, L->nb_g, (off_t)(L->off_g + (uint64_t)e * L->stride_g)) != (ssize_t)L->nb_g ||
             pread(s->fd, en->buf + L->nb_g, L->nb_u, (off_t)(L->off_u + (uint64_t)e * L->stride_u)) != (ssize_t)L->nb_u ||
             pread(s->fd, en->buf + L->nb_g + L->nb_u, L->nb_d, (off_t)(L->off_d + (uint64_t)e * L->stride_d)) != (ssize_t)L->nb_d) {

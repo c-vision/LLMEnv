@@ -4,6 +4,7 @@
  * (rms_norm_cfg/quantized_linear_cfg/plain_linear/llm_mlx_mode_set/...) ora extern.
  */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -772,7 +773,7 @@ int llm_ai_mlx_core_bench(const char* op, int iters, char* out, size_t cap) {
     if (all || strcmp(op, "kvq_sdpa") == 0) {
         int bits = 4, vbits = 4;
         const int nh = 32, nkv = 8, hd = 128, NC = 2048, NR = 128, gs = 64;
-        { const char* kbv = getenv("LLM_CB_KVBITS"); if (kbv) { int a=4,b2=4; if (sscanf(kbv,"%d:%d",&a,&b2)==2) { bits=a; vbits=b2; } } }
+        { const char* kbv = llm_ai_mlx_opt_env("LLM_CB_KVBITS"); if (kbv) { int a=4,b2=4; if (sscanf(kbv,"%d:%d",&a,&b2)==2) { bits=a; vbits=b2; } } }
         llm_cb_kvq_ctx c; c.scale = 1.0f / sqrtf((float)hd); c.bits = bits; c.vbits = vbits; c.gs = gs; c.s = s;
         c.q = llm_cb_rand_arr((int[]){nh, hd}, 2, MLX_FLOAT32, s);
         c.Kr = llm_cb_rand_arr((int[]){nkv, NR, hd}, 3, MLX_FLOAT32, s);
@@ -793,7 +794,7 @@ int llm_ai_mlx_core_bench(const char* op, int iters, char* out, size_t cap) {
                   mlx_vector_array_get(&c.Vc_w, qv2, 0) == 0 &&
                   mlx_vector_array_get(&c.Vc_s, qv2, 1) == 0 &&
                   mlx_vector_array_get(&c.Vc_b, qv2, 2) == 0;
-        if (ok && getenv("LLM_KVQ_MAN")) {
+        if (ok && llm_ai_mlx_opt_env("LLM_KVQ_MAN")) {
             mlx_dtype T = mlx_array_dtype(c.q);
             mlx_array kd=mlx_array_new(), vd=mlx_array_new(), krf=mlx_array_new(), vrf=mlx_array_new(), qf=mlx_array_new();
             mlx_array kcat=mlx_array_new(), vcat=mlx_array_new();

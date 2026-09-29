@@ -76,7 +76,7 @@ const char* llmcodec_rolemap_convert(const LlmCodecRoleMap* m, const char* role,
 
 /* Quantization config MLX per-tensore (da config.json): mode/bits/group di default + override. */
 typedef struct { char name[160]; char mode[16]; int bits, group; } LlmCodecQuantEntry;
-typedef struct { char mode[16]; int bits, group; LlmCodecQuantEntry e[256]; int n; } LlmCodecQuantCfg;
+typedef struct { char mode[16]; int bits, group; LlmCodecQuantEntry e[1024]; int n; } LlmCodecQuantCfg;
 int  llmcodec_quantcfg_load(const char* config_path, LlmCodecQuantCfg* out);        /* 0 ok / -1 */
 const LlmCodecQuantEntry* llmcodec_quantcfg_find(const LlmCodecQuantCfg* c, const char* name); /* override o NULL */
 /* compressed-tensors (vLLM/HF): legge quantization_config.{format,config_groups.weights} e

@@ -51,6 +51,7 @@
 #define LLM_PFLASH_H
 
 #include <stdint.h>
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -138,7 +139,7 @@ static inline double llm_pflash_env_double(const char* name, double dflt) {
  * comportamento silenzioso diverso da quello dichiarato: si stampa un avviso). */
 static inline int llm_pflash_config_from_env(LlmPflashConfig* c) {
     llm_pflash_config_defaults(c);
-    const char* m = getenv("LLM_PFLASH");
+    const char* m = llm_ai_mlx_opt_env("LLM_PFLASH");
     /* Default PROMOSSO a AUTO il 2026-09-18: env ASSENTE => AUTO col profilo validato.
      * Il kill-switch resta LLM_PFLASH=off|0 (unica via per disattivare del tutto). */
     if (m == NULL || *m == '\0') { /* tiene il default AUTO */ }
@@ -157,7 +158,7 @@ static inline int llm_pflash_config_from_env(LlmPflashConfig* c) {
     c->block_size = llm_pflash_env_int("LLM_PFLASH_BLOCK_SIZE", c->block_size);
     c->query_window = llm_pflash_env_int("LLM_PFLASH_QUERY_WINDOW", c->query_window);
     c->stride_blocks = llm_pflash_env_int("LLM_PFLASH_STRIDE_BLOCKS", c->stride_blocks);
-    if (getenv("LLM_PFLASH_INCLUDE_TOOLS") != NULL) c->skip_when_tools = 0;
+    if (llm_ai_mlx_opt_env("LLM_PFLASH_INCLUDE_TOOLS") != NULL) c->skip_when_tools = 0;
     if (c->threshold < 0) c->threshold = 0;
     if (!(c->keep_ratio > 0.0 && c->keep_ratio <= 1.0)) c->keep_ratio = 0.20;
     if (c->min_keep_tokens < 0) c->min_keep_tokens = 0;

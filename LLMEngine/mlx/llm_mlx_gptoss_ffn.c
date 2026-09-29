@@ -4,6 +4,7 @@
  * VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_lora.h"
@@ -291,7 +292,7 @@ static bool gpt_oss_expert_unsort(mlx_array* res, mlx_array raw, mlx_array inv_i
 static LlmPad512 g_pad512[LLM_PAD512_MAX_LAYERS];
 static int g_pad512_state = -1;
 static bool llm_mlx_mxfp4_pad512_enabled(void) {
-    if (g_pad512_state < 0) g_pad512_state = (getenv("LLM_MXFP4_PAD512") != NULL) ? 1 : 0;
+    if (g_pad512_state < 0) g_pad512_state = (llm_ai_mlx_opt_env("LLM_MXFP4_PAD512") != NULL) ? 1 : 0;
     return g_pad512_state == 1;
 }
 void llm_mlx_pad512_reset(void) {
@@ -313,7 +314,7 @@ void llm_mlx_pad512_reset(void) {
 static LlmGateUp g_gateup[LLM_PAD512_MAX_LAYERS];
 static int g_gateup_state = -1;
 static bool llm_mlx_fuse_gateup_enabled(void) {
-    if (g_gateup_state < 0) g_gateup_state = (getenv("LLM_FUSE_GATEUP") != NULL) ? 1 : 0;
+    if (g_gateup_state < 0) g_gateup_state = (llm_ai_mlx_opt_env("LLM_FUSE_GATEUP") != NULL) ? 1 : 0;
     return g_gateup_state == 1;
 }
 void llm_mlx_gateup_reset(void) {
@@ -361,7 +362,7 @@ static bool llm_mlx_pad_last(mlx_array* out, mlx_array a, int pad, mlx_stream s)
 static int g_gptoss_swiglu_metal_state = -1;
 static bool llm_mlx_fuse_swiglu_gptoss_enabled(void) {
     if (g_gptoss_swiglu_metal_state < 0) {
-        const char* e = getenv("LLMMETAL_GPTOSS_SWIGLU_METAL");
+        const char* e = llm_ai_mlx_opt_env("LLMMETAL_GPTOSS_SWIGLU_METAL");
         g_gptoss_swiglu_metal_state = (e != NULL && e[0] == '0') ? 0 : 1;
     }
     return g_gptoss_swiglu_metal_state == 1;
@@ -693,7 +694,7 @@ bool gpt_oss_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h,
     mlx_array gate_raw = mlx_array_new(), up_raw = mlx_array_new();
     /* LLM_FUSE_GATEUP: un solo gather_qmm su [E,2*inter,H] invece di due (bit-identico). */
     LlmGateUp* gu = (layer_idx >= 0 && layer_idx < LLM_PAD512_MAX_LAYERS) ? &g_gateup[layer_idx] : NULL;
-    bool gu_use = ok && !moe_fused_done && !pad512 && gu != NULL && llm_mlx_fuse_gateup_enabled() && getenv("LLMENGINE_MOE_MLX_MOE_SWAP_DIR") == NULL;
+    bool gu_use = ok && !moe_fused_done && !pad512 && gu != NULL && llm_mlx_fuse_gateup_enabled() && !llm_mlx_moe_swap_on();
     if (gu_use && !gu->ready) {
         bool cok = llm_mlx_concat2_axis(&gu->w, gp_w_s, up_w_s, 1, m->stream)
                 && llm_mlx_concat2_axis(&gu->s, gp_s_s, up_s_s, 1, m->stream);

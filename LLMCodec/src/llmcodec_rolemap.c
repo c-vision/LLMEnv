@@ -282,7 +282,8 @@ int llmcodec_quantcfg_load(const char* config_path, LlmCodecQuantCfg* out) {
     char* j = (char*)malloc((size_t)sz + 1); if (j == NULL) { fclose(f); return -1; }
     if (fread(j, 1, (size_t)sz, f) != (size_t)sz) { free(j); fclose(f); return -1; }
     fclose(f); j[sz] = 0;
-    const char* q = jval(j, "quantization");
+    const char* q = jval(j, "quantization_config");   /* chiave HF recente */
+    if (q == NULL || *q != '{') q = jval(j, "quantization"); /* fallback/legacy */
     if (q && *q == '{') {
         int d0 = 0; const char* qe = q;
         for (; *qe; ++qe) { if (*qe=='{') d0++; else if (*qe=='}') { d0--; if (d0==0) break; } }
@@ -290,7 +291,7 @@ int llmcodec_quantcfg_load(const char* config_path, LlmCodecQuantCfg* out) {
           const char* b = jval(q, "bits"); if (b) out->bits = atoi(b);
           const char* g = jval(q, "group_size"); if (g) out->group = atoi(g); }
         const char* p = q + 1;
-        while (p < qe && out->n < 256) {
+        while (p < qe && out->n < 1024) {
             p = strchr(p, '"'); if (p == NULL || p >= qe) break;
             char key[160]; size_t kn = 0; ++p;
             while (*p && *p != '"' && kn + 1 < sizeof key) key[kn++] = *p++;

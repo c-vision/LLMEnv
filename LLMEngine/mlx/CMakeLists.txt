@@ -254,6 +254,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_gguf_io.c
     llm_mlx_session_spec.c
     llm_mlx_session_logprob.c
+    llm_mlx_embed.c
     llm_mlx_session_generate.c
     llm_mlx_attn_batch.c
     llm_mlx_gdn.c
@@ -280,6 +281,11 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_model_lifecycle.c
     llm_kvmetal_bridge.m
     llm_gemvq4_bridge.m
+    # Backend Metal DS4 (F1/F2/F3): GEMV zero-copy su mmap per esperti IQ2_XXS/Q2_K e
+    # proiezioni attn Q8_0. Tabelle IQ2 generate da tools/gen_dsv4_metal_tables.py.
+    llm_dsv4_metal.mm
+    # Contesto GPU DS4 (F4): singleton + hook moe/attn usati dal layer/engine (opt-in LLM_DSV4_GPU).
+    llm_dsv4_gpu_ctx.mm
     # P10: GEMM int8-activation x Q4/Q5 sui tensor unit M5 (port oMLX; bridge ABI-C, ObjC/Metal)
     ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8/llmmetal_oq_a8_bridge.mm
     # MPP q4 affine (tensor unit Apple): bridge ObjC++ zero-copy sui buffer MLX (metallib build-time).
@@ -323,7 +329,7 @@ target_link_libraries(llm_ai_mlx PRIVATE mlxc cjson ${METAL_FRAMEWORK} ${FOUNDAT
 target_include_directories(llm_ai_mlx PRIVATE "${cjson_SOURCE_DIR}")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
-target_include_directories(llm_ai_mlx PUBLIC .)
+target_include_directories(llm_ai_mlx PUBLIC . ../Options)
 
 # ENGINE container reader (llm_engine_container.c): include + link del container runtime (GGUF) e del
 # codec (dequant di formato). Modifica di infrastruttura autorizzata dall'utente 2026-09-24.
@@ -337,8 +343,12 @@ endif()
 if(NOT TARGET llmengine_moe)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../moe llmengine_moe_mlx_build)
 endif()
+# Registro opzioni condiviso (LLMEngine/Options): core, dipendenza di mlx/moe/llama.
+if(NOT TARGET llmengine_opts)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../Options llmengine_opts_build)
+endif()
 target_link_libraries(llm_ai_mlx PRIVATE
-    llmengine_moe llmcodec
+    llmengine_moe llmcodec llmengine_opts
     # i DEQUANT di formato (llmcodec_dsv41_dequant_fp8_block/_fp8_row/_fp4_expert) vivono nel plugIN fp8;
     # il layer ggml-type (llmcodec_ggml_dequant_row/block_vals/type_name/q*_value) nel plugIN ggml.
     llmcodec_fp8 llmcodec_ggml

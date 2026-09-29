@@ -1,5 +1,6 @@
 /* llm_mlx_p4.c — dominio P4: MEMORY PLAN + ADMISSION. Estratto da llmengine_mlx.c (split fase 2), VERBATIM, funzioni da static a extern. */
 #include "llm_mlx_internal.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,13 +40,22 @@ uint64_t llm_p4_kv_state(const ModelConfig* c) {
 void llm_p4_plan_init(LlmMlxModel* m) {
     if (!m || m->p4_plan_done) return;
     m->p4_plan_done = 1;
-    const char* re = getenv("LLM_P4_RESERVE_MB");
+    const char* re = llm_ai_mlx_opt_env("LLM_P4_RESERVE_MB");
     m->p4_reserve_mb = re ? atoi(re) : 2048;
     uint64_t active = 0;
     if (mlx_get_active_memory((size_t*)&active) != 0) active = 0;
     m->p4_weights_bytes = active;   /* al primo append: pesi+modello, KV ancora ~0 */
     { uint64_t exb = llm_mlx_moe_swap_expert_bytes(); /* streaming: gli esperti NON sono materializzati */
       if (exb > 0 && m->p4_weights_bytes > exb) m->p4_weights_bytes -= exb; }
+    /* Modelli mmap/zero-copy (es. DS4, GGUF singolo): `mlx_get_active_memory` NON conta i pesi
+     * (sono view sull'mmap). Fallback GENERALE: dimensione dell'mmap = pesi residenti reali,
+     * meno gli esperti eventualmente in streaming. Senza questo il planner riserva la KV su
+     * "pesi=0" e i pesi vengono sfrattati → letture da SSD a ogni token. */
+    if (m->p4_weights_bytes < (uint64_t)512 * 1024 * 1024 && m->gguf_mmap_bytes > 0) {
+        m->p4_weights_bytes = m->gguf_mmap_bytes;
+        uint64_t exb2 = llm_mlx_moe_swap_expert_bytes();
+        if (exb2 > 0 && m->p4_weights_bytes > exb2) m->p4_weights_bytes -= exb2;
+    }
     const uint64_t wired = llm_p4_sysctl_u64("iogpu.wired_limit_mb") * 1024ull * 1024ull;
     const uint64_t ram = llm_p4_sysctl_u64("hw.memsize");
     uint64_t limit = ram ? (ram / 4ull) * 3ull : 0;
@@ -60,7 +70,7 @@ void llm_p4_plan_init(LlmMlxModel* m) {
      * legittimamente si avvicina al wired limit (104GB su 96GB wired) il budget KV calcola
      * 0 e l'admission RIFIUTA anche un singolo token, rendendo impossibile il test per-layer.
      * LLM_P4_ENFORCE=0 disattiva SOLO il rifiuto (il plan resta stampato). Default invariato. */
-    { const char* pe = getenv("LLM_P4_ENFORCE"); if (pe && atoi(pe) == 0) m->p4_enforce = 0; }
+    { const char* pe = llm_ai_mlx_opt_env("LLM_P4_ENFORCE"); if (pe && atoi(pe) == 0) m->p4_enforce = 0; }
     fprintf(stderr, "[p4-plan] limit=%.1fGB pesi=%.1fGB riserva=%dMB -> budget_kv=%.2fGB | "
                     "kv/token=%.1fKB stato/sessione=%.1fMB (token max ~%llu)\n",
             limit / 1073741824.0, m->p4_weights_bytes / 1073741824.0, m->p4_reserve_mb,

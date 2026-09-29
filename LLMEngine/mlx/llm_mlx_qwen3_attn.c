@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_lora.h"
@@ -403,7 +404,7 @@ bool qwen3_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, 
 /* Orientamento dei sign: default "right" (H·diag(s)); LLM_BONSAI_SIGNS=left per A/B empirico. */
 bool llm_bonsai_signs_right(void) {
     static int st = -1;
-    if (st < 0) { const char* e = getenv("LLM_BONSAI_SIGNS"); st = (e != NULL && strcmp(e, "left") == 0) ? 0 : 1; }
+    if (st < 0) { const char* e = llm_ai_mlx_opt_env("LLM_BONSAI_SIGNS"); st = (e != NULL && strcmp(e, "left") == 0) ? 0 : 1; }
     return st == 1;
 }
 /* Ternary-Bonsai: definita piu' sotto (vicino a dense_swiglu_ffn), ma serve prima qui. */

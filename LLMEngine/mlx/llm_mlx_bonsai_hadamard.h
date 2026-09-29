@@ -32,6 +32,7 @@
 #define LLM_MLX_BONSAI_HADAMARD_H
 
 #include <math.h>
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -170,7 +171,7 @@ static mlx_array llm_bonsai_R_get(int width, int block, const float* signs, bool
      * per SEQUENCY (righe permutate) invece del natural. Variante da LLM_BONSAI_HAD_ORDER. */
     static int s_order = -1;
     if (s_order < 0) {
-        const char* e = getenv("LLM_BONSAI_HAD_ORDER");
+        const char* e = llm_ai_mlx_opt_env("LLM_BONSAI_HAD_ORDER");
         s_order = (e == NULL || strcmp(e, "natural") == 0) ? 0
                  : (strcmp(e, "bitrev") == 0 ? 1 : (strcmp(e, "gray") == 0 ? 2 : 3));
     }

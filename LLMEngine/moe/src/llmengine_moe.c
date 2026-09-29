@@ -1,6 +1,7 @@
 /* llmengine_moe.c — implementazione del MoERuntime (M1: skeleton funzionante).
  *
  * ZERO codice Qwen/DeepSeek/GLM qui: il runtime conosce solo l'adapter e gli esperti. */
+#include "llm_engine_opts.h"   /* registro opzioni condiviso (parametri senza env) */
 #include "llmengine_moe.h"
 #include "llmengine_moe_cache.h"
 #include "llmengine_moe_async.h"
@@ -106,13 +107,13 @@ void llmengine_moe_config_defaults(LlmEngineMoeRuntimeConfig* out) {
     memset(out, 0, sizeof(*out));
     out->mode = LLMENGINE_MOE_MODE_SWAP;
     out->device = LLMENGINE_MOE_DEVICE_AUTO;
-    const char* cm = getenv("LLMENGINE_MOE_CACHE_MB");
+    const char* cm = llm_ai_mlx_opt_env("LLMENGINE_MOE_CACHE_MB");
     out->cache_mb = (cm != NULL && atoi(cm) > 0) ? (uint64_t)atoi(cm) : 0;
-    const char* aw = getenv("LLMENGINE_MOE_ASYNC_WORKERS");
+    const char* aw = llm_ai_mlx_opt_env("LLMENGINE_MOE_ASYNC_WORKERS");
     out->async_workers = (aw != NULL && atoi(aw) > 0) ? (uint32_t)atoi(aw) : 0;
-    const char* pt = getenv("LLMENGINE_MOE_PREFETCH_TOPN");
+    const char* pt = llm_ai_mlx_opt_env("LLMENGINE_MOE_PREFETCH_TOPN");
     out->prefetch_topn = (pt != NULL && atoi(pt) > 0) ? (uint32_t)atoi(pt) : 0;
-    const char* pc = getenv("LLMENGINE_MOE_PREFETCH_CAP");
+    const char* pc = llm_ai_mlx_opt_env("LLMENGINE_MOE_PREFETCH_CAP");
     out->prefetch_cap = (pc != NULL && atoi(pc) > 0) ? (uint32_t)atoi(pc) : 0;
 }
 
@@ -176,7 +177,7 @@ LlmEngineMoeStatus llmengine_moe_load_model_ex(LlmEngineMoeRuntime* rt, const ch
 
     /* M17: controller adattivo (opt-in) — richiede prefetch attivo. */
     if (rt->predictor != NULL) {
-        const char* ad = getenv("LLMENGINE_MOE_ADAPTIVE");
+        const char* ad = llm_ai_mlx_opt_env("LLMENGINE_MOE_ADAPTIVE");
         if (ad != NULL && *ad && strcmp(ad, "0") != 0) {
             rt->adaptive = 1;
             rt->adapt_topn = c.prefetch_topn;

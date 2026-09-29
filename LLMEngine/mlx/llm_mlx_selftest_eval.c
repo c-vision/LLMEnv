@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"   /* llm_mlx_gqa_sdpa */
 
@@ -152,7 +153,7 @@ int llm_ai_mlx_kv_view_selftest(int nkv, int cap, int need, int hd, char* out, i
  * Max) l'attenzione e' ottimale; se e' molto sotto, il collo e' li'.
  * Driver: `llm_attn_bw_test <nkv> <n_heads> <hd> <nk> <reps>` (nk singolo, si invoca per piu' Nk). */
 int llm_ai_mlx_attention_bw_selftest(int nkv, int n_heads, int hd, int nk, int reps, char* out, int cap_out) {
-    const int kv_f16 = (getenv("LLM_ATTN_TEST_KVF16") != NULL) ? 1 : 0; /* default: K/V nello stesso dtype di q (come in produzione su qwen3) */
+    const int kv_f16 = (llm_ai_mlx_opt_env("LLM_ATTN_TEST_KVF16") != NULL) ? 1 : 0; /* default: K/V nello stesso dtype di q (come in produzione su qwen3) */
     if (nkv <= 0 || n_heads <= 0 || hd <= 0 || nk <= 0 || reps <= 0) {
         if (out && cap_out > 0) snprintf(out, (size_t)cap_out, "FAIL: parametri");
         return -1;

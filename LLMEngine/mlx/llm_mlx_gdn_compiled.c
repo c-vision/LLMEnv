@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_gdn_gate_kernel.h"
@@ -102,7 +103,7 @@ int g_spec_capture = 0;
 static int g_gdn_gate_metal_state = -1;
 bool llm_mlx_gdn_gate_metal_enabled(void) {
     if (g_gdn_gate_metal_state < 0)
-        g_gdn_gate_metal_state = (getenv("LLMMETAL_GDN_GATE_METAL") != NULL) ? 1 : 0;
+        g_gdn_gate_metal_state = (llm_ai_mlx_opt_env("LLMMETAL_GDN_GATE_METAL") != NULL) ? 1 : 0;
     return g_gdn_gate_metal_state == 1;
 }
 
@@ -138,7 +139,7 @@ static bool g_gdn_blk_valid[LLM_M1_BLK_MAXL];
 static int g_m1_block_state = -1;
 
 bool llm_mlx_m1_block_enabled(void) {
-    if (g_m1_block_state < 0) g_m1_block_state = (getenv("LLM_M1_BLOCK") != NULL) ? 1 : 0;
+    if (g_m1_block_state < 0) g_m1_block_state = (llm_ai_mlx_opt_env("LLM_M1_BLOCK") != NULL) ? 1 : 0;
     return g_m1_block_state == 1;
 }
 

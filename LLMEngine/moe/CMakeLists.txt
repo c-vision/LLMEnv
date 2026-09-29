@@ -20,6 +20,10 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../LLMDesc ${CMAKE_CURRENT_SO
 if(NOT TARGET llmcodec)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec llmcodec_moe)
 endif()
+# Registro opzioni condiviso (parametri senza env): core, dipendenza anche di MoE.
+if(NOT TARGET llmengine_opts)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../Options llmengine_opts_moe)
+endif()
 add_library(llmengine_moe STATIC
     ../../LLMDesc/llmdesc.c
     llm_engine_moe.c   # adapter all'ABI comune llmengine
@@ -45,6 +49,7 @@ add_library(llmengine_moe STATIC
     src/llmengine_moe_qwen3_forward.c
 )
 target_include_directories(llmengine_moe PUBLIC include)
+target_link_libraries(llmengine_moe PUBLIC llmengine_opts)
 target_compile_options(llmengine_moe PRIVATE -Wall -Wextra -Wpedantic)
 
 

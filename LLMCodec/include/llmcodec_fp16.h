@@ -31,11 +31,14 @@ static inline uint16_t llmcodec_f16_from_f32(float f) {
         return (uint16_t)(sign | ((uint32_t)ex << 10) | s);
     }
 }
-/* f16 -> f32. */
+/* f16 -> f32. Per i NaN si forza il QUIET BIT (0x400000) come l'algoritmo di ggml
+ * (`ggml_compute_fp16_to_fp32`): un NaN signaling di f16 diventa un NaN quiet di f32 con lo
+ * stesso payload. Senza questo bit 1022 pattern su 65536 divergono da ggml bit a bit (gate
+ * differenziale `tools/quant_diff.c`, `f16_exhaustive`). inf/zero/subnormali erano già esatti. */
 static inline float llmcodec_f16_to_f32(uint16_t h) {
     uint32_t s = (uint32_t)(h & 0x8000u) << 16, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu, u;
     if (e == 0) { if (m == 0) u = s; else { int sh = 0; while (!(m & 0x400u)) { m <<= 1; sh++; } m &= 0x3FFu; u = s | ((uint32_t)(127 - 15 - sh + 1) << 23) | (m << 13); } }
-    else if (e == 31) u = s | 0x7F800000u | (m << 13);
+    else if (e == 31) u = s | 0x7F800000u | (m ? 0x400000u : 0u) | (m << 13);
     else u = s | ((e - 15 + 127) << 23) | (m << 13);
     float f; memcpy(&f, &u, 4); return f;
 }

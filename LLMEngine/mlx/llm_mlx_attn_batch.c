@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
@@ -25,7 +26,7 @@ static int g_batch_varlen_state = -1;
 static bool llm_mlx_batch_varlen_enabled(void) {
     if (g_batch_varlen_state < 0) {
         g_batch_varlen_state = 1; /* default ON (llama-only, fallback sicuro su ogni caso non coperto) */
-        const char* e = getenv("LLM_BATCH_VARLEN");
+        const char* e = llm_ai_mlx_opt_env("LLM_BATCH_VARLEN");
         if (e != NULL && (e[0] == '0' || e[0] == 'n' || e[0] == 'N' ||
                           e[0] == 'f' || e[0] == 'F' || e[0] == 'o' || e[0] == 'O'))
             g_batch_varlen_state = 0;
@@ -927,7 +928,7 @@ bool embed_tokens_batch(LlmMlxModel* m, mlx_array embed_w, mlx_array embed_s, ml
     /* Ternary-Bonsai: stesso hook di embed_token (era ASSENTE nel path batch -> prefill
      * non de-ruotato = garbage). L'embed e' in inverse_weight_names -> invert=true. */
     if (ok2) {
-        const int emb_inv_b = (getenv("LLM_BONSAI_EMBED_INV") != NULL) ? (atoi(getenv("LLM_BONSAI_EMBED_INV")) != 0 ? 1 : 0) : 1;
+        const int emb_inv_b = (llm_ai_mlx_opt_env("LLM_BONSAI_EMBED_INV") != NULL) ? (atoi(llm_ai_mlx_opt_env("LLM_BONSAI_EMBED_INV")) != 0 ? 1 : 0) : 1;
         ok2 = llm_bonsai_rotate(out_x, m, -1, "embed_tokens.weight", emb_inv_b == 1);
     }
     /* FASE 1b.4.5 (Gemma4): embed_scale = sqrt(hidden_size), sempre (gemma4_text.py:402).
@@ -969,7 +970,7 @@ bool embed_tokens_batch(LlmMlxModel* m, mlx_array embed_w, mlx_array embed_s, ml
 /* oMLX 736c90f (guasto 3): eval per-layer durante il PREFILL. Opt-in. */
 static bool llm_mlx_prefill_eval_layer_enabled(void) {
     static int st = -1;
-    if (st < 0) st = (getenv("LLM_PREFILL_EVAL_LAYER") != NULL) ? 1 : 0;
+    if (st < 0) st = (llm_ai_mlx_opt_env("LLM_PREFILL_EVAL_LAYER") != NULL) ? 1 : 0;
     return st == 1;
 }
 bool forward_tokens_batch(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array embed_w, mlx_array embed_s, mlx_array embed_b,

@@ -4,6 +4,7 @@
  * debug layer/embed, prefix pin/unpin, state checkpoint/restore, gate RMSNorm gated.
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 
@@ -22,7 +23,7 @@ static os_log_t g_df2_sp_log = NULL;
 static os_signpost_id_t g_df2_sp_prop = 0, g_df2_sp_ver = 0;
 static int g_df2_sp_state = -1;
 static bool llm_df2_signpost_on(void) {
-    if (g_df2_sp_state < 0) g_df2_sp_state = (getenv("LLM_DF2_SIGNPOST") != NULL) ? 1 : 0;
+    if (g_df2_sp_state < 0) g_df2_sp_state = (llm_ai_mlx_opt_env("LLM_DF2_SIGNPOST") != NULL) ? 1 : 0;
     return g_df2_sp_state == 1;
 }
 static void llm_df2_sp_init(void) {
@@ -56,7 +57,7 @@ llm_ai_mlx_dflash2_handle llm_ai_mlx_dflash2_create(llm_ai_mlx_model_handle targ
     rt->draft = (LlmMlxModel*)llm_ai_mlx_load_model(draft_dir);
     if (!rt->draft) { free(rt); return NULL; }
     /* Pesi del draft su GPU: senza, ogni matmul li ri-trasferisce CPU->GPU (~13 ms/proiezione). */
-    { const char* e = getenv("LLM_DF2_NO_GPU_W");
+    { const char* e = llm_ai_mlx_opt_env("LLM_DF2_NO_GPU_W");
       if (e == NULL || strcmp(e, "0") == 0)
           llm_mlx_shards_to_gpu((MultiShardWeights*)&rt->draft->weights, rt->draft->stream); }
     /* Salva il modo del DRAFT (quello che il suo load ha appena applicato) e ripristina
@@ -442,7 +443,7 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
     float* cap = (float*)malloc((size_t)capneed * sizeof(float));
     mlx_array h = mlx_array_new();
     bool ok;
-    if (getenv("LLM_DF2_SEQ_VERIFY")) {
+    if (llm_ai_mlx_opt_env("LLM_DF2_SEQ_VERIFY")) {
         /* ESPERIMENTO (parita' DFlash2 vs greedy): feed 1 token per volta (come il decode greedy)
          * invece del batch N=K+1. Se l'output torna == greedy, la divergenza e' la numerica del
          * forward batch; se resta, e' la logica del round-loop. A/B diagnostico. */
@@ -457,7 +458,7 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
             mlx_array_free(h);
             h = hi;
         }
-    } else if (getenv("LLM_DF2_ASTYLE_VERIFY")) {
+    } else if (llm_ai_mlx_opt_env("LLM_DF2_ASTYLE_VERIFY")) {
         /* ESPERIMENTO/fix: forward in stile (A) — arch->attn per-sessione a K token + FFN batched.
          * Sul n-gram questo path era BIT-EXACT col greedy (143/143), a differenza di
          * layer_forward con K+1 token. Stessa cattura ctx per-sessione. */
@@ -475,7 +476,7 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
     if (g_df2_time_on()) { g_df2_t_fwd += g_df2_now() - _t0; _t0 = g_df2_now(); }
     mlx_array normed = mlx_array_new(), logits = mlx_array_new(), am = mlx_array_new();
     if (ok) {
-        if (getenv("LLM_DF2_FASTRMS"))
+        if (llm_ai_mlx_opt_env("LLM_DF2_FASTRMS"))
             ok = mlx_fast_rms_norm(&normed, h, t.final_norm_w, m->cfg.rms_norm_eps, m->stream) == 0;
         else
             ok = llm_mlx_final_norm(m, h, t.final_norm_w, &normed);
@@ -517,13 +518,13 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
         }
         int P = accepted + 1;   /* [anchor] + accettati */
         mlx_array ph = mlx_array_new();
-        if (getenv("LLM_DF2_ASTYLE_VERIFY")) {
+        if (llm_ai_mlx_opt_env("LLM_DF2_ASTYLE_VERIFY")) {
             LlmMlxSession* ss1[1] = { s };
             int kk1[1] = { P }; int of1[1] = { 0 };
             if (!forward_tokens_batch_multi_cap(m, ss1, kk1, 1, ids, of1,
                                                 t.embed_w, t.embed_s, t.embed_b,
                                                 NULL, 0, NULL, 0, &ph)) ok = false;
-        } else if (getenv("LLM_DF2_SEQ_REAPPEND")) {
+        } else if (llm_ai_mlx_opt_env("LLM_DF2_SEQ_REAPPEND")) {
             /* DIAGNOSI: re-append SEQUENZIALE (1 token per volta, come il greedy) invece del
              * batch P: se la parita' torna, il difetto e' nella numerica GDN multi-token. */
             for (int i = 0; i < P && ok; i++) {
@@ -812,7 +813,7 @@ int llm_ai_mlx_dflash2_generate_multi(llm_ai_mlx_dflash2_handle handle,
          * del grafo) altera l'hidden di out_h? Seconda passata SENZA capture su cache scratch
          * fresca, confronto max|h_cap - h_nocap|. Se != 0, il capture perturba la numerica
          * (candidata causa della divergenza DFlash2 vs greedy). */
-        if (okc && getenv("LLM_DF2_CAP_DIFF")) {
+        if (okc && llm_ai_mlx_opt_env("LLM_DF2_CAP_DIFF")) {
             mlx_array* qk = (mlx_array*)malloc((size_t)tnl * sizeof(mlx_array));
             mlx_array* qv = (mlx_array*)malloc((size_t)tnl * sizeof(mlx_array));
             bool* qh = (bool*)calloc((size_t)tnl, sizeof(bool));

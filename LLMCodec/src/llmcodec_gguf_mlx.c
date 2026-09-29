@@ -130,13 +130,21 @@ static int llmcodec_decode_src(const char* sp, uint64_t base, const uint8_t* raw
                 size_t s1=(size_t)(ti[si].end-ti[si].begin), s2=(size_t)(ti[bi].end-ti[bi].begin);
                 uint8_t* p1r=llmcodec_slurp_range(sp,base+ti[si].begin,s1); uint8_t* p2r=llmcodec_slurp_range(sp,base+ti[bi].begin,s2);
                 if (p1r && p2r) {
-                    /* interleave PER-SLAB: scales[e] ++ biases[e] (l'aux e' per-esperto) */
-                    aux=(uint8_t*)malloc(s1+s2); auxlen=s1+s2;
-                    size_t scb = ab/2; if (scb == 0) scb = s1;
+                    /* interleave PER-SLAB: scales[e] ++ biases[e] (l'aux e' per-esperto).
+                     * I byte PER ESPERTO si ricavano dal numero di esperti E, non da `ab/2`:
+                     * per i tensori esperti 3D `ab` non e' 2*scb e la vecchia formula produceva
+                     * un memcpy gigantesco fuori dal buffer (heap-buffer-overflow, trovato con
+                     * ASan su Qwen3.6-35B-A3B affine). */
+                    size_t scb = (E > 0) ? s1 / (size_t)E : s1; /* byte di scales per esperto */
+                    if (scb == 0) scb = s1;
+                    ab = 2 * scb;                               /* aux per esperto = scales+biases */
+                    aux=(uint8_t*)malloc((size_t)E * ab); auxlen=(size_t)E * ab;
                     for (int e=0; e<E; e++) {
                         size_t off=(size_t)e*scb;
-                        memcpy(aux + (size_t)e*ab,          p1r + off, scb <= s1-off ? scb : (s1>off?s1-off:0));
-                        memcpy(aux + (size_t)e*ab + scb,    p2r + off, scb <= s2-off ? scb : (s2>off?s2-off:0));
+                        size_t c1 = (off < s1) ? (scb <= s1-off ? scb : s1-off) : 0;
+                        size_t c2 = (off < s2) ? (scb <= s2-off ? scb : s2-off) : 0;
+                        if (c1) memcpy(aux + (size_t)e*ab,          p1r + off, c1);
+                        if (c2) memcpy(aux + (size_t)e*ab + scb,    p2r + off, c2);
                     }
                 }
                 free(p1r); free(p2r);

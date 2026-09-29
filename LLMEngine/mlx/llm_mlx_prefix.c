@@ -2,6 +2,7 @@
  * checkpoint, evict LRU, append prefix, last_hidden). Estratto VERBATIM da llmengine_mlx.c
  * (split fase 2). */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,13 +15,13 @@
 bool llm_kvdisk_enabled(LlmMlxModel* m) {
     if (!m) return false;
     if (m->kvdisk_state < 0) {
-        const char* e = getenv("LLM_KVDISK");
+        const char* e = llm_ai_mlx_opt_env("LLM_KVDISK");
         if (e == NULL || e[0] == '\0' || strcmp(e, "0") == 0 || strcmp(e, "off") == 0) {
             m->kvdisk_state = 0;
         } else {
             const char* path = (strcmp(e, "1") == 0) ? "/tmp/llm_kvdisk.scratch" : e;
             uint64_t cap = 0;
-            const char* cb = getenv("LLM_KVDISK_CAP_MB");
+            const char* cb = llm_ai_mlx_opt_env("LLM_KVDISK_CAP_MB");
             if (cb) cap = (uint64_t)strtoull(cb, NULL, 10) * 1024ull * 1024ull;
             m->kvdisk = llm_kv_disk_open(path, /*max_entries=*/8192, cap);
             m->kvdisk_state = (m->kvdisk.f != NULL && m->kvdisk.e != NULL) ? 1 : 0;

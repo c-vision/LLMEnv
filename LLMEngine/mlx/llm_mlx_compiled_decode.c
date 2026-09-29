@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_kvpage.h"
@@ -36,7 +37,7 @@
 static int g_compile_state = -1;
 bool llm_mlx_compile_enabled(void) {
     if (g_compile_state < 0)
-        g_compile_state = (getenv("LLM_COMPILE") != NULL && getenv("LLM_NO_COMPILE") == NULL) ? 1 : 0;
+        g_compile_state = (llm_ai_mlx_opt_env("LLM_COMPILE") != NULL && llm_ai_mlx_opt_env("LLM_NO_COMPILE") == NULL) ? 1 : 0;
     return g_compile_state == 1;
 }
 
@@ -50,13 +51,13 @@ bool llm_mlx_compile_enabled(void) {
 static int g_compile_dense_state = -1;
 static bool llm_mlx_compile_dense_enabled(void) {
     if (g_compile_dense_state < 0)
-        g_compile_dense_state = (getenv("LLM_COMPILE_DENSE") != NULL && getenv("LLM_NO_COMPILE") == NULL) ? 1 : 0;
+        g_compile_dense_state = (llm_ai_mlx_opt_env("LLM_COMPILE_DENSE") != NULL && llm_ai_mlx_opt_env("LLM_NO_COMPILE") == NULL) ? 1 : 0;
     return g_compile_dense_state == 1;
 }
 static int g_compile_qwen35_state = -1;
 bool llm_mlx_compile_qwen35_enabled(void) {
     if (g_compile_qwen35_state < 0)
-        g_compile_qwen35_state = (getenv("LLM_COMPILE_QWEN35") != NULL) ? 1 : 0;
+        g_compile_qwen35_state = (llm_ai_mlx_opt_env("LLM_COMPILE_QWEN35") != NULL) ? 1 : 0;
     return g_compile_qwen35_state == 1;
 }
 bool llm_mlx_compile_arch_supported(const LlmMlxModel* m) {
@@ -290,7 +291,7 @@ bool forward_one_token_dev(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array em
     /* Ternary-Bonsai: embed_tokens e' in inverse_weight_names -> si ruota la sua USCITA.
      * Direzione (R vs R^T) incerta dal naming: LLM_BONSAI_EMBED_INV=1 abilita (default off). */
     {
-        const int emb_inv = (getenv("LLM_BONSAI_EMBED_INV") != NULL) ? (atoi(getenv("LLM_BONSAI_EMBED_INV")) != 0 ? 1 : 0) : 1;
+        const int emb_inv = (llm_ai_mlx_opt_env("LLM_BONSAI_EMBED_INV") != NULL) ? (atoi(llm_ai_mlx_opt_env("LLM_BONSAI_EMBED_INV")) != 0 ? 1 : 0) : 1;
         (void)llm_bonsai_rotate(&x, m, -1, "embed_tokens.weight", emb_inv == 1);
     }    mlx_array h = x;
     bool step_ok = true;
@@ -571,7 +572,7 @@ bool llm_mlx_session_run_compiled_step_arr(LlmMlxSession* s, mlx_array tid_in, i
          * grafo (~1e-3 rel, verificato 2026-09-03: con MLX_COMPILE_MODE_ENABLED
          * il decode compilato DIVERGE da eager; con NO_FUSE e' bit-exact).
          * Default = NO_FUSE (parita'); LLM_COMPILE_FUSE=1 riattiva il fuse. */
-        if (getenv("LLM_COMPILE_FUSE")) mlx_set_compile_mode(MLX_COMPILE_MODE_ENABLED);
+        if (llm_ai_mlx_opt_env("LLM_COMPILE_FUSE")) mlx_set_compile_mode(MLX_COMPILE_MODE_ENABLED);
         else mlx_set_compile_mode(MLX_COMPILE_MODE_NO_FUSE);
         mlx_closure raw = mlx_closure_new_func_payload(llm_mlx_decode_step_fn, s, NULL);
         mlx_closure comp = mlx_closure_new();
@@ -585,7 +586,7 @@ bool llm_mlx_session_run_compiled_step_arr(LlmMlxSession* s, mlx_array tid_in, i
         s->compiled_decode_valid = true;
         if (getenv("LLM_COMPILE_VERBOSE"))
             fprintf(stderr, "[compiled-decode] closure creata arch=%s fuse=%s n_layers=%d\n",
-                    m->cfg.model_type, getenv("LLM_COMPILE_FUSE") ? "ON" : "off", s->n_layers);
+                    m->cfg.model_type, llm_ai_mlx_opt_env("LLM_COMPILE_FUSE") ? "ON" : "off", s->n_layers);
     }
 
     mlx_vector_array in = mlx_vector_array_new();

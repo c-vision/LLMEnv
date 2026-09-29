@@ -15,6 +15,7 @@
 #define LLM_MLX_OPS_H
 
 #include <math.h>    /* sqrtf */
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include <string.h>  /* strcmp */
 #include <stdlib.h>  /* malloc/free */
 #include "mlx/c/mlx.h"
@@ -80,7 +81,7 @@ static struct { llm_sdpa_hook_fn fn; void* ctx; } llm_train_sdpa_hook = { NULL, 
  * n_layers. LLM_MLA_MASKCACHE=0 -> percorso storico (op MLX). */
 static bool llm_mla_maskcache_enabled(void) {
     static int st = -1;
-    if (st < 0) { const char* e = getenv("LLM_MLA_MASKCACHE"); st = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1; }
+    if (st < 0) { const char* e = llm_ai_mlx_opt_env("LLM_MLA_MASKCACHE"); st = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1; }
     return st == 1;
 }
 static mlx_array llm_mlx_pad_mask_cached(int Nk, int valid, mlx_dtype dt, mlx_stream stream) {
@@ -168,7 +169,7 @@ static bool llm_mlx_gqa_sdpa_sinks(mlx_array* out, mlx_array q, mlx_array k, mlx
          * forzava un kernel piu' lento. Prefill (Lq>1): "causal" come mlx_lm. */
         const int lq = (mlx_array_ndim(q) >= 3) ? (int)mlx_array_shape(q)[2] : 0;
         static int sdpaca_state = -1;
-        if (sdpaca_state < 0) sdpaca_state = (getenv("LLM_SDPA_DECODE_CAUSAL") != NULL) ? 1 : 0;
+        if (sdpaca_state < 0) sdpaca_state = (llm_ai_mlx_opt_env("LLM_SDPA_DECODE_CAUSAL") != NULL) ? 1 : 0;
         const char* mm = (lq == 1 && !sdpaca_state) ? "" : "causal";
         bool ok = mlx_fast_scaled_dot_product_attention(out, q_harmony ? qf : q, k, v, scale, mm,
                                                          no_mask, sinks_c, stream) == 0;
@@ -226,9 +227,9 @@ static bool llm_mlx_gqa_sdpa_sinks(mlx_array* out, mlx_array q, mlx_array k, mlx
     static int s_maskcache_state = -2; /* -2 = non letto; 1 = forza ON; 0 = OFF; -1 = auto */
     static long s_maskcache_cap = -1;
     if (s_maskcache_state == -2) {
-        const char* e = getenv("LLM_MASK_CACHE");
+        const char* e = llm_ai_mlx_opt_env("LLM_MASK_CACHE");
         s_maskcache_state = (e == NULL) ? -1 : (strcmp(e, "0") == 0 ? 0 : 1);
-        const char* c = getenv("LLM_MASK_CACHE_MB");
+        const char* c = llm_ai_mlx_opt_env("LLM_MASK_CACHE_MB");
         s_maskcache_cap = (c != NULL && atol(c) > 0) ? atol(c) : 256;
     }
     const long mask_bytes = (long)Lq * (long)Nk * 4L;
@@ -321,7 +322,7 @@ static bool llm_mlx_kv_inplace_enabled(void) {
     /* LLM_KV_DEQUANT_READ: cache = soli recenti (cold nel pending) -> no append in-place. */
     if (llm_kvq_hook.fn != NULL) return false;
     if (g_kv_inplace_state < 0) {
-        const char* e = getenv("LLM_KV_INPLACE");
+        const char* e = llm_ai_mlx_opt_env("LLM_KV_INPLACE");
         g_kv_inplace_state = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1;
     }
     return g_kv_inplace_state == 1;
@@ -431,7 +432,7 @@ static bool llm_mlx_gqa_sdpa(mlx_array* out, mlx_array q, mlx_array k, mlx_array
  * che LLMEnv non aveva. `dim` deve essere potenza di 2 (altrimenti no-op). Default OFF. */
 static int llm_mlx_kvrot_enabled(void) {
     static int st = -1;
-    if (st < 0) st = (getenv("LLM_KVROT") != NULL) ? 1 : 0;
+    if (st < 0) st = (llm_ai_mlx_opt_env("LLM_KVROT") != NULL) ? 1 : 0;
     return st;
 }
 static mlx_array g_kvrot_H = {0};
@@ -476,7 +477,7 @@ static bool llm_mlx_hadamard_rotate(mlx_array* out, mlx_array x, int dim, mlx_st
  * per K, false per V. Compose con LLM_KVROT (rotazione prima). */
 static int llm_mlx_kivi_enabled(void) {
     static int st = -1;
-    if (st < 0) st = (getenv("LLM_KIVI") != NULL) ? 1 : 0;
+    if (st < 0) st = (llm_ai_mlx_opt_env("LLM_KIVI") != NULL) ? 1 : 0;
     return st;
 }
 static bool llm_mlx_kv_quantize_kivi(mlx_vector_array* out, mlx_array kv, int bits, int group_size,
@@ -548,7 +549,7 @@ static bool llm_mlx_kv_dequantize_kivi(mlx_array* out, mlx_array w, mlx_array sc
  * broadcastabile; il dequant combina con where(mask, hi, lo). Gate LLM_KVMIXED. */
 static int llm_mlx_kvmixed_enabled(void) {
     static int st = -1;
-    if (st < 0) st = (getenv("LLM_KVMIXED") != NULL) ? 1 : 0;
+    if (st < 0) st = (llm_ai_mlx_opt_env("LLM_KVMIXED") != NULL) ? 1 : 0;
     return st;
 }
 static bool llm_mlx_kv_saliency_mask(mlx_array* mask, mlx_array kv, bool per_token, mlx_stream s)
@@ -633,7 +634,7 @@ static bool llm_mlx_kv_dequantize_mixed(mlx_array* out, mlx_vector_array lo, mlx
  * Gate LLM_NSN (default OFF). */
 static int llm_mlx_kv_nsn_enabled(void) {
     static int st = -1;
-    if (st < 0) st = (getenv("LLM_NSN") != NULL) ? 1 : 0;
+    if (st < 0) st = (llm_ai_mlx_opt_env("LLM_NSN") != NULL) ? 1 : 0;
     return st;
 }
 static bool llm_mlx_kv_quantize_nsn(mlx_vector_array* out, mlx_array kv, int bits, int group_size, mlx_stream stream)
@@ -705,7 +706,7 @@ static bool llm_mlx_kv_dequantize_nsn(mlx_array* out, mlx_vector_array qn, int b
  * al long-context/offline storage dei modelli futuri. Gate LLM_GEAR (default OFF). */
 static int llm_mlx_kv_gear_enabled(void) {
     static int st = -1;
-    if (st < 0) st = (getenv("LLM_GEAR") != NULL) ? 1 : 0;
+    if (st < 0) st = (llm_ai_mlx_opt_env("LLM_GEAR") != NULL) ? 1 : 0;
     return st;
 }
 static bool llm_mlx_kv_quantize_gear(mlx_vector_array* out, mlx_array kv, int bits, int group_size,
@@ -937,7 +938,7 @@ static LlmMlxKvPolicy llm_mlx_kv_policy_from_env(void) {
     p.method = LLM_KVM_NONE; p.v_method = LLM_KVM_NONE;
     p.bits = 4; p.group_size = 64; p.gear_rank = 8;
     p.retain_budget = 1024; p.retain_sink = 4; p.retain_recent = 128; p.retain_obs = 32;
-    const char* s = getenv("LLM_KV_POLICY");
+    const char* s = llm_ai_mlx_opt_env("LLM_KV_POLICY");
     if (s == NULL || *s == '\0') return p;
     char buf[512];
     snprintf(buf, sizeof buf, "%s", s);
@@ -973,7 +974,7 @@ static LlmMlxKvPolicy llm_mlx_kv_policy_from_env(void) {
  * peggio => la retention selettiva batte la finestra pura. Gate LLM_KVRETAIN (default OFF). */
 static int llm_mlx_kvretain_enabled(void) {
     static int st = -1;
-    if (st < 0) st = (getenv("LLM_KVRETAIN") != NULL) ? 1 : 0;
+    if (st < 0) st = (llm_ai_mlx_opt_env("LLM_KVRETAIN") != NULL) ? 1 : 0;
     return st;
 }
 static int llm_mlx_kvretain_param(const char* name, int dflt) {
@@ -1485,6 +1486,10 @@ static bool llm_mlx_cache_commit(mlx_array* ckpt, mlx_stream stream)
 static bool llm_mlx_cache_trim(mlx_array* out, mlx_array cache, int keep, mlx_stream stream)
 {
     if (keep < 0) keep = 0;
+    /* Cache VUOTA (layer GDN/linear-attention di Qwen3.5: nessun `k_full`): niente da trimmare.
+     * Senza questo guard, `mlx_array_ndim` su un array vuoto lancia "expected a non-empty
+     * mlx_array" (attivato quando kv_max_tokens>0, es. default `context` del consumer). */
+    if (cache.ctx == NULL) return true;   /* cache vuota: `out` resta vuoto (come la cache) */
     int ndim = mlx_array_ndim(cache);
     if (ndim < 3) {
         if (keep == 0) { mlx_array_set_int(out, 0); return true; }

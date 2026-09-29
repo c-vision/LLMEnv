@@ -6,6 +6,7 @@
 #ifndef LLM_MLX_PACKED_QKV_H
 #define LLM_MLX_PACKED_QKV_H
 #include "mlx/c/mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +30,7 @@ static bool llm_mlx_qkv_enabled(void) {
          * Misurato su Llama-1B: prefill +2..+14% (N=2048 il piu' pulito), decode ~+1,6%,
          * LLM_PACKED_QKV=0 kill-switch. IDS greedy identici. Applicato solo dove il packing
          * e' popolato al load (llama/qwen3 affine), altrove fallback alla proiezione singola. */
-        const char* flag = getenv("LLM_PACKED_QKV");
+        const char* flag = llm_ai_mlx_opt_env("LLM_PACKED_QKV");
         enabled = (flag != NULL && strcmp(flag, "0") == 0) ? 0 : 1;
     }
     return enabled != 0;

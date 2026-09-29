@@ -19,6 +19,7 @@
  * non e' in discussione, e' codice upstream vendorizzato invariato.
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 
 #include "llm_mlx_array_count.h"
 #include "llmengine_plugin.h"
@@ -179,7 +180,7 @@ const char* llm_mlx_act16_name(void) {
  * Attivo SOLO per model_type=="mixtral" (slice verticale, vedi layer_forward). */
 static int g_fixkv_state = -1; /* -1 = non inizializzato (letto al primo uso) */
 bool llm_mlx_fixkv_enabled(void) {
-    if (g_fixkv_state < 0) g_fixkv_state = (getenv("LLM_FIXKV") != NULL) ? 1 : 0;
+    if (g_fixkv_state < 0) g_fixkv_state = (llm_ai_mlx_opt_env("LLM_FIXKV") != NULL) ? 1 : 0;
     return g_fixkv_state == 1;
 }
 
@@ -222,12 +223,12 @@ bool llm_mlx_fixkv_enabled(void) {
 #define MAX_KVSEG_LAYERS 256
 static int g_kvseg_state = -1;
 bool llm_mlx_kvseg_enabled(void) {
-    if (g_kvseg_state < 0) g_kvseg_state = (getenv("LLM_KVSEG") != NULL) ? 1 : 0;
+    if (g_kvseg_state < 0) g_kvseg_state = (llm_ai_mlx_opt_env("LLM_KVSEG") != NULL) ? 1 : 0;
     return g_kvseg_state == 1;
 }
 static int g_kvseg_verify_state = -1;
 bool llm_mlx_kvseg_verify_enabled(void) {
-    if (g_kvseg_verify_state < 0) g_kvseg_verify_state = (getenv("LLM_KVSEG_VERIFY") != NULL) ? 1 : 0;
+    if (g_kvseg_verify_state < 0) g_kvseg_verify_state = (llm_ai_mlx_opt_env("LLM_KVSEG_VERIFY") != NULL) ? 1 : 0;
     return g_kvseg_verify_state == 1;
 }
 /* Dimensione fissa del segmento (token). Override: LLM_KVSEG_SIZE. Il main e' il
@@ -236,7 +237,7 @@ bool llm_mlx_kvseg_verify_enabled(void) {
 static int llm_mlx_kvseg_size(void) {
     static int v = 0;
     if (v == 0) {
-        const char* e = getenv("LLM_KVSEG_SIZE");
+        const char* e = llm_ai_mlx_opt_env("LLM_KVSEG_SIZE");
         v = (e != NULL && atoi(e) > 0) ? atoi(e) : 512;
     }
     return v;
@@ -457,7 +458,7 @@ bool llm_mlx_kvseg_step(mlx_stream stream, int nkv, int hd, int layer_idx,
  * sola volta (mai getenv nel loop per-layer). */
 static int g_gdn_eval_state = -1;
 bool llm_mlx_gdn_eval_forced(void) {
-    if (g_gdn_eval_state < 0) g_gdn_eval_state = (getenv("LLM_GDN_EVAL") != NULL) ? 1 : 0;
+    if (g_gdn_eval_state < 0) g_gdn_eval_state = (llm_ai_mlx_opt_env("LLM_GDN_EVAL") != NULL) ? 1 : 0;
     return g_gdn_eval_state == 1;
 }
 
@@ -465,7 +466,7 @@ bool llm_mlx_gdn_eval_forced(void) {
  * LLM_KVSLICE=1 (default OFF). Se non vince la misura resta OFF. */
 static int g_kvslice_state = -1;
 bool llm_mlx_kvslice_enabled(void) {
-    if (g_kvslice_state < 0) g_kvslice_state = (getenv("LLM_KVSLICE") != NULL) ? 1 : 0;
+    if (g_kvslice_state < 0) g_kvslice_state = (llm_ai_mlx_opt_env("LLM_KVSLICE") != NULL) ? 1 : 0;
     return g_kvslice_state == 1;
 }
 
@@ -485,7 +486,7 @@ bool llm_mlx_kvslice_enabled(void) {
 static int g_kvf16_state = -1;
 bool llm_mlx_kv_f16_enabled(void) {
     if (g_kvf16_state < 0) {
-        const char* e = getenv("LLM_KVF16");
+        const char* e = llm_ai_mlx_opt_env("LLM_KVF16");
         g_kvf16_state = (e != NULL && (strcmp(e, "0") == 0 || strcmp(e, "off") == 0)) ? 0 : 1;
     }
     return g_kvf16_state == 1;
@@ -496,7 +497,7 @@ bool llm_mlx_kv_f16_enabled(void) {
  * finche' un A/B a finestra idle non lo promuove. */
 static int g_kvf16_gptoss_state = -1;
 bool llm_mlx_kv_f16_gptoss_enabled(void) {
-    if (g_kvf16_gptoss_state < 0) g_kvf16_gptoss_state = (getenv("LLM_KVF16_GPTOSS") != NULL) ? 1 : 0;
+    if (g_kvf16_gptoss_state < 0) g_kvf16_gptoss_state = (llm_ai_mlx_opt_env("LLM_KVF16_GPTOSS") != NULL) ? 1 : 0;
     return g_kvf16_gptoss_state == 1;
 }
 
@@ -509,12 +510,12 @@ bool llm_mlx_kv_f16_gptoss_enabled(void) {
  * Fallback silenzioso su ANY condizione non soddisfatta: mai un errore bloccante. */
 static int g_fuse_rope_state = -1;
 bool llm_mlx_fuse_rope_enabled(void) {
-    if (g_fuse_rope_state < 0) g_fuse_rope_state = (getenv("LLM_FUSE_ROPE") != NULL) ? 1 : 0;
+    if (g_fuse_rope_state < 0) g_fuse_rope_state = (llm_ai_mlx_opt_env("LLM_FUSE_ROPE") != NULL) ? 1 : 0;
     return g_fuse_rope_state == 1;
 }
 static int g_fuse_rope_verify_state = -1;
 bool llm_mlx_fuse_rope_verify_enabled(void) {
-    if (g_fuse_rope_verify_state < 0) g_fuse_rope_verify_state = (getenv("LLM_FUSE_ROPE_VERIFY") != NULL) ? 1 : 0;
+    if (g_fuse_rope_verify_state < 0) g_fuse_rope_verify_state = (llm_ai_mlx_opt_env("LLM_FUSE_ROPE_VERIFY") != NULL) ? 1 : 0;
     return g_fuse_rope_verify_state == 1;
 }
 
@@ -529,12 +530,12 @@ bool llm_mlx_fuse_rope_verify_enabled(void) {
  * velocita'), zero rischio. Fallback silenzioso su ANY condizione non soddisfatta. */
 static int g_flash_decode_state = -1;
 bool llm_mlx_flash_decode_enabled(void) {
-    if (g_flash_decode_state < 0) g_flash_decode_state = (getenv("LLM_GEMMA_FLASH_DECODE") != NULL) ? 1 : 0;
+    if (g_flash_decode_state < 0) g_flash_decode_state = (llm_ai_mlx_opt_env("LLM_GEMMA_FLASH_DECODE") != NULL) ? 1 : 0;
     return g_flash_decode_state == 1;
 }
 static int g_flash_decode_verify_state = -1;
 bool llm_mlx_flash_decode_verify_enabled(void) {
-    if (g_flash_decode_verify_state < 0) g_flash_decode_verify_state = (getenv("LLM_GEMMA_FLASH_DECODE_VERIFY") != NULL) ? 1 : 0;
+    if (g_flash_decode_verify_state < 0) g_flash_decode_verify_state = (llm_ai_mlx_opt_env("LLM_GEMMA_FLASH_DECODE_VERIFY") != NULL) ? 1 : 0;
     return g_flash_decode_verify_state == 1;
 }
 /* LLM_GEMMA_FLASH_PREFILL (2026-09-11): prefill (n_tokens>1) dei layer FULL di gemma4 (hd=512)
@@ -553,7 +554,7 @@ bool llm_mlx_flash_prefill_enabled(void) {
      * Resta OPT-IN e il chunk gemma4 torna 128 per default. La SOGLIA Nk (16384) sotto resta
      * come protezione per chi lo abilita: a Nk grande il kernel e' catastrofico (misurato). */
     if (g_flash_prefill_state < 0)
-        g_flash_prefill_state = (getenv("LLM_GEMMA_FLASH_PREFILL") != NULL) ? 1 : 0;
+        g_flash_prefill_state = (llm_ai_mlx_opt_env("LLM_GEMMA_FLASH_PREFILL") != NULL) ? 1 : 0;
     return g_flash_prefill_state == 1;
 }
 
@@ -564,7 +565,7 @@ bool llm_mlx_flash_prefill_enabled(void) {
  * storico non esiste. Default OFF = percorso veloce. */
 static int g_sampler_legacy_state = -1;
 bool llm_mlx_sampler_legacy_enabled(void) {
-    if (g_sampler_legacy_state < 0) g_sampler_legacy_state = (getenv("LLM_SAMPLER_LEGACY") != NULL) ? 1 : 0;
+    if (g_sampler_legacy_state < 0) g_sampler_legacy_state = (llm_ai_mlx_opt_env("LLM_SAMPLER_LEGACY") != NULL) ? 1 : 0;
     return g_sampler_legacy_state == 1;
 }
 /* S1 (Todo/(open) - MLX-Decode-Composizione §11): sampling ON-DEVICE (opt-in, default OFF).
@@ -573,7 +574,7 @@ bool llm_mlx_sampler_legacy_enabled(void) {
  * l'opt-in e la nota nel todo. Greedy (temperature<=0) non toccato. */
 static int g_sampler_ondevice_state = -1;
 bool llm_mlx_sampler_ondevice_enabled(void) {
-    if (g_sampler_ondevice_state < 0) g_sampler_ondevice_state = (getenv("LLM_SAMPLER_ONDEVICE") != NULL) ? 1 : 0;
+    if (g_sampler_ondevice_state < 0) g_sampler_ondevice_state = (llm_ai_mlx_opt_env("LLM_SAMPLER_ONDEVICE") != NULL) ? 1 : 0;
     return g_sampler_ondevice_state == 1;
 }
 
@@ -589,14 +590,14 @@ bool llm_mlx_sampler_ondevice_enabled(void) {
 static int g_fuse_moe_decode_state = -1;
 bool llm_mlx_fuse_moe_decode_enabled(void) {
     if (g_fuse_moe_decode_state < 0) {
-        const char* e = getenv("LLMENGINE_MOE_FUSE_MOE_DECODE");
+        const char* e = llm_ai_mlx_opt_env("LLMENGINE_MOE_FUSE_MOE_DECODE");
         g_fuse_moe_decode_state = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1;
     }
     return g_fuse_moe_decode_state == 1;
 }
 static int g_fuse_moe_decode_verify_state = -1;
 bool llm_mlx_fuse_moe_decode_verify_enabled(void) {
-    if (g_fuse_moe_decode_verify_state < 0) g_fuse_moe_decode_verify_state = (getenv("LLMENGINE_MOE_FUSE_MOE_DECODE_VERIFY") != NULL) ? 1 : 0;
+    if (g_fuse_moe_decode_verify_state < 0) g_fuse_moe_decode_verify_state = (llm_ai_mlx_opt_env("LLMENGINE_MOE_FUSE_MOE_DECODE_VERIFY") != NULL) ? 1 : 0;
     return g_fuse_moe_decode_verify_state == 1;
 }
 
@@ -617,14 +618,14 @@ bool llm_mlx_fuse_moe_mxfp4_enabled(void) {
          * token. Misurato ctx2048: +8% decode (126->134 tok/s). LLMENGINE_MOE_FUSE_MOE_MXFP4=0
          * kill-switch; _VERIFY=1 per il diff. Applicato solo a decode puro mxfp4 4/g32
          * (top-k experts), altrove fallback silenzioso a gather_qmm. */
-        const char* e = getenv("LLMENGINE_MOE_FUSE_MOE_MXFP4");
+        const char* e = llm_ai_mlx_opt_env("LLMENGINE_MOE_FUSE_MOE_MXFP4");
         g_fuse_moe_mxfp4_state = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1;
     }
     return g_fuse_moe_mxfp4_state == 1;
 }
 static int g_fuse_moe_mxfp4_verify_state = -1;
 bool llm_mlx_fuse_moe_mxfp4_verify_enabled(void) {
-    if (g_fuse_moe_mxfp4_verify_state < 0) g_fuse_moe_mxfp4_verify_state = (getenv("LLMENGINE_MOE_FUSE_MOE_MXFP4_VERIFY") != NULL) ? 1 : 0;
+    if (g_fuse_moe_mxfp4_verify_state < 0) g_fuse_moe_mxfp4_verify_state = (llm_ai_mlx_opt_env("LLMENGINE_MOE_FUSE_MOE_MXFP4_VERIFY") != NULL) ? 1 : 0;
     return g_fuse_moe_mxfp4_verify_state == 1;
 }
 /* Leva f16-attivazione sugli esperti mxfp4 PURI (2026-09-10, probe tools/moe_mxfp4_gather_probe.py):
@@ -645,7 +646,7 @@ bool llm_mlx_fuse_moe_mxfp4_verify_enabled(void) {
 static int g_mxfp4_act_f16_state = -1;
 bool llm_mlx_mxfp4_act_f16_enabled(void) {
     if (g_mxfp4_act_f16_state < 0) {
-        const char* e = getenv("LLM_MXFP4_ACT_F16");
+        const char* e = llm_ai_mlx_opt_env("LLM_MXFP4_ACT_F16");
         g_mxfp4_act_f16_state = (e != NULL && strcmp(e, "0") != 0) ? 1 : 0;
     }
     return g_mxfp4_act_f16_state == 1;
@@ -694,12 +695,12 @@ mlx_array llm_mlx_scalar_act(float v, mlx_stream stream) {
  * effetto se LLMMETAL_KVMETAL/_VERIFY non sono impostate (comportamento identico a prima). */
 static int g_kvmetal_state = -1;
 bool llm_mlx_kvmetal_enabled(void) {
-    if (g_kvmetal_state < 0) g_kvmetal_state = (getenv("LLMMETAL_KVMETAL") != NULL) ? 1 : 0;
+    if (g_kvmetal_state < 0) g_kvmetal_state = (llm_ai_mlx_opt_env("LLMMETAL_KVMETAL") != NULL) ? 1 : 0;
     return g_kvmetal_state == 1;
 }
 static int g_kvmetal_verify_state = -1;
 bool llm_mlx_kvmetal_verify_enabled(void) {
-    if (g_kvmetal_verify_state < 0) g_kvmetal_verify_state = (getenv("LLMMETAL_KVMETAL_VERIFY") != NULL) ? 1 : 0;
+    if (g_kvmetal_verify_state < 0) g_kvmetal_verify_state = (llm_ai_mlx_opt_env("LLMMETAL_KVMETAL_VERIFY") != NULL) ? 1 : 0;
     return g_kvmetal_verify_state == 1;
 }
 /* Stato ombra della sessione LLMMETAL_KVMETAL attiva, accessibile da llama_attention_block
@@ -722,7 +723,7 @@ int g_kvmetal_disabled = 0;    /* 1 = disabilitato (sessioni concorrenti), fallb
  * evince). Implica l'allocazione del pool (vedi llm_mlx_session_create). */
 static int g_kvmetal_auth_state = -1;
 bool llm_mlx_kvmetal_auth_enabled(void) {
-    if (g_kvmetal_auth_state < 0) g_kvmetal_auth_state = (getenv("LLMMETAL_KVMETAL_AUTH") != NULL) ? 1 : 0;
+    if (g_kvmetal_auth_state < 0) g_kvmetal_auth_state = (llm_ai_mlx_opt_env("LLMMETAL_KVMETAL_AUTH") != NULL) ? 1 : 0;
     return g_kvmetal_auth_state == 1;
 }
 /* Bit per layer: 1 se il pool di quel layer e' stato popolato con successo dal prefill
@@ -752,12 +753,12 @@ bool llm_mlx_kvmetal_auth_layer_ready(int layer_idx) {
  * di LlmMlxSession). */
 static int g_gemvq4_state = -1;
 bool llm_mlx_gemvq4_enabled(void) {
-    if (g_gemvq4_state < 0) g_gemvq4_state = (getenv("LLM_GEMVQ4") != NULL) ? 1 : 0;
+    if (g_gemvq4_state < 0) g_gemvq4_state = (llm_ai_mlx_opt_env("LLM_GEMVQ4") != NULL) ? 1 : 0;
     return g_gemvq4_state == 1;
 }
 static int g_gemvq4_verify_state = -1;
 bool llm_mlx_gemvq4_verify_enabled(void) {
-    if (g_gemvq4_verify_state < 0) g_gemvq4_verify_state = (getenv("LLM_GEMVQ4_VERIFY") != NULL) ? 1 : 0;
+    if (g_gemvq4_verify_state < 0) g_gemvq4_verify_state = (llm_ai_mlx_opt_env("LLM_GEMVQ4_VERIFY") != NULL) ? 1 : 0;
     return g_gemvq4_verify_state == 1;
 }
 void* g_gemvq4_id = NULL;
@@ -775,17 +776,17 @@ static int g_env_prof = -1, g_env_phase = -1, g_env_mem = -1, g_env_mixtral_time
  * (replica mlx_lm). LLM_CLEAR_CACHE_EVERY=N spazia invece che rimuovere del tutto. */
 bool llm_no_clear_cache(void) {
     static int v = -1;
-    if (v < 0) v = (getenv("LLM_NO_CLEAR_CACHE") != NULL) ? 1 : 0;
+    if (v < 0) v = (llm_ai_mlx_opt_env("LLM_NO_CLEAR_CACHE") != NULL) ? 1 : 0;
     return v == 1;
 }
 static int llm_clear_cache_every(void) {
     static int v = -2;
-    if (v == -2) { const char* e = getenv("LLM_CLEAR_CACHE_EVERY"); v = e ? atoi(e) : 0; }
+    if (v == -2) { const char* e = llm_ai_mlx_opt_env("LLM_CLEAR_CACHE_EVERY"); v = e ? atoi(e) : 0; }
     return v;
 }
-bool llm_env_prof(void)      { if (g_env_prof < 0)      g_env_prof = (getenv("LLM_PROF") != NULL) ? 1 : 0; return g_env_prof == 1; }
-bool llm_env_phase(void)     { if (g_env_phase < 0)     g_env_phase = (getenv("LLM_PHASE") != NULL) ? 1 : 0; return g_env_phase == 1; }
-bool llm_env_memprof(void)   { if (g_env_mem < 0)       g_env_mem = (getenv("LLM_MEMPROF") != NULL) ? 1 : 0; return g_env_mem == 1; }
+bool llm_env_prof(void)      { if (g_env_prof < 0)      g_env_prof = (llm_ai_mlx_opt_env("LLM_PROF") != NULL) ? 1 : 0; return g_env_prof == 1; }
+bool llm_env_phase(void)     { if (g_env_phase < 0)     g_env_phase = (llm_ai_mlx_opt_env("LLM_PHASE") != NULL) ? 1 : 0; return g_env_phase == 1; }
+bool llm_env_memprof(void)   { if (g_env_mem < 0)       g_env_mem = (llm_ai_mlx_opt_env("LLM_MEMPROF") != NULL) ? 1 : 0; return g_env_mem == 1; }
 bool llm_env_mixtral_time(void) { if (g_env_mixtral_time < 0) g_env_mixtral_time = (getenv("LLM_MIXTRAL_TIME") != NULL) ? 1 : 0; return g_env_mixtral_time == 1; }
 
 /* Cache GENERICA per le flag d'ambiente lette nel percorso caldo (per-layer / per-token):
@@ -835,7 +836,7 @@ int llm_mlx_kv_cap_for(int needed) {
  * stato usato (shape2 == cache_offset, o cache non 4D). */
 void llm_mlx_kv_compact_prefix(int n_layers, int cache_offset, mlx_stream stream,
                                       mlx_array* k_cache, mlx_array* v_cache) {
-    if (getenv("LLM_NO_KVCOMPACT")) return;   /* A/B diagnostica (bug allineamento W8A8) */
+    if (llm_ai_mlx_opt_env("LLM_NO_KVCOMPACT")) return;   /* A/B diagnostica (bug allineamento W8A8) */
     /* FIX 2026-09-19 (bug multi-append / multi-turn): il padding della KV al multiplo di 256
      * a fine append_impl (riga ~19408) e' INCONDIZIONATO, ma questa compaction era gated dietro
      * LLM_FIXKV/LLM_KVSLICE. Con i flag OFF (default) un SECONDO session_append operava su una
@@ -994,7 +995,7 @@ static bool llm_mlx_oq_a8_prim_enabled(void) {
      * commit+waitUntilCompleted PER PROIEZIONE: centinaia di sync GPU per prefill.
      * Misurato (prefill 2048 512, bf16, quiet): 27B eager 642/-28% vs prim 1095/+22%;
      * 8B eager 2046/-37% vs prim 4554/+40%. Kill-switch: LLMMETAL_OQ_A8_OFF_PRIM=1 (torna eager). */
-    if (g_oq_a8_prim_state < 0) g_oq_a8_prim_state = (getenv("LLMMETAL_OQ_A8_OFF_PRIM") != NULL) ? 0 : 1;
+    if (g_oq_a8_prim_state < 0) g_oq_a8_prim_state = (llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_OFF_PRIM") != NULL) ? 0 : 1;
     return g_oq_a8_prim_state == 1;
 }
 static LlmMetalOqA8Ctx* g_oq_a8_ctx = NULL;
@@ -1013,7 +1014,7 @@ static bool llm_mlx_oq_a8_enabled(void) {
      * QUALITA' (invariata, misurata): 3,52% argmax divergenti (gate teacher-forcing su 256
      * posizioni; controllo negativo deterministico). FAIL-OPEN garantito. */
     if (g_oq_a8_state < 0) {
-        const char* e = getenv("LLMMETAL_OQ_A8");
+        const char* e = llm_ai_mlx_opt_env("LLMMETAL_OQ_A8");
         g_oq_a8_state = (e != NULL && strcmp(e, "0") != 0) ? 1 : 0;   /* =0 = kill-switch */
     }
     return g_oq_a8_state == 1;
@@ -1024,7 +1025,7 @@ static bool llm_mlx_oq_a8_enabled(void) {
  * K>=4096 vince (Qwen3-8B hidden 4096: +16..28%; Qwen3.6-27B hidden 5120/h17408: +10%),
  * K<4096 perde (Llama-1B K=2048). Quindi: AUTO quando la env NON e' impostata -> A8 se K>=4096
  * (il gate e' applicato al chiamante, che conosce K). LLMMETAL_OQ_A8=1 forza su ogni K; =0 disabilita. */
-static bool llm_mlx_oq_a8_auto_enabled(void) { return getenv("LLMMETAL_OQ_A8") == NULL; }
+static bool llm_mlx_oq_a8_auto_enabled(void) { return llm_ai_mlx_opt_env("LLMMETAL_OQ_A8") == NULL; }
 /* A8 AUTO cablato (2026-09-18, richiesta utente: "attivato automaticamente in base al modello").
  * Regola MISURATA (K = dim di input della proiezione):
  *   K >= 4096 -> vince (Qwen3-8B K=4096 +16..28%; Qwen3.6-27B K=5120 +10%; gemma-4-31b +58%)
@@ -1053,7 +1054,7 @@ static bool llm_mlx_oq_a8_active_for(int K) {
     return false;
 }
 static bool llm_mlx_oq_a8_verify_enabled(void) {
-    if (g_oq_a8_verify_state < 0) g_oq_a8_verify_state = (getenv("LLMMETAL_OQ_A8_VERIFY") != NULL) ? 1 : 0;
+    if (g_oq_a8_verify_state < 0) g_oq_a8_verify_state = (llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_VERIFY") != NULL) ? 1 : 0;
     return g_oq_a8_verify_state == 1;
 }
 /* Directory della dylib che contiene questo codice: le risorse oQ A8 (.metallib, versionate in
@@ -1077,8 +1078,8 @@ static const char* llm_mlx_self_dir(void) {
 LlmMetalOqA8Ctx* llm_mlx_oq_a8_ctx(void) {
     if (g_oq_a8_ctx) return g_oq_a8_ctx;
     if (g_oq_a8_failed) return NULL;
-    const char* q = getenv("LLMMETAL_OQ_A8_QMM_LIB");
-    const char* a = getenv("LLMMETAL_OQ_A8_QUANT_LIB");
+    const char* q = llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_QMM_LIB");
+    const char* a = llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_QUANT_LIB");
     char qbuf[1200], abuf[1200];
     if (q == NULL || a == NULL) {
         /* Default (nessuna env): le metallib accanto alla dylib. Era il blocco alla promozione
@@ -1159,7 +1160,7 @@ static LlmMetalMppQ4Ctx* g_mpp_q4_bridge = NULL;
 static bool llm_mpp_q4_bridge_try(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc, mlx_array bi,
                                   int group, int bits, int K, int N, mlx_stream s) {
     static int s_tried = 0;
-    if (!s_tried) { s_tried = 1; const char* lib = getenv("LLMMETAL_MPP_Q4_LIB"); if (lib) g_mpp_q4_bridge = llmmetal_mpp_q4_create(lib); }
+    if (!s_tried) { s_tried = 1; const char* lib = llm_ai_mlx_opt_env("LLMMETAL_MPP_Q4_LIB"); if (lib) g_mpp_q4_bridge = llmmetal_mpp_q4_create(lib); }
     if (g_mpp_q4_bridge == NULL) return false;
     if ((group != 64 && group != 32) || bits != 4) return false;
     if (mlx_array_dtype(sc) != MLX_BFLOAT16 || mlx_array_dtype(bi) != MLX_BFLOAT16) return false;
@@ -1201,7 +1202,7 @@ static long g_mpp_tile_miss = 0;
 static bool llm_mpp_q4_tile_try(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc, mlx_array bi,
                                 int group, int bits, int K, int N, mlx_stream s, int T) {
     static int s_tried = 0;
-    if (!s_tried) { s_tried = 1; const char* lib = getenv("LLMMETAL_MPP_Q4_LIB"); if (lib) g_mpp_q4_bridge = llmmetal_mpp_q4_create(lib); }
+    if (!s_tried) { s_tried = 1; const char* lib = llm_ai_mlx_opt_env("LLMMETAL_MPP_Q4_LIB"); if (lib) g_mpp_q4_bridge = llmmetal_mpp_q4_create(lib); }
     if (g_mpp_q4_bridge == NULL) return false;
     if ((group != 64 && group != 32) || bits != 4) return false;
     if (mlx_array_dtype(sc) != MLX_BFLOAT16 || mlx_array_dtype(bi) != MLX_BFLOAT16) return false;
@@ -1339,7 +1340,7 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
     /* MPP q4 (tensor unit Apple) — LLMMETAL_MPP_Q4=1: x [1,T,K] affine g64 b4 -> tensor-op MPP.
      * `=0` e' un vero kill-switch. Group/bits/mode sono derivati dalle shape del tensore:
      * un trunk affine g32-b4 deve ricadere sempre nella qmm generica. */
-    const char* mpp_q4_env = getenv("LLMMETAL_MPP_Q4");
+    const char* mpp_q4_env = llm_ai_mlx_opt_env("LLMMETAL_MPP_Q4");
     if (mpp_q4_env != NULL && strcmp(mpp_q4_env, "0") != 0 &&
         mlx_array_ndim(x) == 3 && mlx_array_dtype(w) == MLX_UINT32 &&
         scales.ctx != NULL && mlx_array_size(scales) > 0 && mlx_array_ndim(w) == 2) {
@@ -1352,7 +1353,7 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
             if (++mpp_hits == 1 && getenv("LLM_WHICH_PATH") != NULL)
                 fprintf(stderr, "[which-path] quantized_linear: MPP q4 TILE g%d b4 T=%d K=%d N=%d\n",
                         mg, xs[1], K, N);
-            if (getenv("LLMMETAL_MPP_Q4_COUNT") != NULL) {
+            if (llm_ai_mlx_opt_env("LLMMETAL_MPP_Q4_COUNT") != NULL) {
                 static long last = 0;
                 if (mpp_hits - last >= 500) { last = mpp_hits;
                     fprintf(stderr, "[mpp-count] tile_hits=%ld tile_miss=%ld\n", mpp_hits, g_mpp_tile_miss); }
@@ -1405,14 +1406,14 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
              * esempio le gate/up del 27B (inter=17408). Override per A/B: LLMMETAL_OQ_A8_MINTOK,
              * LLMMETAL_OQ_A8_MAXN (0 = illimitato, default). */
             static int s_oq_a8_minm = -1, s_oq_a8_maxn = -1;
-            if (s_oq_a8_minm < 0) { const char* e = getenv("LLMMETAL_OQ_A8_MINTOK"); s_oq_a8_minm = e ? atoi(e) : 128; }
+            if (s_oq_a8_minm < 0) { const char* e = llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_MINTOK"); s_oq_a8_minm = e ? atoi(e) : 128; }
             /* Tetto N di DEFAULT 16384 (come il gate del path verify): ESCLUDE l'lm_head
              * (vocab ~151k) dal W8A8. BUG 2026-09-19: con LLMMETAL_OQ_A8_MINTOK=1 l'lm_head andava
              * in W8A8 a M=1 e le probabilita' collassavano (score: max prob ~0,1 e 0/256 hit
              * con MLX a 89,8%): la distribuzione dei logits si appiattisce. Il path di
              * generate escludeva gia' l'lm_head (M<16 nel try), ma greedy_prob/verify_token
              * passano da qui. Override: LLMMETAL_OQ_A8_MAXN=0 (illimitato) per riprodurre. */
-            if (s_oq_a8_maxn < 0) { const char* e = getenv("LLMMETAL_OQ_A8_MAXN"); s_oq_a8_maxn = e ? atoi(e) : 16384; }
+            if (s_oq_a8_maxn < 0) { const char* e = llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_MAXN"); s_oq_a8_maxn = e ? atoi(e) : 16384; }
             const int minm_eff = (g_oq_a8_minm_override >= 0) ? g_oq_a8_minm_override : s_oq_a8_minm;
             if ((llm_mlx_oq_a8_verify_enabled() || llm_mlx_oq_a8_active_for(K)) &&
                 M >= minm_eff && N > 0 && (s_oq_a8_maxn == 0 || N <= s_oq_a8_maxn) &&
@@ -1432,12 +1433,12 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
                      * primitive lo catturi, non che venga sporcato dopo.
                      * Default OFF, zero overhead quando non impostata (getenv una volta pesa poco
                      * ma qui e' un chokepoint hot: TODO cache come le altre llm_mlx_oq_a8_*). */
-                    if (getenv("LLMMETAL_OQ_A8_SYNC_X")) {
+                    if (llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_SYNC_X")) {
                         (void)mlx_array_eval(x); (void)mlx_array_eval(w);
                         (void)mlx_array_eval(scales); (void)mlx_array_eval(biases);
                     }
                     kres = llmmetal_oq_a8_prim(x, w, scales, biases, stream, og_bits);   /* in-graph (sperimentale) */
-                    if (kres.ctx != NULL && getenv("LLMMETAL_OQ_A8_SYNC")) (void)mlx_array_eval(kres);
+                    if (kres.ctx != NULL && llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_SYNC")) (void)mlx_array_eval(kres);
                 } else {
                     /* EAGER (corretto, +7-9%): Stage-A + layout GPU + GEMM via bridge */
                     mlx_array xf = mlx_array_new(), xc = mlx_array_new(), o8 = mlx_array_new();
@@ -1612,7 +1613,7 @@ bool llm_mlx_oq_a8_stage_try(mlx_array x, mlx_array wref, mlx_array scref, mlx_a
      * modo bf16. La combo bf16-OFF + W8A8 e' ROTTA (un token indietro) -> fail-open a MLX. */
     if (!g_bf16_all) return false;
     if (!llm_mlx_oq_a8_enabled() && !llm_mlx_oq_a8_verify_enabled() && !llm_mlx_oq_a8_auto_enabled()) return false;
-    if (getenv("LLMMETAL_OQ_A8_NO_SHARE")) return false;   /* A/B: disattiva Stage A condivisa */
+    if (llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_NO_SHARE")) return false;   /* A/B: disattiva Stage A condivisa */
     if (e_group != 64 || (e_bits != 4 && e_bits != 5 && e_bits != 8)) return false;
     if (!e_mode || strcmp(e_mode, "affine") != 0) return false;
     if (mlx_array_ndim(x) < 2) return false;
@@ -1627,7 +1628,7 @@ bool llm_mlx_oq_a8_stage_try(mlx_array x, mlx_array wref, mlx_array scref, mlx_a
      * VERIFY DFlash2 (M=8) si abbassa con LLMMETAL_OQ_A8_MINTOK (stesso env del gate esterno).
      * Il kernel OQ-A8 e' M-safe (store guardato `if (m < M)`, clamp delle righe oltre M). */
     static int s_stage_minm = -2;
-    if (s_stage_minm == -2) { const char* e = getenv("LLMMETAL_OQ_A8_MINTOK"); s_stage_minm = e ? atoi(e) : 128; }
+    if (s_stage_minm == -2) { const char* e = llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_MINTOK"); s_stage_minm = e ? atoi(e) : 128; }
     const int minm_eff = (g_oq_a8_minm_override >= 0) ? g_oq_a8_minm_override : s_stage_minm;
     if (M < minm_eff) return false;
     if (mlx_array_ndim(wref) < 2 || mlx_array_dtype(wref) != MLX_UINT32) return false;

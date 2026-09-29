@@ -4,6 +4,7 @@
  * VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 
 #include <stdio.h>
@@ -183,7 +184,7 @@ void llm_mlx_auto_pair_act_dtype(LlmMlxModel* m, bool explicit_requested) {
              * ma f16 e' verificato bit-identico (IDS N=512/8192/32768) e +12%/+7%/+2% decode,
              * +35% prefill. Kill-switch LLMENGINE_LLAMA_F16=0. NON generalizzato: su qwen3 denso
              * (Ternary-Bonsai-4B-2bit) f16 PEGGIORA (83-146 vs 157-165 tok/s) -> resta fp32. */
-            const char* e = getenv("LLMENGINE_LLAMA_F16");
+            const char* e = llm_ai_mlx_opt_env("LLMENGINE_LLAMA_F16");
             if (e != NULL && strcmp(e, "0") == 0) return;
         }
     }
@@ -208,7 +209,7 @@ void llm_mlx_auto_pair_act_dtype(LlmMlxModel* m, bool explicit_requested) {
  * lo stesso hoisting sarebbe lossy (bf16<->f16) e viene omesso (ritorno 0). */
 static bool llm_mlx_f32_scales_enabled(void) {
     static int v = -1;
-    if (v < 0) { const char* e = getenv("LLM_F32_SCALES"); v = !(e && strcmp(e, "0") == 0); }  /* default ON, opt-out =0 */
+    if (v < 0) { const char* e = llm_ai_mlx_opt_env("LLM_F32_SCALES"); v = !(e && strcmp(e, "0") == 0); }  /* default ON, opt-out =0 */
     return v != 0;
 }
 
@@ -236,7 +237,7 @@ static bool llm_mlx_is_norm_weight(const char* k) {
  * le scale reali stanno in [~1e-6,10] (dentro il range f16 non-subnormale). Verifica: IDS. */
 static bool llm_mlx_f16_scales_enabled(void) {
     static int v = -1;
-    if (v < 0) { const char* e = getenv("LLM_F16_SCALES"); v = !(e && strcmp(e, "0") == 0); }
+    if (v < 0) { const char* e = llm_ai_mlx_opt_env("LLM_F16_SCALES"); v = !(e && strcmp(e, "0") == 0); }
     return v != 0;
 }
 
@@ -247,7 +248,7 @@ static bool llm_mlx_f16_scales_enabled(void) {
  * promote per-call (che va in f32) -> OPT-IN finche' non e' validato con IDS/gate. */
 static bool llm_mlx_bf16_scales_enabled(void) {
     static int v = -1;
-    if (v < 0) { const char* e = getenv("LLM_BF16_SCALES"); v = (e != NULL && strcmp(e, "0") != 0); }
+    if (v < 0) { const char* e = llm_ai_mlx_opt_env("LLM_BF16_SCALES"); v = (e != NULL && strcmp(e, "0") != 0); }
     return v != 0;
 }
 

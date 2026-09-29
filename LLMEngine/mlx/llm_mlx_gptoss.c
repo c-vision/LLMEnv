@@ -3,6 +3,7 @@
  * dei bias per il decode e getter (sfx/sub/triple). Estratto VERBATIM da llmengine_mlx.c.
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 
 #include <stdio.h>
@@ -62,7 +63,7 @@ static bool llm_mlx_gptoss_ensure(LlmMlxModel* m, int layer_idx) {
 bool llm_mlx_gptoss_bias_prep(LlmMlxModel* m, int layer_idx, int slot, mlx_array src, int dim, mlx_array* out) {
     mlx_array_free(*out); *out = mlx_array_new();
     static int off = -1;
-    if (off < 0) { const char* e = getenv("LLM_GPTOSS_BIASPREP"); off = (e != NULL && strcmp(e, "0") == 0) ? 1 : 0; }
+    if (off < 0) { const char* e = llm_ai_mlx_opt_env("LLM_GPTOSS_BIASPREP"); off = (e != NULL && strcmp(e, "0") == 0) ? 1 : 0; }
     if (off || m == NULL || layer_idx < 0 || layer_idx >= 64 || slot < 0 || slot > 5 ||
         mlx_array_size(src) != (size_t)dim)
         return mlx_array_set(out, src) == 0;
@@ -86,7 +87,7 @@ bool llm_mlx_gptoss_bias_prep(LlmMlxModel* m, int layer_idx, int slot, mlx_array
 
 bool llm_mlx_gptoss_get_sfx(LlmMlxModel* m, int layer_idx, const char* sfx, mlx_array* out) {
     static int off = -1;
-    if (off < 0) { const char* e = getenv("LLM_GPTOSS_WCACHE"); off = (e != NULL && atoi(e) == 0) ? 1 : 0; }
+    if (off < 0) { const char* e = llm_ai_mlx_opt_env("LLM_GPTOSS_WCACHE"); off = (e != NULL && atoi(e) == 0) ? 1 : 0; }
     char nb[256];
     mlx_array_free(*out); *out = mlx_array_new();
     if (off || m == NULL || !llm_mlx_wcache_enabled() || !llm_mlx_gptoss_ensure(m, layer_idx)) {
@@ -116,7 +117,7 @@ static bool llm_mlx_gptoss_get_sub(LlmMlxModel* m, int layer_idx, const char* sf
     memcpy(nm, sfx, bl);
     memcpy(nm + bl, sub == 0 ? ".weight" : (sub == 1 ? ".scales" : ".biases"), 8);
     static int off = -1;
-    if (off < 0) { const char* e = getenv("LLM_GPTOSS_WCACHE"); off = (e != NULL && atoi(e) == 0) ? 1 : 0; }
+    if (off < 0) { const char* e = llm_ai_mlx_opt_env("LLM_GPTOSS_WCACHE"); off = (e != NULL && atoi(e) == 0) ? 1 : 0; }
     if (off || m == NULL || !llm_mlx_wcache_enabled() || layer_idx < 0 || !llm_mlx_gptoss_ensure(m, layer_idx)) {
         if (m == NULL || layer_idx < 0) return false;
         tname(m->cfg.layer_prefix, layer_idx, nm, nb, sizeof(nb));

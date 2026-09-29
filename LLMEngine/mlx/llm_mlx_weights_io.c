@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llmcodec_fp16.h"
@@ -905,7 +906,7 @@ bool llm_mlx_pretouch_weights_enabled(void) {
      * evita (OOM/lockup su modelli >wired-limit tipo Qwen3.8-Flash-Next 104GB). Port del fix
      * GMBasic 87e75432b. */
     if (llm_mlx_moe_swap_on()) return false;
-    return getenv("LLM_NO_PRETOUCH_WEIGHTS") == NULL;
+    return llm_ai_mlx_opt_env("LLM_NO_PRETOUCH_WEIGHTS") == NULL;
 }
 
 
@@ -1205,7 +1206,7 @@ bool stack_moe_experts(const ModelConfig* cfg, MultiShardWeights* weights, mlx_s
  * LLM_GU_FUSE=1 (sperimentale, non per produzione). */
 static int g_gu_fuse_state = -1;
 static bool llm_mlx_gu_fuse_enabled(void) {
-    if (g_gu_fuse_state < 0) g_gu_fuse_state = (getenv("LLM_GU_FUSE") != NULL) ? 1 : 0;
+    if (g_gu_fuse_state < 0) g_gu_fuse_state = (llm_ai_mlx_opt_env("LLM_GU_FUSE") != NULL) ? 1 : 0;
     return g_gu_fuse_state == 1;
 }
 bool fuse_mixtral_gate_up(const ModelConfig* cfg, MultiShardWeights* weights, mlx_stream stream) {

@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 
 #include <stdio.h>
@@ -97,8 +98,8 @@ LlmMlxMtp* llm_mlx_mtp_get(LlmMlxModel* m) {
                                 if (pr && (!pn || pr<pn)) s_mtp.post_norm=0; }
                       free(b); } } }
                 fclose(cf); } }
-    if (getenv("LLM_MTP_POSTNORM")) s_mtp.post_norm = 1;
-    if (getenv("LLM_MTP_PRENORM"))  s_mtp.post_norm = 0;
+    if (llm_ai_mlx_opt_env("LLM_MTP_POSTNORM")) s_mtp.post_norm = 1;
+    if (llm_ai_mlx_opt_env("LLM_MTP_PRENORM"))  s_mtp.post_norm = 0;
     s_mtp.loaded = true; s_state = 1;
     return &s_mtp;
 }
@@ -130,7 +131,7 @@ static int32_t llm_mlx_mtp_step_impl(LlmMlxModel* m, LlmMlxMtp* q, OutputTensors
         mlx_array_free(hn);
     } else if (ok) ok = rms_norm_cfg(&hh, hidden, q->pnh, eps, s);
     mlx_array cat=mlx_array_new();
-    if (ok) { mlx_array cv[2]; if (getenv("LLM_MTP_HIDFIRST")) { cv[0]=hh; cv[1]=he; } else { cv[0]=he; cv[1]=hh; }
+    if (ok) { mlx_array cv[2]; if (llm_ai_mlx_opt_env("LLM_MTP_HIDFIRST")) { cv[0]=hh; cv[1]=he; } else { cv[0]=he; cv[1]=hh; }
               mlx_vector_array v=mlx_vector_array_new_data(cv,2); ok = mlx_concatenate_axis(&cat, v, -1, s)==0; mlx_vector_array_free(v); }
     mlx_array x=mlx_array_new();
     if (ok) ok = quantized_linear_cfg(&x, cat, q->fc_w,q->fc_s,q->fc_b, 64,4,mode, s);
@@ -406,7 +407,7 @@ int llm_ai_mlx_mtp_draft1(llm_ai_mlx_session_handle sh, int32_t* out_draft, int3
     LlmMlxModel* m = ss->model;
     if (out_greedy) *out_greedy = ss->pending_next_id;
     if (ss->history == NULL || ss->history_len <= 0 || ss->pending_h.ctx == NULL) return -2;
-    const char* emb = getenv("LLM_MTP_EMBED");
+    const char* emb = llm_ai_mlx_opt_env("LLM_MTP_EMBED");
     int32_t last = (emb != NULL && strcmp(emb, "last") == 0) ? ss->history[ss->history_len-1] : ss->pending_next_id;
     int32_t d = llm_mlx_mtp_draft1_impl(m, last, ss->pending_h);
     if (out_draft) *out_draft = d;
@@ -433,7 +434,7 @@ int llm_ai_mlx_session_generate_mtp(llm_ai_mlx_session_handle sh, int max_new_to
     LlmMlxSession* s = (LlmMlxSession*)sh;
     if (s == NULL || s->model == NULL || out_ids == NULL || max_new_tokens <= 0) return -1;
     if (llm_mlx_mtp_get(s->model) == NULL) return -2;
-    int K = 1; { const char* d = getenv("LLM_MTP_DEPTH"); if (d) { int v = atoi(d); if (v >= 1 && v <= 8) K = v; } }
+    int K = 1; { const char* d = llm_ai_mlx_opt_env("LLM_MTP_DEPTH"); if (d) { int v = atoi(d); if (v >= 1 && v <= 8) K = v; } }
     int32_t* drafts = (int32_t*)malloc(sizeof(int32_t) * (size_t)K);
     int32_t* blk = (int32_t*)malloc(sizeof(int32_t) * ((size_t)K + 1));
     if (!drafts || !blk) { free(drafts); free(blk); return -1; }

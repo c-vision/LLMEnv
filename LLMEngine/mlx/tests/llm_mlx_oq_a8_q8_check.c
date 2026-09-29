@@ -16,6 +16,7 @@
  * Uso: /tmp/llmmetal_oq_a8_q8_check [K] [N] [M] [bits] [qmm.metallib] [quantize.metallib]
  */
 #include "mlx/c/mlx.h"
+#include "llm_engine_opts.h"
 #include "llmmetal_oq_a8_bridge.h"
 #include <math.h>
 #include <stdio.h>
@@ -52,7 +53,7 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < (size_t)M * K; i++) { seed = seed * 1664525u + 1013904223u; xf[i] = 0.5f * (((seed >> 8) & 1023) / 512.0f - 1.0f); }
     /* Outlier reali: le attivazioni LLM hanno valori molto grandi e rari (canali outlier).
      * Con scala per-RIGA (absmax) un outlier per riga distrugge la precisione degli altri. */
-    if (getenv("LLM_OQ_CHECK_OUTLIER")) {
+    if (llm_ai_mlx_opt_env("LLM_OQ_CHECK_OUTLIER")) {
         for (int m = 0; m < M; ++m) for (int k = 0; k < K; k += 64) xf[(size_t)m * K + k] *= 100.0f;
     }
     int xsh[2] = {M, K};
@@ -71,7 +72,7 @@ int main(int argc, char** argv) {
     mlx_array_eval(X); mlx_array_eval(Wq); mlx_array_eval(Sc2); mlx_array_eval(Bi2);
     /* Diagnostica layout qa: stampa i primi 32 byte di qa[0] e i valori attesi per k=0..31
      * (ACT_MODE 0: inv_scale = 127/amax della riga). */
-    if (getenv("LLM_OQ_CHECK_LAYOUT")) {
+    if (llm_ai_mlx_opt_env("LLM_OQ_CHECK_LAYOUT")) {
         mlx_array qa2 = mlx_array_new(), sa2 = mlx_array_new(), ra2 = mlx_array_new();
         if (llmmetal_oq_a8_stage_a(X, &qa2, &sa2, &ra2, st) == 0) {
             mlx_array_eval(qa2); mlx_array_eval(sa2);
@@ -96,7 +97,7 @@ int main(int argc, char** argv) {
     /* nostro (W8A8): stage_a + qmm */
     mlx_array qa = mlx_array_new(), sa = mlx_array_new(), ra = mlx_array_new();
     mlx_array Y = mlx_array_new();
-    if (!getenv("LLM_OQ_CHECK_ONLY_PRIM")) {
+    if (!llm_ai_mlx_opt_env("LLM_OQ_CHECK_ONLY_PRIM")) {
         if (llmmetal_oq_a8_stage_a(X, &qa, &sa, &ra, st) != 0) { printf("FAIL: stage_a\n"); return 1; }
         Y = llmmetal_oq_a8_qmm(qa, sa, ra, Wq, Sc2, Bi2, st, bits, use_bf16 ? 1 : 0);
         if (!Y.ctx) { printf("FAIL: qmm (bits=%d)\n", bits); return 1; }

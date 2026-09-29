@@ -3,6 +3,7 @@
  * (GLM/DS), deepseek_v2_ffn_block, glm4_moe_ffn_block. Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_router_kernel.h"
 
@@ -27,7 +28,7 @@ static int g_glm_sorted_state = -1;
  * il path legacy. */
 bool llm_glm_sorted_enabled(void) {
     if (g_glm_sorted_state < 0) {
-        const char* e = getenv("LLM_GLM_SORTED");
+        const char* e = llm_ai_mlx_opt_env("LLM_GLM_SORTED");
         if (e != NULL && strcmp(e, "0") == 0) g_glm_sorted_state = 0;
         else g_glm_sorted_state = 1; /* default sorted */
     }
@@ -42,7 +43,7 @@ bool llm_glm_sorted_enabled(void) {
 static int g_ds_sorted_state = -1;
 bool llm_ds_sorted_enabled(void) {
     if (g_ds_sorted_state < 0) {
-        const char* e = getenv("LLM_DS_SORTED");
+        const char* e = llm_ai_mlx_opt_env("LLM_DS_SORTED");
         g_ds_sorted_state = (e != NULL && strcmp(e, "0") == 0) ? 0 : 1;
     }
     return g_ds_sorted_state == 1;
@@ -74,7 +75,7 @@ bool deepseek_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
      * Opt-out LLM_ROUTER_F16=0 (torna al f32). IDS greedy: 116,68,207 identico; A/B +2,6/+2,0/+1%
      * decode @512/2048/8192. Il softmax resta precise=true (piu' preciso dello standard). */
     if (ok) {
-        static int rf16 = -1; if (rf16 < 0) rf16 = getenv("LLM_ROUTER_F16") != NULL ? (strcmp(getenv("LLM_ROUTER_F16"), "0") != 0) : 1;
+        static int rf16 = -1; if (rf16 < 0) rf16 = llm_ai_mlx_opt_env("LLM_ROUTER_F16") != NULL ? (strcmp(llm_ai_mlx_opt_env("LLM_ROUTER_F16"), "0") != 0) : 1;
         if (rf16 && mlx_array_dtype(gates) == MLX_FLOAT16)
             ok = mlx_array_set(&gates_f, gates) == 0;
         else
@@ -134,7 +135,7 @@ bool deepseek_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
             /* LLMENGINE_MOE_NOCONTIG (default ON = salta): `take_along_axis` accetta la vista
              * (mlx_lm passa la slice di argpartition direttamente, 0 Contiguous). Era un
              * workaround difensivo: 1 nodo/layer/token. Opt-out LLMENGINE_MOE_NOCONTIG=0. */
-            static int nocontig = -1; if (nocontig < 0) nocontig = getenv("LLMENGINE_MOE_NOCONTIG") != NULL ? (strcmp(getenv("LLMENGINE_MOE_NOCONTIG"), "0") != 0) : 1;
+            static int nocontig = -1; if (nocontig < 0) nocontig = llm_ai_mlx_opt_env("LLMENGINE_MOE_NOCONTIG") != NULL ? (strcmp(llm_ai_mlx_opt_env("LLMENGINE_MOE_NOCONTIG"), "0") != 0) : 1;
             if (ok && !nocontig) ok = mlx_contiguous(&top_inds, view, false, m->stream) == 0;
             else if (ok) ok = mlx_array_set(&top_inds, view) == 0;
             mlx_array_free(view);
@@ -179,7 +180,7 @@ bool deepseek_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
     ok = ok && multishard_get_triple(&m->weights, namebuf, &dn_w, &dn_s, &dn_b);
     llm_mlx_quant_derive(gp_w, gp_s, gsz, bts, "affine", &xp_group, &xp_bits, xp_mode, sizeof xp_mode);
     DCHK(ok, "switch_mlp lookup");
-    if (ok && getenv("LLMENGINE_MOE_DT")) fprintf(stderr, "[moe-dt] layer=%d h=%d normed2=%d gp_w=%d gp_s=%d gp_b=%d (F32=%d BF16=%d) mode=%s\n",
+    if (ok && llm_ai_mlx_opt_env("LLMENGINE_MOE_DT")) fprintf(stderr, "[moe-dt] layer=%d h=%d normed2=%d gp_w=%d gp_s=%d gp_b=%d (F32=%d BF16=%d) mode=%s\n",
         layer_idx, (int)mlx_array_dtype(h), (int)mlx_array_dtype(normed2),
         (int)mlx_array_dtype(gp_w), (int)mlx_array_dtype(gp_s), (int)mlx_array_dtype(gp_b),
         (int)MLX_FLOAT32, (int)MLX_BFLOAT16, xp_mode);
@@ -192,7 +193,7 @@ bool deepseek_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
                   ok = mlx_reshape(&tv2, tu, ts, 2, m->stream)==0;
                   /* `tu` e' un astype (dense): il reshape non aggiunge stride, la vista e' gia'
                    * contigua -> niente copia (mlx_lm: 0 Contiguous). Vedi LLMENGINE_MOE_NOCONTIG sopra. */
-                  static int nocontig2 = -1; if (nocontig2 < 0) nocontig2 = getenv("LLMENGINE_MOE_NOCONTIG") != NULL ? (strcmp(getenv("LLMENGINE_MOE_NOCONTIG"), "0") != 0) : 1;
+                  static int nocontig2 = -1; if (nocontig2 < 0) nocontig2 = llm_ai_mlx_opt_env("LLMENGINE_MOE_NOCONTIG") != NULL ? (strcmp(llm_ai_mlx_opt_env("LLMENGINE_MOE_NOCONTIG"), "0") != 0) : 1;
                   if (ok && !nocontig2) ok = mlx_contiguous(&top_inds_arr, tv2, false, m->stream)==0;
                   else if (ok) ok = mlx_array_set(&top_inds_arr, tv2) == 0;
                   mlx_array_free(tv2); }
@@ -201,10 +202,10 @@ bool deepseek_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
     mlx_array x1 = mlx_array_new();
     /* A/B 2026-09-23: lhs 5D (mlx_lm expand_dims(-2,-3)) vs 4D storica -> NESSUNA differenza
      * (5D ~18.0 vs 4D ~17.7 tok/s), parita' IDS ok. Tenuta la 4D storica. LLM_GLM_X1_5D=1 per il 5D. */
-    static int g_x1_5d = -1; if (g_x1_5d < 0) g_x1_5d = (getenv("LLM_GLM_X1_5D") != NULL) ? 1 : 0;
+    static int g_x1_5d = -1; if (g_x1_5d < 0) g_x1_5d = (llm_ai_mlx_opt_env("LLM_GLM_X1_5D") != NULL) ? 1 : 0;
     if (ok && g_x1_5d) { const int x1s[5]={1,n_tokens,1,1,m->cfg.hidden_size}; ok = mlx_reshape(&x1, normed2, x1s, 5, m->stream)==0; }
     else if (ok) { const int x1s[4]={n_tokens,1,1,m->cfg.hidden_size}; ok = mlx_reshape(&x1, normed2, x1s, 4, m->stream)==0; }
-    if (ok && getenv("LLMENGINE_MOE_DT")) fprintf(stderr, "[moe-dt] layer=%d h=%d normed2=%d x1=%d gp_w=%d gp_s=%d gp_b=%d (F32=%d BF16=%d)\n",
+    if (ok && llm_ai_mlx_opt_env("LLMENGINE_MOE_DT")) fprintf(stderr, "[moe-dt] layer=%d h=%d normed2=%d x1=%d gp_w=%d gp_s=%d gp_b=%d (F32=%d BF16=%d)\n",
         layer_idx, (int)mlx_array_dtype(h), (int)mlx_array_dtype(normed2), (int)mlx_array_dtype(x1),
         (int)mlx_array_dtype(gp_w), (int)mlx_array_dtype(gp_s), (int)mlx_array_dtype(gp_b),
         (int)MLX_FLOAT32, (int)MLX_BFLOAT16);
@@ -424,7 +425,7 @@ bool glm4_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
     /* FIX MoE f32 (LLMENGINE_MOE_BF16=1): se normed2 e' f32 (norm weight promosso a f32) ma l'hidden e'
      * bf16, il gather esperti gira in f32 e le scale vengono promosse per-op -> AsType + GatherQMM
      * f32 = ~47 ms su GLM (PEROP), il costo #1. Riporta l'input del MoE al dtype dell'hidden. */
-    static int g_moe_bf16 = -1; if (g_moe_bf16 < 0) g_moe_bf16 = (getenv("LLMENGINE_MOE_BF16") != NULL) ? 1 : 0;
+    static int g_moe_bf16 = -1; if (g_moe_bf16 < 0) g_moe_bf16 = (llm_ai_mlx_opt_env("LLMENGINE_MOE_BF16") != NULL) ? 1 : 0;
     if (ok && g_moe_bf16 && mlx_array_dtype(normed2) == MLX_FLOAT32 && mlx_array_dtype(h) != MLX_FLOAT32) {
         mlx_array n2b = mlx_array_new();
         if (mlx_astype(&n2b, normed2, mlx_array_dtype(h), m->stream) == 0) mlx_array_set(&normed2, n2b);
@@ -435,7 +436,7 @@ bool glm4_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
      * n_group==1, gates f32 (GLM) e scaling 1.0. La strada closure/compile e' documentata
      * controproducente (geglu 14x) -> kernel Metal diretto. PARITA' GREEDY da verificare. OFF di default. */
     static int g_glm_router_metal_state = -1;
-    if (g_glm_router_metal_state < 0) g_glm_router_metal_state = (getenv("LLMMETAL_GLM_ROUTER_METAL") != NULL) ? 1 : 0;
+    if (g_glm_router_metal_state < 0) g_glm_router_metal_state = (llm_ai_mlx_opt_env("LLMMETAL_GLM_ROUTER_METAL") != NULL) ? 1 : 0;
     mlx_array top_inds = mlx_array_new(), weights = mlx_array_new();
     bool router_done = false;
     if (ok && g_glm_router_metal_state == 1 && m->cfg.n_group <= 1 && !kimi_router_bf16 &&
@@ -636,13 +637,13 @@ bool glm4_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
          * f32 (costoso). Riporta x1 al dtype dei pesi (bf16). */
         /* DEFAULT ON (2026-09-23): l'hidden che entra nel MoE deve stare nel dtype del modello
          * (bf16), come mlx_lm. Senza, va in f32 (deviazione+3x piu' lento). Opt-out LLMENGINE_MOE_BF16=0. */
-        static int g_moe_bf16 = -1; if (g_moe_bf16 < 0) { const char* e = getenv("LLMENGINE_MOE_BF16"); g_moe_bf16 = !(e && strcmp(e, "0") == 0); }
+        static int g_moe_bf16 = -1; if (g_moe_bf16 < 0) { const char* e = llm_ai_mlx_opt_env("LLMENGINE_MOE_BF16"); g_moe_bf16 = !(e && strcmp(e, "0") == 0); }
         if (g_moe_bf16 && mlx_array_dtype(x1) == MLX_FLOAT32 && mlx_array_dtype(gp_w) != MLX_FLOAT32) {
             mlx_array x1b = mlx_array_new();
             if (mlx_astype(&x1b, x1, MLX_BFLOAT16, m->stream) == 0) mlx_array_set(&x1, x1b);
             mlx_array_free(x1b);
         }
-        if (getenv("LLMENGINE_MOE_DT")) fprintf(stderr, "[moe-dt] layer=%d h=%d normed2=%d x1=%d gp_w=%d gp_s=%d gp_b=%d (F32=%d BF16=%d)\n",
+        if (llm_ai_mlx_opt_env("LLMENGINE_MOE_DT")) fprintf(stderr, "[moe-dt] layer=%d h=%d normed2=%d x1=%d gp_w=%d gp_s=%d gp_b=%d (F32=%d BF16=%d)\n",
             layer_idx, (int)mlx_array_dtype(h), (int)mlx_array_dtype(normed2), (int)mlx_array_dtype(x1),
             (int)mlx_array_dtype(gp_w), (int)mlx_array_dtype(gp_s), (int)mlx_array_dtype(gp_b),
             (int)MLX_FLOAT32, (int)MLX_BFLOAT16);

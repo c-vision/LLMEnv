@@ -10,6 +10,7 @@
 #include <string.h>
 #include "llm_dsv4_attn_fwd.h"
 #include "llm_dsv4_quant.h"
+#include "llm_dsv4_gpu_ctx.h"   /* hook GPU opt-in (F4) */
 
 typedef struct {
     float* raw_kv;        int n_raw, raw_cap;       /* [raw_cap, head_dim] */
@@ -222,7 +223,8 @@ static inline void llm_dsv4_attn_cached(const LlmDsv4Config* c, const LlmDsv4Lay
     float* kv = (float*)malloc(sizeof(float) * (size_t)hd);
     float* qrn = (float*)malloc(sizeof(float) * (size_t)c->n_lora_q);
     float* heads = (float*)malloc(sizeof(float) * (size_t)q_dim);
-    llm_dsv4_attn_project(c, L, pe, xn, pos, il, q, kv, qrn);
+    if (!llm_dsv4_gpu_attn_project_try(c, L, il, xn, pos, q, kv, qrn))
+        llm_dsv4_attn_project(c, L, pe, xn, pos, il, q, kv, qrn);
     llm_dsv4_fp8_kv_quantize_row(kv, c->n_head_dim, c->n_rot);
     { const char* df = getenv("LLM_DSV4_DUMP_KVF");
       if (df && df[0] && il == 0) { FILE* f = fopen(df, "ab"); if (f) { fwrite(kv, sizeof(float), (size_t)c->n_head_dim, f); fclose(f); } } }
@@ -257,7 +259,8 @@ static inline void llm_dsv4_attn_cached(const LlmDsv4Config* c, const LlmDsv4Lay
       if (dc && dc[0] && il == 0) { FILE* f = fopen(dc, "wb"); if (f) { fwrite(k->raw_kv, sizeof(float), (size_t)k->n_raw * hd, f); fclose(f); } } }
     { const char* dr = getenv("LLM_DSV4_DUMP_RAWHEADS");
       if (dr && dr[0] && il == 0) { FILE* f = fopen(dr, "wb"); if (f) { fwrite(heads, sizeof(float), (size_t)q_dim, f); fclose(f); } } }
-    llm_dsv4_attn_finish(c, L, pe, heads, pos, il, out);
+    if (!llm_dsv4_gpu_attn_finish_try(c, L, il, heads, pos, out))
+        llm_dsv4_attn_finish(c, L, pe, heads, pos, il, out);
     free(heads); free(qrn); free(kv); free(q);
 }
 

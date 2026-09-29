@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_lora.h"
@@ -41,7 +42,7 @@ static LlmKvqCold g_kvq_cold = { {0}, {0}, {0}, {0}, {0}, {0}, 0 };
 static int llm_mlx_kvq_flush_batch(void) {
     static int v = 0;
     if (v == 0) {
-        const char* e = getenv("LLM_KVQ_FLUSH_BATCH");
+        const char* e = llm_ai_mlx_opt_env("LLM_KVQ_FLUSH_BATCH");
         v = (e != NULL && atoi(e) > 0) ? atoi(e) : 64;
     }
     return v;
@@ -473,7 +474,7 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
      * isolato dal resto. Se drenare qui basta (a differenza di LLMMETAL_OQ_A8_SYNC_X, che NON
      * bastava), la causa e' l'accumulo cross-invocazione, non la staleness di un input di una
      * singola chiamata. Default OFF, nessun impatto quando non impostata. */
-    if (ok && getenv("LLMMETAL_OQ_A8_SYNC_LAYER")) ok = mlx_array_eval(*out) == 0;
+    if (ok && llm_ai_mlx_opt_env("LLMMETAL_OQ_A8_SYNC_LAYER")) ok = mlx_array_eval(*out) == 0;
     if (gmem && ok) {
         size_t peak = 0, active = 0, cache = 0;
         mlx_reset_peak_memory();
