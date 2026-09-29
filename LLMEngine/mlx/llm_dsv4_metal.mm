@@ -454,8 +454,8 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]],\n"
 "    ushort sgitg [[simdgroup_index_in_threadgroup]], threadgroup char* shmem [[threadgroup(0)]]) {\n"
 "    const int idx = (int)tgpig.z; const int e = SEL[idx];\n"
-"    device const char* SG = GB + (ulong)e * (ulong)P[3];\n"
-"    device const char* SU = UB + (ulong)e * (ulong)P[4];\n"
+"    device const char* SG = GB + (ulong)P[5] + (ulong)e * (ulong)P[3];\n"
+"    device const char* SU = UB + (ulong)P[6] + (ulong)e * (ulong)P[4];\n"
 "    const int ne00=(int)P[0], nb01=(int)P[1], ne0=(int)P[2];\n"
 "    dsv4_pair_core(SG, SU, Y, MID, RW[idx], idx*ne0, CF[0], ne00, nb01, ne0, 0u, 0u, tgpig.x, tiisg, sgitg, shmem);\n"
 "}\n"
@@ -464,13 +464,13 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) {\n"
 "    const short NSG = 4; const short nr0 = 4;\n"
 "    const int nb = (int)P[0]; const uint nb01 = P[1];\n"
-"    const int ne0 = (int)P[2]; const int ne00 = (int)P[3]; const uint stride_d = P[4];\n"
+"    const int ne0 = (int)P[2]; const int ne00 = (int)P[3]; const uint stride_d = P[4]; const uint lead_d = P[5];\n"
 "    const int first_row = (tgpig.x * NSG + sgitg) * nr0;\n"
 "    float sumf[4] = {0.f,0.f,0.f,0.f};\n"
 "    const short ix = tiisg / 8; const short it = tiisg % 8;\n"
 "    const short iq = it / 4; const short ir = it % 4; const short is = (8 * ir) / 16;\n"
 "    for (int slot = 0; slot < 6; slot++) {\n"
-"        device const char* s0 = DB + (ulong)SEL[slot] * (ulong)stride_d;\n"
+"        device const char* s0 = DB + (ulong)lead_d + (ulong)SEL[slot] * (ulong)stride_d;\n"
 "        device const float* y = MID + (ulong)slot * (ulong)ne00;\n"
 "        device const float* y4 = y + ix * 256 + 128 * iq + 8 * ir;\n"
 "        for (int ib = ix; ib < nb; ib += 4) {\n"
@@ -1230,9 +1230,10 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
     id<MTLBuffer> NORMW = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->norm_w, (size_t)D*sizeof(float));
     id<MTLBuffer> EXPB  = q->exp_probs_b ? (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->exp_probs_b, (size_t)q->n_expert*sizeof(float)) : nil;
     size_t rtw_lead = 0;
-    id<MTLBuffer> GB = dsv4_view(b, q->gate_base, (size_t)q->n_expert * q->gate_stride, NULL);
-    id<MTLBuffer> UB = dsv4_view(b, q->up_base,   (size_t)q->n_expert * q->up_stride,   NULL);
-    id<MTLBuffer> DB = dsv4_view(b, q->down_base, (size_t)q->n_expert * q->down_stride, NULL);
+    size_t lg = 0, lu = 0, ld = 0;
+    id<MTLBuffer> GB = dsv4_view(b, q->gate_base, (size_t)q->n_expert * q->gate_stride, &lg);
+    id<MTLBuffer> UB = dsv4_view(b, q->up_base,   (size_t)q->n_expert * q->up_stride,   &lu);
+    id<MTLBuffer> DB = dsv4_view(b, q->down_base, (size_t)q->n_expert * q->down_stride, &ld);
     id<MTLBuffer> RTW = dsv4_view(b, q->router_w, (size_t)q->n_expert*D*sizeof(float), &rtw_lead);
     size_t oa_lead = 0, ob_lead = 0;
     id<MTLBuffer> OUTA = dsv4_view(b, q->outa_w, (size_t)q->ng*q->rank*q->outa_row_bytes, &oa_lead);
@@ -1330,12 +1331,12 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
         [e setBuffer:SEL offset:0 atIndex:0]; [e setBuffer:GB offset:0 atIndex:1]; [e setBuffer:UB offset:0 atIndex:2];
         [e setBuffer:NRM offset:0 atIndex:3]; [e setBuffer:MID offset:0 atIndex:4]; [e setBuffer:RW offset:0 atIndex:5];
         { float cf[1]={q->clamp}; [e setBytes:cf length:sizeof(cf) atIndex:6]; }
-        { uint32_t P[5]={D,q->gu_nb01,q->ff,(uint32_t)q->gate_stride,(uint32_t)q->up_stride}; [e setBytes:P length:sizeof(P) atIndex:7]; }
+        { uint32_t P[7]={D,q->gu_nb01,q->ff,(uint32_t)q->gate_stride,(uint32_t)q->up_stride,(uint32_t)lg,(uint32_t)lu}; [e setBytes:P length:sizeof(P) atIndex:7]; }
         [e setThreadgroupMemoryLength:256*8+128 atIndex:0];
         [e dispatchThreadgroups:MTLSizeMake((q->ff+NSG*nr0-1)/(NSG*nr0),1,(NSUInteger)q->used) threadsPerThreadgroup:MTLSizeMake(32*NSG,1,1)];
         [e setComputePipelineState:b->pso_addr_sum6];
         [e setBuffer:SEL offset:0 atIndex:0]; [e setBuffer:DB offset:0 atIndex:1]; [e setBuffer:MID offset:0 atIndex:2]; [e setBuffer:ROUT offset:0 atIndex:3];
-        { uint32_t P[5]={q->ff/256u,q->down_nb01,D,q->ff,(uint32_t)q->down_stride}; [e setBytes:P length:sizeof(P) atIndex:4]; }
+        { uint32_t P[6]={q->ff/256u,q->down_nb01,D,q->ff,(uint32_t)q->down_stride,(uint32_t)ld}; [e setBytes:P length:sizeof(P) atIndex:4]; }
         [e dispatchThreadgroups:MTLSizeMake((D+NSG*nr0-1)/(NSG*nr0),1,1) threadsPerThreadgroup:MTLSizeMake(32*NSG,1,1)];
         /* shared expert -> ROUT += D2 */
         if (q->sg) {
