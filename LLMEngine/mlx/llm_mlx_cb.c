@@ -1293,8 +1293,8 @@ int llm_ai_mlx_kvq_splash_selftest(char* out, size_t cap) {
             const int PT = 32, npg = n / PT;
             int8_t* kqr = (int8_t*)malloc((size_t)nkv*n*hd);
             int8_t* vqr = (int8_t*)malloc((size_t)nkv*n*hd);
-            float*  ksr = (float*)malloc((size_t)nkv*n);
-            float*  vsr = (float*)malloc((size_t)nkv*n);
+            float*  ksr = (float*)malloc((size_t)nkv*n*sizeof(float));
+            float*  vsr = (float*)malloc((size_t)nkv*n*sizeof(float));
             int32_t* ptr = (int32_t*)malloc((size_t)npg*sizeof(int32_t));
             if (kqr && vqr && ksr && vsr && ptr) {
                 for (int kh = 0; kh < nkv; kh++)
