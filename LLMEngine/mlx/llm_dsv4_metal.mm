@@ -573,6 +573,48 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        const float s = simd_sum(sumf[row]);\n"
 "        if (tiisg == 0) OUT[first_row + row] = s;\n"
 "    }\n"
+"}\n"
+/* Attn mista su KV device: fedele a llm_dsv4_attention_mixed (raw poi comp, sink, allowed).
+ * Un threadgroup per testa; dot cooperativo (simd_sum), due pass (max, poi somma pesata).
+ * P = {n_raw, n_comp, hd, has_allowed}. */
+"kernel void dsv4_attn_mixed(device const float* Q [[buffer(0)]], device const float* RAWK [[buffer(1)]],\n"
+"    device const float* COMPK [[buffer(2)]], device const int* ALLOWED [[buffer(3)]],\n"
+"    device const float* SINKS [[buffer(4)]], device float* OUT [[buffer(5)]],\n"
+"    constant uint* P [[buffer(6)]],\n"
+"    uint h [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
+"    const uint n_raw = P[0], n_comp = P[1], hd = P[2]; const uint has_allowed = P[3];\n"
+"    const float kq = 1.f / sqrt((float)hd);\n"
+"    device const float* qh = Q + (ulong)h * (ulong)hd;\n"
+"    device float* oh = OUT + (ulong)h * (ulong)hd;\n"
+"    float mx = SINKS[h];\n"
+"    for (uint r = 0; r < n_raw; r++) {\n"
+"        device const float* kv = RAWK + (ulong)r * (ulong)hd;\n"
+"        float acc = 0.f; for (uint i = tiisg; i < hd; i += 32u) acc += qh[i] * kv[i];\n"
+"        acc = simd_sum(acc); float s = acc * kq; if (s > mx) mx = s;\n"
+"    }\n"
+"    for (uint r = 0; r < n_comp; r++) {\n"
+"        if (has_allowed && !ALLOWED[r]) continue;\n"
+"        device const float* kv = COMPK + (ulong)r * (ulong)hd;\n"
+"        float acc = 0.f; for (uint i = tiisg; i < hd; i += 32u) acc += qh[i] * kv[i];\n"
+"        acc = simd_sum(acc); float s = acc * kq; if (s > mx) mx = s;\n"
+"    }\n"
+"    float den = exp(SINKS[h] - mx);\n"
+"    float accE[32]; for (uint k = 0; k < 32u; k++) accE[k] = 0.f;\n"
+"    for (uint r = 0; r < n_raw; r++) {\n"
+"        device const float* kv = RAWK + (ulong)r * (ulong)hd;\n"
+"        float acc = 0.f; for (uint i = tiisg; i < hd; i += 32u) acc += qh[i] * kv[i];\n"
+"        acc = simd_sum(acc); float w = exp(acc * kq - mx); den += w;\n"
+"        uint k = 0; for (uint i = tiisg; i < hd; i += 32u) { accE[k] += w * kv[i]; k++; }\n"
+"    }\n"
+"    for (uint r = 0; r < n_comp; r++) {\n"
+"        if (has_allowed && !ALLOWED[r]) continue;\n"
+"        device const float* kv = COMPK + (ulong)r * (ulong)hd;\n"
+"        float acc = 0.f; for (uint i = tiisg; i < hd; i += 32u) acc += qh[i] * kv[i];\n"
+"        acc = simd_sum(acc); float w = exp(acc * kq - mx); den += w;\n"
+"        uint k = 0; for (uint i = tiisg; i < hd; i += 32u) { accE[k] += w * kv[i]; k++; }\n"
+"    }\n"
+"    float inv = 1.f / den;\n"
+"    { uint k = 0; for (uint i = tiisg; i < hd; i += 32u) { oh[i] = accE[k] * inv; k++; } }\n"
 "}\n";
 
 struct LlmDsv4Metal {
@@ -591,6 +633,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_route;   /* router su GPU (softplus/top-k) */
     id<MTLComputePipelineState> pso_addr_pair, pso_addr_sum6; /* MoE via tabella indirizzi (ds4 addr) */
     id<MTLComputePipelineState> pso_tbl_pair, pso_tbl_sum6;  /* MoE via argument buffer (ds4 table) */
+    id<MTLComputePipelineState> pso_attn_mixed;  /* attn mista raw+comp su device (ds4) */
     id<MTLArgumentEncoder> enc_pair, enc_down;
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
@@ -680,6 +723,9 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->enc_down = f24 ? [f24 newArgumentEncoderWithBufferIndex:1] : nil;
     if (!f23) fprintf(stderr, "dsv4_metal: kernel dsv4_slots6_tbl_pair NON compilato\n");
     if (!f24) fprintf(stderr, "dsv4_metal: kernel dsv4_sum6_tbl NON compilato\n");
+    id<MTLFunction> f25 = [lib newFunctionWithName:@"dsv4_attn_mixed"];
+    b->pso_attn_mixed = f25 ? [dev newComputePipelineStateWithFunction:f25 error:&err] : nil;
+    if (!f25) fprintf(stderr, "dsv4_metal: kernel dsv4_attn_mixed NON compilato\n");
     [lib release];
     if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->pso_route || !b->pso_addr_pair || !b->pso_addr_sum6 || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
@@ -1155,6 +1201,49 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b,
     }
     if (WA) [WA release];
     if (WB) [WB release];
+    return rc;
+}
+
+/* Attn mista (raw+comp) su KV device: replica llm_dsv4_attention_mixed. `allowed` puo' essere
+ * NULL (tutte le compresse ammesse). Attenzioni: upload dei KV host; con KV persistente su device
+ * il chiamante usera' la variante a buffer condivisi. 0 = ok. */
+int llm_dsv4_metal_attention_mixed(LlmDsv4Metal* b, const float* q, int n_head, int hd,
+        const float* raw_kv, int n_raw, const float* comp_kv, int n_comp,
+        const int* allowed, const float* sinks, float* out) {
+    if (!b || !b->pso_attn_mixed || !q || !sinks || !out) return -1;
+    if (n_head <= 0 || hd <= 0 || hd > 1024 || n_raw < 0 || n_comp < 0) return -1;
+    id<MTLBuffer> BQ = [b->dev newBufferWithBytes:q length:(NSUInteger)((size_t)n_head*(size_t)hd*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BS = [b->dev newBufferWithBytes:sinks length:(NSUInteger)((size_t)n_head*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BR = (n_raw > 0) ? [b->dev newBufferWithBytes:raw_kv length:(NSUInteger)((size_t)n_raw*(size_t)hd*sizeof(float)) options:MTLResourceStorageModeShared] : nil;
+    id<MTLBuffer> BC = (n_comp > 0) ? [b->dev newBufferWithBytes:comp_kv length:(NSUInteger)((size_t)n_comp*(size_t)hd*sizeof(float)) options:MTLResourceStorageModeShared] : nil;
+    id<MTLBuffer> BA = (allowed && n_comp > 0) ? [b->dev newBufferWithBytes:allowed length:(NSUInteger)((size_t)n_comp*sizeof(int)) options:MTLResourceStorageModeShared] : nil;
+    id<MTLBuffer> BO = [b->dev newBufferWithLength:(NSUInteger)((size_t)n_head*(size_t)hd*sizeof(float)) options:MTLResourceStorageModeShared];
+    int rc = (BQ && BS && BO && (n_raw == 0 || BR) && (n_comp == 0 || BC)) ? 0 : -2;
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:b->pso_attn_mixed];
+        [e setBuffer:BQ offset:0 atIndex:0];
+        [e setBuffer:BR offset:0 atIndex:1];
+        [e setBuffer:BC offset:0 atIndex:2];
+        [e setBuffer:BA offset:0 atIndex:3];
+        [e setBuffer:BS offset:0 atIndex:4];
+        [e setBuffer:BO offset:0 atIndex:5];
+        uint32_t P[4] = { (uint32_t)n_raw, (uint32_t)n_comp, (uint32_t)hd, (uint32_t)(BA ? 1 : 0) };
+        [e setBytes:P length:sizeof(P) atIndex:6];
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_head, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [e endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) memcpy(out, [BO contents], (size_t)n_head * (size_t)hd * sizeof(float));
+    }
+    if (BQ) [BQ release];
+    if (BS) [BS release];
+    if (BR) [BR release];
+    if (BC) [BC release];
+    if (BA) [BA release];
+    if (BO) [BO release];
     return rc;
 }
 

@@ -67,6 +67,12 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
                                uint32_t down_nb01, const void* sg, const void* su, const void* sd,
                                uint32_t s_nb_g, uint32_t s_nb_d, float* out);
 
+/* Attn mista (raw+comp) su KV device: replica llm_dsv4_attention_mixed. `allowed`/`comp_kv`/`raw_kv`
+ * possono essere NULL se n_comp/n_raw = 0. Scrive out[n_head*hd]. 0 = ok. */
+int llm_dsv4_metal_attention_mixed(LlmDsv4Metal* b, const float* q, int n_head, int hd,
+        const float* raw_kv, int n_raw, const float* comp_kv, int n_comp,
+        const int* allowed, const float* sinks, float* out);
+
 /* Output grouped-LoRA FUSO (ds4): out_a (ng gruppi) + out_b in UNA command buffer, `low` su device. */
 int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t outa_row_bytes,
         size_t outa_lead0, int ng, uint32_t gd, uint32_t rank, const void* outb_w,
