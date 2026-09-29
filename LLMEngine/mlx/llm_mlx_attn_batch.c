@@ -995,14 +995,7 @@ bool forward_tokens_batch(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array emb
         has_cache[layer] = true;
         mlx_array_free(h);
         h = layer_out;
-        if (step_ok && layer <= 1 && getenv("LLM_BONSAI_DBG")) {
-            mlx_array vf = mlx_array_new();
-            if (mlx_astype(&vf, h, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(vf) == 0) {
-                const float* d = mlx_array_data_float32(vf);
-                if (d) { fprintf(stderr, "[layer%d] out[:6] =", layer); for (int q=0;q<6;q++) fprintf(stderr, " %.6f", d[q]); fprintf(stderr, "\n"); }
-            }
-            mlx_array_free(vf);
-        }
+        
 
         /* Senza eval, l'INTERO chunk tiene vivi gli intermedi di TUTTI i layer (la CPU
          * accoda in ~1s, la GPU gira ~10s) -> il picco cresce col chunk. Materializzando

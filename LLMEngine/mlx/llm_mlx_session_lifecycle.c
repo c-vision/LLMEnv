@@ -64,15 +64,7 @@ static bool embed_token(LlmMlxModel* m, mlx_array embed_w, mlx_array embed_s, ml
     if (ok2) {
         const int x_shape[3] = {1, 1, m->cfg.hidden_size};
         ok2 = mlx_reshape(out_x, x_flat, x_shape, 3, m->stream) == 0;
-        if (ok2 && getenv("LLM_BONSAI_DBG")) {
-            mlx_array vf = mlx_array_new();
-            if (mlx_astype(&vf, *out_x, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(vf) == 0) {
-                const float* d = mlx_array_data_float32(vf);
-                if (d) { fprintf(stderr, "[embed] id=%d quant=%d g=%d bits=%d :", token_id, (int)quantized, e_group, e_bits);
-                         for (int q=0;q<8;q++) fprintf(stderr, " %.6f", d[q]); fprintf(stderr, "\n"); }
-            }
-            mlx_array_free(vf);
-        }
+        
         /* Ternary-Bonsai: l'embed e' in inverse_weight_names -> si ruota l'USCITA (invert=true).
          * La direzione (R vs R^T) e' ambigua dal naming: la decide il test empirico (NLL). */
         const int emb_inv = (llm_ai_mlx_opt_env("LLM_BONSAI_EMBED_INV") != NULL) ? (atoi(llm_ai_mlx_opt_env("LLM_BONSAI_EMBED_INV")) != 0 ? 1 : 0) : 1;

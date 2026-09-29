@@ -640,9 +640,9 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
             }
         }
     }
-    if (getenv("LLM_BONSAI_DBG")) fprintf(stderr, "[cfg] quant mode=%s group=%d bits=%d model_type=%s prefix=%s\n",
+    if (0) fprintf(stderr, "[cfg] quant mode=%s group=%d bits=%d model_type=%s prefix=%s\n",
                                           cfg->quant_mode, cfg->quant_group_size, cfg->quant_bits, cfg->model_type, cfg->layer_prefix);
-    if (getenv("LLM_BONSAI_DBG")) fprintf(stderr, "[cfg] gdn Hk=%d Hv=%d Dk=%d Dv=%d convk=%d convkdim=%d attn_hd=%d\n",
+    if (0) fprintf(stderr, "[cfg] gdn Hk=%d Hv=%d Dk=%d Dv=%d convk=%d convkdim=%d attn_hd=%d\n",
                                           cfg->linear_num_key_heads, cfg->linear_num_value_heads, cfg->linear_key_head_dim,
                                           cfg->linear_value_head_dim, cfg->linear_attn_conv_kernel, cfg->linear_conv_kernel_dim, cfg->linear_attn_head_dim);
     /* qwen4_exp: output gate = sigmoid SE (output_gate_type or hidden_act)=="sigmoid", altrimenti silu. */

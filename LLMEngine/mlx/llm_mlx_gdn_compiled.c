@@ -18,10 +18,8 @@
  * (kernel Metal fuso vs loop per-token), una riga per layer. Zero overhead se non impostata.
  * Serve alla verifica del todo MLX-Decode-Composizione §12 (il kernel fuso deve partire sulle
  * shape reali: se qui compare "LOOP per-token", il kernel e' ineleggibile e va corretto). */
-static int g_gdn_kernel_dbg_state = -1;
 bool llm_mlx_gdn_kernel_dbg_enabled(void) {
-    if (g_gdn_kernel_dbg_state < 0) g_gdn_kernel_dbg_state = (getenv("LLM_GDN_KERNEL_DBG") != NULL) ? 1 : 0;
-    return g_gdn_kernel_dbg_state == 1;
+    return false;
 }
 /* M1 iter-1 (decode compilato): closure mlx_compile per le 4 proj in_proj del blocco GDN.
  * Pure (solo h + pesi catturati), shape-stabile a M=1 (decode). Il gate arch
@@ -73,8 +71,7 @@ bool llm_mlx_gdn_inproj_compiled(int li, mlx_array h,
         int rcc = mlx_compile(&g_gdn_ip_cl[li], raw, /*shapeless=*/false);
         mlx_set_compile_mode(MLX_COMPILE_MODE_NO_FUSE);
         mlx_closure_free(raw);
-        if (rcc != 0) { free(pl); g_gdn_ip_pay[li] = NULL; if (getenv("LLM_M1_DBG")) fprintf(stderr, "[m1dbg] mlx_compile FAIL li=%d rc=%d\n", li, rcc); return false; }
-        if (getenv("LLM_M1_DBG")) fprintf(stderr, "[m1dbg] mlx_compile OK li=%d\n", li);
+        if (rcc != 0) { free(pl); g_gdn_ip_pay[li] = NULL; if (0) fprintf(stderr, "[m1dbg] mlx_compile FAIL li=%d rc=%d\n", li, rcc); return false; }
         g_gdn_ip_valid[li] = true;
     }
     mlx_vector_array in = mlx_vector_array_new_data(&h, 1);
@@ -175,7 +172,6 @@ static int gdn_block_fn(mlx_vector_array* out, const mlx_vector_array in, void* 
     mlx_array inv1 = llm_mlx_act_scalar((float)p->inv_scale);
     mlx_vector_array kv_split = mlx_vector_array_new();
 
-    if (getenv("LLM_M1_DBG")) fprintf(stderr, "[m1blk] fn call (trace/replay)\n");
     if (mlx_vector_array_get(&x, in, 0) != 0 ||
         mlx_vector_array_get(&state, in, 1) != 0 ||
         mlx_vector_array_get(&conv0, in, 2) != 0) ok = false;
@@ -290,7 +286,6 @@ bool llm_mlx_gdn_block_compiled(LlmMlxModel* m, int li, mlx_array x,
     if (!g_gdn_blk_valid[li]) {
         GdnBlkPayload* pl = (GdnBlkPayload*)calloc(1, sizeof(*pl));
         if (pl == NULL) return false;
-        if (getenv("LLM_M1_DBG")) fprintf(stderr, "[m1blk] build start li=%d\n", li);
         /* cattura SICURA: nuovo handle + mlx_array_set (il buffer resta vivo: il motore
          * libera gli handle dei pesi a fine blocco). */
 #define GDNBLK_CAP(dst, src) do { dst = mlx_array_new(); \
@@ -341,7 +336,6 @@ bool llm_mlx_gdn_block_compiled(LlmMlxModel* m, int li, mlx_array x,
                    if (mlx_exp(&e, pl->A_log, m->stream) != 0) { mlx_array_free(e); return false; }
                    GDNBLK_CAP(pl->eAlog, e); mlx_array_free(e); }
         }
-        if (getenv("LLM_M1_DBG")) fprintf(stderr, "[m1blk] capture done li=%d\n", li);
 #undef GDNBLK_CAP
         pl->Hk = Hk; pl->Hv = Hv; pl->Dk = Dk; pl->Dv = Dv;
         pl->key_dim = key_dim; pl->value_dim = value_dim; pl->conv_dim = conv_dim;
@@ -358,11 +352,9 @@ bool llm_mlx_gdn_block_compiled(LlmMlxModel* m, int li, mlx_array x,
         mlx_set_compile_mode(MLX_COMPILE_MODE_NO_FUSE);
         mlx_closure_free(raw);
         if (rcc != 0) {
-            if (getenv("LLM_M1_DBG")) fprintf(stderr, "[m1blk] mlx_compile FAIL li=%d rc=%d\n", li, rcc);
             g_gdn_blk_pay[li] = NULL;
             return false;
         }
-        if (getenv("LLM_M1_DBG")) fprintf(stderr, "[m1blk] mlx_compile OK li=%d\n", li);
         g_gdn_blk_valid[li] = true;
     }
 

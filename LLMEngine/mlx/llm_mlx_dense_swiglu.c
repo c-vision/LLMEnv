@@ -137,7 +137,7 @@ bool llm_bonsai_rotate(mlx_array* x, LlmMlxModel* m, int layer_idx, const char* 
             }
         }
         if (kind == 0) {
-            if (getenv("LLM_BONSAI_DBG"))
+            if (0)
                 fprintf(stderr, "[bonsai] NON trovato: '%s' (prefix='%s', layer_idx=%d, alt provato per lm_head)\n",
                         name, m->cfg.layer_prefix, layer_idx);
             return true;
@@ -148,39 +148,24 @@ bool llm_bonsai_rotate(mlx_array* x, LlmMlxModel* m, int layer_idx, const char* 
     if (nd < 1) return true;
     int width = (int)mlx_array_dim(*x, nd - 1);
     const float* signs = llm_bonsai_hadamard_signs_for(m->bonsai_had, width);
-    if (signs != NULL && getenv("LLM_BONSAI_DBG") && strstr(name, "out_proj") != NULL)
+    if (signs != NULL && 0 && strstr(name, "out_proj") != NULL)
         fprintf(stderr, "[gdn] out_proj signs(%d)[0:6]= %.0f %.0f %.0f %.0f %.0f %.0f\n", width,
                 signs[0],signs[1],signs[2],signs[3],signs[4],signs[5]);
     if (signs == NULL) return true;
     mlx_array r = mlx_array_new();
     bool dir_inv = invert;
     if (kind == 1 && llm_ai_mlx_opt_env("LLM_BONSAI_FWD_INV") != NULL && atoi(llm_ai_mlx_opt_env("LLM_BONSAI_FWD_INV")) != 0) dir_inv = !dir_inv;   /* A/B direzione forward */
-    if (getenv("LLM_BONSAI_DBG") && strstr(name, "embed_tokens") != NULL) {
-        mlx_array vf = mlx_array_new();
-        if (mlx_astype(&vf, *x, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(vf) == 0) {
-            const float* d = mlx_array_data_float32(vf);
-            if (d) { fprintf(stderr, "[bonsai] EMBED in[:8] ="); for (int q=0;q<8;q++) fprintf(stderr," %.6f", d[q]); fprintf(stderr, "\n"); }
-        }
-        mlx_array_free(vf);
-    }
+    
     bool ok = llm_bonsai_hadamard_rotate(&r, *x, width, m->bonsai_had->block, signs,
                                         llm_bonsai_signs_right(), dir_inv, m->stream);
     if (ok) {
         mlx_array_set(x, r);
-        if (getenv("LLM_BONSAI_DBG") && strstr(name, "embed_tokens") != NULL) {
-            mlx_array vf = mlx_array_new();
-            if (mlx_astype(&vf, *x, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(vf) == 0) {
-                const float* d = mlx_array_data_float32(vf);
-                if (d) fprintf(stderr, "[bonsai] EMBED out[:6] = %.5f %.5f %.5f %.5f %.5f %.5f\n",
-                               d[0], d[1], d[2], d[3], d[4], d[5]);
-            }
-            mlx_array_free(vf);
-        }
-        if (getenv("LLM_BONSAI_DBG"))
+        
+        if (0)
             fprintf(stderr, "[bonsai] ruotata %s (width=%d invert=%d)%s\n", name, width, (int)invert,
                     llm_ai_mlx_opt_env("LLM_BONSAI_ONCE") ? "" : "");
     }
-    else if (getenv("LLM_BONSAI_DBG"))
+    else if (0)
         fprintf(stderr, "[bonsai] rotate FALLITA %s width=%d invert=%d\n", name, width, (int)invert);
     mlx_array_free(r);
     return ok;
@@ -197,14 +182,7 @@ bool dense_swiglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
         if (!(cond)) { fprintf(stderr, "dense_swiglu_ffn[layer=%d]: %s failed\n", layer_idx, (what)); ok = false; } \
     } while (0)
 
-    if (layer_idx == 0 && getenv("LLM_BONSAI_DBG")) {
-        mlx_array vf = mlx_array_new();
-        if (mlx_astype(&vf, h, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(vf) == 0) {
-            const float* d = mlx_array_data_float32(vf);
-            if (d) { fprintf(stderr, "[mlp0] in[:6] ="); for (int q=0;q<6;q++) fprintf(stderr, " %.6f", d[q]); fprintf(stderr, "\n"); }
-        }
-        mlx_array_free(vf);
-    }
+    
 
     mlx_array ln2_w = mlx_array_new();
     mlx_array gate_w = mlx_array_new(), gate_s = mlx_array_new(), gate_b = mlx_array_new();
