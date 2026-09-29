@@ -47,45 +47,9 @@ static bool df2_rms(mlx_array* res, mlx_array x, mlx_array w, float eps, mlx_str
 }
 
 /* Debug temporaneo (validazione): stampa min/max/mean + primi 8 valori fp32. */
-static void df2_dbg(mlx_array a, const char* tag, mlx_stream st) {
-    if (getenv("DF2_DEBUG") == NULL) return;
-
-    mlx_array h = mlx_array_new();
-    if (mlx_astype(&h, a, MLX_FLOAT32, st) != 0) { mlx_array_free(h); return; }
-    if (mlx_array_eval(h) != 0) { mlx_array_free(h); return; }
-    const float* d = mlx_array_data_float32(h);
-    if (!d) { mlx_array_free(h); return; }
-    size_t n = mlx_array_size(h);
-    if (n > 65536) n = 65536;
-    double mn = 1e30, mx = -1e30, mean = 0.0;
-    for (size_t i = 0; i < n; i++) {
-        if (d[i] < mn) mn = d[i];
-        if (d[i] > mx) mx = d[i];
-        mean += d[i];
-    }
-    fprintf(stderr, "[df2dbg] %-24s n=%zu min=%g max=%g mean=%g |", tag, mlx_array_size(h), mn, mx, mean / (n ? (double)n : 1));
-    size_t p = mlx_array_size(h) > 8 ? 8 : mlx_array_size(h);
-    for (size_t i = 0; i < p; i++) fprintf(stderr, " %.5g", d[i]);
-    fprintf(stderr, "\n");
-    mlx_array_free(h);
-}
 
 /* Dump binario temporaneo (DF2_DUMP=/tmp/df2dir): scrive l'array fp32 raw per
  * confronto bit-exact col reference python (stesso tag, file c_<tag>.bin). */
-static void df2_dump(mlx_array a, const char* tag, mlx_stream st) {
-    const char* dir = getenv("DF2_DUMP");
-    if (dir == NULL) return;
-    mlx_array h = mlx_array_new();
-    if (mlx_astype(&h, a, MLX_FLOAT32, st) != 0) { mlx_array_free(h); return; }
-    if (mlx_array_eval(h) != 0) { mlx_array_free(h); return; }
-    const float* d = mlx_array_data_float32(h);
-    if (!d) { mlx_array_free(h); return; }
-    char path[1024];
-    snprintf(path, sizeof(path), "%s/c_%s.bin", dir, tag);
-    FILE* f = fopen(path, "wb");
-    if (f) { fwrite(d, sizeof(float), mlx_array_size(h), f); fclose(f); }
-    mlx_array_free(h);
-}
 
 /* Grouped dynamic causal conv a due tap -- reference `_grouped_dynamic_convolve`:
  *   hidden : [1, L, H]
@@ -102,8 +66,6 @@ static bool df2_convolve(mlx_array* res, mlx_array hidden, mlx_array dyn,
     int H = mlx_array_shape(hidden)[2];
     int kern = mlx_array_shape(base)[0];
     int groups = H / group_size;
-    static int conv_dump_done = 0;
-    const bool conv_dbg = getenv("DF2_DUMP") != NULL && !conv_dump_done;
 
     /* blocks = hidden.reshape(B,L,groups,group) */
     mlx_array blocks = mlx_array_new();
@@ -119,11 +81,7 @@ static bool df2_convolve(mlx_array* res, mlx_array hidden, mlx_array dyn,
     }
     mlx_array output = mlx_array_new();
     if (ok) ok = mlx_zeros_like(&output, blocks, stream) == 0;
-    if (conv_dbg) {
-        df2_dump(blocks, "cv_blocks", stream);
-        df2_dump(dyn5, "cv_dyn5", stream);
-        df2_dump(base, "cv_base", stream);
-    }
+    
 
     for (int off = 0; ok && off < kern; off++) {
         /* values = blocks shiftate a destra di off lungo l'asse temporale */
@@ -176,17 +134,7 @@ static bool df2_convolve(mlx_array* res, mlx_array hidden, mlx_array dyn,
         /* output = ((output + kernel*values) + dynamic*values) -- ordine Python */
         if (ok) ok = mlx_add(&output, output, kv, stream) == 0;
         if (ok) ok = mlx_add(&output, output, dv, stream) == 0;
-        if (conv_dbg) {
-            char tag[64];
-            snprintf(tag, sizeof(tag), "cv_k%d", off);
-            df2_dump(kernel, tag, stream);
-            snprintf(tag, sizeof(tag), "cv_dyn%d", off);
-            df2_dump(tap, tag, stream);
-            snprintf(tag, sizeof(tag), "cv_values%d", off);
-            df2_dump(values, tag, stream);
-            snprintf(tag, sizeof(tag), "cv_out%d", off);
-            df2_dump(output, tag, stream);
-        }
+        
         mlx_array_free(values); mlx_array_free(kernel); mlx_array_free(tap);
         mlx_array_free(kv); mlx_array_free(dv);
     }
@@ -194,7 +142,6 @@ static bool df2_convolve(mlx_array* res, mlx_array hidden, mlx_array dyn,
         const int sh[3] = {1, L, H};
         ok = mlx_reshape(res, output, sh, 3, stream) == 0;
     }
-    if (conv_dbg) conv_dump_done = 1;
     mlx_array_free(blocks);
     mlx_array_free(dyn5);
     mlx_array_free(output);
@@ -365,19 +312,8 @@ static bool df2_attn_layer(DFlash2Runtime* rt, int layer_idx, int cur,
         mlx_array_free(no_freqs);
     }
     CHK_DF2(ok, "rope");
-    if (getenv("DF2_DEBUG") && layer_idx == 0) {
-        df2_dbg(q, "attn.q", st);
-        df2_dbg(qn, "attn.qn", st);
-        df2_dbg(q_r, "attn.q_rope", st);
-        df2_dbg(kc_r, "attn.kc_rope", st);
-        df2_dbg(kp_r, "attn.kp_rope", st);
-    }
-    if (getenv("DF2_DUMP") && layer_idx == 0) {
-        df2_dump(qn, "l0_qnorm", st);
-        df2_dump(q_r, "l0_qrope", st);
-        df2_dump(kc_r, "l0_kcrope", st);
-        df2_dump(kp_r, "l0_kprope", st);
-    }
+    
+    
 
     /* append ctx keys/values alla cache per layer (positions [cur, cur+S)) */
     mlx_array cache_full = mlx_array_new();
@@ -435,16 +371,8 @@ static bool df2_attn_layer(DFlash2Runtime* rt, int layer_idx, int cur,
         mlx_array_free(no_mask); mlx_array_free(no_sinks);
     }
     CHK_DF2(ok, "scaled_dot_product_attention");
-    if (getenv("DF2_DEBUG") && layer_idx == 0) {
-        df2_dbg(keys_all, "attn.keys_all", st);
-        df2_dbg(vals_all, "attn.vals_all", st);
-        df2_dbg(attn, "attn.sdpa_out", st);
-    }
-    if (getenv("DF2_DUMP") && layer_idx == 0) {
-        df2_dump(keys_all, "l0_keys", st);
-        df2_dump(vals_all, "l0_vals", st);
-        df2_dump(attn, "l0_sdpa", st);
-    }
+    
+    
 
     mlx_array attn_bt = mlx_array_new(), attn_flat = mlx_array_new();
     if (ok) {
@@ -455,23 +383,10 @@ static bool df2_attn_layer(DFlash2Runtime* rt, int layer_idx, int cur,
             ok = mlx_reshape(&attn_flat, attn_bt, fsh, 3, st) == 0;
         }
     }
-    if (getenv("DF2_DUMP") && layer_idx == 0) {
-        df2_dump(attn_flat, "l0_attn_flat", st);
-        df2_dump(ow, "l0_ow", st);
-    }
+    
     if (ok) ok = df2_linear(out_o, attn_flat, ow, st);
     CHK_DF2(ok, "o_proj");
-    if (getenv("DF2_DEBUG") && layer_idx == 0) {
-        df2_dbg(attn_flat, "op_attn_flat", st);
-        df2_dbg(*out_o, "op_bf16", st);
-        /* matmul fp32 esplicito (peso astype f32) per verificare il risultato bf16 */
-        mlx_array wf = mlx_array_new(), wtf = mlx_array_new(), of = mlx_array_new();
-        if (ok) ok = mlx_astype(&wf, ow, MLX_FLOAT32, st) == 0;
-        if (ok) ok = mlx_transpose(&wtf, wf, st) == 0;
-        if (ok) ok = mlx_matmul(&of, attn_flat, wtf, st) == 0;
-        df2_dbg(of, "op_fp32", st);
-        mlx_array_free(wf); mlx_array_free(wtf); mlx_array_free(of);
-    }
+    
 
     mlx_array all[] = {
         qw, kw, vw, ow, qn_w, kn_w, q, k_ctx, v_ctx, k_prop, v_prop,
@@ -500,7 +415,7 @@ static bool df2_mlp_swiglu(DFlash2Runtime* rt, int layer_idx, mlx_array h, mlx_a
     ok = ok && multishard_get(&d->weights, namebuf, &down_w);
     if (!ok) { fprintf(stderr, "df2_mlp[layer=%d]: lookup pesi mlp fallito\n", layer_idx); }
 
-    const bool _mt = (getenv("DF2_PHASE_TIME") != NULL);
+    const bool _mt = 0;
     struct timespec _m0,_m1; double _tg=0,_tu=0,_ts=0,_td=0;
     mlx_array gate_out = mlx_array_new(), up_out = mlx_array_new();
     if (ok) { if(_mt) clock_gettime(CLOCK_MONOTONIC,&_m0); ok = df2_linear(&gate_out, h, gate_w, st); }
@@ -549,7 +464,7 @@ static bool df2_layer(DFlash2Runtime* rt, int layer_idx, int cur, int L, int S,
     const int group_size = c->dflash_conv_group;
     const int groups = H / group_size;
     bool ok = true;
-    const bool _ptime_l = (getenv("DF2_PHASE_TIME") != NULL); static int _once_l = 0;
+    const bool _ptime_l = 0; static int _once_l = 0;
 
 #define CHK_DF2L(cond, what) do { if (!(cond)) { fprintf(stderr, "df2_layer[layer=%d]: %s failed\n", layer_idx, (what)); ok = false; } } while (0)
 
@@ -619,38 +534,20 @@ static bool df2_layer(DFlash2Runtime* rt, int layer_idx, int cur, int L, int S,
     if (ok) ok = df2_convolve(&h_pre, xnorm, dyn_pre, ac_b0, group_size, st);
     if (ok && _ptime_l) { struct timespec _a,_b; clock_gettime(CLOCK_MONOTONIC,&_a); mlx_array_eval(h_pre); clock_gettime(CLOCK_MONOTONIC,&_b); if (layer_idx==2 && _once_l<10) { _once_l++; fprintf(stderr,"[df2lt] conv_hpre=%.2fms\n", ((_b.tv_sec-_a.tv_sec)*1e3+(_b.tv_nsec-_a.tv_nsec)/1e6)); } }
     CHK_DF2L(ok, "conv prepare attenzione");
-    if (getenv("DF2_DEBUG") && layer_idx == 0) {
-        df2_dbg(xnorm, "l0.xnorm", st);
-        df2_dbg(dyn_pre, "l0.dyn_pre", st);
-        df2_dbg(h_pre, "l0.h_pre", st);
-    }
-    if (getenv("DF2_DUMP") && layer_idx == 0) {
-        df2_dump(xnorm, "l0_xnorm", st);
-        df2_dump(dyn_pre, "l0_dyn_pre", st);
-        df2_dump(dyn_sv, "l0_dyn_sv", st);
-        df2_dump(ac_b0, "l0_ac_b0", st);
-        df2_dump(h_pre, "l0_h_pre", st);
-    }
+    
+    
 
     mlx_array attn_o = mlx_array_new();
     if (ok) ok = df2_attn_layer(rt, layer_idx, cur, L, S, h_pre, x_ctx, &attn_o);
     if (ok && _ptime_l) { struct timespec _a,_b; clock_gettime(CLOCK_MONOTONIC,&_a); mlx_array_eval(attn_o); clock_gettime(CLOCK_MONOTONIC,&_b); if (layer_idx==2 && _once_l<10) { _once_l++; fprintf(stderr,"[df2lt] attn=%.2fms\n", ((_b.tv_sec-_a.tv_sec)*1e3+(_b.tv_nsec-_a.tv_nsec)/1e6)); } }
     CHK_DF2L(ok, "attenzione");
-    if (getenv("DF2_DUMP") && layer_idx == 0) {
-        df2_dump(attn_o, "l0_attn_o", st);
-        df2_dump(dyn_sv, "l0_dyn_sv", st);
-        df2_dump(ac_b1, "l0_ac_b1", st);
-    }
+    
     mlx_array h_fin = mlx_array_new();
     if (ok) ok = df2_convolve(&h_fin, attn_o, dyn_sv, ac_b1, group_size, st);
     if (ok && _ptime_l) { struct timespec _a,_b; clock_gettime(CLOCK_MONOTONIC,&_a); mlx_array_eval(h_fin); clock_gettime(CLOCK_MONOTONIC,&_b); if (layer_idx==2 && _once_l<10) { _once_l++; fprintf(stderr,"[df2lt] conv_hfin=%.2fms\n", ((_b.tv_sec-_a.tv_sec)*1e3+(_b.tv_nsec-_a.tv_nsec)/1e6)); } }
     mlx_array h = mlx_array_new();
     if (ok) ok = mlx_add(&h, x, h_fin, st) == 0;   /* residual 1 */
-    if (getenv("DF2_DEBUG") && layer_idx == 0) {
-        df2_dbg(attn_o, "l0.attn_o", st);
-        df2_dbg(h_fin, "l0.h_fin", st);
-        df2_dbg(h, "l0.h_post_attn", st);
-    }
+    
 
     /* ---- MLP: conv.prepare(post_ln) + SwiGLU + conv.finish ---- */
     mlx_array hnorm = mlx_array_new();
@@ -688,17 +585,8 @@ static bool df2_layer(DFlash2Runtime* rt, int layer_idx, int cur, int L, int S,
     if (ok && _ptime_l) { struct timespec _a,_b; clock_gettime(CLOCK_MONOTONIC,&_a); mlx_array_eval(m_fin); clock_gettime(CLOCK_MONOTONIC,&_b); if (layer_idx==2 && _once_l<10) { _once_l++; fprintf(stderr,"[df2lt] conv_mfin=%.2fms\n", ((_b.tv_sec-_a.tv_sec)*1e3+(_b.tv_nsec-_a.tv_nsec)/1e6)); } }
     if (ok) ok = mlx_add(out, h, m_fin, st) == 0;   /* residual 2 */
     CHK_DF2L(ok, "layer output");
-    if (getenv("DF2_DEBUG") && layer_idx == 0) {
-        df2_dbg(hnorm, "l0.hnorm", st);
-        df2_dbg(m_pre, "l0.m_pre", st);
-        df2_dbg(mlp_o, "l0.mlp_o", st);
-        df2_dbg(*out, "l0.out", st);
-    }
-    if (getenv("DF2_DUMP") && layer_idx == 0) {
-        df2_dump(*out, "l0_out", st);
-        df2_dump(h_fin, "l0_h_fin", st);
-        df2_dump(h, "l0_h_post_attn", st);
-    }
+    
+    
 
     mlx_array all[] = {
         ln_w, ln2_w, ac_w, ac_b, mc_w, mc_b, ac_b0, ac_b1, mc_b0, mc_b1,
@@ -727,11 +615,10 @@ bool df2_backbone(DFlash2Runtime* rt, const int32_t* block_ids, int L,
     bool ok = true;
 
     /* embed blocco [1,L,H] bf16 dal target */
-    const bool _ptime = (getenv("DF2_PHASE_TIME") != NULL);
+    const bool _ptime = 0;
     mlx_array x = mlx_array_new();
     if (ok) ok = df2_embed_batch(rt, block_ids, L, &x);
     if (ok && _ptime) { struct timespec _t0,_t1; clock_gettime(CLOCK_MONOTONIC,&_t0); mlx_array_eval(x); clock_gettime(CLOCK_MONOTONIC,&_t1); fprintf(stderr,"[df2bb] embed=%.2fms\n",((_t1.tv_sec-_t0.tv_sec)*1e3+(_t1.tv_nsec-_t0.tv_nsec)/1e6)); }
-    df2_dbg(x, "backbone.x_embed", st);
 
     /* h_ctx = hidden_norm(fc(x_ctx)): fc.weight [H, n_ctx*H] */
     mlx_array fc_w = mlx_array_new();
@@ -745,7 +632,6 @@ bool df2_backbone(DFlash2Runtime* rt, const int32_t* block_ids, int L,
     if (ok) ok = df2_linear(&h_ctx, x_ctx, fc_w, st);
     if (ok) ok = df2_rms(&h_ctx, h_ctx, hn_w, c->rms_norm_eps, st);
     if (ok && _ptime) { struct timespec _t0,_t1; clock_gettime(CLOCK_MONOTONIC,&_t0); mlx_array_eval(h_ctx); clock_gettime(CLOCK_MONOTONIC,&_t1); fprintf(stderr,"[df2bb] fc+norm=%.2fms (x_ctx [1,%d,%d])\n",((_t1.tv_sec-_t0.tv_sec)*1e3+(_t1.tv_nsec-_t0.tv_nsec)/1e6), S, c->hidden_size); }
-    df2_dbg(h_ctx, "backbone.h_ctx", st);
 
     /* n layer */
     mlx_array h = mlx_array_new();
@@ -783,7 +669,7 @@ double g_df2_t_prop = 0, g_df2_t_sel = 0, g_df2_t_bb = 0, g_df2_t_wget = 0, g_df
 double g_df2_ts_argp = 0, g_df2_ts_unary = 0, g_df2_ts_hproj = 0, g_df2_ts_succ = 0, g_df2_ts_ast = 0;
 int g_df2_n_rounds = 0, g_df2_n_roll = 0;
 double g_df2_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
-bool g_df2_time_on(void) { static int v = -1; if (v < 0) v = (getenv("DF2_TIME") != NULL) ? 1 : 0; return v == 1; }
+bool g_df2_time_on(void) { return false; }
 
 bool df2_selector(DFlash2Runtime* rt, mlx_array hidden_post, mlx_array logits,
                          int K, int32_t anchor, int32_t* out_path) {
@@ -871,15 +757,6 @@ bool df2_selector(DFlash2Runtime* rt, mlx_array hidden_post, mlx_array logits,
     mlx_array cp32 = mlx_array_new();
     if (ok && build_cpw) ok = mlx_astype(&cp32, cp_w, MLX_FLOAT32, st) == 0;
     /* DF2_SEL_TIME: valuta i sottografi SEPARATAMENTE per trovare il collo (diagnostica). */
-    if (ok && getenv("DF2_SEL_TIME") != NULL) {
-        double a;
-        a = g_df2_now(); mlx_array_eval(cand_h);            g_df2_ts_argp  += g_df2_now() - a;
-        a = g_df2_now(); mlx_array_eval(unary);             g_df2_ts_unary += g_df2_now() - a;
-        a = g_df2_now(); mlx_array_eval(hidden_proj);       g_df2_ts_hproj += g_df2_now() - a;
-        a = g_df2_now(); mlx_array_eval(succ);              g_df2_ts_succ  += g_df2_now() - a;
-        a = g_df2_now(); mlx_array_eval(unary32); mlx_array_eval(hproj32); mlx_array_eval(succ32);
-        g_df2_ts_ast += g_df2_now() - a;
-    }
     if (ok) {
         mlx_vector_array v = mlx_vector_array_new();
         mlx_vector_array_append_value(v, cand_h);
@@ -932,12 +809,6 @@ bool df2_selector(DFlash2Runtime* rt, mlx_array hidden_post, mlx_array logits,
     mlx_array_free(unary); mlx_array_free(hidden_proj);
     mlx_array_free(cand_flat); mlx_array_free(succ_rows); mlx_array_free(succ);
     if (g_df2_time_on()) g_df2_t_sel += g_df2_now() - _st0;
-    if (getenv("DF2_SEL_TIME") != NULL) {
-        static int pr = 0;
-        if ((pr++ % 8) == 7)
-            fprintf(stderr, "[df2seltime] argp=%.1f unary=%.1f hproj=%.1f succ=%.1f ast=%.1f ms (cumulativi)\n",
-                    g_df2_ts_argp*1000, g_df2_ts_unary*1000, g_df2_ts_hproj*1000, g_df2_ts_succ*1000, g_df2_ts_ast*1000);
-    }
 #undef CHK_DFS
     return ok;
 }

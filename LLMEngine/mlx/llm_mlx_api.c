@@ -219,13 +219,6 @@ static int df2_propose_impl(DFlash2Runtime* rt,
         return -1;
     }
 
-    /* DF2_PHASE_TIME: materializza per fase (backbone, lm_head) cosi' il timer del selector
-     * copre SOLO il selector. Senza, il primo eval flusha tutto e le attribuzioni sono false. */
-    if (ok && getenv("DF2_PHASE_TIME") != NULL) {
-        double _a = g_df2_now(); mlx_array_eval(hidden); g_df2_t_bb += g_df2_now() - _a;
-        _a = g_df2_now(); mlx_array_eval(logits); g_df2_t_wget += g_df2_now() - _a;
-    }
-
     /* ---- selector greedy ---- */
     ok = df2_selector(rt, hidden_post, logits, K, last_verified_token, out_tokens);
 
@@ -499,13 +492,6 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
         accepted = 1;
         for (int j = 1; j < K; j++) { if (greedy[j] == d[j]) accepted++; else break; }
     }
-    if (ok && getenv("DF2_VDBG")) {
-        static int vn = 0;
-        if (vn < 100000) { vn++;
-            fprintf(stderr, "[df2vdbg] n_prev=%d anchor=%d K=%d accepted=%d rollback=%d emitted_start=%d\n",
-                    n_prev, anchor, K, accepted, (accepted<K)?1:0, n_prev+1);
-        }
-    }
     int keep = n_prev + 1 + accepted;
     if (g_df2_time_on()) g_df2_n_rounds++;
     if (ok && accepted < K) {
@@ -616,11 +602,6 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
         for (int i = 0; i < tnl; i++) { mlx_array_free(pk[i]); mlx_array_free(pv[i]); }
         free(pk); free(pv); free(ph); mlx_array_free(phidden);
         if (!okc) { free(pctx); fprintf(stderr, "dflash_generate: capture prompt fallita\n"); return -1; }
-        if (getenv("DF2_DUMP_CTX")) {
-            FILE* fc = fopen(getenv("DF2_DUMP_CTX"), "wb");
-            if (fc) { fwrite(pctx, sizeof(float), (size_t)pctx_cap, fc); fclose(fc); }
-            fprintf(stderr, "[ctx] dumped %lld floats\n", (long long)pctx_cap);
-        }
         llm_ai_mlx_dflash2_reset(handle);   /* nuova sequenza: ring del draft pulito */
     }
 
@@ -667,8 +648,6 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
         anchor = next_anchor;
         if (stop_eos) break;
         if (emitted >= max_tokens) break;
-        if (getenv("DF2_STATS"))
-            fprintf(stderr, "[df2stats] r=%d accepted=%d/%d\n", stat_rounds, accepted, K);
     }
 
     /* A1: persistenza. Il ctx `ctx_r` (ultimo vctx; pctx se nessun round) resta nel runtime per
@@ -678,13 +657,6 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
     rt->last_offset = s->cache_offset;
     s->pending_next_id = anchor;
     s->has_pending = true;
-    if (getenv("DF2_STATS") && stat_rounds > 0)
-        fprintf(stderr, "[df2stats] total accepted=%d/%d (%.0f%%)\n", stat_accepted, stat_K,
-                100.0 * (double)stat_accepted / (double)stat_K);
-    if (getenv("DF2_SEL_TIME")) {
-        fprintf(stderr, "[df2seltime] argp=%.1f unary=%.1f hproj=%.1f succ=%.1f ast=%.1f ms (cumulativi)\n",
-                g_df2_ts_argp*1000, g_df2_ts_unary*1000, g_df2_ts_hproj*1000, g_df2_ts_succ*1000, g_df2_ts_ast*1000);
-    }
     if (g_df2_time_on() && g_df2_n_rounds > 0)
         fprintf(stderr, "[df2time] rounds=%d rollbacks=%d | ckpt=%.1f | fwd=%.1f | arg=%.1f | roll=%.1f | "
                         "PROPOSE=%.1f (backbone=%.1f selector=%.1f) ms/round\n",
