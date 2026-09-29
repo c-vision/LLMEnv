@@ -153,10 +153,6 @@ bool deepseek_v2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset
     if (ok) { mlx_vector_array v=mlx_vector_array_new(); mlx_vector_array_append_value(v,q_nope); mlx_vector_array_append_value(v,q_pe_r);
               ok = mlx_concatenate_axis(&queries, v, 3, m->stream)==0; mlx_vector_array_free(v); }
 
-    { static double _dse=0; static int _dsn2=0; if (llm_env_isset("LLM_DS_TIME")) { struct timespec _a,_b; clock_gettime(CLOCK_MONOTONIC,&_a);
-        mlx_array_eval(keys); mlx_array_eval(values); clock_gettime(CLOCK_MONOTONIC,&_b);
-        _dse += (_b.tv_sec-_a.tv_sec)+(_b.tv_nsec-_a.tv_nsec)*1e-9; _dsn2++;
-        if(_dsn2%27==0) fprintf(stderr,"[DS_EXP] n=%d exp=%.3fs\n",_dsn2,_dse); } }
     mlx_array k_full=mlx_array_new(), v_full=mlx_array_new();
     mlx_array k_attn_src=mlx_array_new(), v_attn_src=mlx_array_new();
     if (ok && has_cache && n_tokens == 1 && llm_mla_inplace_enabled()) {
@@ -215,30 +211,11 @@ bool deepseek_v2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset
     }
 
     mlx_array attn=mlx_array_new();
-    /* LLM_DS_TIME: diagnostica temporanea (con eval) append-cache vs SDPA. */
-    static double _ds_ap = 0.0, _ds_sd = 0.0; static int _ds_n = 0;
-    const bool _ds_tm = llm_env_isset("LLM_DS_TIME");
-    struct timespec _ds_t0, _ds_t1;
-    if (_ds_tm && ok) {
-        clock_gettime(CLOCK_MONOTONIC, &_ds_t0);
-        mlx_array_eval(k_attn_src); mlx_array_eval(v_attn_src);
-        clock_gettime(CLOCK_MONOTONIC, &_ds_t1);
-        _ds_ap += (_ds_t1.tv_sec-_ds_t0.tv_sec) + (_ds_t1.tv_nsec-_ds_t0.tv_nsec)*1e-9;
-    }
     /* mlx_lm deepseek_v2.py: `if mscale_all_dim: mscale=yarn_get_mscale(factor,mscale_all_dim);
      * self.scale = self.scale * mscale * mscale` -> la scala attenzione include mscale^2. */
     float amsc = llm_mlx_yarn_mscale(m->cfg.yarn_factor, m->cfg.yarn_mscale_all_dim);
     float attn_scale = (1.0f/sqrtf((float)qh)) * amsc * amsc;
     if (ok) ok = llm_mlx_gqa_sdpa(&attn, queries, k_attn_src, v_attn_src, attn_scale, 0, m->stream);
-    if (_ds_tm && ok) {
-        clock_gettime(CLOCK_MONOTONIC, &_ds_t0);
-        mlx_array_eval(attn);
-        clock_gettime(CLOCK_MONOTONIC, &_ds_t1);
-        _ds_sd += (_ds_t1.tv_sec-_ds_t0.tv_sec) + (_ds_t1.tv_nsec-_ds_t0.tv_nsec)*1e-9;
-        _ds_n++;
-        if (_ds_n % 27 == 0)
-            fprintf(stderr, "[DS_TIME] layers=%d append=%.3fs sdpa=%.3fs\n", _ds_n, _ds_ap, _ds_sd);
-    }
 
     mlx_array attn_bt=mlx_array_new(), attn_flat=mlx_array_new(), proj=mlx_array_new();
     if (ok) { int perm[4]={0,2,1,3}; ok = mlx_transpose_axes(&attn_bt, attn, perm, 4, m->stream)==0; }
