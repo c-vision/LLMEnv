@@ -80,7 +80,6 @@ static inline bool llm_kvq_pool_init(llm_kvq_pool* p, int layers, int kv_heads, 
     return true;
 }
 
-/* Raddoppia la capacita' (rialloca + copia il prefisso committed). Ritorna false su errore. */
 static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
     if (!p) return false;
     const int ncap = p->cap_tokens * 2;
@@ -129,6 +128,40 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
     }
     p->cap_tokens = ncap;
     return true;
+}
+
+/* Store n token (fp [1,nkv,n,hd]) nel pool alla posizione `pos`: quant Splash
+ * (kernel llm_kvq_store) + slice_update; cresce se serve. Mai Concat. */
+static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
+                                      mlx_array k, mlx_array v, int pos, int n, mlx_stream s) {
+    if (!p || layer < 0 || layer >= p->layers || n <= 0) return false;
+    while (pos + n > p->cap_tokens) { if (!llm_kvq_pool_grow(p, s)) return false; }
+    int sh3[3] = {p->kv_heads, n, p->head_dim};
+    mlx_array k3 = mlx_array_new(), v3 = mlx_array_new();
+    bool ok = mlx_reshape(&k3, k, sh3, 3, s) == 0 && mlx_reshape(&v3, v, sh3, 3, s) == 0;
+    mlx_array kq = mlx_array_new(), vq = mlx_array_new(), sc = mlx_array_new();
+    if (ok) ok = llm_mlx_kvq_splash_store(&kq, &vq, &sc, k3, v3, p->head_dim, s) == 0;
+    mlx_array_free(k3); mlx_array_free(v3);
+    mlx_array sc2 = mlx_array_new(), vqt = mlx_array_new();
+    if (ok) { int sh2[2] = {p->kv_heads, n}; ok = mlx_reshape(&sc2, sc, sh2, 2, s) == 0; }
+    if (ok) { int perm[3] = {0,2,1}; ok = mlx_transpose_axes(&vqt, vq, perm, 3, s) == 0; }  /* V dim-major */
+    if (ok) {
+        mlx_array nk = mlx_array_new(), nv = mlx_array_new(), nks = mlx_array_new(), nvs = mlx_array_new();
+        int k0[3] = {0,pos,0},  k1[3] = {p->kv_heads,pos+n,p->head_dim}, kst[3] = {1,1,1};
+        int v0[3] = {0,0,pos},  v1[3] = {p->kv_heads,p->head_dim,pos+n}, vst[3] = {1,1,1};
+        int s0[2] = {0,pos},    s1[2] = {p->kv_heads,pos+n}, sst[2] = {1,1};
+        ok = mlx_slice_update(&nk, p->keyData[layer], kq, k0,3,k1,3,kst,3, s) == 0 &&
+             mlx_slice_update(&nv, p->valueData[layer], vqt, v0,3,v1,3,vst,3, s) == 0 &&
+             mlx_slice_update(&nks, p->keyScales[layer], sc2, s0,2,s1,2,sst,2, s) == 0 &&
+             mlx_slice_update(&nvs, p->valueScales[layer], sc2, s0,2,s1,2,sst,2, s) == 0;
+        if (ok) { mlx_array_set(&p->keyData[layer], nk); mlx_array_set(&p->valueData[layer], nv);
+                  mlx_array_set(&p->keyScales[layer], nks); mlx_array_set(&p->valueScales[layer], nvs); }
+        mlx_array_free(nk); mlx_array_free(nv); mlx_array_free(nks); mlx_array_free(nvs);
+    }
+    if (ok && pos + n > p->committed) p->committed = pos + n;
+    mlx_array_free(sc2); mlx_array_free(vqt);
+    mlx_array_free(kq); mlx_array_free(vq); mlx_array_free(sc);
+    return ok;
 }
 
 static inline void llm_kvq_pool_free(llm_kvq_pool* p) {
