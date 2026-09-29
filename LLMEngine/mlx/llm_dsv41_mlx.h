@@ -576,8 +576,6 @@ static inline bool llm_dsv41_mlx_attention_packed_swa(mlx_array* out, mlx_array 
     }
     float scale = 1.0f / sqrtf((float)D);
     bool okp = llm_dsv41_metal_packed_attention(out, q, wnd, pool_d, wi, ci_d, sink, scale, s);
-    if (okp && getenv("LLM_DSV41_WIRELOG"))
-        fprintf(stderr, "[wire-packed] SWA kernel: S=%d W=%d D=%d H=%d\n", S, W, D, H);
     free(wi_b); free(pz); free(ci_b);
     mlx_array_free(wnd); mlx_array_free(wi); mlx_array_free(pool_d); mlx_array_free(ci_d);
     return okp;
@@ -625,8 +623,6 @@ static inline bool llm_dsv41_mlx_attention_packed_comp(mlx_array* out, mlx_array
     }
     float scale = 1.0f / sqrtf((float)D);
     bool okp = llm_dsv41_metal_packed_attention(out, q, wnd, pool, wi, ids, sink, scale, s);
-    if (okp && getenv("LLM_DSV41_WIRELOG"))
-        fprintf(stderr, "[wire-packed] COMP kernel: S=%d W=%d C=%d m=%d D=%d H=%d\n", S, W, C, m, D, H);
     mlx_array_free(wnd); mlx_array_free(pool); mlx_array_free(wi); mlx_array_free(sink);
     return okp;
 }
@@ -678,8 +674,6 @@ static inline bool llm_dsv41_mlx_attention_packed_dec(mlx_array* out, mlx_array 
     }
     float scale = 1.0f / sqrtf((float)D);
     bool okp = llm_dsv41_metal_packed_attention(out, q, wnd, pool, wi3, ci3, sink, scale, s);
-    if (okp && getenv("LLM_DSV41_WIRELOG"))
-        fprintf(stderr, "[wire-packed] DEC kernel: S=%d NW=%d NC=%d C=%d W=%d D=%d H=%d\n", S, NW, NC, C, W, D, H);
     if (dummy) { free(pz); free(cib); mlx_array_free(pool); mlx_array_free(ci3); }
     mlx_array_free(wnd); mlx_array_free(wi3); mlx_array_free(sink);
     return okp;
@@ -835,8 +829,6 @@ static inline mlx_array llm_dsv41_mlx_attention(const LlmDsv41Weights* w, int l,
                     mlx_array ec = mlx_array_new_int(0);
                     if (llm_dsv41_metal_index_scores(&sidx, iq, pk3, wp, start_pos, ratio, 0, ec, 0, s)) {
                         sidx_kernel = true;
-                        if (getenv("LLM_DSV41_WIRELOG"))
-                            fprintf(stderr, "[wire-packed] INDEX kernel: S=%d m=%d IH=%d NH=%d\n", S, m, IH, NH);
                     }
                 }
             }

@@ -53,9 +53,6 @@ static inline void llm_dsv4_moe_route(const LlmDsv4Config* c, const LlmDsv4Layer
     int n_expert = c->n_expert, used = c->n_expert_used;
     float probs[LLM_DSV4_MAX_EXPERT];
     llm_dsv4_router_probs(probs, L->ffn_gate_inp, n_expert, c->n_embd, x);
-    { static int once = 0; const char* dp = getenv("LLM_DSV4_DUMP_PROBS");
-      if (dp && dp[0] && once++ == 0) { float lg[LLM_DSV4_MAX_EXPERT]; llm_dsv4_linear(lg, L->ffn_gate_inp, n_expert, c->n_embd, x);
-        FILE* f = fopen(dp, "wb"); if (f) { fwrite(x, sizeof(float), (size_t)c->n_embd, f); fwrite(lg, sizeof(float), (size_t)n_expert, f); fwrite(probs, sizeof(float), (size_t)n_expert, f); fclose(f); } } }
     if (il < c->n_hash_layer && L->ffn_gate_tid2eid) {
         const float* row = L->ffn_gate_tid2eid + (long)token * used;
         for (int i = 0; i < used; i++) selected[i] = (int)row[i];
@@ -68,8 +65,6 @@ static inline void llm_dsv4_moe_route(const LlmDsv4Config* c, const LlmDsv4Layer
     for (int i = 0; i < used; i++) { weight[i] = probs[selected[i]]; sum += weight[i]; }
     if (sum < 6.103515625e-5f) sum = 6.103515625e-5f;
     for (int i = 0; i < used; i++) weight[i] = weight[i] / sum * c->expert_weight_scale;
-    { const char* dr = getenv("LLM_DSV4_DUMP_ROUTE");
-      if (dr && dr[0] && il == 0) { FILE* f = fopen(dr, "wb"); if (f) { fwrite(selected, sizeof(int), (size_t)used, f); fwrite(weight, sizeof(float), (size_t)used, f); fclose(f); } } }
 }
 
 /* MoE completo con esperti f32. `tid2eid` (hash) usato se il<cfg->n_hash_layer. */
@@ -107,8 +102,6 @@ static inline void llm_dsv4_moe_forward(const LlmDsv4Config* c, const LlmDsv4Lay
         for (int j = 0; j < ff; j++) acc += (double)wr[j] * mid[j];
         out[o] += (float)acc;
     }
-    { const char* df = getenv("LLM_DSV4_DUMP_FFN_OUT");
-      if (df && df[0] && il == 0) { FILE* f = fopen(df, "wb"); if (f) { fwrite(out, sizeof(float), (size_t)embd, f); fclose(f); } } }
     free(mid); free(up); free(gate);
 }
 
@@ -145,22 +138,18 @@ static inline void llm_dsv4_moe_forward_packed(const LlmDsv4Config* c, const Llm
             gate[o] = llm_dsv4_dot_w_q8_K(pe->gate_type, gb + (int64_t)o * nb_in, pe->in_dim, xqk);
             up[o]   = llm_dsv4_dot_w_q8_K(pe->up_type,   ub + (int64_t)o * nb_in, pe->in_dim, xqk);
         }
-        { const char* dg = getenv("LLM_DSV4_DUMP_GU"); if (dg && dg[0] && il == 0 && i == 0) { FILE* f = fopen(dg, "ab"); if (f) { fwrite(&gate[547], sizeof(float), 1, f); fwrite(&up[547], sizeof(float), 1, f); fclose(f); } } }
         llm_dsv4_swiglu(mid, gate, up, ff, c->swiglu_clamp_exp);
         /* ds4: il peso del router e' applicato al mid PRIMA di quantizzarlo a Q8_K
          * (layer_routed_moe_one), poi il down accumula senza ulteriore peso. */
         for (int j = 0; j < ff; j++) mid[j] *= weight[i];
         /* #1025: sotto -ffast-math un prodotto non-finito puo' avvelenare residual/KV. */
         for (int j = 0; j < ff; j++) if (!isfinite(mid[j])) mid[j] = 0.0f;
-        { const char* dm = getenv("LLM_DSV4_DUMP_MID"); if (dm && dm[0] && il == 0 && i == 0) { FILE* f = fopen(dm, "wb"); if (f) { fwrite(mid, sizeof(float), (size_t)ff, f); fclose(f); } } }
         llm_dsv4_q8_K_quantize_row(mid, pe->ff_dim, mqk);
         for (int o = 0; o < embd; o++)
             { float v = llm_dsv4_dot_w_q8_K(pe->down_type, db + (int64_t)o * nb_out, pe->ff_dim, mqk);
               if (isfinite(v)) out[o] += v; }   /* #1025 */
     }
     free(mqk); free(xqk);
-    { const char* dm = getenv("LLMENGINE_MOE_DSV4_DUMP_MOE_ONE");
-      if (dm && dm[0] && il == 0) { FILE* f = fopen(dm, "wb"); if (f) { fwrite(out, sizeof(float), (size_t)embd, f); fclose(f); } } }
     /* shared expert: Q8_0 packed se disponibile, altrimenti f32 */
     if (pe->shexp_gate && pe->shexp_down) {
         int64_t nb_g = llm_ggml_nbytes(pe->shexp_gate_type, embd);
@@ -191,8 +180,6 @@ static inline void llm_dsv4_moe_forward_packed(const LlmDsv4Config* c, const Llm
             out[o] += (float)acc;
         }
     }
-    { const char* df = getenv("LLM_DSV4_DUMP_FFN_OUT");
-      if (df && df[0] && il == 0) { FILE* f = fopen(df, "wb"); if (f) { fwrite(out, sizeof(float), (size_t)embd, f); fclose(f); } } }
     free(mid); free(up); free(gate);
 }
 

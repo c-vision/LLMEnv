@@ -18,8 +18,6 @@ int main(int argc, char** argv){
     llm_dsv4_forward_step(c,&e->w,&e->caches,last,pos,hc);
     float* logits=(float*)malloc(sizeof(float)*c->n_vocab);
     llm_dsv4_output_logits(c,&e->w,hc,logits);
-    const char* dump = getenv("LLM_DSV4_DUMP_LOGITS");
-    if (dump && dump[0]) { FILE* f=fopen(dump,"wb"); if(f){ fwrite(logits,sizeof(float),(size_t)c->n_vocab,f); fclose(f);} }
     int am=0; for(int i=1;i<c->n_vocab;i++) if(logits[i]>logits[am]) am=i;
     printf("mio argmax=%d logit=%.4f\n", am, logits[am]);
     int top[8]; for(int i=0;i<8;i++) top[i]=-1;

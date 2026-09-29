@@ -196,12 +196,8 @@ static inline void llm_dsv4_attn_project(const LlmDsv4Config* c, const LlmDsv4La
     }
     llm_dsv4_head_rms_norm_inplace(q, c->n_head, c->n_head_dim, c->rms_eps);
     llm_dsv4_rope_tail_layer_inplace(c, q, c->n_head, c->n_head_dim, c->n_rot, pos, il, 0);
-    { const char* dq = getenv("LLM_DSV4_DUMP_Q");
-      if (dq && dq[0] && il == 0) { FILE* f = fopen(dq, "wb"); if (f) { fwrite(q, sizeof(float), (size_t)q_dim, f); fclose(f); } } }
     llm_dsv4_rms_norm_weight(kv, kv_raw, L->attn_kv_a_norm, c->n_head_dim, c->rms_eps);
     llm_dsv4_rope_tail_layer_inplace(c, kv, 1, c->n_head_dim, c->n_rot, pos, il, 0);
-    { const char* dk = getenv("LLM_DSV4_DUMP_KV");
-      if (dk && dk[0] && il == 0) { FILE* f = fopen(dk, "wb"); if (f) { fwrite(kv, sizeof(float), (size_t)c->n_head_dim, f); fclose(f); } } }
     free(kv_raw); free(qr);
 }
 
@@ -211,8 +207,6 @@ static inline void llm_dsv4_attn_finish(const LlmDsv4Config* c, const LlmDsv4Lay
     int ng = c->n_out_group, rank = c->n_lora_o, embd = c->n_embd;
     int group_dim = c->n_head_dim * (c->n_head / ng), out_low = ng * rank;
     llm_dsv4_rope_tail_layer_inplace(c, heads, c->n_head, c->n_head_dim, c->n_rot, pos, il, 1);
-    { const char* dh = getenv("LLM_DSV4_DUMP_HEADS");
-      if (dh && dh[0] && il == 0) { FILE* f = fopen(dh, "wb"); if (f) { fwrite(heads, sizeof(float), (size_t)c->n_head * c->n_head_dim, f); fclose(f); } } }
     if (pe && pe->out_a && pe->out_b) {
         float* low = (float*)malloc(sizeof(float) * (size_t)out_low);
         int64_t nba = llm_ggml_nbytes(pe->out_a_type, group_dim);
