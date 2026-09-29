@@ -203,6 +203,10 @@ void llm_mlx_session_spec_free(struct LlmMlxSession* s);
 /* True se la tabella n-gram predice >=2 token dalla history (draft[0]==pending): il dispatch usa
  * lo spec solo in quel caso, per evitare il fallback AR sincrono di generate_ngram. */
 int llm_mlx_session_spec_can(struct LlmMlxSession* s);
+/* Draft-model speculativo generico (#3): abilitato dall'opzione `draft_model` (path). */
+extern int llm_mlx_in_draft;
+int llm_mlx_session_draftmodel_enabled(struct LlmMlxSession* s);
+int llm_mlx_session_generate_draftmodel(struct LlmMlxSession* s, int max_out, int32_t eos, int32_t* out);
 
 /* Fase 3 continuous batching (default OFF via LLM_BATCH_DECODE): genera fino a max_new_tokens
  * per N sessioni (stesso modello) in UN forward BATCHED per step (attention per-sessione +
