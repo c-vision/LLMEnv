@@ -44,6 +44,25 @@ static int test_fp8(LlmDsv4Metal* b, int hd, int n_rot, float scale) {
     return ok;
 }
 
+static int test_shift(LlmDsv4Metal* b) {
+    int rows = 8, width = 16, n = 4 * width, src = 4 * width, total = rows * width;
+    float* ref = (float*)malloc(sizeof(float) * (size_t)total);
+    float* gpu = (float*)malloc(sizeof(float) * (size_t)total);
+    for (int i = 0; i < total; i++) { ref[i] = fr(); gpu[i] = ref[i]; }
+    for (int i = 0; i < n; i++) ref[i] = ref[src + i];
+    void* h = llm_dsv4_metal_buf_alloc(b, (size_t)total * sizeof(float));
+    llm_dsv4_metal_buf_write(h, 0, gpu, (size_t)total * sizeof(float));
+    int rc = llm_dsv4_metal_comp_shift(b, h, n, src);
+    llm_dsv4_metal_buf_read(h, 0, gpu, (size_t)total * sizeof(float));
+    double mx = 0.0;
+    for (int i = 0; i < total; i++) { double d = fabs(ref[i] - gpu[i]); if (d > mx) mx = d; }
+    int ok = (rc == 0 && mx == 0.0);
+    printf("[SHIFT] rows=%d width=%d rc=%d max|diff|=%.3e %s\n", rows, width, rc, mx, ok ? "ok" : "BAD");
+    llm_dsv4_metal_buf_free(h);
+    free(ref); free(gpu);
+    return ok;
+}
+
 int main(void) {
     if (!llm_dsv4_metal_available()) { printf("SKIP: nessun device Metal\n"); return 0; }
     LlmDsv4Metal* b = llm_dsv4_metal_create();
@@ -55,6 +74,7 @@ int main(void) {
     ok &= test_fp8(b, 128, 64, 3.0f);    /* n_nope=64 */
     ok &= test_fp8(b, 256, 128, 0.5f);   /* due blocchi, valori piccoli */
     ok &= test_fp8(b, 256, 128, 900.0f); /* saturazione >448 */
+    ok &= test_shift(b);
     printf(ok ? "PASS compressor: pool/fp8 bit-exact/compatibili con la reference CPU\n"
               : "FAIL compressor\n");
     llm_dsv4_metal_destroy(b);

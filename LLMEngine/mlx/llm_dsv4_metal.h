@@ -86,6 +86,15 @@ int llm_dsv4_metal_indexer_scores(LlmDsv4Metal* b, const float* q, int nh, int h
         const float* kvc, int n_comp, const float* w, float* scores);
 int llm_dsv4_metal_indexer_topk(LlmDsv4Metal* b, const float* scores, int n_comp, int top_k, int* allowed);
 
+/* Buffer device opachi (pesi f32 + stato KV persistenti per il middle su GPU). */
+void* llm_dsv4_metal_buf_alloc(LlmDsv4Metal* b, size_t bytes);
+void  llm_dsv4_metal_buf_write(void* h, size_t off, const void* src, size_t bytes);
+void  llm_dsv4_metal_buf_read(void* h, size_t off, void* dst, size_t bytes);
+void  llm_dsv4_metal_buf_free(void* h);
+
+/* Shift [src, src+n) -> [0,n) di un buffer device (stato compressor). 0 = ok. */
+int llm_dsv4_metal_comp_shift(LlmDsv4Metal* b, void* h, int n, int src);
+
 /* Output grouped-LoRA FUSO (ds4): out_a (ng gruppi) + out_b in UNA command buffer, `low` su device. */
 int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t outa_row_bytes,
         size_t outa_lead0, int ng, uint32_t gd, uint32_t rank, const void* outb_w,

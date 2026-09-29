@@ -694,6 +694,10 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        for (uint cc = 0; cc < n_comp; cc++) if (!ALLOWED[cc] && SCORES[cc] > bs) { best = (int)cc; bs = SCORES[cc]; }\n"
 "        ALLOWED[best] = 1;\n"
 "    }\n"
+"}\n"
+/* Shift del buffer di stato: copia [src, src+n) in [0, n) (ds4: righe ratio..2ratio -> 0..ratio). P={n,src}. */
+"kernel void dsv4_comp_shift(device float* BUF [[buffer(0)]], constant uint* P [[buffer(1)]], uint gid [[thread_position_in_grid]]) {\n"
+"    const uint n = P[0], src = P[1]; if (gid >= n) return; BUF[gid] = BUF[src + gid];\n"
 "}\n";
 
 struct LlmDsv4Metal {
@@ -715,6 +719,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_attn_mixed;  /* attn mista raw+comp su device (ds4) */
     id<MTLComputePipelineState> pso_comp_pool, pso_comp_fp8;  /* compressor su device (ds4) */
     id<MTLComputePipelineState> pso_idx_qat, pso_idx_scores, pso_idx_topk;  /* indexer su device (ds4) */
+    id<MTLComputePipelineState> pso_comp_shift;  /* shift dello stato compressor (ds4) */
     id<MTLArgumentEncoder> enc_pair, enc_down;
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[64], so[64], spb[64];
@@ -819,6 +824,9 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_idx_scores = f29 ? [dev newComputePipelineStateWithFunction:f29 error:&err] : nil;
     b->pso_idx_topk   = f30 ? [dev newComputePipelineStateWithFunction:f30 error:&err] : nil;
     if (!f28 || !f29 || !f30) fprintf(stderr, "dsv4_metal: kernel indexer NON compilato\n");
+    id<MTLFunction> f31 = [lib newFunctionWithName:@"dsv4_comp_shift"];
+    b->pso_comp_shift = f31 ? [dev newComputePipelineStateWithFunction:f31 error:&err] : nil;
+    if (!f31) fprintf(stderr, "dsv4_metal: kernel dsv4_comp_shift NON compilato\n");
     [lib release];
     if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->pso_route || !b->pso_addr_pair || !b->pso_addr_sum6 || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
@@ -1454,6 +1462,35 @@ int llm_dsv4_metal_indexer_topk(LlmDsv4Metal* b, const float* scores, int n_comp
     }
     if (BS)[BS release]; if (BA)[BA release];
     return rc;
+}
+
+/* ── Buffer device opachi (per il middle persistente su GPU: pesi f32 + stato KV) ── */
+void* llm_dsv4_metal_buf_alloc(LlmDsv4Metal* b, size_t bytes) {
+    if (!b || bytes == 0) return NULL;
+    return (void*)[b->dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+}
+void llm_dsv4_metal_buf_write(void* h, size_t off, const void* src, size_t bytes) {
+    id<MTLBuffer> buf = (id<MTLBuffer>)h; if (!buf || !src) return;
+    memcpy((uint8_t*)[buf contents] + off, src, bytes);
+}
+void llm_dsv4_metal_buf_read(void* h, size_t off, void* dst, size_t bytes) {
+    id<MTLBuffer> buf = (id<MTLBuffer>)h; if (!buf || !dst) return;
+    memcpy(dst, (const uint8_t*)[buf contents] + off, bytes);
+}
+void llm_dsv4_metal_buf_free(void* h) { id<MTLBuffer> buf = (id<MTLBuffer>)h; if (buf) [buf release]; }
+
+/* Shift [src, src+n) -> [0,n) di un buffer device (stato compressor). 0 = ok. */
+int llm_dsv4_metal_comp_shift(LlmDsv4Metal* b, void* h, int n, int src) {
+    id<MTLBuffer> buf = (id<MTLBuffer>)h;
+    if (!b || !b->pso_comp_shift || !buf || n <= 0 || src < n) return -1;
+    id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:b->pso_comp_shift];
+    [e setBuffer:buf offset:0 atIndex:0];
+    uint32_t P[2] = { (uint32_t)n, (uint32_t)src }; [e setBytes:P length:sizeof(P) atIndex:1];
+    [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)n + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    return cb.error ? -3 : 0;
 }
 
 /* Proiezioni Q-LoRA + KV FUSE (ds4): q_a, kv, RMS, q_b, head_rms, RoPE in UNA command buffer.
