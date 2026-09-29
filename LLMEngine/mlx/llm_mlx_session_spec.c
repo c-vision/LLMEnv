@@ -823,6 +823,51 @@ int llm_ai_mlx_session_generate_constrained(llm_ai_mlx_session_handle handle,
  * li verifica con UN forward batch (greedy intermedi dall''hidden batch) e accetta i primi
  * M che coincidono col greedy. M==K -> K token con 1 forward (guadagno); M<K -> rollback
  * (Cache ABI) + riforward di M. Correttezza: il primo draft deve == greedy noto. */
+/* Longest-suffix prompt-lookup: cerca il piu' LUNGO suffisso della history (L in 2..MAXL) che
+ * ricorre prima (finestra W), e ritorna il seguito (fino a max_draft). Piu' "intelligente" del
+ * n-gram a ordine fisso: usa contesti lunghi (draft piu' affidabili su span ripetuti). Bounded
+ * (W*MAXL) per non costare su contesti enormi. Ritorna nd (0 se nessun match). */
+static int spec_lookup_suffix(LlmMlxSession* s, int32_t* draft, int max_draft) {
+    const int n = s->history_len; const int32_t* H = s->history;
+    if (H == NULL || n < 3 || max_draft <= 0) return 0;
+    const int MAXL = 24, W = 2048;
+    int lo = n - W; if (lo < 0) lo = 0;
+    int Lmax = n - 1; if (Lmax > MAXL) Lmax = MAXL;
+    for (int L = Lmax; L >= 2; L--) {
+        int p = -1;
+        for (int q = n - L - 1; q >= lo; q--) {
+            if (memcmp(&H[q], &H[n - L], (size_t)L * sizeof(int32_t)) == 0) { p = q; break; }
+        }
+        if (p < 0) continue;
+        int nd = 0, e = p + L;
+        while (nd < max_draft && e < n) draft[nd++] = H[e++];
+        if (nd > 0) return nd;
+    }
+    return 0;
+}
+
+/* Draft self-speculativo: PRIMA il n-gram a ordine fisso (successore piu' frequente, provato),
+ * POI il longest-suffix prompt-lookup come fallback (quando l'ordine fisso non predice). */
+static int spec_build_draft(LlmMlxSession* s, int32_t* draft, int max_draft) {
+    if (s == NULL || draft == NULL || max_draft <= 0 || s->history_len < 2) return 0;
+    int nd = 0;
+    if (s->ngram_built && s->ngram.buckets != NULL) {
+        int32_t* ctx = (int32_t*)malloc((s->history_len + (size_t)max_draft + 1) * sizeof(int32_t));
+        if (ctx != NULL) {
+            const int ctx_len = s->history_len;
+            for (int i = 0; i < ctx_len; i++) ctx[i] = s->history[i];
+            for (int i = 0; i < max_draft; i++) {
+                int32_t d = llm_mlx_ngram_predict(&s->ngram, ctx, ctx_len + i);
+                if (d < 0) break;
+                draft[i] = d; ctx[ctx_len + i] = d; nd++;
+            }
+            free(ctx);
+        }
+    }
+    if (nd < 2) nd = spec_lookup_suffix(s, draft, max_draft);
+    return nd;
+}
+
 int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_new_tokens,
                                       int32_t eos_token_id, int32_t* out_ids, int draft_len) {
     if (handle == NULL || max_new_tokens <= 0 || out_ids == NULL) return -1;
@@ -845,15 +890,7 @@ int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_
         int dl = draft_len; if (dl > remaining) dl = remaining;
 
         int32_t draft[16];
-        int nd = 0;
-        int32_t ctx[65536 + 16];
-        int ctx_len = s->history_len > 65536 ? 65536 : s->history_len;
-        for (int i = 0; i < ctx_len; i++) ctx[i] = s->history[i];
-        for (int i = 0; i < dl; i++) {
-            int32_t d = llm_mlx_ngram_predict(&s->ngram, ctx, ctx_len + i);
-            if (d < 0) break;
-            draft[i] = d; ctx[ctx_len + i] = d; nd++;
-        }
+        int nd = spec_build_draft(s, draft, dl);
 
         /* Nessuno spec possibile (draft < 2 o primo != pending): forward AR di `current`.
            SEMPRE il forward: senza di esso il pending non avanza -> token costante. */
@@ -1054,20 +1091,8 @@ void llm_mlx_session_spec_discard(LlmMlxSession* s) {
  * con overlap I/O) sui modelli I/O-bound -- misurato 3.7x su OLMoE (562 vs 150 ms/tok). */
 int llm_mlx_session_spec_can(LlmMlxSession* s) {
     if (s == NULL || !s->ngram_built || s->pending_next_id < 0 || s->history_len <= 0) return 0;
-    int32_t d0 = llm_mlx_ngram_predict(&s->ngram, s->history, s->history_len);
-    if (d0 != s->pending_next_id) return 0;
-    const int n = s->history_len;
-    int32_t stackbuf[4096];
-    int32_t* tmp = stackbuf;
-    int32_t* heap = NULL;
-    if (n + 1 > (int)(sizeof(stackbuf) / sizeof(stackbuf[0]))) {
-        heap = (int32_t*)malloc(((size_t)n + 1) * sizeof(int32_t));
-        tmp = heap;
-        if (tmp == NULL) return 0;
-    }
-    for (int i = 0; i < n; i++) tmp[i] = s->history[i];
-    tmp[n] = d0;
-    int32_t d1 = llm_mlx_ngram_predict(&s->ngram, tmp, n + 1);
-    free(heap);
-    return (d1 >= 0) ? 1 : 0;
+    int32_t d[16];
+    int nd = spec_build_draft(s, d, 8);
+    return (nd >= 2 && d[0] == s->pending_next_id) ? 1 : 0;
 }
+
