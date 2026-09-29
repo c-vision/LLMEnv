@@ -88,56 +88,7 @@ static inline uint64_t llm_kvq_scale_index(uint32_t page, uint32_t head, uint32_
     return (uint64_t)page * per_page + (uint64_t)head * page_tokens + token;
 }
 
-/* ── Store kernel (port di splash_store_kv_row) ────────────────────────────────
- * UN threadgroup per (token, kv-head): i thread sono le DIMENSIONI. La scala
- * simmetrica e' max|v|/127 ridotta sul head_dim (in Splash, per-simdgroup con
- * hd=256; qui generico: threads = hd, riduzione threadgroup ad albero).
- * Scrive DIRETTAMENTE nei buffer int8 preallocati (K token-major, V dim-major).
- * Input: krow [hd] fp32, vrow [hd] fp32. Output: l'int8 + la scala sono SCRITTI
- * nei buffer passati come input (device) -> serve un kernel "in-place": usiamo
- * un output-writer con l'indice calcolato dall'host via `dst_off`.
- * Args: keys [nkv*n*pagetokens*hd] , kscales [nkv*n*pagetokens], ... (buffer globali). */
-static const char llm_kvq_store_src[] =
-    "#include <metal_stdlib>\n"
-    "using namespace metal;\n"
-    "kernel void llm_kvq_store(\n"
-    "    device const float* krow [[buffer(0)]],\n"
-    "    device const float* vrow [[buffer(1)]],\n"
-    "    device char*  kdata [[buffer(2)]],\n"
-    "    device float* kscale[[buffer(3)]],\n"
-    "    device char*  vdata [[buffer(4)]],\n"
-    "    device float* vscale[[buffer(5)]],\n"
-    "    constant uint& hd [[buffer(6)]],\n"
-    "    constant uint& kbase [[buffer(7)]],\n"
-    "    constant uint& vbase [[buffer(8)]],\n"
-    "    constant uint& sbase [[buffer(9)]],\n"
-    "    uint gid [[threadgroup_position_in_grid]],\n"
-    "    uint lane [[thread_position_in_threadgroup]],\n"
-    "    uint tgsz [[threads_per_threadgroup]],\n"
-    "    threadgroup float* sh [[threadgroup(0)]])\n"
-    "{\n"
-    "    float k = krow[lane]; float v = vrow[lane];\n"
-    "    sh[lane] = fmax(fabs(k), fabs(v));\n"
-    "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-    "    for (uint s = tgsz/2; s > 0; s >>= 1) {\n"
-    "        if (lane < s) sh[lane] = fmax(sh[lane], sh[lane+s]);\n"
-    "        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-    "    }\n"
-    "    float mx = sh[0];\n"
-    "    float ks = mx == 0.0f ? 0.0f : mx / 127.0f;\n"
-    "    float vs = ks;\n"
-    "    int qk = mx == 0.0f ? 0 : clamp((int)rint((double)k * 127.0 / (double)mx), -127, 127);\n"
-    "    int qv = mx == 0.0f ? 0 : clamp((int)rint((double)v * 127.0 / (double)mx), -127, 127);\n"
-    "    kdata[kbase + lane] = (char)qk;\n"
-    "    vdata[vbase + lane] = (char)qv;\n"
-    "    if (lane == 0) { kscale[sbase] = ks; vscale[sbase] = vs; }\n"
-    "}\n";
-
-/* ── Quant Splash-style via op MLX (fedele alla matematica di splash_store_kv_row) ──
- * UNA scala simmetrica per (token, kv-head) = max(|k|,|v|) sul head_dim / 127;
- * q = clamp(rint(v*127/max), -127, 127). Niente mlx_quantize (nessun grafo
- * multi-op): e' la differenza chiave. In: k,v [1,nkv,n,hd] fp. Out: kq,vq int8
- * [1,nkv,n,hd] + sc f32 [1,nkv,n,1]. */
+/* ── Quant Splash-style via op MLX (fallback dello store kernel) ── */
 static int llm_mlx_kvq_splash_quant(mlx_array* kq, mlx_array* vq, mlx_array* sc,
                                     mlx_array k, mlx_array v, mlx_stream s) {
     mlx_array ka = mlx_array_new(), va = mlx_array_new();
@@ -176,6 +127,84 @@ static int llm_mlx_kvq_splash_dequant(mlx_array* x, mlx_array q, mlx_array sc, m
     bool ok = mlx_astype(&qf, q, MLX_FLOAT32, s) == 0;
     if (ok) ok = mlx_multiply(x, qf, sc, s) == 0;
     mlx_array_free(qf);
+    return ok ? 0 : -1;
+}
+
+/* ── Store kernel MLX (one-pass, come splash_store_kv_row) ─────────────────────
+ * UN threadgroup per (kv-head, token): i thread sono le dimensioni; la scala
+ * simmetrica e' max(|k|,|v|)/127 ridotta sul head_dim (threadgroup tree). Scrive
+ * int8 + la scala. NIENTE op MLX quant (niente grafo/intermedi): e' la forma di
+ * Splash. In: k,v [1,nkv,n,hd] fp. Out: kq,vq [1,nkv,n,hd] int8, sc [1,nkv,n] f32. */
+static const char llm_kvq_store_src[] =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "kernel void llm_kvq_store(device const T* k [[buffer(0)]], device const T* v [[buffer(1)]],\n"
+    "  device char* kq [[buffer(2)]], device char* vq [[buffer(3)]], device float* sc [[buffer(4)]],\n"
+    "  uint tg [[threadgroup_position_in_grid]], uint lane [[thread_position_in_threadgroup]],\n"
+    "  uint tgsz [[threads_per_threadgroup]], threadgroup float* sh [[threadgroup(0)]])\n"
+    "{\n"
+    "  uint hd = k_shape[k_ndim-1];\n"
+    "  float km = lane < hd ? fabs((float)k[tg*hd+lane]) : 0.0f;\n"
+    "  float vm = lane < hd ? fabs((float)v[tg*hd+lane]) : 0.0f;\n"
+    "  sh[lane] = fmax(km, vm);\n"
+    "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+    "  for (uint s = tgsz/2; s > 0; s >>= 1) { if (lane < s) sh[lane] = fmax(sh[lane], sh[lane+s]);\n"
+    "    threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+    "  float mx = sh[0]; float scale = mx == 0.0f ? 0.0f : mx / 127.0f;\n"
+    "  if (lane < hd) {\n"
+    "    kq[tg*hd+lane] = (char)(mx == 0.0f ? 0 : clamp((int)rint((double)k[tg*hd+lane] * 127.0 / (double)mx), -127, 127));\n"
+    "    vq[tg*hd+lane] = (char)(mx == 0.0f ? 0 : clamp((int)rint((double)v[tg*hd+lane] * 127.0 / (double)mx), -127, 127));\n"
+    "  }\n"
+    "  if (lane == 0) sc[tg] = scale;\n"
+    "}\n";
+
+static mlx_fast_metal_kernel g_kvq_store_k; static int g_kvq_store_built = 0;
+static int llm_mlx_kvq_splash_store_kernel(void) {
+    if (g_kvq_store_built) return g_kvq_store_k.ctx ? 0 : -1;
+    g_kvq_store_built = 1;
+    const char* hdr = "#include <metal_stdlib>\nusing namespace metal;\n";
+    mlx_vector_string iv = mlx_vector_string_new();
+    mlx_vector_string_append_value(iv, "k"); mlx_vector_string_append_value(iv, "v");
+    mlx_vector_string ov = mlx_vector_string_new();
+    mlx_vector_string_append_value(ov, "kq"); mlx_vector_string_append_value(ov, "vq");
+    mlx_vector_string_append_value(ov, "sc");
+    g_kvq_store_k = mlx_fast_metal_kernel_new("llm_kvq_store", iv, ov, llm_kvq_store_src, hdr,
+                                              /*ensure_row_contiguous=*/true, /*atomic_outputs=*/false);
+    mlx_vector_string_free(iv); mlx_vector_string_free(ov);
+    return g_kvq_store_k.ctx ? 0 : -1;
+}
+
+/* k,v [1,nkv,n,hd] fp. Ritorna kq,vq int8 [1,nkv,n,hd] + sc f32 [1,nkv,n,1]. */
+static int llm_mlx_kvq_splash_store(mlx_array* kq, mlx_array* vq, mlx_array* sc,
+                                    mlx_array k, mlx_array v, int hd, mlx_stream s) {
+    if (llm_mlx_kvq_splash_store_kernel() != 0) return -1;
+    int nkv = (int)mlx_array_shape(k)[1], n = (int)mlx_array_shape(k)[2];
+    mlx_vector_array in = mlx_vector_array_new();
+    mlx_vector_array_append_value(in, k); mlx_vector_array_append_value(in, v);
+    mlx_fast_metal_kernel_config cfg = mlx_fast_metal_kernel_config_new();
+    mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, "T", mlx_array_dtype(k));
+    int kqsh[3] = {nkv, n, hd}, scsh[2] = {nkv, n};
+    mlx_fast_metal_kernel_config_add_output_arg(cfg, kqsh, 3, MLX_INT8);
+    mlx_fast_metal_kernel_config_add_output_arg(cfg, kqsh, 3, MLX_INT8);
+    mlx_fast_metal_kernel_config_add_output_arg(cfg, scsh, 2, MLX_FLOAT32);
+    mlx_fast_metal_kernel_config_set_grid(cfg, nkv * n, 1, 1);
+    mlx_fast_metal_kernel_config_set_thread_group(cfg, hd, 1, 1);
+    mlx_vector_array outs = mlx_vector_array_new();
+    int rc = mlx_fast_metal_kernel_apply(&outs, g_kvq_store_k, in, cfg, s);
+    bool ok = (rc == 0) && mlx_vector_array_size(outs) == 3;
+    if (ok) {
+        mlx_array a0 = mlx_array_new(), a1 = mlx_array_new(), a2 = mlx_array_new();
+        ok = mlx_vector_array_get(&a0, outs, 0) == 0 && mlx_vector_array_get(&a1, outs, 1) == 0 &&
+             mlx_vector_array_get(&a2, outs, 2) == 0;
+        if (ok) { mlx_array_set(kq, a0); mlx_array_set(vq, a1);
+                  /* sc -> [nkv,n,1] */
+                  int sh3[3] = {nkv, n, 1}; mlx_array sr = mlx_array_new();
+                  if (mlx_reshape(&sr, a2, sh3, 3, s) == 0) mlx_array_set(sc, sr);
+                  mlx_array_free(sr); }
+        mlx_array_free(a0); mlx_array_free(a1); mlx_array_free(a2);
+    }
+    mlx_fast_metal_kernel_config_free(cfg);
+    mlx_vector_array_free(in); mlx_vector_array_free(outs);
     return ok ? 0 : -1;
 }
 

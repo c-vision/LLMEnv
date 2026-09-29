@@ -578,7 +578,7 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
             mlx_array kq = mlx_array_new(), vq = mlx_array_new(), sc = mlx_array_new();
             bool qok = mlx_slice(&kcold, *k_cache, s0, 4, s1, 4, one, 4, m->stream) == 0 &&
                        mlx_slice(&vcold, *v_cache, s0, 4, s1, 4, one, 4, m->stream) == 0;
-            if (qok) qok = llm_mlx_kvq_splash_quant(&kq, &vq, &sc, kcold, vcold, m->stream) == 0;
+            if (qok) qok = llm_mlx_kvq_splash_store(&kq, &vq, &sc, kcold, vcold, (int)m->cfg.head_dim, m->stream) == 0;
             if (qok) {
                 mlx_array_set(&kvq_sess->kvq_w[layer_idx], kq);
                 mlx_array_set(&kvq_sess->kvq_v_w[layer_idx], vq);
