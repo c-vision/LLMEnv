@@ -354,6 +354,19 @@ int llm_ai_mlx_model_stats(llm_ai_mlx_model_handle handle, int seq_len, double* 
 int llm_ai_mlx_model_active_params(llm_ai_mlx_model_handle handle, double* out_active);
 int llm_ai_mlx_model_flops(llm_ai_mlx_model_handle handle, int seq_len);
 
+/* DFlash2 (A1): handle per-processo (l'opzione `dflash_model` e' globale). Creato lazy alla prima
+ * generate col target coerente; riusato -> il ctx del draft persiste tra le chiamate (streaming). */
+static llm_ai_mlx_dflash2_handle g_df2_handle = NULL;
+static LlmMlxModel* g_df2_target = NULL;
+static llm_ai_mlx_dflash2_handle llm_mlx_df2_for(LlmMlxModel* m) {
+    if (g_df2_target == m) return g_df2_handle;   /* gia' tentato per questo target */
+    char path[1024];
+    if (llm_ai_mlx_opt_get_str("dflash_model", path, sizeof(path)) != 0 || path[0] == 0) return NULL;
+    g_df2_target = m;
+    g_df2_handle = llm_ai_mlx_dflash2_create((llm_ai_mlx_model_handle)m, path);
+    return g_df2_handle;
+}
+
 int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_tokens,
                                  int32_t eos_token_id, int32_t* out_ids) {
     if (handle == NULL || max_new_tokens <= 0 || out_ids == NULL) return -1;
@@ -384,6 +397,28 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
                 if (eos_token_id >= 0 && tok == eos_token_id) break;
             }
             if (cnt > 0) return cnt;   /* fallback a n-gram/AR se MTP non produce */
+        }
+    }
+    /* DFlash2 (A1) greedy: drafter esterno a contesto PERSISTENTE, streaming buffer come MTP. */
+    if (!m->dsv4 && !m->dsv41) {
+        llm_ai_mlx_dflash2_handle dfh = llm_mlx_df2_for(m);
+        if (dfh != NULL) {
+            llm_mlx_sampling_t smd = llm_mlx_session_sampling(s);
+            if (!smd.active || smd.temperature <= 0.0f) {
+                int cnt = 0;
+                while (cnt < max_new_tokens) {
+                    if (s->spec_buf_pos >= s->spec_buf_len) {
+                        llm_mlx_session_spec_begin(s);
+                        int got = llm_ai_mlx_dflash2_generate(dfh, handle, eos_token_id, 16, s->spec_buf);
+                        if (got <= 0) break;
+                        s->spec_buf_len = got; s->spec_buf_pos = 0;
+                    }
+                    int32_t tok = s->spec_buf[s->spec_buf_pos++];
+                    out_ids[cnt++] = tok;
+                    if (eos_token_id >= 0 && tok == eos_token_id) break;
+                }
+                if (cnt > 0) return cnt;
+            }
         }
     }
     /* N-GRAM self-speculative GENERALE (tutti i modelli, greedy): draft dalla tabella n-gram del

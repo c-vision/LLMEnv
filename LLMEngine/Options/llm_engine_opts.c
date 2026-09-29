@@ -38,6 +38,9 @@ static Opt g_opts[] = {
     /* Self-speculative n-gram (generale, tutti i modelli, greedy): draft dalla tabella n-gram del
      * contesto, verificati dal modello. 0=off; N>=2=ordine. Output identico al greedy AR. */
     { "spec_ngram",       "self-speculative n-gram (greedy): 0=off, N>=2=ordine (es. 8)", T_INT, 8, 8, 0, 0, 0, 0, {0}, NULL, 0 },
+    /* DFlash2 (A1): se impostata a un path di draft DFlash2, il decode greedy usa il drafter a
+     * contesto PERSISTENTE (spec streaming). "" = off. */
+    { "dflash_model",     "draft DFlash2 (path) per la speculazione a contesto persistente", T_STR, 0, 0, 0, 0, 0, 0, "", "", 0 },
 };
 #define NOPTS ((int)(sizeof g_opts / sizeof g_opts[0]))
 
