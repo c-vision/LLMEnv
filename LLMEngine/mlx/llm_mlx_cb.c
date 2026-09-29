@@ -1245,3 +1245,43 @@ int llm_ai_mlx_splash_attn_selftest(char* out, size_t cap) {
     free(kh);free(vh);free(qh);
     return (rc==0&&bad==0)?0:1;
 }
+
+/* Probe: una matmul2d MPP reale (M=32,N=32,K=64) sotto mlx_fast_metal_kernel. */
+int llm_ai_mlx_splash_mpp_matmul_probe(char* out, size_t cap) {
+    if (out == NULL || cap == 0) return -1;
+    out[0] = '\0';
+    const char* hdr = "#include <metal_stdlib>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
+                      "using namespace metal;\nusing namespace mpp::tensor_ops;\n";
+    const char* src =
+        "  constexpr int M=32,N=32,K=64;\n"
+        "  auto A = tensor(a, dextents<int,2>{K,M}, array<int,2>{1,K});\n"
+        "  auto B = tensor(b, dextents<int,2>{K,N}, array<int,2>{1,K});\n"
+        "  constexpr auto desc = matmul2d_descriptor(M,N,K,false,true,false, matmul2d_descriptor::mode::multiply);\n"
+        "  matmul2d<desc, execution_simdgroups<4>> mm;\n"
+        "  auto a0 = A.slice<K,M>(0,0); auto b0 = B.slice<K,N>(0,0);\n"
+        "  auto d = mm.get_destination_cooperative_tensor<decltype(a0), decltype(b0), float>();\n"
+        "  mm.run(a0, b0, d);\n"
+        "  auto C = tensor(c, dextents<int,2>{N,M}, array<int,2>{1,N});\n"
+        "  d.store(C.slice<N,M>(0,0));\n";
+    mlx_vector_string iv = mlx_vector_string_new();
+    mlx_vector_string_append_value(iv, "a"); mlx_vector_string_append_value(iv, "b");
+    mlx_vector_string ov = mlx_vector_string_new(); mlx_vector_string_append_value(ov, "c");
+    mlx_fast_metal_kernel k = mlx_fast_metal_kernel_new("mpp_mm_probe", iv, ov, src, hdr, true, false);
+    mlx_vector_string_free(iv); mlx_vector_string_free(ov);
+    if (k.ctx == NULL) { snprintf(out, cap, "MPP matmul probe: build FALLITA"); return 1; }
+    mlx_fast_metal_kernel_config cfg = mlx_fast_metal_kernel_config_new();
+    mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, "T", MLX_FLOAT32);
+    int csh[2] = {32,32}; mlx_fast_metal_kernel_config_add_output_arg(cfg, csh, 2, MLX_FLOAT32);
+    mlx_fast_metal_kernel_config_set_grid(cfg, 128, 1, 1); mlx_fast_metal_kernel_config_set_thread_group(cfg, 128, 1, 1);
+    mlx_stream s = mlx_default_gpu_stream_new();
+    int ash[2] = {64,32}, bsh[2] = {32,32};
+    mlx_array a = mlx_array_new_data((float[]){0}, ash, 2, MLX_FLOAT32);   /* non inizializzato nel probe */
+    mlx_array b = mlx_array_new_data((float[]){0}, bsh, 2, MLX_FLOAT32);
+    mlx_vector_array in = mlx_vector_array_new(); mlx_vector_array_append_value(in, a); mlx_vector_array_append_value(in, b);
+    mlx_vector_array outs = mlx_vector_array_new();
+    int rc = mlx_fast_metal_kernel_apply(&outs, k, in, cfg, s);
+    snprintf(out, cap, "MPP matmul probe: build OK, apply rc=%d", rc);
+    mlx_vector_array_free(in); mlx_vector_array_free(outs); mlx_array_free(a); mlx_array_free(b);
+    mlx_fast_metal_kernel_config_free(cfg);
+    return 0;
+}
