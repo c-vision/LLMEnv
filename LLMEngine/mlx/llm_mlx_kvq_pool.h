@@ -171,7 +171,9 @@ static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
     if (ok) { int s2[3] = {p->kv_heads, n, 1};
               ok = mlx_reshape(&sc2, ks, s2, 3, s) == 0 && mlx_reshape(&vsc2, vs, s2, 3, s) == 0; }
     if (ok) ok = mlx_array_set(&vqt, vq) == 0;
-    /* scrittura per segmenti di pagina: token logico `pos+j` -> fisico `ptab[lp]*32 + r` */
+    /* scrittura COALESCENTE: token logico `pos+j` -> fisico `ptab[lp]*32 + r`. Se le pagine
+     * fisiche consecutive sono contigue (caso default = identita'), l'intera corsa e' UN solo
+     * slice_update; si spezza solo quando la page table rende le pagine non contigue. */
     int j = 0;
     while (ok && j < n) {
         int abs = pos + j, lp = abs / p->page_tokens, r = abs % p->page_tokens;
@@ -179,6 +181,16 @@ static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
         if (phys < 0) { ok = false; break; }
         int ptok = phys * p->page_tokens + r;
         int seg = n - j; if (seg > p->page_tokens - r) seg = p->page_tokens - r;
+        {   /* estendi la corsa finche' le pagine fisiche successive sono contigue */
+            int lp2 = lp + 1, j2 = j + seg;
+            while (j2 < n && (pos + j2) % p->page_tokens == 0) {
+                int lpA = (pos + j2) / p->page_tokens;
+                int physA = llm_kv_pt_map(&p->pt, lpA);
+                if (physA != phys + (lpA - lp)) break;
+                int seg2 = n - j2; if (seg2 > p->page_tokens) seg2 = p->page_tokens;
+                seg += seg2; j2 += seg2; lp2++;
+            }
+        }
         mlx_array ks_seg = mlx_array_new(), kq_seg = mlx_array_new();
         mlx_array vq_seg = mlx_array_new(), sc_seg = mlx_array_new(), vsc_seg = mlx_array_new();
         int a0[3] = {0,j,0}, a1[3] = {p->kv_heads, j+seg, p->head_dim}, ast[3] = {1,1,1};
