@@ -171,6 +171,12 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
         if (cbn == 3) {
             if (getenv("LLM_TQ_QMV_TEST") != NULL) llm_mlx_tq_qmv_selftest(ing, layer, proj, st);
             if (getenv("LLM_TQ_KG_TEST") != NULL) llm_mlx_tq_kg_selftest(ing, layer, proj, st);
+            /* Esperti PACKED diretti (DEFAULT): niente array affine-2bit residenti (~11.5 GB in meno
+             * sul 35B). Fallback al path affine sotto. `LLM_TQ_AFFINE_EXPERTS=1` per disabilitare. */
+            if (getenv("LLM_TQ_AFFINE_EXPERTS") == NULL) {
+                if (llm_mlx_tq_gather_packed(ing, layer, proj, res, x, w, s, idxs, transpose, st) == 0)
+                    return 0;
+            }
             /* DECODE (T==1): gather FUSO a UN launch (mode kg). OPT-IN (`LLM_TQ_QMV=1`): il kernel
              * naïf (32 thread/riga scalare) e' 13 tok/s vs 22 del `gather_qmm` MLX -> il default
              * resta il path affine. Utile solo come base per un kernel ottimizzato (tile/MIA). */

@@ -18,6 +18,13 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <mach/mach.h>
+static void llm_mem_dbg(const char* tag) {
+    if (getenv("LLM_MEM_DBG") == NULL) return;
+    struct mach_task_basic_info info; mach_msg_type_number_t cnt = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &cnt) == KERN_SUCCESS)
+        fprintf(stderr, "[mem] %s: rss=%.0f MB\n", tag, info.resident_size / (1024.0 * 1024.0));
+}
 
 /* Pesi caricati da TUTTI gli shard safetensors del modello (a differenza
  * delle funzioni di checkpoint sopra, che leggono solo il primo file). Ogni
@@ -279,6 +286,7 @@ static void strset_free(StrSet* s) {
 }
 
 bool load_all_shards(const char* model_dir, mlx_stream stream, MultiShardWeights* weights) {
+    llm_mem_dbg("load_all_shards:start");
     char path[1024];
     snprintf(path, sizeof(path), "%s/model.safetensors.index.json", model_dir);
     FILE* f = fopen(path, "rb");
@@ -352,6 +360,7 @@ bool load_all_shards(const char* model_dir, mlx_stream stream, MultiShardWeights
         weights->shards[weights->count++] = m;
     }
     strset_free(&shard_files);
+    llm_mem_dbg("load_all_shards:end");
     return ok;
 }
 
@@ -739,6 +748,7 @@ int gptq_nf4_synthesize_weights(MultiShardWeights* weights, mlx_stream stream) {
 
 int turboquant_synthesize_weights(MultiShardWeights* weights, mlx_stream stream) {
     if (weights == NULL || weights->count <= 0) return 0;
+    llm_mem_dbg("tq_synth:start");
     mlx_map_string_to_array synth = mlx_map_string_to_array_new();
     if (synth.ctx == NULL) return -1;
     int n_dec = 0; bool ok = true;
@@ -797,6 +807,22 @@ int turboquant_synthesize_weights(MultiShardWeights* weights, mlx_stream stream)
                 fprintf(stderr, "[turboquant] %s: shape inattese in_dim=%d packed=%d cbn=%d\n", base, in_dim, packed, cbn);
                 ok = false; mlx_array_free(w); mlx_array_free(sc); mlx_array_free(sg); mlx_array_free(cb); break;
             }
+            /* ── TQ DENSO (2-D): NON si dequantizza a load. `.weight` resta PACKED (usato dal kernel
+             * TQ a runtime); si inserisce solo `.biases`=signs (per la rotazione input nel decode).
+             * Prima si materializzava F16 (es. lm_head [248320,2048] = ~2GB f32 + 1GB f16 SPRECATI). */
+            if (llm_mlx_tq_enabled() && ndw == 2) {
+                const mlx_dtype odt = g_bf16_all ? g_act16 : MLX_FLOAT16;
+                mlx_array sgo = mlx_array_new();
+                bool okd = true;
+                if (mlx_array_dtype(sg) == odt) mlx_array_set(&sgo, sg);
+                else if (mlx_astype(&sgo, sg, odt, stream) != 0) okd = false;
+                if (okd) { snprintf(nm, sizeof nm, "%s.biases", base); okd = mlx_map_string_to_array_insert(synth, nm, sgo) == 0; }
+                mlx_array_free(sgo);
+                mlx_array_free(w); mlx_array_free(sc); mlx_array_free(sg); mlx_array_free(cb);
+                if (!okd) { fprintf(stderr, "[turboquant] %s: insert biases fallita\n", base); ok = false; }
+                else n_dec++;
+                continue;
+            }
             const uint32_t* wd = mlx_array_data_uint32(w);
             const uint16_t* scd = (const uint16_t*)(const void*)mlx_array_data_float16(sc);
             const uint16_t* sgd = (const uint16_t*)(const void*)mlx_array_data_float16(sg);
@@ -828,21 +854,8 @@ int turboquant_synthesize_weights(MultiShardWeights* weights, mlx_stream stream)
             const mlx_dtype odt = g_bf16_all ? g_act16 : MLX_FLOAT16;
             bool aok = of.ctx && mlx_astype(&o16, of, odt, stream) == 0 && mlx_array_eval(o16) == 0;
             mlx_array_free(of);
-            if (llm_mlx_tq_enabled() && ndw == 2) {
-                /* Path TQ dense (opzione 2): `.weight` resta PACKED (u32); i signs vanno in `.biases`
-                 * (il fetch get_triple li consegna a quantized_linear_cfg). Signs nel dtype di
-                 * attivazione (±1, cast esatto): multiply+hadamard restano nel dtype di attivazione nel
-                 * decode (niente roundtrip f32 + niente astype finale). */
-                mlx_array sgo = mlx_array_new();
-                if (mlx_array_dtype(sg) == odt) { mlx_array_set(&sgo, sg); }
-                else if (mlx_astype(&sgo, sg, odt, stream) != 0) { mlx_array_free(sgo); aok = false; }
-                if (aok) { snprintf(nm, sizeof nm, "%s.biases", base);
-                           aok = mlx_map_string_to_array_insert(synth, nm, sgo) == 0; }
-                mlx_array_free(sgo);
-            } else {
-                snprintf(nm, sizeof nm, "%s.weight", base);
-                if (aok) aok = mlx_map_string_to_array_insert(synth, nm, o16) == 0;
-            }
+            snprintf(nm, sizeof nm, "%s.weight", base);
+            if (aok) aok = mlx_map_string_to_array_insert(synth, nm, o16) == 0;
             if (!aok) { fprintf(stderr, "[turboquant] %s: insert fallita\n", base); ok = false; }
             mlx_array_free(o16);
             mlx_array_free(w); mlx_array_free(sc); mlx_array_free(sg); mlx_array_free(cb);
@@ -860,6 +873,7 @@ int turboquant_synthesize_weights(MultiShardWeights* weights, mlx_stream stream)
     } else {
         mlx_map_string_to_array_free(synth);
     }
+    llm_mem_dbg("tq_synth:end");
     return ok ? n_dec : -1;
 }
 

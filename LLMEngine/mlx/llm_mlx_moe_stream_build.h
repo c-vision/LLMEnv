@@ -263,6 +263,70 @@ static inline int llm_mlx_tq_rotate_input(const LlmEngineMoeTsIngest* s, int lay
     return r == 0 ? 0 : -1;
 }
 
+/* Esperti tq PACKED diretti (opzione memoria): usa i `w`/`scales` packed + codebook/signs dall'ingest
+ * e UN launch del kernel `kg`. Output [M,1,O] (come il gather_qmm affine: routing appiattiti a M).
+ * Elimina gli array affine-2bit residenti (~11.5 GB sul 35B). */
+static inline int llm_mlx_tq_gather_packed(const LlmEngineMoeTsIngest* s, int layer, int proj,
+        mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array idxs,
+        bool transpose, mlx_stream st) {
+    if (!transpose) return -1;
+    const int wnd = (int)mlx_array_ndim(w);
+    const int O = (int)mlx_array_shape(w)[wnd >= 2 ? wnd - 2 : 0];
+    const int PW = (int)mlx_array_shape(w)[wnd - 1];
+    const int snd = (int)mlx_array_ndim(scales);
+    const int NG = (int)mlx_array_shape(scales)[snd - 1];
+    const int xnd = (int)mlx_array_ndim(x);
+    const int K = (int)mlx_array_shape(x)[xnd - 1];
+    const int M = (int)mlx_array_size(idxs);                  /* idxs flat [M] = n_tok*top_k */
+    const int T = (xnd >= 1) ? (int)mlx_array_dim(x, 0) : M;  /* n_tokens da x */
+    uint32_t cbb = 0; int cbn = 0;
+    const uint8_t* cbp = llmengine_moe_ts_aux_get(s, layer, proj, 1, &cbb, &cbn);
+    if (!cbp || cbn < 1 || M <= 0 || K <= 0 || O <= 0 || NG <= 0) return -1;
+    const int trit = (cbn == 3);
+    const int bits = trit ? 3 : (cbn == 8 ? 3 : (cbn == 4 ? 2 : 4));
+    const int grp = (K % NG == 0) ? K / NG : 64;
+    int csh[1] = { cbn };
+    mlx_array CB = mlx_array_new_data((const void*)cbp, csh, 1, MLX_FLOAT16);
+    const mlx_dtype cdt = mlx_array_dtype(x);
+    mlx_array xr = mlx_array_new();
+    if (llm_mlx_tq_rotate_input(s, layer, proj, x, st, cdt, &xr) != 0) {
+        mlx_array_free(CB); return -1;
+    }
+    mlx_array xm = mlx_array_new();
+    int r = 0;
+    const int rows_x = (int)(mlx_array_size(xr) / (size_t)K);
+    int s2[2] = { M, K };
+    if (rows_x == T && M > T) {
+        int tk = M / T;
+        int s3[3] = { T, 1, K }, b3[3] = { T, tk, K };
+        mlx_array x3 = mlx_array_new(), xb = mlx_array_new();
+        if (mlx_reshape(&x3, xr, s3, 3, st) != 0) r = -1;
+        if (r == 0 && mlx_broadcast_to(&xb, x3, b3, 3, st) != 0) r = -1;
+        if (r == 0 && mlx_reshape(&xm, xb, s2, 2, st) != 0) r = -1;
+        mlx_array_free(x3); mlx_array_free(xb);
+    } else {
+        if (mlx_reshape(&xm, xr, s2, 2, st) != 0) r = -1;
+    }
+    mlx_array_free(xr);
+    if (r != 0) {
+        mlx_array_free(CB); mlx_array_free(xm); return -1;
+    }
+    mlx_array y = mlx_array_new();
+    r = llm_mlx_tq_qmv_kg(&y, w, scales, CB, xm, idxs, M, K, O, NG, PW, bits, grp, trit, st);
+    mlx_array_free(CB); mlx_array_free(xm);
+    if (r != 0) {
+        mlx_array_free(y); return -1;
+    }
+    int osh[3] = { M, 1, O };
+    mlx_array out = mlx_array_new();
+    if (mlx_reshape(&out, y, osh, 3, st) != 0) {
+        mlx_array_free(y); mlx_array_free(out); return -1;
+    }
+    mlx_array_free(y);
+    mlx_array_set(res, out); mlx_array_free(out);
+    return 0;
+}
+
 /* Self-test ISOLATO del kernel mode 1 (`kg`, gather multi-esperto): y[kk,row] deve coincidere col
  * decode di riferimento dell'esperto indices[kk]. Env LLM_TQ_KG_TEST=1. Isola il kernel dal resto. */
 static inline void llm_mlx_tq_kg_selftest(const LlmEngineMoeTsIngest* s, int layer, int proj, mlx_stream st) {
