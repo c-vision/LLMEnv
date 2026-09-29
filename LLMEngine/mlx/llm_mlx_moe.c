@@ -3,6 +3,7 @@
  * cache pesi FFN MoE per-layer (lazy). Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llmengine_mlx.h"
+#include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_moe_fused_kernel.h"
 #include "llm_mlx_swiglu_kernel.h"
@@ -27,6 +28,12 @@ const char* llm_mlx_moe_swap_dir(void) { return g_moe_swap_dir; }
  *   on=0          : array affine-2bit residenti + gather_qmm MLX -> velocita' massima, piu' RAM. */
 static int g_tq_mem_opt = 1;
 void llm_ai_mlx_set_tq_memory_opt(int on) { g_tq_mem_opt = on ? 1 : 0; }
+
+/* Registra il setter TurboQuant nel registro opzioni (decoupling: `llmengine_opts` non
+ * referenzia direttamente la lib mlx). Il constructor gira al load della dylib. */
+__attribute__((constructor)) static void llm_tq_opt_register_c(void) {
+    llm_ai_mlx_opt_register_tq_setter(llm_ai_mlx_set_tq_memory_opt);
+}
 int llm_mlx_tq_mem_opt(void) { return g_tq_mem_opt; }
 
 
@@ -36,7 +43,7 @@ int llm_mlx_tq_mem_opt(void) { return g_tq_mem_opt; }
  * di due gather_qmm separati, split del risultato in due meta' lungo l'ultimo asse. */
 static int g_moe_gateup_fuse_state = -1;
 static bool llm_mlx_moe_gateup_fuse_enabled(void) {
-    if (g_moe_gateup_fuse_state < 0) g_moe_gateup_fuse_state = (getenv("LLMENGINE_MOE_GATEUP_FUSE") != NULL) ? 1 : 0;
+    if (g_moe_gateup_fuse_state < 0) g_moe_gateup_fuse_state = (llm_ai_mlx_opt_env("LLMENGINE_MOE_GATEUP_FUSE") != NULL) ? 1 : 0;
     return g_moe_gateup_fuse_state == 1;
 }
 
@@ -431,8 +438,8 @@ bool qwen3_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
      * loro taglia -> firma di sync/serializzazione). A/B (back-to-back, load 5,15 => da riconfermare
      * in finestra quieta): prefill 6,6 -> **8,3 tok/s (+26%)** con **IDS IDENTICI** (92675131).
      * DEFAULT unsorted per mixtral; kill-switch LLMENGINE_MOE_SORT=1; LLMENGINE_MOE_NOSORT=1 forzato resta valido. */
-    if (strcmp(m->cfg.model_type, "mixtral") == 0 && getenv("LLMENGINE_MOE_SORT") == NULL) do_sort = false;
-    if (getenv("LLMENGINE_MOE_NOSORT") != NULL) do_sort = false;
+    if (strcmp(m->cfg.model_type, "mixtral") == 0 && llm_ai_mlx_opt_env("LLMENGINE_MOE_SORT") == NULL) do_sort = false;
+    if (llm_ai_mlx_opt_env("LLMENGINE_MOE_NOSORT") != NULL) do_sort = false;
     if (llm_moe_swap_ingest() != NULL) do_sort = false; /* streaming esperti: gather locale (unsorted) */
     mlx_array gate_out = mlx_array_new(), up_out = mlx_array_new();
     mlx_array sig = mlx_array_new(), silu = mlx_array_new(), act = mlx_array_new();
@@ -683,13 +690,24 @@ bool qwen3_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
                              no_lhs, top_inds_arr, true, gsz_opt, bts_opt, "affine", false, m->stream) == 0;
         CHK(ok, "gather_qmm down_proj");
     }
-    /* down_out: [n_tokens, top_k, 1, hidden]. probs (score per token/esperto, con eventuale
+    if (ok && !moe_fused_done) {
+        /* Il gather TQ (llm_mlx_tq_gather_packed) ritorna [n_tokens*top_k, 1, H]; il gather affine
+         * NON-TQ ritorna [n_tokens, top_k, 1, H]. Normalizza a [n_tokens, top_k, H] cosi' il
+         * broadcast con scores [n_tokens, top_k, 1] e la somma su axis=1 sono corretti per OGNI
+         * n_tokens (con n_tokens==1 il flatten coincide con top_k -> funzionava per caso). */
+        mlx_array d3 = mlx_array_new();
+        const int dsh[3] = { n_tokens, m->cfg.top_k, m->cfg.hidden_size };
+        if (mlx_reshape(&d3, down_out, dsh, 3, m->stream) == 0) mlx_array_set(&down_out, d3);
+        else ok = false;
+        mlx_array_free(d3);
+    }
+    /* down_out: [n_tokens, top_k, hidden]. probs (score per token/esperto, con eventuale
      * rinormalizzazione norm_topk_prob) e' gia' stato calcolato piu' sopra, prima del
      * tentativo di kernel fuso -- non ricalcolarlo qui. */
     if (ok && !moe_fused_done) {
         const int pr_shape[2] = {n_tokens, m->cfg.top_k};
-        const int sc_shape[4] = {n_tokens, m->cfg.top_k, 1, 1};
-        ok = mlx_reshape(&scores_arr, probs, sc_shape, 4, m->stream) == 0;   /* canonico: [T,K] intermedio ridondante */
+        const int sc_shape[3] = {n_tokens, m->cfg.top_k, 1};
+        ok = mlx_reshape(&scores_arr, probs, sc_shape, 3, m->stream) == 0;   /* canonico: [T,K] intermedio ridondante */
         if (ok) ok = mlx_multiply(&scaled, down_out, scores_arr, m->stream) == 0;
         CHK(ok, "moe score scale");
     }
@@ -732,13 +750,13 @@ bool qwen3_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
  * Gate: LLM_WCACHE=0 disabilita (fallback alla risoluzione per chiamata). */
 static int g_wcache_state = -1;
 bool llm_mlx_wcache_enabled(void) {
-    if (g_wcache_state < 0) g_wcache_state = (getenv("LLM_WCACHE") != NULL && strcmp(getenv("LLM_WCACHE"), "0") == 0) ? 0 : 1;
+    if (g_wcache_state < 0) g_wcache_state = (llm_ai_mlx_opt_env("LLM_WCACHE") != NULL && strcmp(llm_ai_mlx_opt_env("LLM_WCACHE"), "0") == 0) ? 0 : 1;
     return g_wcache_state == 1;
 }
 static int g_reshape_canonical_state = -1;
 bool llm_mlx_reshape_canonical_enabled(void) {
     if (g_reshape_canonical_state < 0) {
-        const char* v = getenv("LLM_RESHAPE_CANONICAL");
+        const char* v = llm_ai_mlx_opt_env("LLM_RESHAPE_CANONICAL");
         g_reshape_canonical_state = (v != NULL && strcmp(v, "0") == 0) ? 0 : 1;
     }
     return g_reshape_canonical_state == 1;
