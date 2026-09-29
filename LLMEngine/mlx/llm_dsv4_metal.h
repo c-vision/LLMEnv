@@ -134,6 +134,11 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t ou
         size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
         const float* heads, float* out);
 
+/* MoE batched via mul_mm_id (kernel ds4): `nt` token, 6 esperti/token, gate/up (`gtype`) + down (`dtype`) su tensori di
+ * layer con esperti impilati. ids [nt*6] (esperti scelti), rws [nt*6] (pesi), x [nt*embd] -> out [nt*embd] (solo routed). */
+int llm_dsv4_metal_moe_mm_batch(LlmDsv4Metal* b, int nt, const void* gate_w, const void* up_w, const void* down_w,
+        int gtype, int dtype, uint32_t n_expert, uint32_t embd, uint32_t ff, uint32_t gu_row_bytes, uint32_t down_row_bytes,
+        const int* ids, const float* rws, const float* x, float clamp, float* out);
 /* Come attn_out_fused per `nt` token: heads [nt*heads_total] -> out [nt*embd]. */
 int llm_dsv4_metal_attn_out_fused_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes,
         size_t outa_lead0, int ng, uint32_t gd, uint32_t rank, const void* outb_w,
