@@ -138,6 +138,14 @@ int main(int argc, char** argv) {
       int mism=0; for (int i=0;i<c.n_expert_used && (int)i<(int)got;i++) if (a[i]!=rsel[i]) mism++;
       fprintf(stderr,"[TAIL] sel    mism=%d%s\n", mism, mism?"  <<< DIVERGE":"");
       if (mism) fails++; }
+    { FILE* f=fopen("/tmp/d4_mid.bin","rb"); float* a=(float*)malloc(sizeof(float)*(size_t)c.n_expert_used*c.n_ff_exp);
+      size_t got=f?fread(a,sizeof(float),(size_t)c.n_expert_used*c.n_ff_exp,f):0; if(f)fclose(f);
+      double mx=0, ss=0; for(size_t i=0;i<got;i++){ double v=fabs(a[i]); if(v>mx)mx=v; ss+=v*v; }
+      fprintf(stderr,"[TAIL] mid    n=%zu max|.|=%.4g rms=%.4g%s\n", got, mx, got?sqrt(ss/(double)got):0.0, (mx>1e3)?"  <<< GARBAGE":"");
+      free(a); }
+    { float* a = rdbin("/tmp","rw",c.n_expert_used); if(a){ double mx=0; for(int i=0;i<c.n_expert_used;i++){double v=fabs(a[i]); if(v>mx)mx=v;} fprintf(stderr,"[TAIL] rw     max|.|=%.4g\n", mx); free(a);} }
+    { float* t = rdbin("/tmp","rout",D); double mxt=0; if(t){ for(int i=0;i<D;i++){double v=fabs(t[i]); if(v>mxt)mxt=v;} free(t);} double mxr=0; for(int i=0;i<D;i++){double v=fabs(rrout[i]); if(v>mxr)mxr=v;}
+      fprintf(stderr,"[TAIL] rout   |tail|max=%.6g  |ref|max=%.6g    (gate=%p up=%p down=%p)\n", mxt, mxr, (void*)pe.gate, (void*)pe.up, (void*)pe.down); }
     fprintf(stderr, "%s layer %d tail: %s\n", fails?"FAIL":"PASS", IL, fails?"primo stadio divergente sopra":"tutti bit-exact");
     return fails?1:0;
 }
