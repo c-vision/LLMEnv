@@ -1400,52 +1400,59 @@ int llm_ai_mlx_kvdisk_int8_selftest(char* out, size_t cap) {
     return (rc == 0 && bad_n == 0 && tier_ok == 0) ? 0 : 1;
 }
 
-/* Self-test: spill/fault di una pagina del pool int8 sul tier SSD (riuso kvdisk).
- * Confronto RAW: i byte della pagina (K/V/scale) dopo il fault-in devono essere
- * IDENTICI a prima dello spill (la pagina fisica viene ripristinata via kvdisk). */
+/* Self-test: spill/fault dell'INTERO cold del pool int8 (2 layer) sul tier SSD (kvdisk).
+ * La page table e' condivisa: lo spill deve coprire TUTTI i layer. Confronto RAW dei byte
+ * (K int8) per ogni layer prima/dopo. Include la decisione di policy `should_spill`. */
 int llm_ai_mlx_kvq_page_tier_selftest(char* out, size_t cap) {
     if (out == NULL || cap == 0) return -1;
     out[0] = '\0';
-    const int nkv = 2, hd = 64, N = 64;   /* 2 pagine da 32 */
+    const int L = 2, nkv = 2, hd = 64, N = 64;   /* 2 layer, 2 pagine da 32 */
     mlx_stream s = mlx_default_gpu_stream_new();
     llm_kvq_pool p;
-    if (!llm_kvq_pool_init(&p, 1, nkv, hd, LLM_KVQ_FMT_INT8, N, s)) { snprintf(out, cap, "pool_init FAIL"); return 1; }
+    if (!llm_kvq_pool_init(&p, L, nkv, hd, LLM_KVQ_FMT_INT8, N, s)) { snprintf(out, cap, "pool_init FAIL"); return 1; }
     float* kb = (float*)malloc((size_t)nkv*N*hd*4), *vb = (float*)malloc((size_t)nkv*N*hd*4);
     for (int i = 0; i < nkv*N*hd; i++) { kb[i] = sinf((float)i*0.7f)*3.0f; vb[i] = cosf((float)i*0.31f)*2.0f; }
     mlx_array K = mlx_array_new_data(kb, (int[]){nkv,N,hd}, 3, MLX_FLOAT32);
     mlx_array V = mlx_array_new_data(vb, (int[]){nkv,N,hd}, 3, MLX_FLOAT32);
-    bool stored = (llm_kvq_pool_store(&p, 0, K, V, 0, N, s) != 0);
+    bool stored = true;
+    for (int l = 0; l < L; l++) stored = stored && (llm_kvq_pool_store(&p, l, K, V, 0, N, s) != 0);
 
-    /* snapshot RAW della pagina logica 0 (K int8 + scale f32), prima dello spill. */
     int PT = p.page_tokens, ploc0 = llm_kv_pt_phys(&p.pt, 0) * PT;
-    size_t nk = (size_t)nkv*PT*hd, ns = (size_t)nkv*PT;
-    int8_t* kA = (int8_t*)malloc(nk); float* sA = (float*)malloc(ns*4);
-    int8_t* kB = (int8_t*)malloc(nk); float* sB = (float*)malloc(ns*4);
-    int snapA = 0, snapB = 0;
-    { mlx_array a = mlx_array_new(); int c0[3]={0,ploc0,0}, c1[3]={nkv,ploc0+PT,hd}, st[3]={1,1,1};
-      if (mlx_slice(&a, p.keyData[0], c0,3,c1,3,st,3, s)==0 && mlx_array_eval(a)==0) { memcpy(kA, mlx_array_data_int8(a), nk); snapA++; } mlx_array_free(a); }
-    { mlx_array a = mlx_array_new(); int c0[3]={0,ploc0,0}, c1[3]={nkv,ploc0+PT,1}, st[3]={1,1,1};
-      if (mlx_slice(&a, p.keyScales[0], c0,3,c1,3,st,3, s)==0 && mlx_array_eval(a)==0) { memcpy(sA, mlx_array_data_float32(a), ns*4); snapA++; } mlx_array_free(a); }
-
+    size_t nk = (size_t)nkv*PT*hd;
+    int8_t* A[2]; int8_t* B[2];
+    for (int l = 0; l < L; l++) { A[l] = (int8_t*)malloc(nk); B[l] = (int8_t*)malloc(nk); }
+    int snapA = 0;
+    for (int l = 0; l < L; l++) {
+        mlx_array a = mlx_array_new(), ac = mlx_array_new(); int c0[3]={0,ploc0,0}, c1[3]={nkv,ploc0+PT,hd}, st[3]={1,1,1};
+        if (mlx_slice(&a, p.keyData[l], c0,3,c1,3,st,3, s)==0 &&
+            mlx_contiguous(&ac, a, false, s)==0 && mlx_array_eval(ac)==0) { memcpy(A[l], mlx_array_data_int8(ac), nk); snapA++; }
+        mlx_array_free(a); mlx_array_free(ac);
+    }
     KvDisk d = llm_kv_disk_open("/tmp/llm_kvq_pagetier.scratch", 64, (uint64_t)4*1024*1024);
     int sp_rc = -9, fi_rc = -9; int tier_ok = 0;
-    if (stored && d.f && d.e) {
-        sp_rc = llm_kvq_pool_spill_page(&p, 0, 0, &d, 0x1111ULL, s);
-        fi_rc = llm_kvq_pool_faultin_page(&p, 0, 0, &d, 0x1111ULL, s);
+    if (stored && d.f && d.e) { sp_rc = llm_kvq_pool_spill_all(&p, &d, 0x2222ULL, s); fi_rc = llm_kvq_pool_faultin_all(&p, &d, 0x2222ULL, s); }
+    int snapB = 0;
+    for (int l = 0; l < L; l++) {
+        int pl = llm_kv_pt_phys(&p.pt, 0) * PT;
+        mlx_array a = mlx_array_new(), ac = mlx_array_new(); int c0[3]={0,pl,0}, c1[3]={nkv,pl+PT,hd}, st[3]={1,1,1};
+        if (mlx_slice(&a, p.keyData[l], c0,3,c1,3,st,3, s)==0 &&
+            mlx_contiguous(&ac, a, false, s)==0 && mlx_array_eval(ac)==0) { memcpy(B[l], mlx_array_data_int8(ac), nk); snapB++; }
+        mlx_array_free(a); mlx_array_free(ac);
     }
-    int ploc0b = llm_kv_pt_phys(&p.pt, 0) * PT;
-    { mlx_array a = mlx_array_new(); int c0[3]={0,ploc0b,0}, c1[3]={nkv,ploc0b+PT,hd}, st[3]={1,1,1};
-      if (mlx_slice(&a, p.keyData[0], c0,3,c1,3,st,3, s)==0 && mlx_array_eval(a)==0) { memcpy(kB, mlx_array_data_int8(a), nk); snapB++; } mlx_array_free(a); }
-    { mlx_array a = mlx_array_new(); int c0[3]={0,ploc0b,0}, c1[3]={nkv,ploc0b+PT,1}, st[3]={1,1,1};
-      if (mlx_slice(&a, p.keyScales[0], c0,3,c1,3,st,3, s)==0 && mlx_array_eval(a)==0) { memcpy(sB, mlx_array_data_float32(a), ns*4); snapB++; } mlx_array_free(a); }
-    if (snapA == 2 && snapB == 2 && sp_rc == 0 && fi_rc == 0)
-        tier_ok = (memcmp(kA, kB, nk) == 0 && memcmp(sA, sB, ns*4) == 0) ? 1 : 0;
+    double mdiff=0; int diffL[2] = {0,0}; int firstd=-1; int av=0,bv=0;
+    if (snapA == L && snapB == L && sp_rc == 0 && fi_rc == 0) {
+        tier_ok = 1; for (int l = 0; l < L; l++) { int d=0; for (size_t i=0;i<nk;i++) if (A[l][i]!=B[l][i]) { d++; if (firstd<0){firstd=(int)i; av=A[l][i]; bv=B[l][i];} } diffL[l]=d; if (d) tier_ok = 0; }
+    }
+    /* policy: sotto il reserve si spilla, sopra no (pura). */
+    LlmMemGov g = llm_memgov_default();
+    int pol_ok = llm_memgov_should_spill(&g, g.reserve_bytes - 1) && !llm_memgov_should_spill(&g, g.reserve_bytes + 1);
     llm_kv_disk_close(&d);
-    snprintf(out, cap, "kvq_page_tier selftest: store=%d spill=%d faultin=%d raw=%s %s",
-             (int)stored, sp_rc, fi_rc, tier_ok ? "OK" : "FAIL", (stored && tier_ok) ? "OK" : "FAIL");
-    free(kA); free(sA); free(kB); free(sB);
+    snprintf(out, cap, "kvq_page_tier selftest: store=%d spill_all=%d faultin_all=%d layers=%d raw=%s policy=%s %s",
+             (int)stored, sp_rc, fi_rc, L, tier_ok ? "OK" : "FAIL", pol_ok ? "OK" : "FAIL",
+             (stored && tier_ok && pol_ok) ? "OK" : "FAIL");
+    for (int l = 0; l < L; l++) { free(A[l]); free(B[l]); }
     mlx_array_free(K); mlx_array_free(V); llm_kvq_pool_free(&p);
-    return (stored && tier_ok) ? 0 : 1;
+    return (stored && tier_ok && pol_ok) ? 0 : 1;
 }
 
 /* Self-test: memory governor (decisioni pure + misura + resource_timeout). */

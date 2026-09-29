@@ -71,6 +71,12 @@ static inline uint64_t llm_memgov_system_free_bytes(void) {
 #endif
 }
 
+/* Policy B9: spillare le pagine cold quando il governor e' ON e il libero e' sotto il
+ * reserve (memoria in pressione). Se `free_b` == 0 (non misurabile) non spillare. */
+static inline bool llm_memgov_should_spill(const LlmMemGov* g, uint64_t free_b) {
+    return g->on && free_b > 0 && free_b < g->reserve_bytes;
+}
+
 /* Libero minimo richiesto per allocare `need` byte senza violare il budget. */
 static inline uint64_t llm_memgov_need_free(const LlmMemGov* g, uint64_t need) {
     return g->reserve_bytes + g->grow_min_free_bytes + need;
