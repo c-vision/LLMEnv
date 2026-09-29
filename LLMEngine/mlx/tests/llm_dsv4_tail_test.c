@@ -74,9 +74,25 @@ int main(int argc, char** argv) {
     fprintf(stderr, "layer %d ratio=%d gate=%d up=%d down=%d  (attesi 16/16/10 = IQ2/IQ2/Q2_K)\n",
             IL, ratio, pe.gate_type, pe.up_type, pe.down_type);
 
-    /* ctx GPU: serve un array per-layer; riempio tutti con questo layer (gli altri non usati). */
+    /* ctx GPU: serve un array per-layer REALE (le viste attn/moe si costruiscono per tutte le layer). */
     LlmDsv4PackedExperts* exps = (LlmDsv4PackedExperts*)calloc((size_t)c.n_layer, sizeof *exps);
-    for (int i = 0; i < c.n_layer; i++) exps[i] = pe;
+    for (int il2 = 0; il2 < c.n_layer; il2++) {
+        LlmDsv4PackedExperts* e = &exps[il2]; bool ok2 = true;
+        e->gate=llm_dsv4_bind_packed(&g,il2,"ffn_gate_exps",&e->gate_type,&ok2);
+        e->up  =llm_dsv4_bind_packed(&g,il2,"ffn_up_exps",&e->up_type,&ok2);
+        e->down=llm_dsv4_bind_packed(&g,il2,"ffn_down_exps",&e->down_type,&ok2);
+        e->in_dim=c.n_embd; e->ff_dim=c.n_ff_exp;
+        e->q_a=llm_dsv4_bind_packed(&g,il2,"attn_q_a",&e->q_a_type,&ok2);
+        e->q_b=llm_dsv4_bind_packed(&g,il2,"attn_q_b",&e->q_b_type,&ok2);
+        e->kv =llm_dsv4_bind_packed(&g,il2,"attn_kv",&e->kv_type,&ok2);
+        e->out_a=llm_dsv4_bind_packed(&g,il2,"attn_output_a",&e->out_a_type,&ok2);
+        e->out_b=llm_dsv4_bind_packed(&g,il2,"attn_output_b",&e->out_b_type,&ok2);
+        e->shexp_gate=llm_dsv4_bind_packed(&g,il2,"ffn_gate_shexp",&e->shexp_gate_type,&ok2);
+        e->shexp_up  =llm_dsv4_bind_packed(&g,il2,"ffn_up_shexp",&e->shexp_up_type,&ok2);
+        e->shexp_down=llm_dsv4_bind_packed(&g,il2,"ffn_down_shexp",&e->shexp_down_type,&ok2);
+        if (!ok2) fprintf(stderr, "bind layer %d fallito (ok parziale)\n", il2);
+    }
+    pe = exps[IL];   /* il tail e il riferimento usano lo stesso layer reale */
     if (!llm_dsv4_gpu_ctx_init(&c, exps)) { fprintf(stderr, "ctx GPU init fallito\n"); return 3; }
     llm_dsv4_metal_tail_set_dump("/tmp");
 
