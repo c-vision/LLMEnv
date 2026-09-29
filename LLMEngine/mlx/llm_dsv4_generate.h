@@ -35,16 +35,9 @@ static inline void llm_dsv4_forward_step(const LlmDsv4Config* c, const LlmDsv4We
     float* cur = (float*)malloc(sizeof(float) * (size_t)HC * D);
     float* nxt = (float*)malloc(sizeof(float) * (size_t)HC * D);
     llm_dsv4_hc_from_embedding(c, w->token_embd + (long)token * D, cur);
-    const char* dhc = getenv("LLM_DSV4_DUMP_HC");
-    const char* dtok = getenv("LLM_DSV4_DUMP_TOKEN");
-    int want = dtok ? atoi(dtok) : -1;
     for (int il = 0; il < c->n_layer; il++) {
         const LlmDsv4PackedExperts* pe = w->exps ? &w->exps[il] : NULL;
         llm_dsv4_layer_forward_cached_pe(c, &w->layers[il], pe, &cs->layers[il], cur, token, pos, il, nxt);
-        if (dhc && dhc[0] && token == want) {
-            FILE* f = fopen(dhc, il == 0 ? "wb" : "ab");
-            if (f) { fwrite(nxt, sizeof(float), (size_t)HC * D, f); fclose(f); }
-        }
         float* t = cur; cur = nxt; nxt = t;
     }
     memcpy(out_hc, cur, sizeof(float) * (size_t)HC * D);

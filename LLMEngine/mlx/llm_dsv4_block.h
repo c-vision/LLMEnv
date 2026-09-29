@@ -63,8 +63,6 @@ static inline void llm_dsv4_block_pre(const LlmDsv4Config* c, const float* fn, c
     for (int i = 0; i < HC; i++) post_out[i] = split[HC + i];
     for (int i = 0; i < HC * HC; i++) comb_out[i] = split[2 * HC + i];
     free(split);
-    { static int once = 0; const char* dp = getenv("LLM_DSV4_DUMP_BP");
-      if (dp && dp[0] && once++ == 0) { FILE* f = fopen(dp, "wb"); if (f) { fwrite(flat, sizeof(float), (size_t)HCD, f); fwrite(mixes, sizeof(float), (size_t)SIZE, f); fwrite(pre, sizeof(float), (size_t)HC, f); fwrite(post_out, sizeof(float), (size_t)HC, f); fwrite(comb_out, sizeof(float), (size_t)HC*HC, f); fclose(f); } } }
     float* hin = (float*)malloc((size_t)D * sizeof(float));
     for (int d = 0; d < D; d++) { float a = 0.0f; for (int h = 0; h < HC; h++) a += residual_hc[(long)h * D + d] * pre[h]; hin[d] = a; }
     llm_dsv4b_rms_weight(out_x, hin, norm_w, D, c->rms_eps);

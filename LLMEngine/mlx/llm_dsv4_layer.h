@@ -76,8 +76,6 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
         if (strcmp(op, "mhc_pre_attn") == 0) {
             memcpy(saved, cur, sizeof(float) * (size_t)HC * D);
             llm_dsv4_block_pre(c, L->hc_attn_fn, L->hc_attn_scale, L->hc_attn_base, L->attn_norm, cur, normed, post, comb);
-            { const char* dn = getenv("LLM_DSV4_DUMP_ANORM");
-              if (dn && dn[0] && il == 0) { FILE* f = fopen(dn, "wb"); if (f) { fwrite(normed, sizeof(float), (size_t)D, f); fclose(f); } } }
         } else if (strcmp(op, "mhc_pre_ffn") == 0) {
             memcpy(saved, cur, sizeof(float) * (size_t)HC * D);
             llm_dsv4_block_pre(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, cur, normed, post, comb);
@@ -107,8 +105,6 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
                 llm_dsv4_attn_cached(c, L, pe, cache, normed, pos, il, proj);
             }
             if (tail_done) break;
-            { const char* da = getenv("LLM_DSV4_DUMP_AOUT");
-              if (da && da[0] && il == 0) { FILE* f = fopen(da, "wb"); if (f) { fwrite(proj, sizeof(float), (size_t)D, f); fclose(f); } } }
         } else if (strcmp(op, "moe") == 0) {
             if (!llm_dsv4_gpu_moe_try(c, L, il, normed, token, proj)) {
                 if (pe && pe->gate) llm_dsv4_moe_forward_packed(c, L, pe, normed, il, token, proj);
@@ -117,12 +113,6 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
         } else if (strcmp(op, "mhc_post_attn") == 0 || strcmp(op, "mhc_post_ffn") == 0) {
             llm_dsv4_block_post(c, proj, saved, post, comb, nxt);
             memcpy(cur, nxt, sizeof(float) * (size_t)HC * D);
-            if (strcmp(op, "mhc_post_attn") == 0) {
-                const char* da = getenv("LLM_DSV4_DUMP_ATTN"); const char* dt = getenv("LLM_DSV4_DUMP_TOKEN");
-                int want = dt ? atoi(dt) : -1;
-                if (da && da[0] && token == want) { FILE* f = fopen(da, il == 0 ? "wb" : "ab");
-                    if (f) { fwrite(cur, sizeof(float), (size_t)HC * D, f); fclose(f); } }
-            }
         }
         /* op sconosciuto: ignorato (il gap e' visibile nel log della pipeline) */
     }

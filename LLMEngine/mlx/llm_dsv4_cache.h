@@ -117,10 +117,7 @@ static inline int llm_dsv4_compressor_decode(const LlmDsv4Config* c, float* out_
     free(sc_cur); free(kv_cur);
     if (!should) return 0;
     float* pooled = (float*)malloc(sizeof(float) * (size_t)head_dim);
-    { const char* dx = getenv("LLM_DSV4_DUMP_CX"); if (dx && dx[0] && il == 2 && head_dim == c->n_head_dim) { FILE* f = fopen(dx, "ab"); if (f) { unsigned p2 = (unsigned)pos; fwrite(&p2, sizeof(unsigned), 1, f); fwrite(x, sizeof(float), (size_t)embd, f); fclose(f); } } }
-    { const char* st = getenv("LLM_DSV4_DUMP_STATE"); if (st && st[0] && il == 2 && head_dim == c->n_head_dim) { int w = co * head_dim; FILE* f = fopen(st, "wb"); if (f) { fwrite(state_kv, sizeof(float), (size_t)co*ratio*w, f); fwrite(state_score, sizeof(float), (size_t)co*ratio*w, f); fclose(f); } } }
     llm_dsv4_compressor_pool_state(pooled, state_kv, state_score, head_dim, ratio);
-    { const char* dp = getenv("LLM_DSV4_DUMP_POOL"); if (dp && dp[0] && il == 2 && head_dim == c->n_head_dim) { FILE* f = fopen(dp, "wb"); if (f) { fwrite(pooled, sizeof(float), (size_t)head_dim, f); fclose(f); } } }
     double ss = 0.0;
     for (int i = 0; i < head_dim; i++) ss += (double)pooled[i] * pooled[i];
     float rms = 1.0f / sqrtf((float)(ss / (double)head_dim) + c->rms_eps);
