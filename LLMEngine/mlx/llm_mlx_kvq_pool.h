@@ -73,13 +73,13 @@ static inline bool llm_kvq_pool_init(llm_kvq_pool* p, int layers, int kv_heads, 
     for (int l = 0; l < layers; l++) {
         int ksh[3] = {kv_heads, cap_tokens, head_dim};
         int vsh[3] = {kv_heads, cap_tokens, head_dim};   /* token-major come il kernel read */
-        int ssh[2] = {kv_heads, cap_tokens};
+        int ssh[3] = {kv_heads, cap_tokens, 1};
         p->keyData[l]   = mlx_array_new(); p->valueData[l]   = mlx_array_new();
         p->keyScales[l] = mlx_array_new(); p->valueScales[l] = mlx_array_new();
         if (mlx_zeros(&p->keyData[l], ksh, 3, edt, s) != 0) return false;
         if (mlx_zeros(&p->valueData[l], vsh, 3, edt, s) != 0) return false;
-        if (mlx_zeros(&p->keyScales[l], ssh, 2, MLX_FLOAT32, s) != 0) return false;
-        if (mlx_zeros(&p->valueScales[l], ssh, 2, MLX_FLOAT32, s) != 0) return false;
+        if (mlx_zeros(&p->keyScales[l], ssh, 3, MLX_FLOAT32, s) != 0) return false;
+        if (mlx_zeros(&p->valueScales[l], ssh, 3, MLX_FLOAT32, s) != 0) return false;
     }
     return true;
 }
@@ -91,12 +91,12 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
     for (int l = 0; l < p->layers; l++) {
         int ksh[3] = {p->kv_heads, ncap, p->head_dim};
         int vsh[3] = {p->kv_heads, ncap, p->head_dim};
-        int ssh[2] = {p->kv_heads, ncap};
+        int ssh[3] = {p->kv_heads, ncap, 1};
         mlx_array nk = mlx_array_new(), nv = mlx_array_new(), nks = mlx_array_new(), nvs = mlx_array_new();
         bool ok = mlx_zeros(&nk, ksh, 3, edt, s) == 0 &&
                   mlx_zeros(&nv, vsh, 3, edt, s) == 0 &&
-                  mlx_zeros(&nks, ssh, 2, MLX_FLOAT32, s) == 0 &&
-                  mlx_zeros(&nvs, ssh, 2, MLX_FLOAT32, s) == 0;
+                  mlx_zeros(&nks, ssh, 3, MLX_FLOAT32, s) == 0 &&
+                  mlx_zeros(&nvs, ssh, 3, MLX_FLOAT32, s) == 0;
         if (ok && p->committed > 0) {
             /* copia il prefisso scritto: K [nkv, committed, hd], V [nkv, hd, committed] */
             int ks0[3] = {0,0,0}, ks1[3] = {p->kv_heads, p->committed, p->head_dim}, kst[3] = {1,1,1};
@@ -105,9 +105,9 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
             mlx_array kssrc = mlx_array_new(), vssrc = mlx_array_new();
             ok = ok && mlx_slice(&ksrc, p->keyData[l], ks0, 3, ks1, 3, kst, 3, s) == 0 &&
                        mlx_slice(&vsrc, p->valueData[l], vs0, 3, vs1, 3, vst, 3, s) == 0;
-            int ss0[2] = {0,0}, ss1[2] = {p->kv_heads, p->committed}, sst[2] = {1,1};
-            ok = ok && mlx_slice(&kssrc, p->keyScales[l], ss0, 2, ss1, 2, sst, 2, s) == 0 &&
-                       mlx_slice(&vssrc, p->valueScales[l], ss0, 2, ss1, 2, sst, 2, s) == 0;
+            int ss0[3] = {0,0,0}, ss1[3] = {p->kv_heads, p->committed, 1}, sst[3] = {1,1,1};
+            ok = ok && mlx_slice(&kssrc, p->keyScales[l], ss0, 3, ss1, 3, sst, 3, s) == 0 &&
+                       mlx_slice(&vssrc, p->valueScales[l], ss0, 3, ss1, 3, sst, 3, s) == 0;
             if (ok) { /* scrivi il prefisso in testa ai nuovi buffer */
                 mlx_array ku = mlx_array_new(), vu = mlx_array_new(), ksu = mlx_array_new(), vsu = mlx_array_new();
                 int ku0[3] = {0,0,0}, ku1[3] = {p->kv_heads, p->committed, p->head_dim}, ust[3] = {1,1,1};
@@ -116,9 +116,9 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
                      mlx_slice_update(&vu, nv, vsrc, vu0, 3, vu1, 3, ust, 3, s) == 0;
                 if (ok) mlx_array_set(&nk, ku);
                 if (ok) mlx_array_set(&nv, vu);
-                int su0[2] = {0,0}, su1[2] = {p->kv_heads, p->committed}, sust[2] = {1,1};
-                ok = ok && mlx_slice_update(&ksu, nks, kssrc, su0, 2, su1, 2, sust, 2, s) == 0 &&
-                           mlx_slice_update(&vsu, nvs, vssrc, su0, 2, su1, 2, sust, 2, s) == 0;
+                int su0[3] = {0,0,0}, su1[3] = {p->kv_heads, p->committed, 1}, sust[3] = {1,1,1};
+                ok = ok && mlx_slice_update(&ksu, nks, kssrc, su0, 3, su1, 3, sust, 3, s) == 0 &&
+                           mlx_slice_update(&vsu, nvs, vssrc, su0, 3, su1, 3, sust, 3, s) == 0;
                 if (ok) mlx_array_set(&nks, ksu);
                 if (ok) mlx_array_set(&nvs, vsu);
                 mlx_array_free(ku); mlx_array_free(vu); mlx_array_free(ksu); mlx_array_free(vsu);
@@ -149,17 +149,17 @@ static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
     if (ok) ok = llm_mlx_kvq_splash_store(&kq, &vq, &sc, k3, v3, p->head_dim, s) == 0;
     mlx_array_free(k3); mlx_array_free(v3);
     mlx_array sc2 = mlx_array_new(), vqt = mlx_array_new();
-    if (ok) { int sh2[2] = {p->kv_heads, n}; ok = mlx_reshape(&sc2, sc, sh2, 2, s) == 0; }
-    if (ok) ok = mlx_array_set(&vqt, vq) == 0;   /* V token-major (il kernel read lo legge cosi) */
+    if (ok) ok = mlx_array_set(&sc2, sc) == 0;   /* sc gia' [nkv,n,1] (nessun reshape) */
+    if (ok) ok = mlx_array_set(&vqt, vq) == 0;   /* V token-major */
     if (ok) {
         mlx_array nk = mlx_array_new(), nv = mlx_array_new(), nks = mlx_array_new(), nvs = mlx_array_new();
         int k0[3] = {0,pos,0},  k1[3] = {p->kv_heads,pos+n,p->head_dim}, kst[3] = {1,1,1};
         int v0[3] = {0,pos,0},  v1[3] = {p->kv_heads,pos+n,p->head_dim}, vst[3] = {1,1,1};
-        int s0[2] = {0,pos},    s1[2] = {p->kv_heads,pos+n}, sst[2] = {1,1};
+        int s0[3] = {0,pos,0},  s1[3] = {p->kv_heads,pos+n,1}, sst[3] = {1,1,1};
         ok = mlx_slice_update(&nk, p->keyData[layer], kq, k0,3,k1,3,kst,3, s) == 0 &&
              mlx_slice_update(&nv, p->valueData[layer], vqt, v0,3,v1,3,vst,3, s) == 0 &&
-             mlx_slice_update(&nks, p->keyScales[layer], sc2, s0,2,s1,2,sst,2, s) == 0 &&
-             mlx_slice_update(&nvs, p->valueScales[layer], sc2, s0,2,s1,2,sst,2, s) == 0;
+             mlx_slice_update(&nks, p->keyScales[layer], sc2, s0,3,s1,3,sst,3, s) == 0 &&
+             mlx_slice_update(&nvs, p->valueScales[layer], sc2, s0,3,s1,3,sst,3, s) == 0;
         if (ok) { mlx_array_set(&p->keyData[layer], nk); mlx_array_set(&p->valueData[layer], nv);
                   mlx_array_set(&p->keyScales[layer], nks); mlx_array_set(&p->valueScales[layer], nvs); }
         mlx_array_free(nk); mlx_array_free(nv); mlx_array_free(nks); mlx_array_free(nvs);
