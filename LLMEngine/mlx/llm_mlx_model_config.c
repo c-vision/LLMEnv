@@ -70,6 +70,18 @@ int llm_ai_mlx_model_set_kv_quantize(llm_ai_mlx_model_handle handle, bool enable
     return 0;
 }
 
+/* B7 (2026-09-29): identita' di formato della KV (per la futura prefix-cache: blocchi non
+ * attraversano formati). "bf16" (default) oppure "int{4|8}:{threshold}". */
+int llm_ai_mlx_model_kv_format(llm_ai_mlx_model_handle handle, char* out, int cap) {
+    if (handle == NULL || out == NULL || cap <= 0) return -1;
+    LlmMlxModel* m = (LlmMlxModel*)handle;
+    if (m->cfg.kv_quantize)
+        snprintf(out, (size_t)cap, "int%d:%d", m->cfg.kv_quantize_bits, m->cfg.kv_quantize_threshold);
+    else
+        snprintf(out, (size_t)cap, "bf16");
+    return 0;
+}
+
 /* Matcha mlx_lm: bfloat16 per embed (riduce la differenza di precisione che il MoE amplifica). */
 int llm_ai_mlx_model_set_bfloat16(llm_ai_mlx_model_handle handle, bool enabled) {
     if (handle == NULL) return -1;

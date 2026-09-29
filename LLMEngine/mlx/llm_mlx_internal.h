@@ -155,6 +155,11 @@ typedef struct {
     bool kv_quantize;
     int kv_quantize_bits;
     int kv_quantize_threshold; /* token oltre cui quantizza la parte cold */
+    /* AUTO (2026-09-29): attiva la KV int8 Splash da sola quando il contesto supera
+     * `kv_quantize_auto_trigger` (il crossover misurato e' ~8-10k token: sotto conviene fp,
+     * sopra l'int8 e' ~4x piu' veloce e ~1.7x meno memoria). Solo per modelli compatibili. */
+    bool kv_quantize_auto;
+    int kv_quantize_auto_trigger;
     int kv_max_tokens;         /* Rolling-Window KV (fase 3 paging): max token nella KV-cache full; 0=off */
     bool bfloat16_input;       /* matcha mlx_lm: embed/rms_norm in bfloat16 */
     int per_tensor_quant;      /* config quantization contiene override per-tensore (es. gpt-oss-20b MXFP4-Q8: embed/attention affine, esperti mxfp4) */

@@ -8,6 +8,8 @@
 #include "llm_mlx_ops.h"
 #include "llm_mlx_lora.h"
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
+#include "llm_mlx_kvq_splash.h"   /* KV-quant port da Splash */
+#include "llm_mlx_kvq_pool.h"     /* page pool int8 (storage primario cold) */
 #include "llm_mlx_flash_decode_kernel.h"
 #include "llm_mlx_fused_rope_append.h"
 
@@ -16,6 +18,13 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+
+/* Definizioni UNICHE degli hook SDPA (dichiarati extern in llm_mlx_ops.h).
+ * Prima erano `static` per-TU -> l'hook installato qui non era visibile agli archi
+ * attention (altre TU) e non veniva mai invocato. */
+llm_sdpa_hook_slot llm_kvq_hook = { NULL, NULL };
+llm_sdpa_hook_slot llm_pagesel_hook = { NULL, NULL };
+llm_sdpa_hook_slot llm_train_sdpa_hook = { NULL, NULL };
 
 /* ── LLM_KV_DEQUANT_READ (2026-09-13): attenzione decode che legge la KV cold QUANTIZZATA
  * direttamente (kernel Metal dequant-on-read, llm_mlx_kv_quant_sdpa_kernel.h), senza
@@ -61,8 +70,9 @@ static bool llm_kvq_sdpa_hook_dispatch(mlx_array* out, mlx_array q, mlx_array k,
     mlx_array kw = mlx_array_new(), ks = mlx_array_new(), kb = mlx_array_new();
     mlx_array vw = mlx_array_new(), vs = mlx_array_new(), vb = mlx_array_new();
     int qsh[2] = {nh, hd}, ksh[3] = {nkv, nr, hd};
-    int cw[3] = {nkv, c->nc, hd * c->kbits / 32}, cs[3] = {nkv, c->nc, hd / 64};
-    int cwv[3] = {nkv, c->nc, hd * c->vbits / 32};
+    int kcap = (int)mlx_array_shape(c->kw)[1];                 /* capacita' del pool (K) */
+    int cw[3] = {nkv, kcap, hd}, cs[3] = {nkv, kcap, 1};       /* Splash: int8 byte + 1 scala/token */
+    int cwv[3] = {nkv, kcap, hd};
     bool ok = mlx_reshape(&q2, q, qsh, 2, s) == 0 &&
               mlx_reshape(&k2, k, ksh, 3, s) == 0 &&
               mlx_reshape(&v2, v, ksh, 3, s) == 0 &&
@@ -73,7 +83,7 @@ static bool llm_kvq_sdpa_hook_dispatch(mlx_array* out, mlx_array q, mlx_array k,
               mlx_reshape(&vs, c->vs, cs, 3, s) == 0 &&
               mlx_reshape(&vb, c->vb, cs, 3, s) == 0;
     mlx_array o2 = mlx_array_new();
-    if (ok) ok = llm_mlx_kvq_sdpa_decode(&o2, q2, kw, ks, kb, vw, vs, vb, k2, v2, c->nc, c->kbits, c->vbits, scale, s);
+    if (ok) ok = llm_mlx_kvq_sdpa_decode(&o2, q2, kw, ks, kb, vw, vs, vb, k2, v2, c->nc, c->kbits, c->vbits, scale, hd, s);
     if (ok) {
         mlx_array o2c = mlx_array_new();
         ok = (mlx_array_dtype(o2) == mlx_array_dtype(q)) ? (mlx_array_set(&o2c, o2) == 0)
@@ -291,20 +301,41 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
      * e' attivo, invece di richiedere un secondo flag separato che nessun utente/benchmark
      * conosceva: LLM_KV_DEQUANT_READ resta utilizzabile per forzarlo anche in scenari dove
      * kv_quantize non e' ancora stato attivato dal chiamante. */
-    bool kvq_read = (n_tokens == 1) &&
-        (m->cfg.kv_quantize || llm_env_get("LLM_KV_DEQUANT_READ") != NULL);
+    /* AUTO (2026-09-29): attiva la KV int8 Splash quando il contesto supera la soglia.
+     * Il crossover misurato e' ~8-10k token (sotto conviene l'fp, sopra l'int8 e' ~4x piu'
+     * veloce e ~1.7x meno memoria). Solo per modelli COMPATIBILI col kernel: head_dim
+     * multiplo di 32, GQA valido, nessuna sliding-window/NSA. Default del registro = auto. */
+    if (m->cfg.kv_quantize_auto && !m->cfg.kv_quantize) {
+        bool compat = !m->cfg.nsa_sparse && m->cfg.head_dim > 0 &&
+                      (m->cfg.head_dim % 32 == 0) && m->cfg.n_kv_heads > 0 &&
+                      (m->cfg.n_heads % m->cfg.n_kv_heads == 0) &&
+                      (m->cfg.is_sliding_layer == NULL);
+        if (compat && cache_offset + n_tokens > m->cfg.kv_quantize_auto_trigger) {
+            m->cfg.kv_quantize = true;
+            m->cfg.kv_quantize_bits = 8;
+            m->cfg.kv_quantize_threshold = 2048;
+            fprintf(stderr, "[kvquant] auto-ON a %d token (int8 Splash, finestra 2048)\n",
+                    cache_offset + n_tokens);
+        }
+    }
+    bool kvq_read = (n_tokens == 1) && m->cfg.kv_quantize;   /* read FUSED (kernel Splash layout) */
+    /* KV-quant (port Splash): il cold vive nel PAGE POOL int8 = storage PRIMARIO.
+     * La cache fp e' SOLO la finestra recente; il read fused legge il pool. */
+    llm_kvq_pool* kvqp = NULL;
+    if (kvq_sess && m->cfg.kv_quantize && m->cfg.kv_quantize_threshold > 0)
+        kvqp = llm_kvq_pool_for((void*)m, (void*)kvq_sess, (int)m->cfg.n_layers,
+                                (int)m->cfg.n_kv_heads, (int)m->cfg.head_dim, LLM_KVQ_FMT_INT8,
+                                m->cfg.kv_quantize_threshold, m->stream);
     bool kvq_read_used = false;
-    if (kvq_read && kvq_sess && kvq_sess->kvq_len && kvq_sess->kvq_len[layer_idx] > 0 &&
-        kvq_sess->kvq_v_w && kvq_sess->kvq_v_len && kvq_sess->kvq_v_len[layer_idx] == kvq_sess->kvq_len[layer_idx]) {
-        g_kvq_cold.kw = kvq_sess->kvq_w[layer_idx];
-        g_kvq_cold.ks = kvq_sess->kvq_sc[layer_idx];
-        g_kvq_cold.kb = kvq_sess->kvq_bi[layer_idx];
-        g_kvq_cold.vw = kvq_sess->kvq_v_w[layer_idx];
-        g_kvq_cold.vs = kvq_sess->kvq_v_sc[layer_idx];
-        g_kvq_cold.vb = kvq_sess->kvq_v_bi[layer_idx];
-        g_kvq_cold.nc = kvq_sess->kvq_len[layer_idx];
-        g_kvq_cold.kbits = kvq_sess->kvq_bits;
-        g_kvq_cold.vbits = kvq_sess->kvq_v_bits;
+    if (kvq_read && kvqp && kvqp->committed_l[layer_idx] > 0) {
+        g_kvq_cold.kw = kvqp->keyData[layer_idx];
+        g_kvq_cold.ks = kvqp->keyScales[layer_idx];
+        g_kvq_cold.kb = kvqp->bias[layer_idx];
+        g_kvq_cold.vw = kvqp->valueData[layer_idx];
+        g_kvq_cold.vs = kvqp->valueScales[layer_idx];
+        g_kvq_cold.vb = kvqp->bias[layer_idx];
+        g_kvq_cold.nc = kvqp->committed_l[layer_idx];
+        g_kvq_cold.kbits = 8; g_kvq_cold.vbits = 8;
         llm_kvq_hook.fn = llm_kvq_sdpa_hook_dispatch;
         llm_kvq_hook.ctx = &g_kvq_cold;
         kvq_read_used = true;
@@ -313,8 +344,7 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
         int cold = kvq_sess->kvq_len[layer_idx];
         int bits = kvq_sess->kvq_bits;
         mlx_array deq = mlx_array_new();
-        if (llm_mlx_kv_dequantize(&deq, kvq_sess->kvq_w[layer_idx], kvq_sess->kvq_sc[layer_idx],
-                                  kvq_sess->kvq_bi[layer_idx], bits, 64, m->stream)) {
+        if (llm_mlx_kvq_splash_dequant(&deq, kvq_sess->kvq_w[layer_idx], kvq_sess->kvq_sc[layer_idx], m->stream) == 0) {
             mlx_vector_array rc = mlx_vector_array_new();
             mlx_vector_array_append_value(rc, deq);
             mlx_vector_array_append_value(rc, *k_cache);
@@ -331,8 +361,7 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
     if (!kvq_read_used && kvq_sess && kvq_sess->kvq_v_len && kvq_sess->kvq_v_len[layer_idx] > 0) {
         int vbits = kvq_sess->kvq_v_bits;
         mlx_array deqv = mlx_array_new();
-        if (llm_mlx_kv_dequantize(&deqv, kvq_sess->kvq_v_w[layer_idx], kvq_sess->kvq_v_sc[layer_idx],
-                                  kvq_sess->kvq_v_bi[layer_idx], vbits, 64, m->stream)) {
+        if (llm_mlx_kvq_splash_dequant(&deqv, kvq_sess->kvq_v_w[layer_idx], kvq_sess->kvq_v_sc[layer_idx], m->stream) == 0) {
             mlx_vector_array rc = mlx_vector_array_new();
             mlx_vector_array_append_value(rc, deqv);
             mlx_vector_array_append_value(rc, *v_cache);
@@ -563,92 +592,55 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
     if (gprof && layer_idx + 1 >= m->cfg.n_layers) { fprintf(stderr, "[LLM_PROF] attn=%.2fs ffn=%.2fs total=%.2fs\n", prof_attn, prof_ffn, prof_attn + prof_ffn); prof_attn = prof_ffn = 0.0; (void)prof_run; }
     /* KV quant: DOPO l'attn (cache aggiornata con i nuovi token), se supera la soglia quantizza la
      * parte COLD e la salva in kvq_*[layer] (persistente quantizzata); k_cache resta SOLO i recenti. */
-    if (ok && !kvq_read_used && kvq_sess && m->cfg.kv_quantize && m->cfg.kv_quantize_threshold > 0) {
-        int bits = kvq_sess->kvq_bits;
-        int n_cold = 0;
-        mlx_vector_array qk = mlx_vector_array_new();
-        if (llm_mlx_kv_apply_policy(&qk, *k_cache, m->cfg.kv_quantize_threshold, bits, 64, &n_cold, m->stream)
-            && n_cold > 0) {
-            mlx_array w = mlx_array_new(), sc = mlx_array_new(), bi = mlx_array_new();
-            mlx_vector_array_get(&w, qk, 0); mlx_vector_array_get(&sc, qk, 1); mlx_vector_array_get(&bi, qk, 2);
-            mlx_array_set(&kvq_sess->kvq_w[layer_idx], w);
-            mlx_array_set(&kvq_sess->kvq_sc[layer_idx], sc);
-            mlx_array_set(&kvq_sess->kvq_bi[layer_idx], bi);
-            kvq_sess->kvq_len[layer_idx] = n_cold;
-            /* k_cache = solo recenti FP16 (n_cold..N) */
-            int r0[4]={0,0,n_cold,0}, r1[4]={1,(int)mlx_array_shape(*k_cache)[1],(int)mlx_array_shape(*k_cache)[2],(int)mlx_array_shape(*k_cache)[3]};
-            int ones[4]={1,1,1,1};
-            mlx_array recent = mlx_array_new(), recent_c = mlx_array_new();
-            if (mlx_slice(&recent, *k_cache, r0, 4, r1, 4, ones, 4, m->stream) == 0 &&
-                mlx_contiguous(&recent_c, recent, false, m->stream) == 0)
-                mlx_array_set(k_cache, recent_c);
-            mlx_array_free(recent); mlx_array_free(recent_c);
-            mlx_array_free(w); mlx_array_free(sc); mlx_array_free(bi);
-        }
-        mlx_vector_array_free(qk);
-    }
-    /* HETERO-KV: quantizza la parte cold di V a kvq_v_bits (K piu' preciso di V, LeanKV). */
-    if (ok && !kvq_read_used && kvq_sess && kvq_sess->kvq_v_w && m->cfg.kv_quantize && m->cfg.kv_quantize_threshold > 0) {
-        int vbits = kvq_sess->kvq_v_bits;
-        int nv_cold = 0;
-        mlx_vector_array qv = mlx_vector_array_new();
-        if (llm_mlx_kv_apply_policy(&qv, *v_cache, m->cfg.kv_quantize_threshold, vbits, 64, &nv_cold, m->stream)
-            && nv_cold > 0) {
-            mlx_array w = mlx_array_new(), sc = mlx_array_new(), bi = mlx_array_new();
-            mlx_vector_array_get(&w, qv, 0); mlx_vector_array_get(&sc, qv, 1); mlx_vector_array_get(&bi, qv, 2);
-            mlx_array_set(&kvq_sess->kvq_v_w[layer_idx], w);
-            mlx_array_set(&kvq_sess->kvq_v_sc[layer_idx], sc);
-            mlx_array_set(&kvq_sess->kvq_v_bi[layer_idx], bi);
-            kvq_sess->kvq_v_len[layer_idx] = nv_cold;
-            int r0[4]={0,0,nv_cold,0}, r1[4]={1,(int)mlx_array_shape(*v_cache)[1],(int)mlx_array_shape(*v_cache)[2],(int)mlx_array_shape(*v_cache)[3]};
-            int ones[4]={1,1,1,1};
-            mlx_array recent = mlx_array_new(), recent_c = mlx_array_new();
-            if (mlx_slice(&recent, *v_cache, r0, 4, r1, 4, ones, 4, m->stream) == 0 &&
-                mlx_contiguous(&recent_c, recent, false, m->stream) == 0)
-                mlx_array_set(v_cache, recent_c);
-            mlx_array_free(recent); mlx_array_free(recent_c);
-            mlx_array_free(w); mlx_array_free(sc); mlx_array_free(bi);
-        }
-        mlx_vector_array_free(qv);
-    }
-    /* LLM_KV_DEQUANT_READ: append "a blocchi" — quantizza SOLO i token che scadono dalla
-     * finestra e li concatena ai quantizzati persistenti (nessun dequant del cold). */
-    if (ok && kvq_read_used && kvq_sess && m->cfg.kv_quantize && m->cfg.kv_quantize_threshold > 0) {
+    /* KV-quant (port Splash ARCHITETTURALE): il cold [0, N-W) va nel PAGE POOL
+     * int8 (storage primario, slice_update); la cache fp conserva SOLO la
+     * finestra recente [N-W, N). Nessun Concat del cold, nessuna cache fp del
+     * cold: il +1266 MB del path "in aggiunta" non puo' esistere. */
+    if (ok && kvq_sess && kvqp && m->cfg.kv_quantize_threshold > 0 &&
+        (*k_cache).ctx != NULL && (*v_cache).ctx != NULL &&
+        mlx_array_ndim(*k_cache) == 4 && mlx_array_ndim(*v_cache) == 4 &&
+        mlx_array_shape(*k_cache)[1] == (int)m->cfg.n_kv_heads &&
+        mlx_array_shape(*k_cache)[3] == (int)m->cfg.head_dim) {
         int thr = m->cfg.kv_quantize_threshold;
-        int nk = mlx_array_shape(*k_cache)[2];
-        int n_new = nk - thr;
-        /* batch il flush (vedi llm_mlx_kvq_flush_batch sopra): lascia crescere la finestra
-         * recente fino a LLM_KVQ_FLUSH_BATCH token oltre soglia prima di quantizzare+
-         * concatenare tutti insieme, invece di un concat O(nc) a OGNI step. */
-        if (n_new >= llm_mlx_kvq_flush_batch()) {
-            int n = llm_kvq_append_cold(&kvq_sess->kvq_w[layer_idx], &kvq_sess->kvq_sc[layer_idx],
-                                        &kvq_sess->kvq_bi[layer_idx], kvq_sess->kvq_len[layer_idx],
-                                        *k_cache, n_new, kvq_sess->kvq_bits, 64, m->stream);
-            kvq_sess->kvq_len[layer_idx] = n;
-            int r0[4] = {0,0,n_new,0};
-            int r1[4] = {1,(int)mlx_array_shape(*k_cache)[1],nk,(int)mlx_array_shape(*k_cache)[3]};
-            int ones[4] = {1,1,1,1};
-            mlx_array rec = mlx_array_new(), rec_c = mlx_array_new();
-            if (mlx_slice(&rec, *k_cache, r0, 4, r1, 4, ones, 4, m->stream) == 0 &&
-                mlx_contiguous(&rec_c, rec, false, m->stream) == 0) mlx_array_set(k_cache, rec_c);
-            mlx_array_free(rec); mlx_array_free(rec_c);
-        }
-        int nv = mlx_array_shape(*v_cache)[2];
-        int nv_new = nv - thr;
-        if (nv_new >= llm_mlx_kvq_flush_batch()) {
-            int n = llm_kvq_append_cold(&kvq_sess->kvq_v_w[layer_idx], &kvq_sess->kvq_v_sc[layer_idx],
-                                        &kvq_sess->kvq_v_bi[layer_idx], kvq_sess->kvq_v_len[layer_idx],
-                                        *v_cache, nv_new, kvq_sess->kvq_v_bits, 64, m->stream);
-            kvq_sess->kvq_v_len[layer_idx] = n;
-            int r0[4] = {0,0,nv_new,0};
-            int r1[4] = {1,(int)mlx_array_shape(*v_cache)[1],nv,(int)mlx_array_shape(*v_cache)[3]};
-            int ones[4] = {1,1,1,1};
-            mlx_array rec = mlx_array_new(), rec_c = mlx_array_new();
-            if (mlx_slice(&rec, *v_cache, r0, 4, r1, 4, ones, 4, m->stream) == 0 &&
-                mlx_contiguous(&rec_c, rec, false, m->stream) == 0) mlx_array_set(v_cache, rec_c);
-            mlx_array_free(rec); mlx_array_free(rec_c);
+        int nkv = (int)mlx_array_shape(*k_cache)[1], hd = (int)mlx_array_shape(*k_cache)[3];
+        int N = (int)mlx_array_shape(*k_cache)[2];
+        int total = cache_offset + n_tokens;          /* posizione ASSOLUTA totale */
+        int upto = total - thr;                       /* cold assoluto = [0, upto) */
+        if (thr > 0 && upto > 0) {
+            /* La cache fp puo' essere una FINESTRA [total-N, total) (concat, dopo un trim) oppure
+             * un buffer PADDED a capacita' con i validi in [0, total) (in-place, alla prima
+             * attivazione). valid_start = posizione assoluta del primo token valido nella cache. */
+            int valid_start = (N <= total) ? (total - N) : 0;
+            int valid_count = (N <= total) ? N : total;
+            int committed = kvqp->committed_l[layer_idx];
+            int n_new = upto - committed;
+            int one[4] = {1,1,1,1};
+            if (n_new > 0) {
+                int i0 = committed - valid_start, i1 = upto - valid_start;
+                if (i0 >= 0 && i1 <= valid_count && i1 > i0) {
+                    int s0[4] = {0,0,i0,0}, s1[4] = {1,nkv,i1,hd};
+                    mlx_array kn = mlx_array_new(), vn = mlx_array_new();
+                    if (mlx_slice(&kn, *k_cache, s0,4,s1,4,one,4,m->stream) == 0 &&
+                        mlx_slice(&vn, *v_cache, s0,4,s1,4,one,4,m->stream) == 0)
+                        llm_kvq_pool_store(kvqp, layer_idx, kn, vn, committed, n_new, m->stream);
+                    mlx_array_free(kn); mlx_array_free(vn);
+                }
+            }
+            /* cache fp = ultimi thr token VALIDI, in ordine assoluto [total-thr, total) */
+            if (valid_count > thr) {
+                int r0[4] = {0,0,valid_count-thr,0};
+                int r1[4] = {1,nkv,valid_count,hd};
+                mlx_array kr = mlx_array_new(), krc = mlx_array_new();
+                mlx_array vr = mlx_array_new(), vrc = mlx_array_new();
+                if (mlx_slice(&kr, *k_cache, r0,4,r1,4,one,4,m->stream) == 0 &&
+                    mlx_contiguous(&krc, kr, false, m->stream) == 0) mlx_array_set(k_cache, krc);
+                if (mlx_slice(&vr, *v_cache, r0,4,r1,4,one,4,m->stream) == 0 &&
+                    mlx_contiguous(&vrc, vr, false, m->stream) == 0) mlx_array_set(v_cache, vrc);
+                mlx_array_free(kr); mlx_array_free(krc); mlx_array_free(vr); mlx_array_free(vrc);
+            }
         }
     }
+    /* (i path affine/kvq "in aggiunta" sono rimossi: sostituiti dal page pool Splash) */
     mlx_array_free(h);
     return ok;
 }
