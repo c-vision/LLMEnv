@@ -58,7 +58,6 @@ static char* llm_tq_qmv_build_src(int bits, int group, int trit, int mode) {
         "    const uint ng = scales_shape[scales_ndim - 1];\n"
         "    const uint K  = x_shape[x_ndim - 1];\n"
         "%s"
-        "    threadgroup float shared_sums[32];\n"
         "    float cb[LQ_NC];\n"
         "    for (uint i = 0; i < (uint)LQ_NC; i++) cb[i] = (float)codebook[i];\n"
         "    const uint pw_base = (e * O + row) * pw;\n"
@@ -85,17 +84,10 @@ static char* llm_tq_qmv_build_src(int bits, int group, int trit, int mode) {
         "        }\n"
         "        accum += ga * scale;\n"
         "    }\n"
-        "    shared_sums[lane] = accum;\n"
-        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-        "    if (lane < 16u) shared_sums[lane] += shared_sums[lane + 16u];\n"
-        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-        "    if (lane < 8u) shared_sums[lane] += shared_sums[lane + 8u];\n"
-        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-        "    if (lane < 4u) shared_sums[lane] += shared_sums[lane + 4u];\n"
-        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-        "    if (lane < 2u) shared_sums[lane] += shared_sums[lane + 2u];\n"
-        "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-        "    if (lane == 0u) out[%s] = T(shared_sums[0] + shared_sums[1]);\n",
+        "    float v = accum;\n"
+        "#pragma unroll\n"
+        "    for (uint o = 16u; o > 0u; o >>= 1) v += simd_shuffle_xor(v, o);\n"
+        "    if (lane == 0u) out[%s] = T(v);\n",
         epu, nc, group, trit, bits, mode, (mode ? addr1 : addr0), xexpr, oexpr);
     return s;
 }
