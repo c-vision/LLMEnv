@@ -1265,11 +1265,11 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
          threadsPerThreadgroup:MTLSizeMake(32*NSG, 1, 1)];
         if (WG) {
             /* shared expert su GPU: gate/up (Q8_0) + swiglu + down + OUT += D */
-            [e setComputePipelineState:b->pso];
+            [e setComputePipelineState:b->pso_q8_0];
             [e setBuffer:WG offset:0 atIndex:0]; [e setBuffer:X offset:0 atIndex:1]; [e setBuffer:G offset:0 atIndex:2];
             { uint32_t P[7]={lg_g,s_nb_g,embd/32u,ff,8u,34u,32u}; [e setBytes:P length:sizeof(P) atIndex:3]; }
             [e dispatchThreadgroups:MTLSizeMake(ff,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
-            [e setComputePipelineState:b->pso];
+            [e setComputePipelineState:b->pso_q8_0];
             [e setBuffer:WU offset:0 atIndex:0]; [e setBuffer:X offset:0 atIndex:1]; [e setBuffer:U offset:0 atIndex:2];
             { uint32_t P[7]={lu_g,s_nb_g,embd/32u,ff,8u,34u,32u}; [e setBytes:P length:sizeof(P) atIndex:3]; }
             [e dispatchThreadgroups:MTLSizeMake(ff,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
@@ -1277,7 +1277,7 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
             [e setBuffer:G offset:0 atIndex:0]; [e setBuffer:U offset:0 atIndex:1]; [e setBuffer:MID2 offset:0 atIndex:2];
             { uint32_t P[1]={ff}; [e setBytes:P length:sizeof(P) atIndex:3]; float cf[1]={clamp}; [e setBytes:cf length:sizeof(cf) atIndex:4]; }
             [e dispatchThreadgroups:MTLSizeMake((ff+63)/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
-            [e setComputePipelineState:b->pso];
+            [e setComputePipelineState:b->pso_q8_0];
             [e setBuffer:WD offset:0 atIndex:0]; [e setBuffer:MID2 offset:0 atIndex:1]; [e setBuffer:D offset:0 atIndex:2];
             { uint32_t P[7]={ld_g,s_nb_d,ff/32u,embd,8u,34u,32u}; [e setBytes:P length:sizeof(P) atIndex:3]; }
             [e dispatchThreadgroups:MTLSizeMake(embd,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
