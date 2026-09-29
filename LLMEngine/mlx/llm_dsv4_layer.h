@@ -134,6 +134,47 @@ static inline void llm_dsv4_layer_forward_cached(const LlmDsv4Config* c, const L
     llm_dsv4_layer_forward_cached_pe(c, L, NULL, cache, hc, token, pos, il, out_hc);
 }
 
+/* Un layer su un CHUNK di N token consecutivi (pos0..pos0+N-1), pipeline canonica. Stessa matematica di N
+ * chiamate a llm_dsv4_layer_forward_cached_pe_pipe (le cache del layer avanzano token per token, in ordine),
+ * ma in 3 fasi per layer: (1) mHC+attenzione per ogni token, (2) MoE per tutti i token (punto di batching:
+ * esperti dell'unione letti una volta, una sola command buffer), (3) mHC post. `hc_in/hc_out` [N][HC*D]. */
+static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
+        const LlmDsv4PackedExperts* pe, LlmDsv4LayerCache* cache, const float* hc_in, const int* tokens,
+        int pos0, int N, int il, float* hc_out) {
+    const int HC = c->n_hc, D = c->n_embd; const size_t hcn = (size_t)HC * D;
+    float* after  = (float*)malloc(sizeof(float) * hcn * (size_t)N);
+    float* ffn_x  = (float*)malloc(sizeof(float) * (size_t)D * N);
+    float* ffn_o  = (float*)malloc(sizeof(float) * (size_t)D * N);
+    float* post_f = (float*)malloc(sizeof(float) * (size_t)HC * N);
+    float* comb_f = (float*)malloc(sizeof(float) * (size_t)HC * HC * N);
+    float* normed = (float*)malloc(sizeof(float) * (size_t)D);
+    float* proj   = (float*)malloc(sizeof(float) * (size_t)D);
+    float* post   = (float*)malloc(sizeof(float) * (size_t)HC);
+    float* comb   = (float*)malloc(sizeof(float) * (size_t)HC * HC);
+    /* fase 1: mHC pre attn -> attenzione -> mHC post attn -> mHC pre ffn */
+    for (int t = 0; t < N; t++) {
+        const float* cur = hc_in + hcn * t;
+        llm_dsv4_block_pre(c, L->hc_attn_fn, L->hc_attn_scale, L->hc_attn_base, L->attn_norm, cur, normed, post, comb);
+        llm_dsv4_attn_cached(c, L, pe, cache, normed, pos0 + t, il, proj);
+        llm_dsv4_block_post(c, proj, cur, post, comb, after + hcn * t);
+        llm_dsv4_block_pre(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, after + hcn * t,
+                           ffn_x + (size_t)D * t, post_f + (size_t)HC * t, comb_f + (size_t)HC * HC * t);
+    }
+    /* fase 2: MoE su tutti i token */
+    for (int t = 0; t < N; t++) {
+        const float* x = ffn_x + (size_t)D * t; float* o = ffn_o + (size_t)D * t;
+        if (!llm_dsv4_gpu_moe_try(c, L, il, x, tokens[t], o)) {
+            if (pe && pe->gate) llm_dsv4_moe_forward_packed(c, L, pe, x, il, tokens[t], o);
+            else                llm_dsv4_moe_forward(c, L, x, il, tokens[t], o);
+        }
+    }
+    /* fase 3: mHC post ffn */
+    for (int t = 0; t < N; t++)
+        llm_dsv4_block_post(c, ffn_o + (size_t)D * t, after + hcn * t, post_f + (size_t)HC * t,
+                            comb_f + (size_t)HC * HC * t, hc_out + hcn * t);
+    free(comb); free(post); free(proj); free(normed); free(comb_f); free(post_f); free(ffn_o); free(ffn_x); free(after);
+}
+
 /* Tutti i layer su un token (nessuna cache: attenzione solo sul token corrente). */
 static inline void llm_dsv4_forward_token(const LlmDsv4Config* c, const LlmDsv4Weights* w,
         const float* token_emb, int token, int pos, float* out_hc) {
