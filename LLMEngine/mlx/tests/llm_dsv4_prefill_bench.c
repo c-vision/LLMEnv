@@ -1,5 +1,5 @@
 /* llm_dsv4_prefill_bench.c — prefill puro a chunk su N token sintetici (un solo caricamento), t/s.
- * Uso: prefill_bench [gguf] [n_tok] [chunk] [cache_mb]   (aggira il limite di lunghezza del prompt del CLI) */
+ * Uso: prefill_bench [gguf] [n_tok] [chunk] [cache_mb] [tokfile]   (aggira il limite di lunghezza del prompt del CLI) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -11,6 +11,10 @@ int main(int argc, char** argv) {
     if (argc > 4) llm_ai_mlx_opt_set("dsv4_cache_mb", argv[4]);
     int* tok = (int*)malloc(sizeof(int) * (size_t)n); unsigned s = 12345;
     for (int i = 0; i < n; i++) { s = s * 1103515245u + 12345u; tok[i] = 1000 + (int)((s >> 8) % 20000); }
+    if (argc > 5) { FILE* f = fopen(argv[5], "r"); int v, k = 0;   /* token id separati da spazio (es. da `ds4 --dump-tokens`) */
+        if (!f) { fprintf(stderr, "tokfile?\n"); return 1; }
+        while (k < n && fscanf(f, "%d", &v) == 1) tok[k++] = v;
+        fclose(f); if (k < n) { fprintf(stderr, "solo %d token\n", k); n = k; } }
     LlmDsv4Engine* e = llm_dsv4_engine_load_swap(path, n + 64, 3000);
     if (!e) { fprintf(stderr, "load fallita\n"); return 1; }
     const LlmDsv4Config* c = &e->w.cfg;

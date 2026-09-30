@@ -912,6 +912,22 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        X[off+i] = (v < 0.f ? -q : q) * scale;\n"
 "    }\n"
 "}\n"
+"kernel void dsv4_comp_fp8_rows(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], uint2 gid [[thread_position_in_grid]]) {\n"
+"    const uint n_nope = P[0], hd = P[1]; const uint off = gid.x * 64u; if (off + 64u > n_nope) return;\n"
+"    device float* x = X + (ulong)gid.y * hd;\n"
+"    float amax = 0.f;\n"
+"    for (uint i = 0; i < 64u; i++) { float av = fabs(x[off+i]); if (av > amax) amax = av; }\n"
+"    if (amax < 1.0e-4f) amax = 1.0e-4f;\n"
+"    float scale = exp2(ceil(log2(amax / 448.f)));\n"
+"    for (uint i = 0; i < 64u; i++) {\n"
+"        float v = x[off+i] / scale; if (v > 448.f) v = 448.f; if (v < -448.f) v = -448.f;\n"
+"        float a = fabs(v); if (a > 448.f) a = 448.f;\n"
+"        float am = a < 1.953125e-3f ? 1.953125e-3f : a;\n"
+"        int e = (int)floor(log2(am)); int ste = e - 3; if (ste < -9) ste = -9;\n"
+"        float stp = exp2((float)ste); float q = rint(a / stp) * stp; if (q > 448.f) q = 448.f;\n"
+"        x[off+i] = (v < 0.f ? -q : q) * scale;\n"
+"    }\n"
+"}\n"
 /* Indexer QAT: Hadamard128 + FP4 e2m1 per blocco-32, in-place per riga (head_dim=128). P={n_rows,hd}. */
 "kernel void dsv4_indexer_qat(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], uint gid [[thread_position_in_grid]]) {\n"
 "    const uint n_rows = P[0], hd = P[1]; if (gid >= n_rows || hd != 128u) return;\n"
@@ -993,7 +1009,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
     id<MTLComputePipelineState> pso_mmp_q8, pso_mmp_iq2, pso_mmp_q2k, pso_mmp_q4k, pso_mmp_iq2a, pso_mmp_q2ka, pso_mmp_q4ka;   /* MPP (nil se non disponibile) */
-    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
+    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
@@ -1165,7 +1181,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
             { "dsv4_hcb_sinkhorn", &b->pso_hcb_sink }, { "dsv4_hcb_norm", &b->pso_hcb_norm }, { "dsv4_hcb_post", &b->pso_hcb_post }, { "kernel_mul_mm_id_iq2_xxs_addr_f32", &b->pso_mm_iq2a },
             { "kernel_mul_mm_id_q2_K_addr_f32", &b->pso_mm_q2ka }, { "kernel_mul_mm_id_q4_K_addr_f32", &b->pso_mm_q4ka }, { "kernel_mul_mv_slots6_q4_K_pair_swiglu_f32", &b->pso_q4_pair },
             { "kernel_mul_mv_slots6_q4_K_sum6_f32", &b->pso_q4_sum6 }, { "dsv4_rms_w_rows", &b->pso_rms_rows },
-            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_rope_rows", &b->pso_rope_rows },
+            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_comp_fp8_rows", &b->pso_fp8_rows }, { "dsv4_rope_rows", &b->pso_rope_rows },
             { "kernel_mul_mm_id_map0_ne20_8", &b->pso_mm_map8 }, { "kernel_mul_mm_id_q8_0_f32", &b->pso_mm_q8 }, { "kernel_mul_mm_id_iq2_xxs_f32", &b->pso_mm_iq2 },
             { "kernel_mul_mm_id_q2_K_f32", &b->pso_mm_q2k }, { "kernel_mul_mm_id_q4_K_f32", &b->pso_mm_q4k },
             { "dsv4_swiglu_w", &b->pso_swiglu_w }, { "dsv4_sum_slots6", &b->pso_sum_slots6 } };
@@ -1258,7 +1274,7 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_hcb_norm) [b->pso_hcb_norm release]; if (b->pso_hcb_post) [b->pso_hcb_post release];
     if (b->pso_mm_iq2a) [b->pso_mm_iq2a release]; if (b->pso_mm_q2ka) [b->pso_mm_q2ka release]; if (b->pso_mm_q4ka) [b->pso_mm_q4ka release];
     if (b->pso_q4_pair) [b->pso_q4_pair release]; if (b->pso_q4_sum6) [b->pso_q4_sum6 release];
-    if (b->pso_rms_rows) [b->pso_rms_rows release]; if (b->pso_head_rms_rows) [b->pso_head_rms_rows release]; if (b->pso_rope_rows) [b->pso_rope_rows release];
+    if (b->pso_rms_rows) [b->pso_rms_rows release]; if (b->pso_head_rms_rows) [b->pso_head_rms_rows release]; if (b->pso_rope_rows) [b->pso_rope_rows release]; if (b->pso_fp8_rows) [b->pso_fp8_rows release];
     if (b->pso_mm_map1) [b->pso_mm_map1 release]; if (b->pso_mm_map8) [b->pso_mm_map8 release]; if (b->pso_mm_q8) [b->pso_mm_q8 release];
     if (b->pso_mm_map0) [b->pso_mm_map0 release]; if (b->pso_mm_iq2) [b->pso_mm_iq2 release];
     if (b->pso_mm_q2k) [b->pso_mm_q2k release]; if (b->pso_mm_q4k) [b->pso_mm_q4k release];
@@ -2593,6 +2609,34 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         }
         #undef GEMV_NT
     }
+    /* Prepara in blocco (indipendente dal resto della catena): fp8+f16 della riga KV di ogni token; q indexer (rope, qat, scala pesi). */
+    {
+        const int nnope0 = hd - p0->n_rot;
+        [e setComputePipelineState:b->pso_fp8_rows];
+        [e setBuffer:KVC offset:0 atIndex:0];
+        { uint32_t P[2] = { (uint32_t)nnope0, (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+        [e dispatchThreads:MTLSizeMake((NSUInteger)(nnope0 / 64), (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [e setComputePipelineState:b->pso_f16];
+        [e setBuffer:KVC offset:0 atIndex:0];
+        { uint32_t P[1] = { (uint32_t)((size_t)nt * hd) }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+        [e dispatchThreads:MTLSizeMake((NSUInteger)nt * hd, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        if (p0->has_idx) {
+            [e setComputePipelineState:b->pso_rope_rows];
+            [e setBuffer:QI offset:0 atIndex:0];
+            { uint32_t P[4] = { (uint32_t)p0->n_rot, (uint32_t)p0->idx_hd, (uint32_t)p0->pos, (uint32_t)p0->idx_nh }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+            [e setBytes:p0->rope_cfg length:7 * sizeof(float) atIndex:2];
+            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)p0->idx_nh, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            [e setComputePipelineState:b->pso_idx_qat];
+            [e setBuffer:QI offset:0 atIndex:0];
+            { uint32_t P[2] = { (uint32_t)(p0->idx_nh * nt), (uint32_t)p0->idx_hd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+            [e dispatchThreads:MTLSizeMake((NSUInteger)p0->idx_nh * nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            [e setComputePipelineState:b->pso_scale];
+            [e setBuffer:WI offset:0 atIndex:0];
+            { float cf[1] = { 1.0f / sqrtf((float)(p0->idx_hd * p0->idx_nh)) }; [e setBytes:cf length:sizeof(cf) atIndex:1]; }
+            { uint32_t P[1] = { (uint32_t)((size_t)p0->idx_nh * nt) }; [e setBytes:P length:sizeof(P) atIndex:2]; }
+            [e dispatchThreads:MTLSizeMake((NSUInteger)p0->idx_nh * nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        }
+    }
     for (int t = 0; t < nt; t++) {
         const LlmDsv4MidParams* p = &ps[t];
         const NSUInteger qio = (NSUInteger)((size_t)t * (p->has_idx ? p->qdim : 0) * 4), wio = (NSUInteger)((size_t)t * (p->has_idx ? p->idx_nh : 0) * 4);
@@ -2622,14 +2666,6 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             { uint32_t P[2] = { (uint32_t)((p->raw_cap - 1) * hd), (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
             [e dispatchThreadgroups:MTLSizeMake((NSUInteger)(((p->raw_cap - 1) * hd + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         }
-        [e setComputePipelineState:b->pso_comp_fp8];
-        [e setBuffer:KVC offset:ko atIndex:0];
-        { uint32_t P[1] = { (uint32_t)nnope }; [e setBytes:P length:sizeof(P) atIndex:1]; }
-        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)(nnope / 64), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-        [e setComputePipelineState:b->pso_f16];
-        [e setBuffer:KVC offset:ko atIndex:0];
-        { uint32_t P[1] = { (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
-        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((hd + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         [e setComputePipelineState:b->pso_copy];
         [e setBuffer:KVC offset:ko atIndex:0]; [e setBuffer:rawB offset:(NSUInteger)((size_t)p->raw_off * 4) atIndex:1];
         { uint32_t P[1] = { (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:2]; }
@@ -2715,21 +2751,6 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
                     [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((ratio * iwidth + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
                 }
             }
-            /* q indexer (idx_q_b*qrn e pesi idx_proj*x gia' in fase A): rope, qat, scala */
-            [e setComputePipelineState:b->pso_rope];
-            [e setBuffer:QI offset:qio atIndex:0];
-            { uint32_t P[4] = { (uint32_t)p->n_rot, (uint32_t)p->idx_hd, (uint32_t)p->pos, 0u }; [e setBytes:P length:sizeof(P) atIndex:1]; }
-            [e setBytes:p->rope_cfg length:7 * sizeof(float) atIndex:2];
-            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)p->idx_nh, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-            [e setComputePipelineState:b->pso_idx_qat];
-            [e setBuffer:QI offset:qio atIndex:0];
-            { uint32_t P[2] = { (uint32_t)p->idx_nh, (uint32_t)p->idx_hd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
-            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((p->idx_nh + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-            [e setComputePipelineState:b->pso_scale];
-            [e setBuffer:WI offset:wio atIndex:0];
-            { float cf[1] = { 1.0f / sqrtf((float)(p->idx_hd * p->idx_nh)) }; [e setBytes:cf length:sizeof(cf) atIndex:1]; }
-            { uint32_t P[1] = { (uint32_t)p->idx_nh }; [e setBytes:P length:sizeof(P) atIndex:2]; }
-            [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)p->idx_nh + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
             /* scores + top-k */
             [e setComputePipelineState:b->pso_idx_scores];
             [e setBuffer:QI offset:qio atIndex:0]; [e setBuffer:icB offset:0 atIndex:1]; [e setBuffer:WI offset:wio atIndex:2]; [e setBuffer:SCO offset:0 atIndex:3];
