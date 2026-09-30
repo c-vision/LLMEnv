@@ -387,6 +387,163 @@ static void llmcodec_write_config_quant(const char* out_dir, uint32_t group, uin
     fclose(f);
 }
 
+static void jw_str(FILE* o, const char* s) {
+    fputc('"', o);
+    for (const unsigned char* p = (const unsigned char*)s; *p; ++p) {
+        unsigned char c = *p;
+        if (c == '"' || c == '\\') { fputc('\\', o); fputc((int)c, o); }
+        else if (c == '\n') fputs("\\n", o);
+        else if (c == '\r') fputs("\\r", o);
+        else if (c == '\t') fputs("\\t", o);
+        else if (c < 0x20) fprintf(o, "\\u%04x", (unsigned)c);
+        else fputc((int)c, o);
+    }
+    fputc('"', o);
+}
+
+static int llmcodec_write_tokenizer_json(const char* gguf_path, const char* out_dir) {
+    LlmCodecGgufMetaKVOwned* kv = NULL; int n = 0; LlmCodecGgufFileInfo fi;
+    if (llmcodec_gguf_read_meta(gguf_path, &kv, &n, &fi) != 0) return -1;
+    const LlmCodecGgufMetaKVOwned* toks = NULL; const LlmCodecGgufMetaKVOwned* merges = NULL;
+    const char* chat_tpl = NULL;
+    const char* verbatim_json = NULL; const char* verbatim_cfg = NULL;
+    long bos = -1, eos = -1;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(kv[i].key, "tokenizer.ggml.tokens") == 0) toks = &kv[i];
+        else if (strcmp(kv[i].key, "tokenizer.ggml.merges") == 0) merges = &kv[i];
+        else if (strcmp(kv[i].key, "tokenizer.ggml.bos_token_id") == 0) bos = (long)kv[i].u32;
+        else if (strcmp(kv[i].key, "tokenizer.ggml.eos_token_id") == 0) eos = (long)kv[i].u32;
+        else if (strcmp(kv[i].key, "tokenizer.chat_template") == 0) chat_tpl = kv[i].str;
+        else if (strcmp(kv[i].key, "tokenizer.gmb.json") == 0) verbatim_json = kv[i].str;
+        else if (strcmp(kv[i].key, "tokenizer.gmb.config") == 0) verbatim_cfg = kv[i].str;
+    }
+    /* SE il GGUF porta il tokenizer.json VERBATIM (conservato in MLX->GGUF): lo si scrive tal
+     * quale -> tokenizzazione ESATTA (la ricostruzione sotto e' lossy: manca il pre_tokenizer). */
+    if (verbatim_json != NULL) {
+        char op[1400]; snprintf(op, sizeof op, "%s/tokenizer.json", out_dir);
+        FILE* o = fopen(op, "wb");
+        if (o) { fwrite(verbatim_json, 1, strlen(verbatim_json), o); fclose(o); }
+        if (verbatim_cfg != NULL) {
+            char oc[1400]; snprintf(oc, sizeof oc, "%s/tokenizer_config.json", out_dir);
+            FILE* c = fopen(oc, "wb");
+            if (c) { fwrite(verbatim_cfg, 1, strlen(verbatim_cfg), c); fclose(c); }
+        }
+        llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, n);
+        return 0;
+    }
+    int rc = -1;
+    if (toks && toks->arr && toks->arr_n > 0) {
+        char op[1400]; snprintf(op, sizeof op, "%s/tokenizer.json", out_dir);
+        FILE* o = fopen(op, "wb");
+        if (o) {
+            fputs("{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[", o);
+            int first = 1;
+            for (int i = 0; i < toks->arr_n; i++) {
+                if ((long)i != bos && (long)i != eos) continue;
+                if (!first) fputc(',', o); first = 0;
+                fprintf(o, "{\"id\":%d,\"content\":", i); jw_str(o, toks->arr[i]);
+                fputs(",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true}", o);
+            }
+            fputs("],\"normalizer\":null,"
+                  "\"pre_tokenizer\":{\"type\":\"Sequence\",\"pretokenizers\":["
+                  "{\"type\":\"Split\",\"pattern\":{\"Regex\":\"[\\\\r\\\\n]\"},\"behavior\":\"Isolated\",\"invert\":false},"
+                  "{\"type\":\"Split\",\"pattern\":{\"Regex\":\"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\\\r\\\\n\\\\p{L}\\\\p{N}]?\\\\p{L}+|\\\\p{N}{1,3}| ?[^\\\\s\\\\p{L}\\\\p{N}]+[\\\\r\\\\n]*|\\\\s*[\\\\r\\\\n]+|\\\\s+(?!\\\\S)|\\\\s+\"},\"behavior\":\"Isolated\",\"invert\":false},"
+                  "{\"type\":\"ByteLevel\",\"add_prefix_space\":false,\"trim_offsets\":true,\"use_regex\":false}]},"
+                  "\"post_processor\":null,"
+                  "\"decoder\":{\"type\":\"ByteLevel\",\"add_prefix_space\":true,\"trim_offsets\":true,\"use_regex\":true},"
+                  "\"model\":{\"type\":\"BPE\",\"dropout\":null,\"unk_token\":null,\"continuing_subword_prefix\":null,"
+                  "\"end_of_word_suffix\":null,\"fuse_unk\":false,\"byte_fallback\":false,\"vocab\":{", o);
+            for (int i = 0; i < toks->arr_n; i++) { if (i) fputc(',', o); jw_str(o, toks->arr[i]); fprintf(o, ":%d", i); }
+            fputs("},\"merges\":[", o);
+            if (merges && merges->arr) for (int i = 0; i < merges->arr_n; i++) { if (i) fputc(',', o); jw_str(o, merges->arr[i]); }
+            fputs("]}}", o);
+            fclose(o); rc = 0;
+            /* tokenizer_config.json: l'engine MLX legge eos/bos da QUI (non da config.json). */
+            char tc[1400]; snprintf(tc, sizeof tc, "%s/tokenizer_config.json", out_dir);
+            FILE* t2 = fopen(tc, "wb");
+            if (t2) {
+                fputs("{\"add_bos_token\":true,\"add_eos_token\":false,\"tokenizer_class\":\"PreTrainedTokenizerFast\"", t2);
+                if (bos >= 0 && bos < toks->arr_n) { fputs(",\"bos_token\":", t2); jw_str(t2, toks->arr[bos]); }
+                if (eos >= 0 && eos < toks->arr_n) { fputs(",\"eos_token\":", t2); jw_str(t2, toks->arr[eos]); fputs(",\"pad_token\":", t2); jw_str(t2, toks->arr[eos]); }
+                if (chat_tpl != NULL) { fputs(",\"chat_template\":", t2); jw_str(t2, chat_tpl); }
+                fputs("}\n", t2);
+                fclose(t2);
+            }
+        }
+    }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, n);
+    return rc;
+}
+
+static long long gkv_num(const LlmCodecGgufMetaKVOwned* kv, int n, const char* key) {
+    for (int i = 0; i < n; i++) if (strcmp(kv[i].key, key) == 0) {
+        if (kv[i].type == LLMCODEC_GGUF_MT_U32) return (long long)kv[i].u32;
+        if (kv[i].type == LLMCODEC_GGUF_MT_I32) return (long long)kv[i].i32;
+    }
+    return -1;
+}
+static double gkv_flt(const LlmCodecGgufMetaKVOwned* kv, int n, const char* key) {
+    for (int i = 0; i < n; i++) if (strcmp(kv[i].key, key) == 0 && kv[i].type == LLMCODEC_GGUF_MT_F32) return (double)kv[i].f32;
+    return -1;
+}
+static const char* gkv_str(const LlmCodecGgufMetaKVOwned* kv, int n, const char* key) {
+    for (int i = 0; i < n; i++) if (strcmp(kv[i].key, key) == 0 && kv[i].type == LLMCODEC_GGUF_MT_STRING) return kv[i].str;
+    return NULL;
+}
+static void llmcodec_write_config_from_gguf(const char* gguf_path, const char* out_dir, const char* arch, uint32_t group, uint32_t bits) {
+    LlmCodecGgufMetaKVOwned* kv = NULL; int n = 0; LlmCodecGgufFileInfo fi;
+    int have = (llmcodec_gguf_read_meta(gguf_path, &kv, &n, &fi) == 0);
+    /* SE il GGUF porta il config.json VERBATIM (conservato in MLX->GGUF): lo si scrive tal quale
+     * -> tutti i campi HF esatti (rope_scaling/yarn, routed_scaling_factor, norm_topk_prob, ...).
+     * La ricostruzione sotto copre solo i campi che il GGUF porta: ne perde di CRITICI -> garbage. */
+    { const char* vcfg = have ? gkv_str(kv, n, "model.gmb.config") : NULL;
+      if (vcfg != NULL) {
+          char cpv[1300]; snprintf(cpv, sizeof cpv, "%s/config.json", out_dir);
+          FILE* fv = fopen(cpv, "wb");
+          if (fv) { fwrite(vcfg, 1, strlen(vcfg), fv); fclose(fv); }
+          llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, n);
+          return;
+      } }
+    char cp[1300]; snprintf(cp, sizeof cp, "%s/config.json", out_dir);
+    FILE* f = fopen(cp, "wb"); if (!f) { if (have) { llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, n); } return; }
+    fprintf(f, "{\n  \"architectures\": [\"%s\"],\n  \"model_type\": \"%s\",\n  \"tie_word_embeddings\": false", arch, arch);
+    if (have) {
+        char k[192];
+#define KVN(SUF, JSON) { snprintf(k, sizeof k, "%s.%s", arch, SUF); long long v = gkv_num(kv, n, k); if (v >= 0) fprintf(f, ",\n  \"%s\": %lld", JSON, v); }
+        KVN("embedding_length", "hidden_size")
+        KVN("block_count", "num_hidden_layers")
+        KVN("attention.head_count", "num_attention_heads")
+        KVN("attention.head_count_kv", "num_key_value_heads")
+        KVN("attention.key_length", "head_dim")
+        KVN("vocab_size", "vocab_size")
+        KVN("context_length", "max_position_embeddings")
+        KVN("expert_count", "n_routed_experts")
+        KVN("expert_used_count", "num_experts_per_tok")
+        KVN("expert_shared_count", "n_shared_experts")
+        KVN("expert_feed_forward_length", "moe_intermediate_size")
+        KVN("feed_forward_length", "intermediate_size")
+        KVN("expert_group_count", "n_group")
+        KVN("expert_group_used_count", "topk_group")
+        KVN("attention.first_k_dense_replace", "first_k_dense_replace")
+        KVN("attention.kv_lora_rank", "kv_lora_rank")
+        KVN("attention.qk_nope_head_dim", "qk_nope_head_dim")
+        KVN("attention.qk_rope_head_dim", "qk_rope_head_dim")
+        KVN("attention.v_head_dim", "v_head_dim")
+        KVN("attention.q_lora_rank", "q_lora_rank")
+#undef KVN
+        { snprintf(k, sizeof k, "%s.rope.freq_base", arch); double v = gkv_flt(kv, n, k); if (v > 0) fprintf(f, ",\n  \"rope_theta\": %g", v); }
+        { snprintf(k, sizeof k, "%s.attention.layer_norm_rms_epsilon", arch); double v = gkv_flt(kv, n, k); if (v > 0) fprintf(f, ",\n  \"rms_norm_eps\": %g", v); }
+        { long long b = gkv_num(kv, n, "tokenizer.ggml.bos_token_id"); if (b >= 0) fprintf(f, ",\n  \"bos_token_id\": %lld", b); }
+        { long long e = gkv_num(kv, n, "tokenizer.ggml.eos_token_id"); if (e >= 0) fprintf(f, ",\n  \"eos_token_id\": %lld", e); }
+        /* Router scoring (softmax|sigmoid): SEMANTICAMENTE CRITICO (cambia il routing). Senza,
+         * l'engine usa l'euristica per-arch -> output incoerente. */
+        { snprintf(k, sizeof k, "%s.expert_scoring_func", arch); const char* sf = gkv_str(kv, n, k); if (sf) fprintf(f, ",\n  \"scoring_func\": \"%s\"", sf); }
+        llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, n);
+    }
+    fprintf(f, ",\n  \"quantization\": {\"group_size\": %u, \"bits\": %u}\n}\n", group, bits);
+    fclose(f);
+}
+
 int llmcodec_gguf_to_mlx_ex(const char* gguf_path, const char* out_dir, uint32_t group, uint32_t bits, const LlmCodecRoleMap* rm) {
     if (group == 0 && rm && llmcodec_rolemap_group(rm) > 0) group = (uint32_t)llmcodec_rolemap_group(rm);
     if (bits  == 0 && rm && llmcodec_rolemap_bits(rm)  > 0) bits  = (uint32_t)llmcodec_rolemap_bits(rm);
@@ -413,7 +570,8 @@ int llmcodec_gguf_to_mlx_ex(const char* gguf_path, const char* out_dir, uint32_t
             if (tcname == NULL) { tcname = "mlx_affine"; tfmt = 0; tp0 = (int)group; tp1 = (int)bits; }
             const LlmCodec* tc = llmcodec_resolve(tcname);
             const LlmCodec* gc = llmcodec_resolve("ggml");
-            if (tc && gc && tc->encode && tc->store_shape_of && (t->ndim == 2 || t->ndim == 3) && numel > 0) {
+            int plain_in = (t->ggml_type == 0 || t->ggml_type == 1 || t->ggml_type == 30);
+            if (!plain_in && tc && gc && tc->encode && tc->store_shape_of && (t->ndim == 2 || t->ndim == 3) && numel > 0) {
                 int E = (t->ndim == 3) ? (int)t->dims[2] : 1;
                 size_t rows = (size_t)t->dims[1], cols = (size_t)t->dims[0];
                 size_t m0=0,m1=0,ob=0,ab=0,sob=0,sab=0;
@@ -471,7 +629,8 @@ int llmcodec_gguf_to_mlx_ex(const char* gguf_path, const char* out_dir, uint32_t
     }
     char op[1300]; snprintf(op,sizeof op,"%s/model.safetensors",out_dir);
     int rc = llmcodec_safetensors_write(op, st, ns);
-    llmcodec_write_config_quant(out_dir, group, bits, rm);
+    llmcodec_write_config_from_gguf(gguf_path, out_dir, (rm && rm->arch[0]) ? rm->arch : "llm", group, bits);
+    llmcodec_write_tokenizer_json(gguf_path, out_dir);
     for (int i=0;i<ns;i++){ free(nms[i]); free(bufs[i]); }
     free(st); free(bufs); free(shp); free(nms); llmcodec_gguf_free_info(&info);
     return rc;

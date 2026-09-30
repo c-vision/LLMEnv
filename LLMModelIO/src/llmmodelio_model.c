@@ -616,10 +616,29 @@ int llmmodelio_model_merge(const char* a_path, const char* b_path, const char* o
 /* ---- PRUNE: riduce gli esperti a `keep` (i primi), con router COERENTE (stessa fetta) e
  * aggiornamento di `*.expert_count` / `*.expert_used_count`. I tensori esperti hanno l'esperto
  * nell'ultima dim: la fetta e' il prefisso contiguo. ---- */
+/* Ritorna una copia (malloc) di `json` con il valore intero della chiave `"key"` -> `val`.
+ * Usato dal PRUNE per aggiornare il config.json VERBATIM dopo la riduzione esperti. */
+static char* llm_json_set_int(const char* json, const char* key, long val) {
+    char pat[96]; snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char* p = strstr(json, pat); if (!p) return NULL;
+    p += strlen(pat);
+    while (*p==' '||*p=='\t'||*p=='\n'||*p=='\r') ++p;
+    if (*p != ':') return NULL; ++p;
+    while (*p==' '||*p=='\t'||*p=='\n'||*p=='\r') ++p;
+    const char* d0 = p; while (*p=='-'||(*p>='0'&&*p<='9')) ++p; const char* d1 = p;
+    if (d0 == d1) return NULL;
+    size_t pre = (size_t)(d0 - json), post = strlen(d1);
+    char buf[32]; int bl = snprintf(buf, sizeof buf, "%ld", val);
+    char* o = (char*)malloc(pre + (size_t)bl + post + 1); if (!o) return NULL;
+    memcpy(o, json, pre); memcpy(o + pre, buf, (size_t)bl); memcpy(o + pre + bl, d1, post + 1);
+    return o;
+}
 static int llm_is_expert_tensor(const char* name, int ndim, uint64_t last) {
     if (ndim < 2 || last == 0) return 0;
     return (strstr(name, "_exps") != NULL || strstr(name, "experts") != NULL
-            || strstr(name, "gate_inp") != NULL || strstr(name, "expert") != NULL);
+            || strstr(name, "gate_inp") != NULL || strstr(name, "expert") != NULL
+            /* naming MLX/HF (modelli importati): esperti switch_mlp.*_proj, router mlp.gate. */
+            || strstr(name, "switch_mlp") != NULL || strstr(name, ".mlp.gate.") != NULL);
 }
 /* PRUNE per IMPORTANZA: per ogni layer sceglie i `keep` esperti con la norma di colonna del
  * router piu' alta (proxy di uso), e fa una GATHER coerente (stessi indici) su esperti + router.
@@ -636,7 +655,7 @@ int llmmodelio_model_prune(const char* in_path, const char* out_path, int64_t ke
     for (uint64_t i = 0; i < fi.n_tensors; i++) {
         const LlmCodecGgufTensorInfo* ti = &fi.tensors[i];
         uint64_t last = ti->ndim > 0 ? ti->dims[ti->ndim-1] : 0;
-        if (last && (strstr(ti->name, "_exps") || strstr(ti->name, "gate_inp"))) { E = last; break; }
+        if (last && (strstr(ti->name, "_exps") || strstr(ti->name, "gate_inp") || strstr(ti->name, "switch_mlp"))) { E = last; break; }
     }
     if (E == 0 || (uint64_t)keep > E) { llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fi); return -1; }
     FILE* src = fopen(in_path, "rb");
@@ -650,7 +669,8 @@ int llmmodelio_model_prune(const char* in_path, const char* out_path, int64_t ke
         LlmCodecGgufTensorInfo* ti = &fi.tensors[i];
         uint64_t numel = llm_numel(ti->dims, ti->ndim);
         uint64_t last = ti->ndim > 0 ? ti->dims[ti->ndim-1] : 0;
-        int is_exp = llm_is_expert_tensor(ti->name, ti->ndim, last) && last == E;
+        int eax = (ti->ndim > 0 && ti->dims[ti->ndim-1] == E) ? ti->ndim-1 : 0;
+        int is_exp = llm_is_expert_tensor(ti->name, ti->ndim, last) && (last == E || ti->dims[0] == E);
         uint64_t b = 0;
         if (llmcodec_ggml_type_bytes(ti->ggml_type, numel, &b) != 0) {
             fprintf(stderr, "LLM MODEL: %s: tipo GGML %d con %llu elementi: dimensione non calcolabile\n",
@@ -665,7 +685,8 @@ int llmmodelio_model_prune(const char* in_path, const char* out_path, int64_t ke
         for (int d = 0; d < ti->ndim; d++) ((uint64_t*)ts[i].dims)[d] = ti->dims[d];
         if (is_exp) {
             /* layer corrente dal nome (blk.N.) */
-            char lay[64] = ""; if (strncmp(ti->name, "blk.", 4) == 0) { int k = 0; while (ti->name[4+k] && ti->name[4+k] != '.' && k < 62) { lay[k] = ti->name[4+k]; k++; } lay[k] = 0; }
+            char lay[64] = ""; { const char* bp = strstr(ti->name, "blk."); if (bp) bp += 4; else { bp = strstr(ti->name, ".layers."); if (bp) bp += 8; }
+                if (bp) { int k = 0; while (bp[k] && bp[k] != '.' && k < 62) { lay[k] = bp[k]; k++; } lay[k] = 0; } }
             if (strcmp(lay, cur_layer) != 0) {
                 snprintf(cur_layer, sizeof cur_layer, "%s", lay); nsel = 0;
                 char rn[256]; snprintf(rn, sizeof rn, "blk.%s.ffn_gate_inp.weight", lay);
@@ -722,7 +743,7 @@ int llmmodelio_model_prune(const char* in_path, const char* out_path, int64_t ke
             (void)per;
             free(buf);
             ts[i].data = nb;
-            ((uint64_t*)ts[i].dims)[ti->ndim-1] = (uint64_t)keep;
+            ((uint64_t*)ts[i].dims)[eax] = (uint64_t)keep;
             pruned++;
         } else {
             ts[i].data = buf;
@@ -733,6 +754,11 @@ int llmmodelio_model_prune(const char* in_path, const char* out_path, int64_t ke
             if (strstr(kv[i].key, ".expert_count") || strstr(kv[i].key, ".expert_used_count")) {
                 if (kv[i].type == LLMCODEC_GGUF_MT_U32 && kv[i].u32 > (uint32_t)keep) kv[i].u32 = (uint32_t)keep;
                 else if (kv[i].type == LLMCODEC_GGUF_MT_I32 && kv[i].i32 > (int32_t)keep) kv[i].i32 = (int32_t)keep;
+            }
+            if (strcmp(kv[i].key, "model.gmb.config") == 0 && kv[i].type == LLMCODEC_GGUF_MT_STRING && kv[i].str) {
+                char* patched = llm_json_set_int(kv[i].str, "n_routed_experts", (long)keep);
+                if (patched == NULL) patched = llm_json_set_int(kv[i].str, "num_experts", (long)keep);
+                if (patched) kv[i].str = patched;
             }
             llmcodec_gguf_meta_to_writer(&kv[i], &wkv[i]);
         }

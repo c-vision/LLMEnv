@@ -37,6 +37,32 @@ static double jflt(const char* s, const char* key, double def) {
     const char* p = jfind(s, key); if (!p) return def;
     char* e = NULL; double v = strtod(p, &e); return (e==p) ? def : v;
 }
+/* stringa JSON tra virgolette per `key` -> out (cap); ritorna 1 se trovata. */
+static int jstr(const char* s, const char* key, char* out, size_t cap) {
+    const char* p = jfind(s, key); if (!p) return 0;
+    while (*p==' '||*p=='\t'||*p=='\n'||*p=='\r') ++p;
+    if (*p != '"') return 0;
+    ++p; size_t i = 0; while (*p && *p != '"' && i + 1 < cap) out[i++] = *p++; out[i] = 0; return 1;
+}
+static char* jstr_alloc(const char* s, const char* key) {
+    const char* p = jfind(s, key); if (!p) return NULL;
+    while (*p==' '||*p=='\t'||*p=='\n'||*p=='\r') ++p;
+    if (*p != '"') return NULL; ++p;
+    size_t cap = 256, n = 0; char* o = (char*)malloc(cap); if (!o) return NULL;
+    for (; *p && *p != '"'; ++p) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\\') { ++p; char e = *p;
+            if (e=='n') c='\n'; else if (e=='t') c='\t'; else if (e=='r') c='\r';
+            else if (e=='b') c='\b'; else if (e=='f') c='\f';
+            else if (e=='u') { unsigned v=0; for (int k=0;k<4&&p[1];k++){ ++p; char h=*p; v=(v<<4)|(unsigned)((h>='0'&&h<='9')?h-'0':(h>='a'&&h<='f')?h-'a'+10:(h>='A'&&h<='F')?h-'A'+10:0); }
+                if (n+4>=cap){cap*=2;o=(char*)realloc(o,cap);}
+                if (v<0x80) o[n++]=(char)v; else if (v<0x800){o[n++]=(char)(0xC0|(v>>6));o[n++]=(char)(0x80|(v&0x3F));}
+                else {o[n++]=(char)(0xE0|(v>>12));o[n++]=(char)(0x80|((v>>6)&0x3F));o[n++]=(char)(0x80|(v&0x3F));} continue; }
+            else c=(unsigned char)e; }
+        if (n+1>=cap){cap*=2;o=(char*)realloc(o,cap);} o[n++]=(char)c;
+    }
+    o[n]=0; return o;
+}
 
 /* ── registrazione allocazioni (per il free finale) ── */
 typedef struct { void** p; int n, cap; } Reg;
@@ -93,7 +119,21 @@ int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmC
     long long ne=jnum(cj,"num_experts",-1); if (ne<0) ne=jnum(cj,"num_local_experts",-1);
     if (ne>=0) add_u32a(&m,arch,"expert_count",(uint32_t)ne);
     long long nt=jnum(cj,"num_experts_per_tok",-1); if (nt>=0) add_u32a(&m,arch,"expert_used_count",(uint32_t)nt);
-    long long nsh=jnum(cj,"num_shared_experts",-1); if (nsh>=0) add_u32a(&m,arch,"expert_shared_count",(uint32_t)nsh);
+    long long nsh=jnum(cj,"num_shared_experts",-1); if (nsh<0) nsh=jnum(cj,"n_shared_experts",-1);
+    if (nsh>=0) add_u32a(&m,arch,"expert_shared_count",(uint32_t)nsh);
+    /* MoE: il FFN degli esperti ha la SUA dimensione (moe_intermediate_size). */
+    long long mi=jnum(cj,"moe_intermediate_size",-1); if (mi<0) mi=jnum(cj,"expert_intermediate_size",-1);
+    if (mi>=0) add_u32a(&m,arch,"expert_feed_forward_length",(uint32_t)mi);
+    long long fk=jnum(cj,"first_k_dense_replace",-1); if (fk>=0) add_u32a(&m,arch,"attention.first_k_dense_replace",(uint32_t)fk);
+    long long ng=jnum(cj,"n_group",-1); if (ng>=0) add_u32a(&m,arch,"expert_group_count",(uint32_t)ng);
+    long long tg=jnum(cj,"topk_group",-1); if (tg>=0) add_u32a(&m,arch,"expert_group_used_count",(uint32_t)tg);
+    { char sf[32]; if (jstr(cj,"scoring_func",sf,sizeof sf)) { char b[96]; snprintf(b,sizeof b,"%s.expert_scoring_func",arch); add_str(&m,b,sf); } }
+    /* MLA (DeepSeek) */
+    { long long v; v=jnum(cj,"kv_lora_rank",-1);     if(v>=0) add_u32a(&m,arch,"attention.kv_lora_rank",(uint32_t)v);
+                     v=jnum(cj,"qk_nope_head_dim",-1); if(v>=0) add_u32a(&m,arch,"attention.qk_nope_head_dim",(uint32_t)v);
+                     v=jnum(cj,"qk_rope_head_dim",-1); if(v>=0) add_u32a(&m,arch,"attention.qk_rope_head_dim",(uint32_t)v);
+                     v=jnum(cj,"v_head_dim",-1);       if(v>=0) add_u32a(&m,arch,"attention.v_head_dim",(uint32_t)v);
+                     v=jnum(cj,"q_lora_rank",-1);      if(v>=0) add_u32a(&m,arch,"attention.q_lora_rank",(uint32_t)v); }
     /* special token ids */
     long long bos=jnum(cj,"bos_token_id",-1), eos=jnum(cj,"eos_token_id",-1), pad=jnum(cj,"pad_token_id",-1);
     /* tokenizer: dati pre-digeriti dal progetto tokenizer (tm). NON sono nostri:
@@ -121,6 +161,17 @@ int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmC
     if (pad>=0) add_u32(&m,"tokenizer.ggml.padding_token_id",(uint32_t)pad);
     add_bool(&m,"tokenizer.ggml.add_bos_token", jnum(cj,"add_bos_token",1)!=0);
     add_bool(&m,"tokenizer.ggml.add_eos_token", jnum(cj,"add_eos_token",0)!=0);
+    /* chat_template REALE (da tokenizer_config.json) -> tokenizer.chat_template. */
+    { char tcp[1300]; snprintf(tcp, sizeof tcp, "%s/tokenizer_config.json", model_dir);
+      char* tcj = mslurp(tcp);
+      if (tcj) { char* tpl = jstr_alloc(tcj, "chat_template"); if (tpl) { add_str(&m, "tokenizer.chat_template", tpl); free(tpl); } free(tcj); } }
+    /* tokenizer.json + tokenizer_config.json + config.json VERBATIM (round-trip fedele). */
+    { char tjp[1300]; snprintf(tjp, sizeof tjp, "%s/tokenizer.json", model_dir);
+      char* tj = mslurp(tjp); if (tj) { add_str(&m, "tokenizer.gmb.json", tj); free(tj); } }
+    { char tcp2[1300]; snprintf(tcp2, sizeof tcp2, "%s/tokenizer_config.json", model_dir);
+      char* tcj2 = mslurp(tcp2); if (tcj2) { add_str(&m, "tokenizer.gmb.config", tcj2); free(tcj2); } }
+    { char cfp[1300]; snprintf(cfp, sizeof cfp, "%s/config.json", model_dir);
+      char* cf = mslurp(cfp); if (cf) { add_str(&m, "model.gmb.config", cf); free(cf); } }
     free(cj);
     /* trasferisci ownership: la free libera il Reg (chiavi, str, array) + kv */
     *out_kv=m.kv; *out_n=m.n;
