@@ -143,6 +143,45 @@ static void llm_q5_K(const float* x, int64_t n, uint8_t* out);
 static void llm_q3_K(const float* x, int64_t n, uint8_t* out);
 static int llmmodelio_K_imatrix(const float* x, int64_t n, uint8_t* out, const float* qw,
                          int64_t row_len, int64_t weight_sets, int bpb, int is_q4);
+/* ABLATE (model surgery: MODIFICARE) — azzera i tensori il cui nome contiene `pattern`
+ * (per-ruolo/esperto, es. "wo_b", "layers.17.mlp"). Byte-zero: F32/F16 -> 0.0 esatto;
+ * quantizzati -> scale 0 -> dequant ~0. Scrive un GGUF nuovo (metadata preservati).
+ * Se nessun tensore combacia -> -1 (mai un risultato silenzioso). */
+int llmmodelio_model_ablate(const char* in_path, const char* out_path, const char* pattern) {
+    if (in_path == NULL || out_path == NULL || pattern == NULL || !*pattern) return -1;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(in_path, &kv, &nkv, &fi) != 0) return -1;
+    if (fi.n_tensors == 0) { llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fi); return -1; }
+    LlmCodecGgufTensor* ts = (LlmCodecGgufTensor*)calloc((size_t)fi.n_tensors, sizeof(*ts));
+    uint64_t* dims = (uint64_t*)calloc((size_t)fi.n_tensors * 8, sizeof(uint64_t));
+    LlmCodecGgufMetaKV* wkv = (LlmCodecGgufMetaKV*)calloc((size_t)(nkv ? nkv : 1), sizeof(*wkv));
+    FILE* src = fopen(in_path, "rb");
+    if (ts == NULL || dims == NULL || wkv == NULL || src == NULL) {
+        free(ts); free(dims); free(wkv); if (src) fclose(src);
+        llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fi); return -1;
+    }
+    int rc = 0; uint64_t hit = 0;
+    for (uint64_t i = 0; i < fi.n_tensors && rc == 0; i++) {
+        LlmCodecGgufTensorInfo* ti = &fi.tensors[i];
+        uint64_t numel = llm_numel(ti->dims, ti->ndim);
+        ts[i].name = ti->name; ts[i].ggml_type = ti->ggml_type; ts[i].ndim = ti->ndim; ts[i].dims = dims + i*8;
+        for (int d = 0; d < ti->ndim; d++) ((uint64_t*)ts[i].dims)[d] = ti->dims[d];
+        uint64_t b = 0;
+        if (llmcodec_ggml_type_bytes(ti->ggml_type, numel, &b) != 0 || b == 0) { rc = -1; break; }
+        void* buf = malloc((size_t)b);
+        if (buf == NULL) { rc = -1; break; }
+        if (fseek(src, (long)(fi.data_start + ti->offset), SEEK_SET) != 0 || fread(buf, 1, (size_t)b, src) != (size_t)b) { free(buf); rc = -1; break; }
+        if (strstr(ti->name, pattern) != NULL) { memset(buf, 0, (size_t)b); hit++; }
+        ts[i].data = buf;
+    }
+    if (rc == 0 && hit == 0) rc = -1;   /* pattern inesistente -> errore esplicito */
+    if (rc == 0) for (int i = 0; i < nkv; i++) llmcodec_gguf_meta_to_writer(&kv[i], &wkv[i]);
+    if (rc == 0) rc = llmcodec_gguf_write(out_path, wkv, nkv, ts, (int)fi.n_tensors, 32);
+    for (uint64_t i = 0; i < fi.n_tensors; i++) free((void*)ts[i].data);
+    fclose(src); free(ts); free(dims); free(wkv);
+    llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fi);
+    return rc == 0 ? 0 : -1;
+}
 int llmmodelio_model_quantize(const char* in_path, const char* out_path) {
     if (in_path == NULL || out_path == NULL) return -1;
     LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
