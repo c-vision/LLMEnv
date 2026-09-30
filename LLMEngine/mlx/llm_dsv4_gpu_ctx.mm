@@ -260,6 +260,29 @@ int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeight
     return ok ? 1 : 0;
 }
 
+/* Prewarm dei pesi statici (attn Q8_0 + shared expert): una sola commit del residency set invece di una per cb nel primo chunk. */
+static void dsv4_prewarm_static(const LlmDsv4Config* c, const LlmDsv4PackedExperts* exps) {
+    if (!g_be || !exps) return;
+    const int lq = c->n_lora_q, embd = c->n_embd, qd = c->n_head * c->n_head_dim, hd = c->n_head_dim, ng = c->n_out_group, rank = c->n_lora_o, ff = c->n_ff_exp;
+    for (int il = 0; il < c->n_layer && il < LLM_DSV4_MAX_LAYER; il++) {
+        const LlmDsv4PackedExperts* pe = &exps[il];
+        if (g_attn.inited) {
+            llm_dsv4_metal_prewarm_view(g_be, g_attn.qa[il].w, (size_t)lq * g_attn.qa[il].row_bytes);
+            llm_dsv4_metal_prewarm_view(g_be, g_attn.kv[il].w, (size_t)hd * g_attn.kv[il].row_bytes);
+            llm_dsv4_metal_prewarm_view(g_be, g_attn.qb[il].w, (size_t)qd * g_attn.qb[il].row_bytes);
+            llm_dsv4_metal_prewarm_view(g_be, g_attn.outa[il].w, (size_t)ng * rank * g_attn.outa[il].row_bytes);
+            llm_dsv4_metal_prewarm_view(g_be, g_attn.outb[il].w, (size_t)embd * g_attn.outb[il].row_bytes);
+        }
+        if (pe->shexp_gate && pe->shexp_up && pe->shexp_down) {
+            size_t sg = (size_t)llm_ggml_nbytes(pe->shexp_gate_type, embd), sd = (size_t)llm_ggml_nbytes(pe->shexp_down_type, ff);
+            llm_dsv4_metal_prewarm_view(g_be, pe->shexp_gate, (size_t)ff * sg);
+            llm_dsv4_metal_prewarm_view(g_be, pe->shexp_up, (size_t)ff * sg);
+            llm_dsv4_metal_prewarm_view(g_be, pe->shexp_down, (size_t)embd * sd);
+        }
+    }
+    llm_dsv4_metal_prewarm_commit(g_be);
+}
+
 int llm_dsv4_gpu_ctx_init(const LlmDsv4Config* c, const LlmDsv4PackedExperts* exps) {
     if (g_on) { g_ref++; return 1; }
     if (!c || !exps) {
@@ -282,6 +305,7 @@ int llm_dsv4_gpu_ctx_init(const LlmDsv4Config* c, const LlmDsv4PackedExperts* ex
         llm_dsv4_metal_destroy(g_be); g_be = NULL; return 0;
     }
     g_on = 1; g_ref = 1;
+    dsv4_prewarm_static(c, exps);
     fprintf(stderr, "DSV4 GPU: contesto attivo (Metal; esperti IQ2_XXS/Q2_K + attn Q8_0)\n");
     return 1;
 }
@@ -299,6 +323,7 @@ void llm_dsv4_gpu_ctx_reinit(const LlmDsv4Config* c, const LlmDsv4PackedExperts*
         fprintf(stderr, "DSV4 GPU: reinit attn fallita -> path C\n");
         llm_dsv4_gpu_moe_destroy(&g_moe); g_on = 0; return;
     }
+    dsv4_prewarm_static(c, exps);
     fprintf(stderr, "DSV4 GPU: ricaricato con cache esperti (streaming/GPU)\n");
 }
 

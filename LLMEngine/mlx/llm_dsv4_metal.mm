@@ -2164,6 +2164,10 @@ int llm_dsv4_metal_route_batch(LlmDsv4Metal* b, int nt, int n_expert, int embd, 
     return 0;
 }
 
+/* Prewarm: crea (e mette nel residency set) le view no-copy dei pesi statici a load, cosi' il commit e' UNO solo invece di uno per cb nel primo chunk. */
+void llm_dsv4_metal_prewarm_view(LlmDsv4Metal* b, const void* ptr, size_t bytes) { size_t lead; if (b && ptr && bytes) (void)dsv4_nocopy_view(b, ptr, bytes, &lead); }
+void llm_dsv4_metal_prewarm_commit(LlmDsv4Metal* b) { if (b) dsv4_res_commit(b); }
+
 /* Proiezioni Q-LoRA + KV del chunk via mul_mm_id Q8_0 (1 esperto) + kernel rms/head_rms/rope con dimensione token.
  * Stesse uscite di attn_proj_fused_batch (q_out [nt*qd], kv_out [nt*hd], qrn_out [nt*lq]); attivazioni half nel kernel. 0 = ok. */
 int llm_dsv4_metal_attn_proj_mm_batch(LlmDsv4Metal* b, int nt,
