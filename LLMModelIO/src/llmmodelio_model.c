@@ -12,6 +12,7 @@
 #include "llmcodec_gguf_mlx.h"   /* llmcodec_conv_mlx_to_gguf_arch_ex / llmcodec_conv_gguf_to_mlx_arch (progetto codec) */
 #include "llmtoken.h"   /* unica sorgente tokenizer.json (export per i metadata GGUF) */
 #include "llmcodec_gguf_writer.h"
+#include "llmcodec_safetensors.h"   /* adapter LoRA (.safetensors) */
 #include "llmcodec_iq2_xxs.h"
 #include "llmmodelio_imatrix.h"
 #include "llmmodelio_infer.h"
@@ -181,6 +182,118 @@ int llmmodelio_model_ablate(const char* in_path, const char* out_path, const cha
     for (uint64_t i = 0; i < fi.n_tensors; i++) free((void*)ts[i].data);
     fclose(src); free(ts); free(dims); free(wkv);
     llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fi);
+    return rc == 0 ? 0 : -1;
+}
+/* ── AGGIUNGERE adapter (LoRA .safetensors): W += (alpha/r) * B@A ── */
+static int llm_st_esize(const char* dt) {
+    if (!strcmp(dt, "F32")) return 4; if (!strcmp(dt, "F16") || !strcmp(dt, "BF16")) return 2;
+    if (!strcmp(dt, "F64") || !strcmp(dt, "I64")) return 8; if (!strcmp(dt, "I32")) return 4;
+    if (!strcmp(dt, "I16")) return 2; if (!strcmp(dt, "I8") || !strcmp(dt, "U8") || !strcmp(dt, "BOOL")) return 1;
+    return 0;
+}
+static float llm_st_elem_f32(const unsigned char* p, const char* dt) {
+    if (!strcmp(dt, "F32")) { float f; memcpy(&f, p, 4); return f; }
+    if (!strcmp(dt, "F16")) { uint16_t h; memcpy(&h, p, 2); return llmcodec_f16_to_f32(h); }
+    if (!strcmp(dt, "BF16")) { uint16_t h; memcpy(&h, p, 2); return llmcodec_bf16_to_f32(h); }
+    if (!strcmp(dt, "F64")) { double d; memcpy(&d, p, 8); return (float)d; }
+    return 0.0f;
+}
+static float* llm_st_load_f32(FILE* fp, uint64_t data_base, const LlmCodecStTensorInfo* t, uint64_t* out_numel) {
+    uint64_t numel = 1; for (int d = 0; d < t->ndim; d++) numel *= t->shape[d];
+    int es = llm_st_esize(t->dtype); if (es <= 0) return NULL;
+    uint64_t nbytes = numel * (uint64_t)es;
+    if (t->end < t->begin || t->end - t->begin < nbytes) return NULL;
+    unsigned char* buf = (unsigned char*)malloc((size_t)nbytes); if (buf == NULL) return NULL;
+    if (fseek(fp, (long)(data_base + t->begin), SEEK_SET) != 0 || fread(buf, 1, (size_t)nbytes, fp) != (size_t)nbytes) { free(buf); return NULL; }
+    float* f = (float*)malloc((size_t)(numel * sizeof(float))); if (f == NULL) { free(buf); return NULL; }
+    for (uint64_t i = 0; i < numel; i++) f[i] = llm_st_elem_f32(buf + (size_t)i * es, t->dtype);
+    free(buf); if (out_numel) *out_numel = numel; return f;
+}
+static int llm_st_find(const LlmCodecStTensorInfo* st, int n, const char* name) {
+    for (int i = 0; i < n; i++) if (strcmp(st[i].name, name) == 0) return i;
+    return -1;
+}
+static uint64_t llm_ggml_esize(int t) { return (t == LLMCODEC_GGML_T_F32) ? 4u : ((t == LLMCODEC_GGML_T_F16 || t == LLMCODEC_GGML_T_BF16) ? 2u : 0u); }
+/* per una base tensor 2D, ritorna A/B nello store (o -1). */
+static int llm_lora_pair(const LlmCodecStTensorInfo* st, int n, const char* base_name, int* ia, int* ib) {
+    const char* suf = ".weight"; size_t bl = strlen(base_name), sl = strlen(suf);
+    char prefix[256];
+    if (bl > sl && strcmp(base_name + bl - sl, suf) == 0) { size_t pl = bl - sl; if (pl > 255) pl = 255; memcpy(prefix, base_name, pl); prefix[pl] = 0; }
+    else { if (bl > 255) return -1; strcpy(prefix, base_name); }
+    char a[600], b[600], a2[600], b2[600];
+    snprintf(a, sizeof a, "%s.lora_A.weight", prefix); snprintf(b, sizeof b, "%s.lora_B.weight", prefix);
+    snprintf(a2, sizeof a2, "base_model.model.%s.lora_A.weight", prefix); snprintf(b2, sizeof b2, "base_model.model.%s.lora_B.weight", prefix);
+    int x = llm_st_find(st, n, a), y = llm_st_find(st, n, b);
+    if (x < 0 || y < 0) { x = llm_st_find(st, n, a2); y = llm_st_find(st, n, b2); }
+    if (x < 0 || y < 0) return -1;
+    *ia = x; *ib = y; return 0;
+}
+int llmmodelio_model_adapter(const char* base_path, const char* adapter_path, const char* out_path, const char* alpha_str) {
+    if (base_path == NULL || adapter_path == NULL || out_path == NULL) return -1;
+    double alpha = alpha_str ? atof(alpha_str) : 1.0;
+    LlmCodecGgufFileInfo fb; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(base_path, &kv, &nkv, &fb) != 0) return -1;
+    LlmCodecStTensorInfo* st = NULL; int nst = 0; uint64_t dbase = 0;
+    if (llmcodec_safetensors_read(adapter_path, &st, &nst, &dbase) != 0) { llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fb); return -1; }
+    uint64_t cap = fb.n_tensors;
+    LlmCodecGgufTensor* ts = (LlmCodecGgufTensor*)calloc((size_t)cap, sizeof(*ts));
+    uint64_t* dims = (uint64_t*)calloc((size_t)cap * 8, sizeof(uint64_t));
+    LlmCodecGgufMetaKV* wkv = (LlmCodecGgufMetaKV*)calloc((size_t)(nkv ? nkv : 1), sizeof(*wkv));
+    FILE* bfp = fopen(base_path, "rb"); FILE* afp = fopen(adapter_path, "rb");
+    if (ts == NULL || dims == NULL || wkv == NULL || bfp == NULL || afp == NULL) {
+        free(ts); free(dims); free(wkv); if (bfp) fclose(bfp); if (afp) fclose(afp);
+        llmcodec_safetensors_info_free(st); llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fb); return -1;
+    }
+    int rc = 0; uint64_t nout = 0, merged = 0;
+    for (uint64_t i = 0; i < fb.n_tensors && rc == 0; i++) {
+        LlmCodecGgufTensorInfo* tb = &fb.tensors[i];
+        uint64_t numel = llm_numel(tb->dims, tb->ndim), b = 0;
+        if (llmcodec_ggml_type_bytes(tb->ggml_type, numel, &b) != 0 || b == 0) { rc = -1; break; }
+        void* buf = malloc((size_t)b); if (buf == NULL) { rc = -1; break; }
+        int did_merge = 0;
+        int ia = -1, ib = -1;
+        if (tb->ndim == 2 && llm_ggml_esize(tb->ggml_type) != 0 && llm_lora_pair(st, nst, tb->name, &ia, &ib) == 0) {
+            uint64_t in = tb->dims[0], out = tb->dims[1];
+            uint64_t An = 0, Bn = 0;
+            float* A = llm_st_load_f32(afp, dbase, &st[ia], &An);
+            float* B = llm_st_load_f32(afp, dbase, &st[ib], &Bn);
+            if (A == NULL || B == NULL || st[ia].ndim != 2 || st[ib].ndim != 2
+                || st[ia].shape[1] != in || st[ib].shape[0] != out || st[ia].shape[0] != st[ib].shape[1]
+                || An != st[ia].shape[0] * in || Bn != out * st[ib].shape[1]) {
+                free(A); free(B); rc = -1; free(buf); break;   /* coppia presente ma forma incoerente -> errore esplicito */
+            }
+            uint64_t r = st[ia].shape[0];
+            if (fseek(bfp, (long)(fb.data_start + tb->offset), SEEK_SET) != 0 || fread(buf, 1, (size_t)b, bfp) != (size_t)b) { free(A); free(B); rc = -1; free(buf); break; }
+            unsigned char* bb = (unsigned char*)buf; int et = tb->ggml_type;
+            double scale = alpha / (double)(r ? r : 1);
+            for (uint64_t o = 0; o < out; o++)
+                for (uint64_t ii = 0; ii < in; ii++) {
+                    double acc = 0.0;
+                    for (uint64_t k = 0; k < r; k++) acc += (double)B[o * r + k] * (double)A[k * in + ii];
+                    float cur;
+                    if (et == LLMCODEC_GGML_T_F32) { float t; memcpy(&t, bb + (size_t)(o * in + ii) * 4, 4); cur = t; }
+                    else if (et == LLMCODEC_GGML_T_F16) { uint16_t h; memcpy(&h, bb + (size_t)(o * in + ii) * 2, 2); cur = llmcodec_f16_to_f32(h); }
+                    else { uint16_t h; memcpy(&h, bb + (size_t)(o * in + ii) * 2, 2); cur = llmcodec_bf16_to_f32(h); }
+                    float nv = (float)((double)cur + scale * acc);
+                    if (et == LLMCODEC_GGML_T_F32) memcpy(bb + (size_t)(o * in + ii) * 4, &nv, 4);
+                    else if (et == LLMCODEC_GGML_T_F16) { uint16_t h = llmcodec_f16_from_f32(nv); memcpy(bb + (size_t)(o * in + ii) * 2, &h, 2); }
+                    else { uint16_t h = llmcodec_bf16_from_f32(nv); memcpy(bb + (size_t)(o * in + ii) * 2, &h, 2); }
+                }
+            free(A); free(B); did_merge = 1; merged++;
+        }
+        if (!did_merge) {
+            if (fseek(bfp, (long)(fb.data_start + tb->offset), SEEK_SET) != 0 || fread(buf, 1, (size_t)b, bfp) != (size_t)b) { free(buf); rc = -1; break; }
+        }
+        ts[nout].name = tb->name; ts[nout].ggml_type = tb->ggml_type; ts[nout].ndim = tb->ndim; ts[nout].dims = dims + nout * 8; ts[nout].data = buf;
+        for (int d = 0; d < tb->ndim; d++) ((uint64_t*)ts[nout].dims)[d] = tb->dims[d];
+        nout++;
+    }
+    if (rc == 0) for (int i = 0; i < nkv; i++) llmcodec_gguf_meta_to_writer(&kv[i], &wkv[i]);
+    if (rc == 0) rc = llmcodec_gguf_write(out_path, wkv, nkv, ts, (int)nout, 32);
+    for (uint64_t i = 0; i < nout; i++) free((void*)ts[i].data);
+    fclose(bfp); fclose(afp); free(ts); free(dims); free(wkv);
+    llmcodec_safetensors_info_free(st); llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fb);
+    (void)merged;
     return rc == 0 ? 0 : -1;
 }
 /* AGGIUNGERE (model surgery): aggiunge/sovrascrive in <base> i tensori di <module> (per nome),
