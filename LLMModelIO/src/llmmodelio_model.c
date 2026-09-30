@@ -183,6 +183,65 @@ int llmmodelio_model_ablate(const char* in_path, const char* out_path, const cha
     llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fi);
     return rc == 0 ? 0 : -1;
 }
+/* AGGIUNGERE (model surgery): aggiunge/sovrascrive in <base> i tensori di <module> (per nome),
+ * scrivendo un GGUF nuovo (<out>). Metadata da <base>. Building block di adapter/moduli.
+ * Base/modulo non GGUF o illeggibili -> -1 (mai silenzioso). */
+static LlmCodecGgufTensorInfo* llm_find_tensor(LlmCodecGgufFileInfo* fi, const char* name) {
+    for (uint64_t i = 0; i < fi->n_tensors; i++) if (strcmp(fi->tensors[i].name, name) == 0) return &fi->tensors[i];
+    return NULL;
+}
+int llmmodelio_model_add(const char* base_path, const char* module_path, const char* out_path) {
+    if (base_path == NULL || module_path == NULL || out_path == NULL) return -1;
+    LlmCodecGgufFileInfo fb, fm;
+    LlmCodecGgufMetaKVOwned *kvb = NULL, *kvm = NULL; int nkvb = 0, nkvm = 0;
+    if (llmcodec_gguf_read_meta(base_path, &kvb, &nkvb, &fb) != 0) return -1;
+    if (llmcodec_gguf_read_meta(module_path, &kvm, &nkvm, &fm) != 0) {
+        llmcodec_gguf_meta_free(kvb, nkvb); llmcodec_gguf_free_info(&fb); return -1;
+    }
+    uint64_t cap = fb.n_tensors + fm.n_tensors;
+    LlmCodecGgufTensor* ts = (LlmCodecGgufTensor*)calloc((size_t)cap, sizeof(*ts));
+    uint64_t* dims = (uint64_t*)calloc((size_t)cap * 8, sizeof(uint64_t));
+    LlmCodecGgufMetaKV* wkv = (LlmCodecGgufMetaKV*)calloc((size_t)(nkvb ? nkvb : 1), sizeof(*wkv));
+    FILE* bfp = fopen(base_path, "rb"); FILE* mfp = fopen(module_path, "rb");
+    if (ts == NULL || dims == NULL || wkv == NULL || bfp == NULL || mfp == NULL) {
+        free(ts); free(dims); free(wkv); if (bfp) fclose(bfp); if (mfp) fclose(mfp);
+        llmcodec_gguf_meta_free(kvb, nkvb); llmcodec_gguf_meta_free(kvm, nkvm);
+        llmcodec_gguf_free_info(&fb); llmcodec_gguf_free_info(&fm); return -1;
+    }
+    int rc = 0; uint64_t nout = 0; uint64_t replaced = 0, added = 0;
+    /* 1) tensori della base NON presenti nel modulo -> copiati dalla base. */
+    for (uint64_t i = 0; i < fb.n_tensors && rc == 0; i++) {
+        LlmCodecGgufTensorInfo* tb = &fb.tensors[i];
+        if (llm_find_tensor(&fm, tb->name) != NULL) continue;   /* sara' sovrascritto dal modulo */
+        uint64_t numel = llm_numel(tb->dims, tb->ndim), b = 0;
+        if (llmcodec_ggml_type_bytes(tb->ggml_type, numel, &b) != 0 || b == 0) { rc = -1; break; }
+        void* buf = malloc((size_t)b); if (buf == NULL) { rc = -1; break; }
+        if (fseek(bfp, (long)(fb.data_start + tb->offset), SEEK_SET) != 0 || fread(buf, 1, (size_t)b, bfp) != (size_t)b) { free(buf); rc = -1; break; }
+        ts[nout].name = tb->name; ts[nout].ggml_type = tb->ggml_type; ts[nout].ndim = tb->ndim; ts[nout].dims = dims + nout * 8; ts[nout].data = buf;
+        for (int d = 0; d < tb->ndim; d++) ((uint64_t*)ts[nout].dims)[d] = tb->dims[d];
+        nout++;
+    }
+    /* 2) tensori del modulo -> aggiunti/sovrascritti. */
+    for (uint64_t j = 0; j < fm.n_tensors && rc == 0; j++) {
+        LlmCodecGgufTensorInfo* tm = &fm.tensors[j];
+        uint64_t numel = llm_numel(tm->dims, tm->ndim), b = 0;
+        if (llmcodec_ggml_type_bytes(tm->ggml_type, numel, &b) != 0 || b == 0) { rc = -1; break; }
+        void* buf = malloc((size_t)b); if (buf == NULL) { rc = -1; break; }
+        if (fseek(mfp, (long)(fm.data_start + tm->offset), SEEK_SET) != 0 || fread(buf, 1, (size_t)b, mfp) != (size_t)b) { free(buf); rc = -1; break; }
+        if (llm_find_tensor(&fb, tm->name) != NULL) replaced++; else added++;
+        ts[nout].name = tm->name; ts[nout].ggml_type = tm->ggml_type; ts[nout].ndim = tm->ndim; ts[nout].dims = dims + nout * 8; ts[nout].data = buf;
+        for (int d = 0; d < tm->ndim; d++) ((uint64_t*)ts[nout].dims)[d] = tm->dims[d];
+        nout++;
+    }
+    if (rc == 0) for (int i = 0; i < nkvb; i++) llmcodec_gguf_meta_to_writer(&kvb[i], &wkv[i]);
+    if (rc == 0) rc = llmcodec_gguf_write(out_path, wkv, nkvb, ts, (int)nout, 32);
+    for (uint64_t i = 0; i < nout; i++) free((void*)ts[i].data);
+    fclose(bfp); fclose(mfp); free(ts); free(dims); free(wkv);
+    llmcodec_gguf_meta_free(kvb, nkvb); llmcodec_gguf_meta_free(kvm, nkvm);
+    llmcodec_gguf_free_info(&fb); llmcodec_gguf_free_info(&fm);
+    (void)replaced; (void)added;
+    return rc == 0 ? 0 : -1;
+}
 /* ── Checkpoint/rollback: copia file + hash di integrita' (FNV-1a 64) ── */
 static int llm_copy_file(const char* src, const char* dst) {
     FILE* a = fopen(src, "rb"); if (a == NULL) return -1;

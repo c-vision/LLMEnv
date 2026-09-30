@@ -56,6 +56,7 @@ int llmmodelio_model_ablate(const char* in_path, const char* out_path, const cha
 int llmmodelio_model_diff(const char* a_path, const char* b_path, const char* out_path);
 int llmmodelio_model_checkpoint(const char* src, const char* store_dir, const char* name);
 int llmmodelio_model_rollback(const char* store_dir, const char* name, const char* dst);
+int llmmodelio_model_add(const char* base_path, const char* module_path, const char* out_path);
 
 /* Q4_K weighted, stessa convenzione di llama.cpp: quant_weights contiene `weight_sets` vettori
  * consecutivi da n_per_row elementi; ogni vettore si applica a nrows/weight_sets righe. */
