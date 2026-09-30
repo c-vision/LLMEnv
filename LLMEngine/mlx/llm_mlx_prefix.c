@@ -15,6 +15,19 @@
 bool llm_kvdisk_enabled(LlmMlxModel* m) {
     if (!m) return false;
     if (m->kvdisk_state < 0) {
+        /* D15: se `prefix_cache` e' impostata il tier e' PERSISTENTE (path `<prefix_cache>.kv`):
+         * i blob KV dei prefissi sopravvivono al riavvio. Altrimenti scratch storico (`kvdisk`). */
+        char pc[2048];
+        if (llm_ai_mlx_opt_get_str("prefix_cache", pc, (int)sizeof pc) == 0 && pc[0] != '\0') {
+            char kpath[2200];
+            snprintf(kpath, sizeof kpath, "%s.kv", pc);
+            int cap_mb = 0; (void)llm_ai_mlx_opt_get_int("kvdisk_cap_mb", &cap_mb);
+            uint64_t cap = (cap_mb > 0) ? (uint64_t)cap_mb * 1024ull * 1024ull : 0;
+            m->kvdisk = llm_kv_disk_open_mode(kpath, /*max_entries=*/8192, cap, /*persistent=*/1);
+            m->kvdisk_state = (m->kvdisk.f != NULL && m->kvdisk.e != NULL) ? 1 : 0;
+            if (m->kvdisk_state == 1)
+                fprintf(stderr, "[kvdisk] prefix-cache PERSISTENTE: %s\n", kpath);
+        } else {
         /* Registro opzioni (niente env): `kvdisk` = off|on|<path>, `kvdisk_cap_mb` = budget. */
         char kv[2048];
         int is_set = (llm_ai_mlx_opt_get_str("kvdisk", kv, (int)sizeof kv) == 0);
@@ -30,6 +43,7 @@ bool llm_kvdisk_enabled(LlmMlxModel* m) {
             if (m->kvdisk_state == 1)
                 fprintf(stderr, "[kvdisk] tier SSD KV attivo: %s (cap=%llu MB)\n",
                         path, (unsigned long long)(cap >> 20));
+        }
         }
     }
     return m->kvdisk_state == 1;
@@ -504,11 +518,30 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
         }
     }
 
+    /* D15: PERSISTENZA (opt-in `prefix_cache`) — spilla la KV su kvdisk (se attivo) e salva il file
+     * dei prefissi (nome+token): un riavvio li riconosce e (con il tier SSD) la KV si RESTAURA,
+     * evitando il re-prefill. Spillando si libera la RAM (on_disk=true → il riuso ripristina). */
+    {
+        char pp[2048];
+        if (llm_ai_mlx_opt_get_str("prefix_cache", pp, (int)sizeof pp) == 0 && pp[0]) {
+            if (m->kvdisk_state < 0) (void)llm_kvdisk_enabled(m);
+            if (m->kvdisk_state == 1 && p->has_kv && llm_prefix_spill(m, p) == 0) {
+                for (int l = 0; l < p->n_layers; l++) {
+                    if (m->cfg.is_sliding_layer && l < m->cfg.n_layers && m->cfg.is_sliding_layer[l]) continue;
+                    if (!p->has_cache || !p->has_cache[l]) continue;
+                    mlx_array_free(p->k_cache[l]); p->k_cache[l] = mlx_array_new();
+                    mlx_array_free(p->v_cache[l]); p->v_cache[l] = mlx_array_new();
+                    p->has_cache[l] = false;
+                }
+                p->has_kv = false; p->on_disk = true;
+            }
+            (void)llm_ai_mlx_model_prefix_save((llm_ai_mlx_model_handle)m, pp);
+        }
+    }
+
     return 0;
 
 }
-
-
 
 /* Append che RIUUSA un prefisso salvato: se token_ids inizia coi token del prefisso,
 
@@ -568,7 +601,11 @@ int llm_ai_mlx_session_append_reuse_prefix(llm_ai_mlx_session_handle sh, llm_ai_
      * Nel secondo caso la ripristiniamo dallo scratch e proseguiamo col riuso normale;
      * altrimenti re-prefill dell'intero prompt (fail-open, corretto). */
     if (!p->has_kv) {
-        if (p->on_disk && llm_kvdisk_enabled(m) && llm_prefix_restore(m, p) == 0) {
+        int _rst = (p->on_disk && llm_kvdisk_enabled(m)) ? llm_prefix_restore(m, p) : -99;
+        if (llm_ai_mlx_opt_env("FMLX_PREFIX_DEBUG"))
+            fprintf(stderr, "[prefix-reuse] name=%s token_len=%d cache_off=%d on_disk=%d restore=%d\n",
+                    name, p->token_len, p->cache_offset, (int)p->on_disk, _rst);
+        if (_rst == 0) {
             /* KV ripristinata da disco: continua col riuso normale (sotto) */
         } else {
             return llm_ai_mlx_session_append(sh, token_ids, n_ids);
@@ -659,6 +696,9 @@ int llm_ai_mlx_session_append_auto_prefix(llm_ai_mlx_session_handle sh, llm_ai_m
     /* radix-trie: trova il prefisso salvato piu' lungo (O(prefix_len)) */
     int best_pid = -1;
     int d = llm_radix_longest_match(&m->radix, token_ids, n_ids, &best_pid);
+    if (llm_ai_mlx_opt_env("FMLX_PREFIX_DEBUG"))
+        fprintf(stderr, "[prefix-auto] n_ids=%d match=%d best_pid=%d n_prefixes=%d\n",
+                n_ids, d, best_pid, m->n_prefixes);
     if (d >= min_match && best_pid >= 0 && best_pid < m->n_prefixes)
         return llm_ai_mlx_session_append_reuse_prefix(sh, mh, m->prefixes[best_pid].name, token_ids, n_ids);
     return llm_ai_mlx_session_append(sh, token_ids, n_ids); /* nessun match utile */
@@ -707,7 +747,10 @@ static int llm_prefix_register_persisted(LlmMlxModel* m, const char* name, const
     p->v_cache = (mlx_array*)calloc((size_t)p->n_layers, sizeof(mlx_array));
     p->has_cache = (bool*)calloc((size_t)p->n_layers, sizeof(bool));
     for (int l = 0; l < p->n_layers; l++) { p->k_cache[l] = mlx_array_new(); p->v_cache[l] = mlx_array_new(); }
-    p->has_kv = false; /* da disco: KV da ri-prefillare al riuso */
+    /* D15: se il tier SSD e' attivo la KV spillata al save e' su disco -> il riuso la RESTAURA
+     * (on_disk=true, niente re-prefill); altrimenti keys-only -> re-prefill (has_kv=false). */
+    p->has_kv = false;
+    p->on_disk = llm_kvdisk_enabled(m);
     if (p->token_len > 0) llm_radix_insert(&m->radix, p->tokens, p->token_len, idx);
     return idx;
 }

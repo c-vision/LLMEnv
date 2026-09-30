@@ -45,6 +45,7 @@ typedef struct {
     uint64_t     clock;
     /* statistiche */
     long puts, gets, hits, misses, evictions;
+    bool persistent;            /* D15: persistente tra processi (no truncate, no remove, indice su sidecar) */
 } KvDisk;
 
 static inline uint64_t llm_kv_disk_hash(const void* p, size_t n) {
@@ -54,22 +55,60 @@ static inline uint64_t llm_kv_disk_hash(const void* p, size_t n) {
     return h;
 }
 
-static inline KvDisk llm_kv_disk_open(const char* path, int max_entries, uint64_t cap_bytes) {
+/* D15: INDICE del kvdisk su sidecar `<path>.idx` (per la modalita' persistente). Formato:
+ * magic "KVDSKI1" + u32 ver=1 + u32 n, poi n x {u64 hash,off,size,ck,last_used}. */
+#define LLM_KVDSK_IDX_MAGIC "KVDSKI1"
+static inline void llm_kv_disk_save_index(KvDisk* d) {
+    if (!d || !d->persistent) return;
+    char ip[1300]; snprintf(ip, sizeof ip, "%s.idx", d->path);
+    char tp[1320]; snprintf(tp, sizeof tp, "%s.tmp", ip);
+    FILE* f = fopen(tp, "wb"); if (!f) return;
+    uint32_t ver = 1, n = 0; for (int i = 0; i < d->n_entries; i++) if (d->e[i].used) n++;
+    fwrite(LLM_KVDSK_IDX_MAGIC, 1, 7, f); fwrite(&ver, 4, 1, f); fwrite(&n, 4, 1, f);
+    for (int i = 0; i < d->n_entries; i++) if (d->e[i].used) {
+        uint64_t v[5]; v[0]=d->e[i].hash; v[1]=d->e[i].off; v[2]=d->e[i].size; v[3]=d->e[i].ck; v[4]=d->e[i].last_used;
+        fwrite(v, sizeof(uint64_t), 5, f);
+    }
+    fclose(f); rename(tp, ip);
+}
+static inline void llm_kv_disk_load_index(KvDisk* d) {
+    if (!d || !d->persistent) return;
+    char ip[1300]; snprintf(ip, sizeof ip, "%s.idx", d->path);
+    FILE* f = fopen(ip, "rb"); if (!f) return;
+    char magic[7]; uint32_t ver=0, n=0;
+    if (fread(magic,1,7,f)==7 && !memcmp(magic,LLM_KVDSK_IDX_MAGIC,7) && fread(&ver,4,1,f)==1 && ver==1 && fread(&n,4,1,f)==1) {
+        for (uint32_t k = 0; k < n && k < (uint32_t)d->n_entries; k++) {
+            uint64_t v[5]; if (fread(v,sizeof(uint64_t),5,f)!=5) break;
+            int slot = -1; for (int i=0;i<d->n_entries;i++) if (!d->e[i].used) { slot=i; break; }
+            if (slot < 0) break;
+            d->e[slot].used=true; d->e[slot].hash=v[0]; d->e[slot].off=v[1]; d->e[slot].size=v[2];
+            d->e[slot].ck=v[3]; d->e[slot].last_used=v[4];
+            d->n_live++; d->live_bytes += v[2]; if (v[4] > d->clock) d->clock = v[4];
+        }
+    }
+    fclose(f);
+}
+static inline KvDisk llm_kv_disk_open_mode(const char* path, int max_entries, uint64_t cap_bytes, int persistent) {
     KvDisk d; memset(&d, 0, sizeof(d));
     snprintf(d.path, sizeof(d.path), "%s", path ? path : "/tmp/llm_kvdisk.scratch");
-    d.f = fopen(d.path, "w+b");
-    if (!d.f) d.f = fopen(d.path, "w+b");   /* secondo tentativo (path relativo) */
+    d.persistent = persistent ? true : false;
+    if (d.persistent) { d.f = fopen(d.path, "r+b"); if (!d.f) d.f = fopen(d.path, "w+b"); }
+    else { d.f = fopen(d.path, "w+b"); if (!d.f) d.f = fopen(d.path, "w+b"); }
     d.n_entries = max_entries > 0 ? max_entries : 65536;
     d.e = (KvDiskEntry*)calloc((size_t)d.n_entries, sizeof(KvDiskEntry));
     d.cap_free = 256;
     d.free_list = (KvDiskRange*)calloc((size_t)d.cap_free, sizeof(KvDiskRange));
     d.cap_bytes = cap_bytes;
+    if (d.persistent && d.f) { fseeko(d.f, 0, SEEK_END); d.file_bytes = (uint64_t)ftello(d.f); llm_kv_disk_load_index(&d); }
     return d;
+}
+static inline KvDisk llm_kv_disk_open(const char* path, int max_entries, uint64_t cap_bytes) {
+    return llm_kv_disk_open_mode(path, max_entries, cap_bytes, 0);
 }
 
 static inline void llm_kv_disk_close(KvDisk* d) {
     if (!d) return;
-    if (d->f) { fclose(d->f); d->f = NULL; remove(d->path); }   /* scratch temporaneo */
+    if (d->f) { if (d->persistent) llm_kv_disk_save_index(d); fclose(d->f); d->f = NULL; if (!d->persistent) remove(d->path); }
     free(d->e); d->e = NULL;
     free(d->free_list); d->free_list = NULL;
     d->n_live = d->n_free = 0;
@@ -144,6 +183,7 @@ static inline int llm_kv_disk_put(KvDisk* d, uint64_t hash, const void* data, si
     d->e[slot].last_used = ++d->clock;
     d->n_live++;
     d->live_bytes += n;
+    if (d->persistent) llm_kv_disk_save_index(d);
     return 0;
 }
 

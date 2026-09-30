@@ -938,6 +938,15 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
         wp.x_sampler_legacy = llm_ai_mlx_opt_env("LLM_SAMPLER_LEGACY") != NULL;
         llm_mlx_which_path_dump(&wp);
     }
+    /* D15: prefix-cache PERSISTENTE — se l'opzione `prefix_cache` e' impostata, ricarica i
+     * prefissi salvati (nome+token) e li registra (radix); con il tier SSD attivo la KV e'
+     * restaurabile, quindi il riuso evita il re-prefill (TTFT cached) anche tra riavvii. */
+    { char pp[2048];
+      if (llm_ai_mlx_opt_get_str("prefix_cache", pp, (int)sizeof pp) == 0 && pp[0]) {
+          int nl = llm_ai_mlx_model_prefix_load((llm_ai_mlx_model_handle)m, pp);
+          if (nl > 0) fprintf(stderr, "[prefix] %d prefissi persistenti caricati da %s\n", nl, pp);
+      }
+    }
     return m;
 }
 

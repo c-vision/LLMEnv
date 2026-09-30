@@ -34,6 +34,7 @@ static Opt g_opts[] = {
     { "kvq_gqa",          "KV-quant attn fusa: GQA-shared (1/0, sperimentale)",         T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0, "1" },
     { "kvdisk",           "tier SSD KV: off|on|<path> (file scratch)",               T_STR,   0, 0, 0, 0, 0, 0, "off", "off", 0, "on" },
     { "kvdisk_cap_mb",    "budget byte VIVI del tier SSD KV in MB (0 = illimitato)", T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0, "8192" },
+    { "prefix_cache",     "D15: path del file di persistenza della prefix-cache (vuoto = in-RAM)", T_STR, 0, 0, 0, 0, 0, 0, "", "", 0, "/tmp/llm_prefix.cache" },
     { "memgov",           "memory governor attivo (1/0): tiene ~2 GiB liberi per macOS", T_INT, 1, 1, 0, 0, 0, 0, {0}, NULL, 0, "1" },
     { "memgov_reserve_mb", "byte da lasciare liberi per il sistema (MB)",            T_INT,   2048, 2048, 0, 0, 0, 0, {0}, NULL, 0, "2048" },
     { "memgov_grow_min_free_mb", "libero minimo richiesto per crescere le cache (MB)", T_INT, 1024, 1024, 0, 0, 0, 0, {0}, NULL, 0, "1024" },
