@@ -25,6 +25,7 @@ int main(int argc, char** argv) {
     int (*optset)(const char*, const char*)  = dlsym(h, "llm_ai_mlx_opt_set");
     int (*park)(S, M)                        = dlsym(h, "llm_ai_mlx_session_park");
     int (*mem)(size_t*, size_t*, size_t*)    = dlsym(h, "llm_ai_mlx_memory_stats");
+    int (*destroy)(S)                        = dlsym(h, "llm_ai_mlx_destroy_session");
     if (!load || !create || !append || !gen || !park) { fprintf(stderr, "dlsym fallito\n"); return 3; }
 
     int P = atoi(argv[3]);
@@ -34,6 +35,9 @@ int main(int argc, char** argv) {
     if (!m) { fprintf(stderr, "load NULL\n"); return 4; }
     int32_t* ids = (int32_t*)malloc((size_t)P * sizeof(int32_t));
     for (int i = 0; i < P; i++) ids[i] = 100 + (i % 2000);
+    /* WARMUP con la STESSA P: MLX compila i kernel PER FORMA, quindi solo una prefill di P token
+     * compila la shape del prefill che misuriamo. Cosi' il cold non paga la compilazione. */
+    { S sw = create(m); append(sw, ids, P); int32_t w1[2]; gen(sw, 1, -1, w1); if (destroy) destroy(sw); }
     int32_t one[2] = {0}, one2[2] = {0};
 
     /* COLD: sessione fresca, append(P) + gen(1) dal contesto P. */
@@ -47,6 +51,8 @@ int main(int argc, char** argv) {
     printf("COLD : append(P=%d) rc=%d = %.1f ms | TTFT(cold) = %.1f ms | gen=%d | tok=%d | active=%.1f MB\n",
            P, rc, t_prefill, t_ttft_cold, g, one[0], mem ? a/1e6 : 0);
 
+    if (destroy) destroy(s1);   /* libera la sessione cold PRIMA della warm (memoria minima) */
+    size_t c2=0,a2=0,p2=0; if (mem) mem(&c2,&a2,&p2);
     /* WARM: sessione fresca, append(P) + park + gen(1) dal MEDESIMO contesto P (unpark auto). */
     S s2 = create(m);
     append(s2, ids, P);
