@@ -9,8 +9,9 @@
 #include "llm_dsv4_engine.h"
 #include "llm_engine_opts.h"
 
+static int g_cap = 3000;   /* bundle nella cache esperti (argv[5]) */
 static float* run(const char* path, const int* tok, int n, int chunk, double* secs, int* am) {
-    LlmDsv4Engine* e = llm_dsv4_engine_load_swap(path, 1024, 3000);
+    LlmDsv4Engine* e = llm_dsv4_engine_load_swap(path, 1024, g_cap);
     if (!e) { fprintf(stderr, "load fallita\n"); exit(1); }
     const LlmDsv4Config* c = &e->w.cfg;
     float* hc = (float*)malloc(sizeof(float) * (size_t)c->n_hc * c->n_embd);
@@ -46,7 +47,7 @@ int main(int argc, char** argv) {
      *   raw  : attenzione layer 0-1 GPU vs CPU              -> statistico (2 caricamenti) */
     const char* path = argc > 1 ? argv[1] : "/Users/gaetano/ds4/ds4flash.gguf";
     int n = argc > 2 ? atoi(argv[2]) : 40, chunk = argc > 3 ? atoi(argv[3]) : 16;
-    const char* cs = argc > 4 ? argv[4] : "f32";
+    const char* cs = argc > 4 ? argv[4] : "f32"; if (argc > 5) g_cap = atoi(argv[5]);
     int tok[4096]; unsigned s = 12345; for (int i = 0; i < n; i++) { s = s * 1103515245u + 12345u; tok[i] = 1000 + (int)((s >> 8) % 20000); }
     const int nv = 129280; double ta, tb; int aa, ab;
     llm_ai_mlx_opt_set("dsv4_prefill_f16", "0"); llm_ai_mlx_opt_set("dsv4_gpu_hc", "0"); llm_ai_mlx_opt_set("dsv4_gpu_raw_attn", "1"); llm_ai_mlx_opt_set("dsv4_prefill_mm", "0");

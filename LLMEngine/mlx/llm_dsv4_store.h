@@ -211,7 +211,12 @@ static inline int llm_dsv4_store_claim(LlmDsv4Store* s, int layer, int e, int* m
     /* Buffer ALLINEATO a pagina + paddato: le view Metal zero-copy (newBufferWithBytesNoCopy) mappano pagine intere
      * [align_down, align_up) -> il buffer deve coprirle, altrimenti la view esce dall'allocazione. */
     const size_t page = 16384;
-    size_t padded = ((len + page - 1) / page) * page + page;
+    /* Ogni slot ha SEMPRE la dimensione massima fra i layer: mai free()+riallocazione al cambio layer. Le view no-copy Metal sono
+     * cached per indirizzo e legano le pagine FISICHE alla creazione: se l'indirizzo viene liberato e riassegnato ad altre pagine, la
+     * GPU leggerebbe dati vecchi (bug: prefill a chunk errato appena la cache esperti inizia a evincere). */
+    size_t maxlen = len;
+    for (int il = 0; il < s->n_layer; il++) { size_t l2 = s->layers[il].nb_g + s->layers[il].nb_u + s->layers[il].nb_d; if (l2 > maxlen) maxlen = l2; }
+    size_t padded = ((maxlen + page - 1) / page) * page + page;
     if (en->cap < padded) { free(en->buf); en->buf = NULL; en->cap = 0; }
     if (!en->buf) {
         void* p = NULL;

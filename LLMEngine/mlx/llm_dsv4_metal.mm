@@ -928,6 +928,138 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        x[off+i] = (v < 0.f ? -q : q) * scale;\n"
 "    }\n"
 "}\n"
+/* ── Mid BATCHED (token in griglia): compressor/indexer a eventi, attenzione con finestra raw lineare ── */
+"kernel void dsv4_comp_pool_ev(device const float* SKV0 [[buffer(0)]], device const float* SSC0 [[buffer(1)]],\n"
+"    device float* OUT0 [[buffer(2)]], constant uint* P [[buffer(3)]], uint2 gg [[thread_position_in_grid]]) {\n"
+"    const uint hd = P[0], ratio = P[1], co = P[2], row0 = P[3], nev = P[4]; const uint width = co * hd;\n"
+"    const uint tid = gg.x, ev = gg.y; if (tid >= hd || ev >= nev) return;\n"
+"    device const float* SKV = SKV0 + (ulong)(row0 + ev * ratio) * width; device const float* SSC = SSC0 + (ulong)(row0 + ev * ratio) * width; device float* OUT = OUT0 + (ulong)ev * hd;\n"
+"    float mx = -1.0e30f;\n"
+"    if (co == 2u) { for (uint r = 0; r < ratio; r++) { float sp = SSC[r*width+tid]; float sc = SSC[(ratio+r)*width+hd+tid]; if (sp > mx) mx = sp; if (sc > mx) mx = sc; } }\n"
+"    else { for (uint r = 0; r < ratio; r++) { float s = SSC[r*width+tid]; if (s > mx) mx = s; } }\n"
+"    if (mx <= -1.0e30f * 0.5f) { OUT[tid] = 0.f; return; }\n"
+"    float den = 0.f, sum = 0.f;\n"
+"    if (co == 2u) { for (uint r = 0; r < ratio; r++) { float wp = exp(SSC[r*width+tid]-mx), wc = exp(SSC[(ratio+r)*width+hd+tid]-mx); den += wp + wc; sum += wp*SKV[r*width+tid]; sum += wc*SKV[(ratio+r)*width+hd+tid]; } }\n"
+"    else { for (uint r = 0; r < ratio; r++) { float w = exp(SSC[r*width+tid]-mx); den += w; sum += w*SKV[r*width+tid]; } }\n"
+"    OUT[tid] = sum / den;\n"
+"}\n"
+"kernel void dsv4_rope_ev(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], constant float* CF [[buffer(2)]],\n"
+"    uint2 tg [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
+"    const int n_rot = (int)P[0], head_dim = (int)P[1], pos = (int)(P[2] + tg.y * P[4]); const uint nh = P[3];\n"
+"    const float freq_base = CF[0], freq_scale = CF[1], ext_factor = CF[2], attn_factor = CF[3];\n"
+"    const float beta_fast = CF[4], beta_slow = CF[5]; const float n_ctx_orig = CF[6];\n"
+"    const int n_nope = head_dim - n_rot;\n"
+"    const float theta_scale = pow(freq_base, -2.f / (float)n_rot);\n"
+"    float corr0 = 0.f, corr1 = 0.f;\n"
+"    const float TWO_PI = 6.28318530717958647692f;\n"
+"    if (ext_factor != 0.f) {\n"
+"        float start = floor((float)n_rot * log(n_ctx_orig / (beta_fast * TWO_PI)) / (2.f * log(freq_base)));\n"
+"        float end = ceil((float)n_rot * log(n_ctx_orig / (beta_slow * TWO_PI)) / (2.f * log(freq_base)));\n"
+"        corr0 = max(0.f, start); corr1 = min((float)(n_rot - 1), end);\n"
+"    }\n"
+"    device float* tail = X + ((ulong)tg.y * nh + tg.x) * (ulong)head_dim + n_nope;\n"
+"    for (int i = (int)tiisg * 2; i < n_rot; i += 64) {\n"
+"        float theta_extrap = (float)pos;\n"
+"        for (int t = 0; t < i; t += 2) theta_extrap *= theta_scale;\n"
+"        float theta_interp = freq_scale * theta_extrap;\n"
+"        float theta = theta_interp, mscale = attn_factor;\n"
+"        if (ext_factor != 0.f) {\n"
+"            float y = ((float)(i / 2) - corr0) / max(0.001f, corr1 - corr0);\n"
+"            float ramp = 1.f - min(1.f, max(0.f, y));\n"
+"            float ramp_mix = ramp * ext_factor;\n"
+"            theta = theta_interp * (1.f - ramp_mix) + theta_extrap * ramp_mix;\n"
+"            mscale *= 1.f + 0.1f * log(1.f / freq_scale);\n"
+"        }\n"
+"        float c = cos(theta) * mscale, s = sin(theta) * mscale;\n"
+"        float x0 = tail[i], x1 = tail[i + 1];\n"
+"        tail[i] = x0 * c - x1 * s;\n"
+"        tail[i + 1] = x0 * s + x1 * c;\n"
+"    }\n"
+"}\n"
+"kernel void dsv4_indexer_scores_t(device const float* Q [[buffer(0)]], device const float* KVC [[buffer(1)]],\n"
+"    device const float* W [[buffer(2)]], device float* SCORES [[buffer(3)]], constant uint* P [[buffer(4)]], device const uint* NC [[buffer(5)]],\n"
+"    uint2 cg [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) {\n"
+"    const uint nh = P[0], hd = P[1], maxc = P[2]; const uint c = cg.x, t = cg.y; const uint n_comp = NC[t]; if (c >= n_comp) return;\n"
+"    device const float* kv = KVC + (ulong)c * (ulong)hd; float s = 0.f;\n"
+"    for (uint h = sg; h < nh; h += 4u) {\n"
+"        device const float* qh = Q + ((ulong)t * nh + h) * (ulong)hd;\n"
+"        float acc = 0.f; for (uint i = tiisg; i < hd; i += 32u) acc += qh[i] * kv[i];\n"
+"        acc = simd_sum(acc); if (acc < 0.f) acc = 0.f; s += acc * W[(ulong)t * nh + h];\n"
+"    }\n"
+"    threadgroup float ss[4]; if (tiisg == 0u) ss[sg] = s;\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    if (sg == 0u && tiisg == 0u) SCORES[(ulong)t * maxc + c] = ss[0] + ss[1] + ss[2] + ss[3];\n"
+"}\n"
+"kernel void dsv4_indexer_topk_t(device const float* SCORES0 [[buffer(0)]], device int* ALLOWED0 [[buffer(1)]],\n"
+"    constant uint* P [[buffer(2)]], device const uint* NC [[buffer(3)]], uint2 g2 [[thread_position_in_grid]]) {\n"
+"    const uint maxc = P[0], top_k = P[1]; const uint c = g2.x, t = g2.y; const uint n_comp = NC[t]; if (c >= n_comp) return;\n"
+"    device const float* SCORES = SCORES0 + (ulong)t * maxc; device int* ALLOWED = ALLOWED0 + (ulong)t * maxc;\n"
+"    const float s = SCORES[c]; uint rank = 0;\n"
+"    for (uint j = 0; j < n_comp; j++) { const float sj = SCORES[j]; if (sj > s || (sj == s && j < c)) rank++; }\n"
+"    ALLOWED[c] = rank < top_k ? 1 : 0;\n"
+"}\n"
+"kernel void dsv4_attn_part_t(device const float* Q0 [[buffer(0)]], device const float* RAWK0 [[buffer(1)]],\n"
+"    device const float* COMPK [[buffer(2)]], device const int* ALLOWED0 [[buffer(3)]],\n"
+"    device float* PART [[buffer(4)]], constant uint* P [[buffer(5)]], device const uint4* TP [[buffer(6)]],\n"
+"    uint3 tg [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]],\n"
+"    ushort tiisg [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) {\n"
+"    const uint hd = P[0], has_allowed = P[1], nsm = P[2], g0 = P[3], maxc = P[4], nh = P[5]; const uint tok = g0 + tg.z;\n"
+"    const uint4 tp = TP[tok]; const uint n_raw = tp.x, n_comp = tp.y, ns = tp.w;\n"
+"    const uint h = tg.x, s = tg.y, nch = hd / 128u; if (s >= ns) return;\n"
+"    device const float* RAWK = RAWK0 + (ulong)tp.z * (ulong)hd; device const int* ALLOWED = ALLOWED0 + (ulong)tok * maxc; device const float* Q = Q0 + (ulong)tok * nh * hd;\n"
+"    const uint total = n_raw + n_comp, per = (total + ns - 1u) / ns;\n"
+"    const uint t0 = s * per, t1 = min(total, t0 + per);\n"
+"    const float kq = 1.f / sqrt((float)hd);\n"
+"    device const float4* q4 = (device const float4*)(Q + (ulong)h * (ulong)hd);\n"
+"    float4 qv[4], acc[4];\n"
+"    for (uint j = 0; j < 4u; j++) { qv[j] = j < nch ? q4[j * 32u + tiisg] : float4(0.f); acc[j] = float4(0.f); }\n"
+"    float m = -INFINITY, l = 0.f;\n"
+"    for (uint t = t0 + sg; t < t1; t += 4u) {\n"
+"        device const float* kvp;\n"
+"        if (t < n_raw) kvp = RAWK + (ulong)t * (ulong)hd;\n"
+"        else { const uint r = t - n_raw; if (has_allowed && !ALLOWED[r]) continue; kvp = COMPK + (ulong)r * (ulong)hd; }\n"
+"        device const float4* k4 = (device const float4*)kvp;\n"
+"        float4 kv[4]; float d = 0.f;\n"
+"        for (uint j = 0; j < 4u; j++) { if (j < nch) { kv[j] = k4[j * 32u + tiisg]; d += dot(qv[j], kv[j]); } }\n"
+"        d = simd_sum(d) * kq;\n"
+"        const float mn = max(m, d), corr = exp(m - mn), w = exp(d - mn);\n"
+"        l = l * corr + w;\n"
+"        for (uint j = 0; j < 4u; j++) if (j < nch) acc[j] = acc[j] * corr + w * kv[j];\n"
+"        m = mn;\n"
+"    }\n"
+"    threadgroup float sm[4], sl[4]; threadgroup float sacc[4 * 512];\n"
+"    if (tiisg == 0u) { sm[sg] = m; sl[sg] = l; }\n"
+"    for (uint j = 0; j < 4u; j++) if (j < nch) *(threadgroup float4*)(sacc + sg * 512u + j * 128u + tiisg * 4u) = acc[j];\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    const float M = max(max(sm[0], sm[1]), max(sm[2], sm[3]));\n"
+"    device float* out = PART + (((ulong)tg.z * nh + h) * (ulong)nsm + (ulong)s) * (ulong)(hd + 2u);\n"
+"    float e0 = 0.f, e1 = 0.f, e2 = 0.f, e3 = 0.f;\n"
+"    if (M > -INFINITY) { e0 = exp(sm[0] - M); e1 = exp(sm[1] - M); e2 = exp(sm[2] - M); e3 = exp(sm[3] - M); }\n"
+"    for (uint i = tid; i < hd; i += 128u)\n"
+"        out[i] = e0 * sacc[i] + e1 * sacc[512u + i] + e2 * sacc[1024u + i] + e3 * sacc[1536u + i];\n"
+"    if (tid == 0u) { out[hd] = M; out[hd + 1u] = e0 * sl[0] + e1 * sl[1] + e2 * sl[2] + e3 * sl[3]; }\n"
+"}\n"
+"kernel void dsv4_attn_merge_t(device const float* PART [[buffer(0)]], device const float* SINKS [[buffer(1)]],\n"
+"    device float* OUT [[buffer(2)]], constant uint* P [[buffer(3)]], device const uint4* TP [[buffer(4)]],\n"
+"    uint2 hz [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]]) {\n"
+"    const uint hd = P[0], nsm = P[1], g0 = P[2], nh = P[3]; const uint stride = hd + 2u; const uint h = hz.x, tok = g0 + hz.y; const uint ns = TP[tok].w;\n"
+"    device const float* base = PART + (((ulong)hz.y * nh + h) * (ulong)nsm) * (ulong)stride;\n"
+"    const float sink = SINKS[h];\n"
+"    float M = sink;\n"
+"    for (uint s = 0; s < ns; s++) M = max(M, base[(ulong)s * stride + hd]);\n"
+"    float den = exp(sink - M);\n"
+"    for (uint s = 0; s < ns; s++) { const float ms = base[(ulong)s * stride + hd]; if (ms > -INFINITY) den += exp(ms - M) * base[(ulong)s * stride + hd + 1u]; }\n"
+"    const float inv = 1.f / den;\n"
+"    for (uint i = tid; i < hd; i += 128u) {\n"
+"        float a = 0.f;\n"
+"        for (uint s = 0; s < ns; s++) { const float ms = base[(ulong)s * stride + hd]; if (ms > -INFINITY) a += exp(ms - M) * base[(ulong)s * stride + i]; }\n"
+"        OUT[((ulong)tok * nh + h) * (ulong)hd + i] = a * inv;\n"
+"    }\n"
+"}\n"
+"kernel void dsv4_ape_rows(device const float* PSC [[buffer(0)]], device const float* APE [[buffer(1)]], device float* XSC [[buffer(2)]], constant uint* P [[buffer(3)]], uint2 g [[thread_position_in_grid]]) {\n"
+"    const uint width = P[0], ratio = P[1], pm0 = P[2], nt = P[3]; if (g.x >= width || g.y >= nt) return;\n"
+"    XSC[(ulong)g.y * width + g.x] = PSC[(ulong)g.y * width + g.x] + APE[(ulong)((pm0 + g.y) % ratio) * width + g.x];\n"
+"}\n"
 /* Indexer QAT: Hadamard128 + FP4 e2m1 per blocco-32, in-place per riga (head_dim=128). P={n_rows,hd}. */
 "kernel void dsv4_indexer_qat(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], uint gid [[thread_position_in_grid]]) {\n"
 "    const uint n_rows = P[0], hd = P[1]; if (gid >= n_rows || hd != 128u) return;\n"
@@ -1009,7 +1141,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
     id<MTLComputePipelineState> pso_mmp_q8, pso_mmp_iq2, pso_mmp_q2k, pso_mmp_q4k, pso_mmp_iq2a, pso_mmp_q2ka, pso_mmp_q4ka;   /* MPP (nil se non disponibile) */
-    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
+    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_rope_ev, pso_iscore_t, pso_itopk_t, pso_apart_t, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
@@ -1181,7 +1313,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
             { "dsv4_hcb_sinkhorn", &b->pso_hcb_sink }, { "dsv4_hcb_norm", &b->pso_hcb_norm }, { "dsv4_hcb_post", &b->pso_hcb_post }, { "kernel_mul_mm_id_iq2_xxs_addr_f32", &b->pso_mm_iq2a },
             { "kernel_mul_mm_id_q2_K_addr_f32", &b->pso_mm_q2ka }, { "kernel_mul_mm_id_q4_K_addr_f32", &b->pso_mm_q4ka }, { "kernel_mul_mv_slots6_q4_K_pair_swiglu_f32", &b->pso_q4_pair },
             { "kernel_mul_mv_slots6_q4_K_sum6_f32", &b->pso_q4_sum6 }, { "dsv4_rms_w_rows", &b->pso_rms_rows },
-            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_comp_fp8_rows", &b->pso_fp8_rows }, { "dsv4_rope_rows", &b->pso_rope_rows },
+            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_comp_fp8_rows", &b->pso_fp8_rows }, { "dsv4_comp_pool_ev", &b->pso_pool_ev }, { "dsv4_rope_ev", &b->pso_rope_ev }, { "dsv4_indexer_scores_t", &b->pso_iscore_t }, { "dsv4_indexer_topk_t", &b->pso_itopk_t }, { "dsv4_attn_part_t", &b->pso_apart_t }, { "dsv4_attn_merge_t", &b->pso_amerge_t }, { "dsv4_ape_rows", &b->pso_ape_rows }, { "dsv4_rope_rows", &b->pso_rope_rows },
             { "kernel_mul_mm_id_map0_ne20_8", &b->pso_mm_map8 }, { "kernel_mul_mm_id_q8_0_f32", &b->pso_mm_q8 }, { "kernel_mul_mm_id_iq2_xxs_f32", &b->pso_mm_iq2 },
             { "kernel_mul_mm_id_q2_K_f32", &b->pso_mm_q2k }, { "kernel_mul_mm_id_q4_K_f32", &b->pso_mm_q4k },
             { "dsv4_swiglu_w", &b->pso_swiglu_w }, { "dsv4_sum_slots6", &b->pso_sum_slots6 } };
@@ -2357,7 +2489,7 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b,
 static void dsv4_encode_attn_mixed(LlmDsv4Metal* b, id<MTLComputeCommandEncoder> e,
         id<MTLBuffer> Q, id<MTLBuffer> RAWK, id<MTLBuffer> COMPK, id<MTLBuffer> ALLOWED,
         id<MTLBuffer> SINKS, id<MTLBuffer> OUT, NSUInteger qoff, NSUInteger ooff,
-        int n_head, int hd, int n_raw, int n_comp, int has_allowed) {
+        int n_head, int hd, int n_raw, int n_comp, int has_allowed, NSUInteger raw_boff = 0) {
     const uint32_t total = (uint32_t)(n_raw + n_comp);
     id<MTLBuffer> PART = nil;
     uint32_t ns = (total + 63u) / 64u; if (ns < 1u) ns = 1u; if (ns > 16u) ns = 16u;
@@ -2365,7 +2497,7 @@ static void dsv4_encode_attn_mixed(LlmDsv4Metal* b, id<MTLComputeCommandEncoder>
         PART = dsv4_scratch(b, &b->sx[48], &b->sx_cap[48], (size_t)n_head * ns * (size_t)(hd + 2) * sizeof(float));
     if (PART) {
         [e setComputePipelineState:b->pso_attn_part];
-        [e setBuffer:Q offset:qoff atIndex:0]; [e setBuffer:RAWK offset:0 atIndex:1]; [e setBuffer:COMPK offset:0 atIndex:2];
+        [e setBuffer:Q offset:qoff atIndex:0]; [e setBuffer:RAWK offset:raw_boff atIndex:1]; [e setBuffer:COMPK offset:0 atIndex:2];
         [e setBuffer:ALLOWED offset:0 atIndex:3]; [e setBuffer:PART offset:0 atIndex:4];
         { uint32_t P[5] = { (uint32_t)n_raw, (uint32_t)n_comp, (uint32_t)hd, (uint32_t)(has_allowed ? 1u : 0u), ns }; [e setBytes:P length:sizeof(P) atIndex:5]; }
         [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_head, ns, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
@@ -2376,7 +2508,7 @@ static void dsv4_encode_attn_mixed(LlmDsv4Metal* b, id<MTLComputeCommandEncoder>
         return;
     }
     [e setComputePipelineState:b->pso_attn_mixed];
-    [e setBuffer:Q offset:qoff atIndex:0]; [e setBuffer:RAWK offset:0 atIndex:1]; [e setBuffer:COMPK offset:0 atIndex:2];
+    [e setBuffer:Q offset:qoff atIndex:0]; [e setBuffer:RAWK offset:raw_boff atIndex:1]; [e setBuffer:COMPK offset:0 atIndex:2];
     [e setBuffer:ALLOWED offset:0 atIndex:3]; [e setBuffer:SINKS offset:0 atIndex:4]; [e setBuffer:OUT offset:ooff atIndex:5];
     { uint32_t P[4] = { (uint32_t)n_raw, (uint32_t)n_comp, (uint32_t)hd, (uint32_t)(has_allowed ? 1u : 0u) }; [e setBytes:P length:sizeof(P) atIndex:6]; }
     [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_head, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -2609,6 +2741,12 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         }
         #undef GEMV_NT
     }
+    /* RAW lineare per il chunk: [righe di stato gia' presenti | KV correnti di ogni token]: la finestra del token t e' un intervallo
+     * contiguo (stesso ordine della finestra scorrevole), quindi niente shift+copia per token. A fine chunk lo stato = ultime righe. */
+    const int cap_raw = p0->raw_cap;
+    const int n_prev = p0->raw_full ? cap_raw : p0->n_raw - 1;
+    id<MTLBuffer> RAWX = dsv4_scratch(b, &b->sx[74], &b->sx_cap[74], (size_t)(n_prev + nt) * hd * sizeof(float));
+    if (!RAWX) return -2;
     /* Prepara in blocco (indipendente dal resto della catena): fp8+f16 della riga KV di ogni token; q indexer (rope, qat, scala pesi). */
     {
         const int nnope0 = hd - p0->n_rot;
@@ -2619,6 +2757,16 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         [e setComputePipelineState:b->pso_f16];
         [e setBuffer:KVC offset:0 atIndex:0];
         { uint32_t P[1] = { (uint32_t)((size_t)nt * hd) }; [e setBytes:P length:sizeof(P) atIndex:1]; }
+        [e dispatchThreads:MTLSizeMake((NSUInteger)nt * hd, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        if (n_prev > 0) {
+            [e setComputePipelineState:b->pso_copy];
+            [e setBuffer:(id<MTLBuffer>)p0->raw offset:0 atIndex:0]; [e setBuffer:RAWX offset:0 atIndex:1];
+            { uint32_t P[1] = { (uint32_t)((size_t)n_prev * hd) }; [e setBytes:P length:sizeof(P) atIndex:2]; }
+            [e dispatchThreads:MTLSizeMake((NSUInteger)n_prev * hd, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        }
+        [e setComputePipelineState:b->pso_copy];
+        [e setBuffer:KVC offset:0 atIndex:0]; [e setBuffer:RAWX offset:(NSUInteger)((size_t)n_prev * hd * 4) atIndex:1];
+        { uint32_t P[1] = { (uint32_t)((size_t)nt * hd) }; [e setBytes:P length:sizeof(P) atIndex:2]; }
         [e dispatchThreads:MTLSizeMake((NSUInteger)nt * hd, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         if (p0->has_idx) {
             [e setComputePipelineState:b->pso_rope_rows];
@@ -2637,6 +2785,135 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             [e dispatchThreads:MTLSizeMake((NSUInteger)p0->idx_nh * nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         }
     }
+    /* ── PATH A TOKEN IN GRIGLIA (come ds4: niente catena per token): compressor/indexer a EVENTI su righe lineari [stato | chunk],
+     * indexer score/top-k con token in griglia, attenzione con finestra raw lineare a gruppi di 32 token. Stessa matematica del path per-token. ── */
+    int use_tok = 0;
+    if (nt >= 8 && b->pso_apart_t && b->pso_amerge_t && b->pso_pool_ev && b->pso_rope_ev && b->pso_iscore_t && b->pso_itopk_t && b->pso_ape_rows &&
+        b->pso_rms_rows && b->pso_fp8_rows && (hd % 128) == 0 && hd <= 512) use_tok = 1;
+    int nev = 0, ev_first = -1, nevi = 0, ev_first_i = -1, ndue = 0;
+    if (use_tok && ratio > 0) {
+        for (int t = 0; t < nt; t++) {
+            if (ps[t].due) ndue++;
+            if (ps[t].push_acomp) { if (nev == 0) ev_first = t; else if (t != ev_first + nev * ratio) use_tok = 0; nev++; }
+            if (ps[t].push_icomp) { if (nevi == 0) ev_first_i = t; else if (t != ev_first_i + nevi * ratio) use_tok = 0; nevi++; }
+        }
+        if (ndue != nev) use_tok = 0;
+        if (p0->has_idx && nevi != nev) use_tok = 0;
+    }
+    if (use_tok) {
+        const int nh_ = p0->n_head;
+        const int pm0 = ratio > 0 ? p0->pos % ratio : 0;
+        const int S0 = ratio > 0 ? (co == 2 ? ratio : 0) + pm0 : 0;
+        const int pm_end = ratio > 0 ? (p0->pos + nt) % ratio : 0;
+        const int keep = ratio > 0 ? (co == 2 ? ratio : 0) + pm_end : 0;
+        const int nnope_ = hd - p0->n_rot;
+        int max_ic = 1; for (int t = 0; t < nt; t++) if (ps[t].n_icomp > max_ic) max_ic = ps[t].n_icomp;
+        if (!p0->has_idx) max_ic = 1;
+        id<MTLBuffer> TPB = dsv4_scratch(b, &b->sx[75], &b->sx_cap[75], (size_t)nt * 16);
+        id<MTLBuffer> NCB = dsv4_scratch(b, &b->sx[76], &b->sx_cap[76], (size_t)nt * 4);
+        id<MTLBuffer> SCB = dsv4_scratch(b, &b->sx[81], &b->sx_cap[81], (size_t)nt * max_ic * 4);
+        id<MTLBuffer> ALB = dsv4_scratch(b, &b->sx[82], &b->sx_cap[82], (size_t)nt * max_ic * 4);
+        if (!TPB || !NCB || !SCB || !ALB) return -2;
+        int nsm = 1;
+        { uint32_t* tp = (uint32_t*)[TPB contents]; uint32_t* nc = (uint32_t*)[NCB contents];
+          for (int t = 0; t < nt; t++) {
+            const int nr_ = ps[t].n_raw, na_ = ps[t].n_acomp; int total = nr_ + na_; int ns_ = (total + 63) / 64; if (ns_ < 1) ns_ = 1; if (ns_ > 16) ns_ = 16;
+            tp[4 * t] = (uint32_t)nr_; tp[4 * t + 1] = (uint32_t)na_; tp[4 * t + 2] = (uint32_t)(n_prev + t + 1 - nr_); tp[4 * t + 3] = (uint32_t)ns_;
+            nc[t] = (uint32_t)(ps[t].has_idx ? ps[t].n_icomp : 0);
+            if (ns_ > nsm) nsm = ns_;
+          } }
+        #define COPYF(SRC, SOFF, DST, DOFF, NELEM) do { [e setComputePipelineState:b->pso_copy]; [e setBuffer:(SRC) offset:(SOFF) atIndex:0]; [e setBuffer:(DST) offset:(DOFF) atIndex:1]; \
+            { uint32_t P_[1] = { (uint32_t)(NELEM) }; [e setBytes:P_ length:sizeof(P_) atIndex:2]; } \
+            [e dispatchThreads:MTLSizeMake((NSUInteger)(NELEM), 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)]; } while (0)
+        /* compressor (attn) e, se presente, indexer: stessi passi con larghezze/pesi diversi */
+        for (int pass = 0; pass < 2 && ratio > 0; pass++) {
+            if (pass == 1 && !p0->has_idx) break;
+            const int w_ = pass == 0 ? co * hd : co * p0->ihd, hdd = pass == 0 ? hd : p0->ihd, evn = pass == 0 ? nev : nevi, evf = pass == 0 ? ev_first : ev_first_i;
+            id<MTLBuffer> PK = pass == 0 ? PKV : PIKV, PS_ = pass == 0 ? PSC : PISC;
+            id<MTLBuffer> XK = dsv4_scratch(b, &b->sx[pass == 0 ? 77 : 79], &b->sx_cap[pass == 0 ? 77 : 79], (size_t)(S0 + nt) * w_ * 4);
+            id<MTLBuffer> XS = dsv4_scratch(b, &b->sx[pass == 0 ? 78 : 80], &b->sx_cap[pass == 0 ? 78 : 80], (size_t)(S0 + nt) * w_ * 4);
+            if (!XK || !XS) return -2;
+            id<MTLBuffer> stk = (id<MTLBuffer>)(pass == 0 ? p0->st_akv : p0->st_ikv), sts = (id<MTLBuffer>)(pass == 0 ? p0->st_asc : p0->st_isc);
+            id<MTLBuffer> apeB = (id<MTLBuffer>)(pass == 0 ? p0->w_cape : p0->w_icape);
+            if (S0 > 0) { COPYF(stk, 0, XK, 0, (size_t)S0 * w_); COPYF(sts, 0, XS, 0, (size_t)S0 * w_); }
+            COPYF(PK, 0, XK, (NSUInteger)((size_t)S0 * w_ * 4), (size_t)nt * w_);
+            [e setComputePipelineState:b->pso_ape_rows];
+            [e setBuffer:PS_ offset:0 atIndex:0]; [e setBuffer:apeB offset:0 atIndex:1]; [e setBuffer:XS offset:(NSUInteger)((size_t)S0 * w_ * 4) atIndex:2];
+            { uint32_t P_[4] = { (uint32_t)w_, (uint32_t)ratio, (uint32_t)pm0, (uint32_t)nt }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; }
+            [e dispatchThreads:MTLSizeMake((NSUInteger)w_, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            if (evn > 0) {
+                id<MTLBuffer> cB = (id<MTLBuffer>)(pass == 0 ? p0->acomp : p0->icomp);
+                const NSUInteger coff = (NSUInteger)((size_t)(pass == 0 ? ps[evf].acomp_off : ps[evf].icomp_off) * 4);
+                const int idx_first = S0 + (ps[evf].pos - p0->pos);
+                const int row0 = idx_first - (co * ratio - 1);
+                [e setComputePipelineState:b->pso_pool_ev];
+                [e setBuffer:XK offset:0 atIndex:0]; [e setBuffer:XS offset:0 atIndex:1]; [e setBuffer:cB offset:coff atIndex:2];
+                { uint32_t P_[5] = { (uint32_t)hdd, (uint32_t)ratio, (uint32_t)co, (uint32_t)row0, (uint32_t)evn }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; }
+                [e dispatchThreads:MTLSizeMake((NSUInteger)hdd, (NSUInteger)evn, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [e setComputePipelineState:b->pso_rms_rows];
+                [e setBuffer:cB offset:coff atIndex:0]; [e setBuffer:(id<MTLBuffer>)(pass == 0 ? p0->w_cnorm : p0->w_icnorm) offset:0 atIndex:1]; [e setBuffer:cB offset:coff atIndex:2];
+                { uint32_t P_[1] = { (uint32_t)hdd }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; float cf[1] = { p0->rms_eps }; [e setBytes:cf length:sizeof(cf) atIndex:4]; }
+                [e dispatchThreadgroups:MTLSizeMake(1, (NSUInteger)evn, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [e setComputePipelineState:b->pso_rope_ev];
+                [e setBuffer:cB offset:coff atIndex:0];
+                { uint32_t P_[5] = { (uint32_t)p0->n_rot, (uint32_t)hdd, (uint32_t)(ps[evf].pos + 1 - ratio), 1u, (uint32_t)ratio }; [e setBytes:P_ length:sizeof(P_) atIndex:1]; }
+                [e setBytes:p0->rope_cfg length:7 * sizeof(float) atIndex:2];
+                [e dispatchThreadgroups:MTLSizeMake(1, (NSUInteger)evn, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                if (pass == 0) {
+                    [e setComputePipelineState:b->pso_fp8_rows];
+                    [e setBuffer:cB offset:coff atIndex:0];
+                    { uint32_t P_[2] = { (uint32_t)nnope_, (uint32_t)hdd }; [e setBytes:P_ length:sizeof(P_) atIndex:1]; }
+                    [e dispatchThreads:MTLSizeMake((NSUInteger)(nnope_ / 64), (NSUInteger)evn, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                } else {
+                    [e setComputePipelineState:b->pso_idx_qat];
+                    [e setBuffer:cB offset:coff atIndex:0];
+                    { uint32_t P_[2] = { (uint32_t)evn, (uint32_t)hdd }; [e setBytes:P_ length:sizeof(P_) atIndex:1]; }
+                    [e dispatchThreads:MTLSizeMake((NSUInteger)evn, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                }
+                [e setComputePipelineState:b->pso_f16];
+                [e setBuffer:cB offset:coff atIndex:0];
+                { uint32_t P_[1] = { (uint32_t)((size_t)evn * hdd) }; [e setBytes:P_ length:sizeof(P_) atIndex:1]; }
+                [e dispatchThreads:MTLSizeMake((NSUInteger)evn * hdd, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            }
+            if (keep > 0) {
+                COPYF(XK, (NSUInteger)((size_t)(S0 + nt - keep) * w_ * 4), stk, 0, (size_t)keep * w_);
+                COPYF(XS, (NSUInteger)((size_t)(S0 + nt - keep) * w_ * 4), sts, 0, (size_t)keep * w_);
+            }
+        }
+        if (p0->has_idx) {
+            [e setComputePipelineState:b->pso_iscore_t];
+            [e setBuffer:QI offset:0 atIndex:0]; [e setBuffer:(id<MTLBuffer>)p0->icomp offset:0 atIndex:1]; [e setBuffer:WI offset:0 atIndex:2]; [e setBuffer:SCB offset:0 atIndex:3];
+            { uint32_t P_[3] = { (uint32_t)p0->idx_nh, (uint32_t)p0->idx_hd, (uint32_t)max_ic }; [e setBytes:P_ length:sizeof(P_) atIndex:4]; }
+            [e setBuffer:NCB offset:0 atIndex:5];
+            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)max_ic, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            [e setComputePipelineState:b->pso_itopk_t];
+            [e setBuffer:SCB offset:0 atIndex:0]; [e setBuffer:ALB offset:0 atIndex:1];
+            { uint32_t P_[2] = { (uint32_t)max_ic, (uint32_t)p0->idx_top_k }; [e setBytes:P_ length:sizeof(P_) atIndex:2]; }
+            [e setBuffer:NCB offset:0 atIndex:3];
+            [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)max_ic + 63) / 64, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        }
+        {   /* attenzione a gruppi di 32 token */
+            const int G_ = 32;
+            id<MTLBuffer> PT = dsv4_scratch(b, &b->sx[83], &b->sx_cap[83], (size_t)G_ * nh_ * nsm * (size_t)(hd + 2) * 4);
+            if (!PT) return -2;
+            for (int g0 = 0; g0 < nt; g0 += G_) {
+                const int gt = nt - g0 < G_ ? nt - g0 : G_;
+                [e setComputePipelineState:b->pso_apart_t];
+                [e setBuffer:Q offset:0 atIndex:0]; [e setBuffer:RAWX offset:0 atIndex:1]; [e setBuffer:(id<MTLBuffer>)p0->acomp offset:0 atIndex:2];
+                [e setBuffer:ALB offset:0 atIndex:3]; [e setBuffer:PT offset:0 atIndex:4];
+                { uint32_t P_[6] = { (uint32_t)hd, (uint32_t)(p0->has_idx ? 1 : 0), (uint32_t)nsm, (uint32_t)g0, (uint32_t)max_ic, (uint32_t)nh_ }; [e setBytes:P_ length:sizeof(P_) atIndex:5]; }
+                [e setBuffer:TPB offset:0 atIndex:6];
+                [e dispatchThreadgroups:MTLSizeMake((NSUInteger)nh_, (NSUInteger)nsm, (NSUInteger)gt) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [e setComputePipelineState:b->pso_amerge_t];
+                [e setBuffer:PT offset:0 atIndex:0]; [e setBuffer:(id<MTLBuffer>)p0->sinks offset:0 atIndex:1]; [e setBuffer:HD offset:0 atIndex:2];
+                { uint32_t P_[4] = { (uint32_t)hd, (uint32_t)nsm, (uint32_t)g0, (uint32_t)nh_ }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; }
+                [e setBuffer:TPB offset:0 atIndex:4];
+                [e dispatchThreadgroups:MTLSizeMake((NSUInteger)nh_, (NSUInteger)gt, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            }
+        }
+        #undef COPYF
+    }
+    if (!use_tok)
     for (int t = 0; t < nt; t++) {
         const LlmDsv4MidParams* p = &ps[t];
         const NSUInteger qio = (NSUInteger)((size_t)t * (p->has_idx ? p->qdim : 0) * 4), wio = (NSUInteger)((size_t)t * (p->has_idx ? p->idx_nh : 0) * 4);
@@ -2659,18 +2936,6 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         { uint32_t P[1] = { (uint32_t)width }; [e setBytes:P length:sizeof(P) atIndex:5]; }
         [e dispatchThreads:MTLSizeMake((NSUInteger)width, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         }
-        /* 2) raw: shift se pieno, fp8 della riga, copia in raw[raw_off] */
-        if (p->raw_full) {
-            [e setComputePipelineState:b->pso_comp_shift];
-            [e setBuffer:rawB offset:0 atIndex:0];
-            { uint32_t P[2] = { (uint32_t)((p->raw_cap - 1) * hd), (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:1]; }
-            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)(((p->raw_cap - 1) * hd + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-        }
-        [e setComputePipelineState:b->pso_copy];
-        [e setBuffer:KVC offset:ko atIndex:0]; [e setBuffer:rawB offset:(NSUInteger)((size_t)p->raw_off * 4) atIndex:1];
-        { uint32_t P[1] = { (uint32_t)hd }; [e setBytes:P length:sizeof(P) atIndex:2]; }
-        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((hd + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-
         /* 3) attn compressa (se dovuta): pool -> rms -> rope -> fp8, poi shift dello stato */
         if (p->due) {
           if (p->push_acomp) {
@@ -2763,7 +3028,8 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         }
 
         /* 5) attenzione mista (raw + compresse) */
-        dsv4_encode_attn_mixed(b, e, Q, rawB, aB, allowedB, (id<MTLBuffer>)p->sinks, HD, qo, ho, p->n_head, hd, p->n_raw, p->n_acomp, p->has_idx ? 1 : 0);
+        dsv4_encode_attn_mixed(b, e, Q, RAWX, aB, allowedB, (id<MTLBuffer>)p->sinks, HD, qo, ho, p->n_head, hd, p->n_raw, p->n_acomp, p->has_idx ? 1 : 0,
+                               (NSUInteger)((size_t)(n_prev + t + 1 - p->n_raw) * hd * 4));
 
         /* PIPELINE CPU/GPU: ogni 16 token chiude e SOTTOMETTE la cb (senza attendere) e ne apre un'altra: la GPU esegue i primi token
          * mentre la CPU codifica i successivi (coda seriale: l'ordine e' garantito). L'attesa e' solo sull'ultima. */
@@ -2771,6 +3037,13 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             [e endEncoding]; dsv4_res_commit(b); [cb commit];
             cb = [b->queue commandBuffer]; e = [cb computeCommandEncoder];
         }
+    }
+    {   /* stato raw = ultime min(cap, n_prev+nt) righe del buffer lineare */
+        const int keep = (n_prev + nt < cap_raw) ? n_prev + nt : cap_raw;
+        [e setComputePipelineState:b->pso_copy];
+        [e setBuffer:RAWX offset:(NSUInteger)((size_t)(n_prev + nt - keep) * hd * 4) atIndex:0]; [e setBuffer:(id<MTLBuffer>)p0->raw offset:0 atIndex:1];
+        { uint32_t P[1] = { (uint32_t)((size_t)keep * hd) }; [e setBytes:P length:sizeof(P) atIndex:2]; }
+        [e dispatchThreads:MTLSizeMake((NSUInteger)keep * hd, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     }
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
