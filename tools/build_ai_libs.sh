@@ -90,9 +90,15 @@ cmake --build "$BUILD_DIR" -j4
 # MLX Metal: la `mlx.metallib` (kernels Metal AOT) è un artefatto runtime necessario
 # all'engine MLX (MLX la cerca colocated accanto alla libreria, o al METAL_PATH del build).
 # Costruiscila esplicitamente se il target esiste (non è nel grafo di default).
-if cmake --build "$BUILD_DIR" --target help 2>/dev/null | grep -q '^\.\.\. mlx-metallib'; then
-    cmake --build "$BUILD_DIR" --target mlx-metallib -j4 || \
-        echo "WARN: build di mlx-metallib fallita — l'engine MLX non potrà caricare la metallib" >&2
+# NB: il target puo' NON essere nel grafo di default; lo si costruisce SEMPRE (guardia sulla
+# presenza del target, non su un match fragile di `--target help`). Il fallimento e' LOUD:
+# una metallib assente = engine MLX inutilizzabile, e in passato e' passata in silenzio.
+if cmake --build "$BUILD_DIR" --target help 2>/dev/null | grep -qi 'mlx-metallib'; then
+    cmake --build "$BUILD_DIR" --target mlx-metallib -j4 || true
+fi
+if ! find "$BUILD_DIR" -name 'mlx.metallib' -print -quit | grep -q .; then
+    echo "ERRORE: mlx.metallib NON prodotta (target mlx-metallib fallito) — l'engine MLX non carichera'. Vedi il log sopra." >&2
+    exit 1
 fi
 
 mkdir -p "$DIST"
