@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
         gp[k] = (const uint8_t*)pe->gate + ex * ff * gnb; up[k] = (const uint8_t*)pe->up + ex * ff * gnb; dp[k] = (const uint8_t*)pe->down + ex * embd * dnb; }
     float* ref = malloc(sizeof(float) * (size_t)nt * embd); float* got = malloc(sizeof(float) * (size_t)nt * embd);
     int r1 = llm_dsv4_metal_moe_iq2_q2k_batch(be, nt, gp, up, dp, x, rw, 6, c->swiglu_clamp_exp, embd, (uint32_t)gnb, ff, (uint32_t)dnb, NULL, NULL, NULL, 0, 0, ref);
-    int r2 = llm_dsv4_metal_moe_mm_batch(be, nt, pe->gate, pe->up, pe->down, pe->gate_type, pe->down_type, ne, embd, ff, (uint32_t)gnb, (uint32_t)dnb, ids, rw, x, c->swiglu_clamp_exp, got);
+    int r2 = llm_dsv4_metal_moe_mm_batch(be, nt, pe->gate, pe->up, pe->down, pe->gate_type, pe->down_type, ne, embd, ff, (uint32_t)gnb, (uint32_t)dnb, ids, rw, x, c->swiglu_clamp_exp, NULL, NULL, NULL, 0, 0, got);
     { int nr = 0, ng = 0; for (int i = 0; i < nt * embd; i++) { nr += !isfinite(ref[i]); ng += !isfinite(got[i]); }
       printf("non-finiti ref=%d got=%d  ref[0..3]=%g %g %g %g got[0..3]=%g %g %g %g clamp=%g\n", nr, ng, ref[0], ref[1], ref[2], ref[3], got[0], got[1], got[2], got[3], c->swiglu_clamp_exp); }
     { float* mids[6]; float* mb = malloc(sizeof(float) * 6 * ff); for (int k = 0; k < 6; k++) mids[k] = mb + k * ff;
@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
     double rel = sqrt(ss / (sr > 0 ? sr : 1));
     printf("[MM] layer=%d nt=%d rc=%d/%d  max|diff|=%.3e  rel=%.3e  |ref|rms=%.3e\n", il, nt, r1, r2, mx, rel, sqrt(sr / ((double)nt * embd)));
     { double t0 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_moe_iq2_q2k_batch(be, nt, gp, up, dp, x, rw, 6, c->swiglu_clamp_exp, embd, (uint32_t)gnb, ff, (uint32_t)dnb, NULL, NULL, NULL, 0, 0, ref);
-      double t1 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_moe_mm_batch(be, nt, pe->gate, pe->up, pe->down, pe->gate_type, pe->down_type, ne, embd, ff, (uint32_t)gnb, (uint32_t)dnb, ids, rw, x, c->swiglu_clamp_exp, got);
+      double t1 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_moe_mm_batch(be, nt, pe->gate, pe->up, pe->down, pe->gate_type, pe->down_type, ne, embd, ff, (uint32_t)gnb, (uint32_t)dnb, ids, rw, x, c->swiglu_clamp_exp, NULL, NULL, NULL, 0, 0, got);
       double t2 = now(); printf("tempo (caldo, 5 iter): pair/sum6 %.1f ms  |  mul_mm_id %.1f ms per chunk di %d token\n", (t1 - t0) * 200, (t2 - t1) * 200, nt); }
     int ok = r1 == 0 && r2 == 0 && rel < 5e-3;
     printf(ok ? "PASS mm_id: routed MoE batched == pair/sum6 (rel < 5e-3)\n" : "FAIL mm_id\n");

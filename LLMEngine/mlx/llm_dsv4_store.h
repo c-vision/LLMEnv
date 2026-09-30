@@ -12,9 +12,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dispatch/dispatch.h>
+#include <sys/mman.h>
 #include "llm_dsv4.h"
 #include "llm_dsv4_packed.h"
 #include "llm_gguf.h"
+#include "llm_engine_opts.h"   /* opzione dsv4_q4_arena (registro, no env) */
 
 typedef enum { LLM_DSV4_STORE_RESIDENT = 0, LLM_DSV4_STORE_SWAP = 1 } LlmDsv4StoreMode;
 
@@ -37,7 +39,68 @@ typedef struct {
     int cap, n, tick;
     int* ht_keys; int* ht_vals; int ht_cap;   /* hash (layer,e) -> idx entry, open addressing */
     uint64_t bytes_read, hits, misses, evictions;
+    /* ARENA per i layer con esperti Q4_K (gate/up/down tutti tipo 12): i tensori di layer con gli esperti IMPILATI
+     * (stessa disposizione del GGUF) vivono in un'unica regione anonima, riempita a richiesta con pread. Cosi' il kernel
+     * mul_mm_id (src0 = tensore impilato, stride per esperto) li legge senza modifiche; niente LRU per questi layer. */
+    uint8_t* q4_base; size_t q4_size; int q4_ne;
+    size_t* q4_off;        /* [n_layer*3]: offset gate/up/down nell'arena (size_t(-1) = layer non in arena) */
+    uint8_t* q4_present;   /* [n_layer*q4_ne] */
 } LlmDsv4Store;
+
+/* Crea l'arena per i layer Q4_K (vedi sopra). Ritorna il numero di layer in arena (0 = nessuno / fallito). */
+static inline int llm_dsv4_store_enable_q4(LlmDsv4Store* s, int n_expert) {
+    if (!s || n_expert <= 0 || n_expert > 1024) return 0;
+    const size_t page = 16384;
+    size_t total = 0; int nl = 0;
+    s->q4_off = (size_t*)malloc(sizeof(size_t) * 3 * (size_t)s->n_layer);
+    if (!s->q4_off) return 0;
+    for (int il = 0; il < s->n_layer; il++) {
+        LlmDsv4StoreLayer* L = &s->layers[il];
+        size_t* o = &s->q4_off[il * 3];
+        o[0] = o[1] = o[2] = (size_t)-1;
+        if (L->t_g == 12 && L->t_u == 12 && L->t_d == 12) {
+            size_t sg = (size_t)n_expert * L->nb_g, su = (size_t)n_expert * L->nb_u, sd = (size_t)n_expert * L->nb_d;
+            sg = (sg + page - 1) / page * page; su = (su + page - 1) / page * page; sd = (sd + page - 1) / page * page;
+            o[0] = total; o[1] = total + sg; o[2] = total + sg + su; total += sg + su + sd; nl++;
+        }
+    }
+    if (nl == 0) { free(s->q4_off); s->q4_off = NULL; return 0; }
+    void* m = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);   /* pagine allineate, lazy */
+    s->q4_present = (uint8_t*)calloc((size_t)s->n_layer * n_expert, 1);
+    if (m == MAP_FAILED || !s->q4_present) { if (m != MAP_FAILED) munmap(m, total); free(s->q4_present); s->q4_present = NULL; free(s->q4_off); s->q4_off = NULL; return 0; }
+    s->q4_base = (uint8_t*)m; s->q4_size = total; s->q4_ne = n_expert;
+    return nl;
+}
+/* 1 se il layer e' servito dall'arena; riempie i tre tensori impilati. */
+static inline int llm_dsv4_store_q4_stacks(LlmDsv4Store* s, int layer, const uint8_t** g, const uint8_t** u, const uint8_t** d) {
+    if (!s || !s->q4_off || s->q4_off[layer * 3] == (size_t)-1) return 0;
+    if (g) *g = s->q4_base + s->q4_off[layer * 3]; if (u) *u = s->q4_base + s->q4_off[layer * 3 + 1]; if (d) *d = s->q4_base + s->q4_off[layer * 3 + 2];
+    return 1;
+}
+/* Legge (se mancanti) gli esperti indicati nell'arena, in parallelo. Ritorna 0 = ok. */
+static inline int llm_dsv4_store_q4_ensure(LlmDsv4Store* s, int layer, const int* experts, int n) {
+    if (!llm_dsv4_store_q4_stacks(s, layer, NULL, NULL, NULL)) return -1;
+    LlmDsv4StoreLayer* L = &s->layers[layer];
+    uint8_t* pres = s->q4_present + (size_t)layer * s->q4_ne;
+    int* todo = (int*)malloc(sizeof(int) * (size_t)(n > 0 ? n : 1)); int nt = 0;
+    if (!todo) return -2;
+    for (int i = 0; i < n; i++) { int e = experts[i]; if (e < 0 || e >= s->q4_ne) { free(todo); return -3; }
+        if (!pres[e]) { pres[e] = 2; todo[nt++] = e; s->misses++; } else if (pres[e] == 1) s->hits++; }   /* 2 = in lettura (dedup nella stessa chiamata) */
+    if (nt == 0) { free(todo); return 0; }
+    __block int bad = 0;
+    uint8_t* const base = s->q4_base; const size_t* off = &s->q4_off[layer * 3]; const int fd = s->fd;
+    const LlmDsv4StoreLayer LL = *L;
+    int* td = todo;
+    dispatch_apply((size_t)nt * 3, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t k) {
+        int e = td[k / 3]; int part = (int)(k % 3);
+        size_t nb = part == 0 ? LL.nb_g : part == 1 ? LL.nb_u : LL.nb_d;
+        uint64_t fo = (part == 0 ? LL.off_g + (uint64_t)e * LL.stride_g : part == 1 ? LL.off_u + (uint64_t)e * LL.stride_u : LL.off_d + (uint64_t)e * LL.stride_d);
+        if (pread(fd, base + off[part] + (size_t)e * nb, nb, (off_t)fo) != (ssize_t)nb) bad = 1;
+    });
+    for (int i = 0; i < nt; i++) { pres[todo[i]] = bad ? 0 : 1; if (!bad) s->bytes_read += LL.nb_g + LL.nb_u + LL.nb_d; }
+    free(todo);
+    return bad ? -4 : 0;
+}
 
 static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngineMoeGguf* g,
         const LlmDsv4Config* c, LlmDsv4StoreMode mode, int cap_bundles) {
@@ -84,6 +147,9 @@ static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngin
         L->nb_d = (size_t)(c->n_embd * llm_ggml_nbytes((uint32_t)L->t_d, c->n_ff_exp));
         L->stride_d = L->nb_d;
     }
+    /* Arena Q4_K: SPERIMENTALE, DISATTIVA di default (alloca ~21 GB e li rende residenti: sopra il budget di una macchina da 128 GB
+     * con la cache esperti da 86 GB). Si attiva solo con l'opzione di registro `dsv4_q4_arena=1` (mai env). */
+    { int v = 0; if (mode == LLM_DSV4_STORE_SWAP && llm_ai_mlx_opt_get_bool("dsv4_q4_arena", &v) == 0 && v) llm_dsv4_store_enable_q4(s, c->n_expert); }
     return s;
 }
 static inline void llm_dsv4_store_free(LlmDsv4Store* s) {
@@ -91,6 +157,8 @@ static inline void llm_dsv4_store_free(LlmDsv4Store* s) {
     if (s->ents) { for (int i = 0; i < s->cap; i++) free(s->ents[i].buf); free(s->ents); }
     free(s->ht_keys); free(s->ht_vals);
     if (s->fd >= 0) close(s->fd);
+    if (s->q4_base) munmap(s->q4_base, s->q4_size);
+    free(s->q4_off); free(s->q4_present);
     free(s->layers); free(s);
 }
 static inline int llm_dsv4_store_find(LlmDsv4Store* s, int layer, int e) {
@@ -175,6 +243,15 @@ static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, i
     const uint8_t* r_d = s->resident_base + L->off_d + (uint64_t)e * L->stride_d;
     *gate = r_g; *up = r_u; *down = r_d;
     if (s->mode == LLM_DSV4_STORE_RESIDENT) return r_g;
+    if (llm_dsv4_store_q4_stacks(s, layer, NULL, NULL, NULL)) {   /* layer Q4_K: puntatori nell'arena */
+        if (llm_dsv4_store_q4_ensure(s, layer, &e, 1) == 0) {
+            *gate = s->q4_base + s->q4_off[layer * 3] + (size_t)e * L->nb_g;
+            *up   = s->q4_base + s->q4_off[layer * 3 + 1] + (size_t)e * L->nb_u;
+            *down = s->q4_base + s->q4_off[layer * 3 + 2] + (size_t)e * L->nb_d;
+            return *gate;
+        }
+        return r_g;
+    }
     int miss = 0, idx = llm_dsv4_store_claim(s, layer, e, &miss);
     if (idx < 0) return r_g;
     LlmDsv4StoreEnt* en = &s->ents[idx];
@@ -196,6 +273,7 @@ static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, i
  * (l'NVMe/page cache scalano con piu' richieste). Dopo, llm_dsv4_store_expert() e' tutto hit. `n` fino a 4096. */
 static inline void llm_dsv4_store_prefetch(LlmDsv4Store* s, int layer, const int* experts, int n) {
     if (!s || s->mode != LLM_DSV4_STORE_SWAP || n <= 0) return;
+    if (llm_dsv4_store_q4_stacks(s, layer, NULL, NULL, NULL)) { llm_dsv4_store_q4_ensure(s, layer, experts, n); return; }
     typedef struct { int e, idx; } Job;
     Job* jobs = (Job*)malloc(sizeof(Job) * (size_t)n);   /* heap: letto dai worker GCD (un __thread non sarebbe condiviso) */
     if (!jobs) return;

@@ -15,6 +15,7 @@
 #include "llm_dsv4_gpu.h"       /* backend Metal + llm_dsv4_gpu_enabled */
 #include "llm_dsv4_metal.h"     /* backend Metal (C API) */
 #include "llm_dsv4_moe_fwd.h"   /* router/swiglu/linear riusati */
+#include "llm_engine_opts.h"       /* registro opzioni (dsv4_prefill_f16) */
 
 typedef struct {
     LlmDsv4Metal* be;
@@ -232,9 +233,30 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
                                           int il, const float* X, const int* tokens, int nt, float* OUT) {
     if (!llm_dsv4_gpu_enabled() || !m || !m->inited || il < 0 || il >= c->n_layer || nt <= 0) return false;
     const int used = c->n_expert_used, ff = c->n_ff_exp, embd = c->n_embd;
-    if (m->gate[il].type != 16 || m->up[il].type != 16 || m->down[il].type != 10 || used != 6) return false;
     const LlmDsv4PackedExperts* pe = &m->exps[il];
     const int streaming = (pe->store && pe->store_get) != 0;
+    const int is_iq2 = m->gate[il].type == 16 && m->up[il].type == 16 && m->down[il].type == 10;
+    const int is_q4  = m->gate[il].type == 12 && m->up[il].type == 12 && m->down[il].type == 12;
+    if (!(is_iq2 || is_q4) || used != 6) return false;
+    if (is_q4) {
+        int f16_ok = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_f16", &v) == 0) f16_ok = v; }
+        if (!f16_ok) return false;   /* percorso f32 per-token (bit-exact col token-per-token) */
+        /* Layer Q4_K: tensori impilati nell'ARENA dello store + mul_mm_id (ds4) per tutto il chunk, shared expert incluso. */
+        const uint8_t *g = NULL, *u = NULL, *d = NULL;
+        if (!pe->q4_stacks || !pe->q4_ensure || !pe->q4_stacks(pe->store, il, &g, &u, &d)) return false;
+        if (!(pe->shexp_gate && pe->shexp_up && pe->shexp_down)) return false;
+        int* sel = (int*)malloc(sizeof(int) * (size_t)nt * used); float* wts = (float*)malloc(sizeof(float) * (size_t)nt * used);
+        if (!sel || !wts) { free(sel); free(wts); return false; }
+        for (int t = 0; t < nt; t++) llm_dsv4_moe_route(c, L, X + (size_t)t * embd, il, tokens[t], sel + (size_t)t * used, wts + (size_t)t * used);
+        bool okq = pe->q4_ensure(pe->store, il, sel, nt * used) == 0;
+        if (okq) okq = llm_dsv4_metal_moe_mm_batch(m->be, nt, g, u, d, 12, 12, (uint32_t)c->n_expert, (uint32_t)embd, (uint32_t)ff,
+                                                   (uint32_t)m->gate[il].row_bytes, (uint32_t)m->down[il].row_bytes, sel, wts, X,
+                                                   c->swiglu_clamp_exp, pe->shexp_gate, pe->shexp_up, pe->shexp_down,
+                                                   (uint32_t)llm_ggml_nbytes(pe->shexp_gate_type, embd),
+                                                   (uint32_t)llm_ggml_nbytes(pe->shexp_down_type, ff), OUT) == 0;
+        free(sel); free(wts);
+        return okq;
+    }
     const void** gp = (const void**)malloc(sizeof(void*) * 3 * (size_t)nt * used);
     float* rw = (float*)malloc(sizeof(float) * (size_t)nt * used);
     if (!gp || !rw) { free(gp); free(rw); return false; }
