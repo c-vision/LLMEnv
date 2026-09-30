@@ -2713,6 +2713,12 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         /* 5) attenzione mista (raw + compresse) */
         dsv4_encode_attn_mixed(b, e, Q, rawB, aB, allowedB, (id<MTLBuffer>)p->sinks, HD, qo, ho, p->n_head, hd, p->n_raw, p->n_acomp, p->has_idx ? 1 : 0);
 
+        /* PIPELINE CPU/GPU: ogni 16 token chiude e SOTTOMETTE la cb (senza attendere) e ne apre un'altra: la GPU esegue i primi token
+         * mentre la CPU codifica i successivi (coda seriale: l'ordine e' garantito). L'attesa e' solo sull'ultima. */
+        if (((t + 1) % 16) == 0 && (t + 1) < nt) {
+            [e endEncoding]; dsv4_res_commit(b); [cb commit];
+            cb = [b->queue commandBuffer]; e = [cb computeCommandEncoder];
+        }
     }
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
