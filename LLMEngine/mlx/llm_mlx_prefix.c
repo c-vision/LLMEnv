@@ -35,9 +35,23 @@ bool llm_kvdisk_enabled(LlmMlxModel* m) {
     return m->kvdisk_state == 1;
 }
 
-/* Chiave del prefisso: FNV-1a dei token (dipende da tutto il contesto). */
-static uint64_t llm_prefix_kvdisk_key(const int32_t* toks, int n) {
-    return llm_kv_disk_hash(toks, (size_t)n * sizeof(int32_t));
+/* D15/B7: identita' di FORMATO della KV (bf16 | int<bits>:<thr>) come SALt nelle chiavi della
+ * prefix-cache/checkpoint/park: blocchi di formati diversi NON devono attraversarsi (riusare una
+ * KV fp16 in una sessione int8 sarebbe errato). Vedi llm_ai_mlx_model_kv_format(). */
+static uint64_t llm_prefix_fmt_salt(LlmMlxModel* m) {
+    char fmt[32] = "bf16";
+    if (m != NULL) llm_ai_mlx_model_kv_format((llm_ai_mlx_model_handle)m, fmt, sizeof fmt);
+    return llm_kv_disk_hash(fmt, strlen(fmt));
+}
+static uint64_t llm_key_with_fmt(uint64_t tok_hash, uint64_t fmt_salt) {
+    uint64_t z = tok_hash ^ (fmt_salt + 0x9E3779B97F4A7C15ULL + (tok_hash << 6) + (tok_hash >> 2));
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+/* Chiave del prefisso: FNV-1a dei token (dipende da tutto il contesto) + salt di formato. */
+static uint64_t llm_prefix_kvdisk_key(LlmMlxModel* m, const int32_t* toks, int n) {
+    return llm_key_with_fmt(llm_kv_disk_hash(toks, (size_t)n * sizeof(int32_t)), llm_prefix_fmt_salt(m));
 }
 
 /* Spilla su disco la KV dei soli layer GLOBAL (i local sliding-window sono ricomputabili
@@ -60,7 +74,7 @@ static int llm_prefix_spill(LlmMlxModel* m, SavedPrefix* p) {
     }
     if (nt == 0) { free(buf); return -1; }
     memcpy(buf + 16, &nt, 4);
-    int rc = llm_kv_disk_put(&m->kvdisk, llm_prefix_kvdisk_key(p->tokens, p->token_len), buf, len);
+    int rc = llm_kv_disk_put(&m->kvdisk, llm_prefix_kvdisk_key(m, p->tokens, p->token_len), buf, len);
     free(buf);
     if (rc != 0) return -1;
     /* NB: has_cache NON viene toccato qui; il chiamante libera gli array dei soli layer
@@ -72,7 +86,7 @@ static int llm_prefix_spill(LlmMlxModel* m, SavedPrefix* p) {
 /* Ripristina da disco la KV spillata nel prefisso p (layer global). 0 ok / -1. */
 static int llm_prefix_restore(LlmMlxModel* m, SavedPrefix* p) {
     if (!m || !p || p->token_len <= 0 || m->kvdisk_state != 1) return -1;
-    uint64_t key = llm_prefix_kvdisk_key(p->tokens, p->token_len);
+    uint64_t key = llm_prefix_kvdisk_key(m, p->tokens, p->token_len);
     size_t need = 0;
     if (!llm_kv_disk_has(&m->kvdisk, key, &need) || need < 20) return -1;
     uint8_t* buf = (uint8_t*)malloc(need);
@@ -112,8 +126,8 @@ static int llm_prefix_restore(LlmMlxModel* m, SavedPrefix* p) {
  * GLOBAL + cache_offset. Scritto ai confini di m->kvckpt_block token durante il prefill.
  * Scopo: dopo un rewind (l'agent loop rimuove il reasoning) ripristinare il prefisso piu' lungo
  * disponibile e ri-prefillare SOLO il suffisso mancante, invece dell'intero prompt. */
-static uint64_t llm_session_ckpt_key(const int32_t* toks, int n) {
-    return llm_kv_disk_hash(toks, (size_t)n * sizeof(int32_t));
+static uint64_t llm_session_ckpt_key(LlmMlxModel* m, const int32_t* toks, int n) {
+    return llm_key_with_fmt(llm_kv_disk_hash(toks, (size_t)n * sizeof(int32_t)), llm_prefix_fmt_salt(m));
 }
 
 /* Serializza i layer della sessione alla posizione pos su llm_kv_disk. 0/-1.
@@ -143,7 +157,7 @@ int llm_session_ckpt_write_k(LlmMlxModel* m, LlmMlxSession* s, int pos,
     int kn = key_n > 0 ? key_n : s->history_len;
     if (kn > pos) kn = pos;
     const int32_t* kt = key_tok != NULL ? key_tok : s->history;
-    int rc = llm_kv_disk_put(&m->kvdisk, llm_session_ckpt_key(kt, kn), buf, len);
+    int rc = llm_kv_disk_put(&m->kvdisk, llm_session_ckpt_key(m, kt, kn), buf, len);
     free(buf);
     if (rc != 0) return -1;
     m->kvckpt_writes++;
@@ -176,12 +190,12 @@ int llm_ai_mlx_session_rewind(llm_ai_mlx_session_handle sh, llm_ai_mlx_model_han
     }
     size_t need = 0;
     for (; p > 0; p -= m->kvckpt_block)
-        if (llm_kv_disk_has(&m->kvdisk, llm_session_ckpt_key(tokens, p), &need) && need > 20) break;
+        if (llm_kv_disk_has(&m->kvdisk, llm_session_ckpt_key(m, tokens, p), &need) && need > 20) break;
     if (p <= 0) return -1;
     uint8_t* buf = (uint8_t*)malloc(need);
     if (!buf) return -1;
     size_t got = 0;
-    if (llm_kv_disk_get(&m->kvdisk, llm_session_ckpt_key(tokens, p), buf, need, &got) != 0 || got < 20) { free(buf); return -1; }
+    if (llm_kv_disk_get(&m->kvdisk, llm_session_ckpt_key(m, tokens, p), buf, need, &got) != 0 || got < 20) { free(buf); return -1; }
     uint32_t magic = 0, ver = 0, nt = 0; int32_t coff = 0;
     memcpy(&magic, buf + 0, 4); memcpy(&ver, buf + 4, 4);
     memcpy(&coff, buf + 8, 4);  memcpy(&nt, buf + 16, 4);
@@ -254,7 +268,7 @@ int llm_ai_mlx_session_park(llm_ai_mlx_session_handle sh, llm_ai_mlx_model_handl
     }
     if (nt == 0) { free(buf); return -1; }
     memcpy(buf + 16, &nt, 4);
-    s->park_key = llm_session_ckpt_key(s->history, s->history_len) ^ LLM_KV_PARK_SALT;
+    s->park_key = llm_session_ckpt_key(m, s->history, s->history_len) ^ LLM_KV_PARK_SALT;
     int rc = llm_kv_disk_put(&m->kvdisk, s->park_key, buf, len);
     free(buf);
     if (rc != 0) return -1;
@@ -367,7 +381,7 @@ static bool llm_prefix_evict_lru(LlmMlxModel* m) {
     }
     SavedPrefix* p = &m->prefixes[victim];
     if (p->on_disk && p->token_len > 0 && m->kvdisk_state == 1)
-        llm_kv_disk_del(&m->kvdisk, llm_prefix_kvdisk_key(p->tokens, p->token_len));
+        llm_kv_disk_del(&m->kvdisk, llm_prefix_kvdisk_key(m, p->tokens, p->token_len));
     for (int l = 0; l < p->n_layers; l++) { mlx_array_free(p->k_cache[l]); mlx_array_free(p->v_cache[l]); }
     free(p->k_cache); free(p->v_cache); free(p->has_cache); free(p->tokens); free(p->history);
     memset(p, 0, sizeof(*p));
