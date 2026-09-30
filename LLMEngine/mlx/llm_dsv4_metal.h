@@ -157,6 +157,9 @@ int llm_dsv4_metal_moe_mm_batch(LlmDsv4Metal* b, int nt, const void* gate_w, con
 int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes, int ng, uint32_t gd,
         uint32_t rank, const void* outb_w, size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
         const float* heads, float* out);
+/* Routing di nt token su GPU (logits gemv multi-token + top-k/pesi come llm_dsv4_moe_route). hsel = esperti da tabella hash o NULL. */
+int llm_dsv4_metal_route_batch(LlmDsv4Metal* b, int nt, int n_expert, int embd, int used, const float* gate_inp, const float* bias,
+        const int* hsel, float scale, const float* x, int* sel, float* wt);
 /* mHC batched (token = dimensione griglia): pre = rms(no weight) -> mixes -> sinkhorn -> somma pesata -> rms(weight); sp [nt*size] = pre|post|comb. */
 int llm_dsv4_metal_hc_pre_batch(LlmDsv4Metal* b, int nt, int HC, int D, int iters, float hc_eps, float rms_eps, const float* res,
         const float* fn, const float* scale, const float* base, const float* norm_w, float* normed, float* sp);

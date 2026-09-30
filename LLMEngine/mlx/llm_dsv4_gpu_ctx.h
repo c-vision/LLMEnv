@@ -22,6 +22,8 @@ int  llm_dsv4_gpu_ctx_active(void);
 /* Hook layer/attenzione (0 => esegui su CPU). */
 int llm_dsv4_gpu_moe_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                          const float* x, int token, float* out);
+/* Routing di un chunk su GPU (1 = eseguito): sel [nt*used], wt [nt*used]. */
+int llm_dsv4_gpu_route_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il, const float* x, const int* tokens, int nt, int* sel, float* wt);
 /* mHC batched su GPU (1 = eseguito): res [nt*HC*D] -> normed [nt*D], sp [nt*size] (pre|post|comb); post: bo,res,sp -> out. */
 int llm_dsv4_gpu_hc_pre_batch_try(const LlmDsv4Config* c, const float* fn, const float* scale, const float* base, const float* norm_w,
                                   const float* res, int nt, float* normed, float* sp);

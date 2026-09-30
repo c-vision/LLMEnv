@@ -328,6 +328,17 @@ int llm_dsv4_gpu_moe_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, i
     return r;
 }
 
+int llm_dsv4_gpu_route_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il, const float* x, const int* tokens, int nt, int* sel, float* wt) {
+    if (!g_on || !g_be || !L->ffn_gate_inp) return 0;
+    const int used = c->n_expert_used; int* hs = NULL;
+    if (il < c->n_hash_layer && L->ffn_gate_tid2eid) {
+        hs = (int*)malloc(sizeof(int) * (size_t)nt * used); if (!hs) return 0;
+        for (int t = 0; t < nt; t++) for (int j = 0; j < used; j++) hs[(size_t)t * used + j] = (int)L->ffn_gate_tid2eid[(long)tokens[t] * used + j];
+    }
+    int r = llm_dsv4_metal_route_batch(g_be, nt, c->n_expert, c->n_embd, used, L->ffn_gate_inp, L->exp_probs_b, hs, c->expert_weight_scale, x, sel, wt) == 0;
+    free(hs);
+    return r;
+}
 int llm_dsv4_gpu_hc_pre_batch_try(const LlmDsv4Config* c, const float* fn, const float* scale, const float* base, const float* norm_w,
                                   const float* res, int nt, float* normed, float* sp) {
     if (!g_on || !g_be) return 0;

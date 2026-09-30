@@ -528,6 +528,22 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    device float* STKV [[buffer(3)]], device float* STSC [[buffer(4)]], constant uint* P [[buffer(5)]], uint gid [[thread_position_in_grid]]) {\n"
 "    if (gid >= P[0]) return; STKV[gid] = PKV[gid]; STSC[gid] = PSC[gid] + APE[gid];\n"
 "}\n"
+/* Routing BATCHED: probs = sqrt(softplus(logit)); selezione top-k (stesso ordine/spareggi di llm_dsv4_topk_desc: a pari score vince l'indice minore)
+ * su probs+bias, oppure esperti da tabella hash; pesi = probs/sum*scale. Un thread per token. P={n_expert, used, has_bias, is_hash, nt}. */
+"kernel void dsv4_route_batch(device const float* LG [[buffer(0)]], device const float* BIAS [[buffer(1)]], device const int* HSEL [[buffer(2)]],\n"
+"    device int* SEL [[buffer(3)]], device float* WT [[buffer(4)]], constant uint* P [[buffer(5)]], constant float* CF [[buffer(6)]], uint t [[thread_position_in_grid]]) {\n"
+"    const uint n = P[0], used = P[1], has_bias = P[2], is_hash = P[3]; if (t >= P[4]) return;\n"
+"    float probs[256]; int idx[16];\n"
+"    for (uint i = 0; i < n; i++) { const float x = LG[(ulong)t * n + i]; const float sp = (x > 20.f) ? x : ((x < -20.f) ? exp(x) : log(1.f + exp(x))); probs[i] = sqrt(sp); }\n"
+"    for (uint j = 0; j < used; j++) idx[j] = -1;\n"
+"    if (is_hash) { for (uint j = 0; j < used; j++) idx[j] = HSEL[(ulong)t * used + j]; }\n"
+"    else { for (uint i = 0; i < n; i++) { const float si = probs[i] + (has_bias ? BIAS[i] : 0.f);\n"
+"        for (uint j = 0; j < used; j++) { const bool take = idx[j] < 0 || si > probs[idx[j]] + (has_bias ? BIAS[idx[j]] : 0.f);\n"
+"            if (take) { for (int m = (int)used - 1; m > (int)j; m--) idx[m] = idx[m - 1]; idx[j] = (int)i; break; } } } }\n"
+"    float sum = 0.f; for (uint j = 0; j < used; j++) sum += probs[idx[j]];\n"
+"    if (sum < 6.103515625e-5f) sum = 6.103515625e-5f;\n"
+"    for (uint j = 0; j < used; j++) { SEL[(ulong)t * used + j] = idx[j]; WT[(ulong)t * used + j] = probs[idx[j]] / sum * CF[0]; }\n"
+"}\n"
 "kernel void dsv4_swiglu(device const float* G [[buffer(0)]], device const float* U [[buffer(1)]],\n"
 "    device float* MID [[buffer(2)]], constant uint* P [[buffer(3)]], constant float* CF [[buffer(4)]],\n"
 "    uint gid [[thread_position_in_grid]]) {\n"
@@ -970,7 +986,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_pair;   /* MoE fuso gate+up+swiglu (ds4 pair) */
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
-    id<MTLComputePipelineState> pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
+    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
@@ -1118,7 +1134,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_sum6_q2k = f6 ? [dev newComputePipelineStateWithFunction:f6 error:&err] : nil;
     {   /* MoE batched (mul_mm_id): opzionale, se manca il path per-token resta valido */
         struct { const char* n; id<MTLComputePipelineState> __strong* dst; } mmk[] = {
-            { "kernel_mul_mm_id_map0_ne20_6", &b->pso_mm_map0 }, { "kernel_mul_mm_id_map0_ne20_1", &b->pso_mm_map1 }, { "dsv4_gemv_f32_nt", &b->pso_gemv_nt }, { "dsv4_state_store", &b->pso_state_store }, { "dsv4_hcb_scale", &b->pso_hcb_scale }, { "dsv4_hcb_mixes", &b->pso_hcb_mixes },
+            { "kernel_mul_mm_id_map0_ne20_6", &b->pso_mm_map0 }, { "kernel_mul_mm_id_map0_ne20_1", &b->pso_mm_map1 }, { "dsv4_gemv_f32_nt", &b->pso_gemv_nt }, { "dsv4_route_batch", &b->pso_route_b }, { "dsv4_state_store", &b->pso_state_store }, { "dsv4_hcb_scale", &b->pso_hcb_scale }, { "dsv4_hcb_mixes", &b->pso_hcb_mixes },
             { "dsv4_hcb_sinkhorn", &b->pso_hcb_sink }, { "dsv4_hcb_norm", &b->pso_hcb_norm }, { "dsv4_hcb_post", &b->pso_hcb_post }, { "kernel_mul_mm_id_iq2_xxs_addr_f32", &b->pso_mm_iq2a },
             { "kernel_mul_mm_id_q2_K_addr_f32", &b->pso_mm_q2ka }, { "kernel_mul_mm_id_q4_K_addr_f32", &b->pso_mm_q4ka }, { "kernel_mul_mv_slots6_q4_K_pair_swiglu_f32", &b->pso_q4_pair },
             { "kernel_mul_mv_slots6_q4_K_sum6_f32", &b->pso_q4_sum6 }, { "dsv4_rms_w_rows", &b->pso_rms_rows },
@@ -1208,7 +1224,7 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_pair)     [b->pso_pair release];
     if (b->pso_sum6_q2k) [b->pso_sum6_q2k release];
     if (b->pso_attn_part) [b->pso_attn_part release];
-    if (b->pso_gemv_nt) [b->pso_gemv_nt release]; if (b->pso_state_store) [b->pso_state_store release];
+    if (b->pso_route_b) [b->pso_route_b release]; if (b->pso_gemv_nt) [b->pso_gemv_nt release]; if (b->pso_state_store) [b->pso_state_store release];
     if (b->pso_hcb_scale) [b->pso_hcb_scale release]; if (b->pso_hcb_mixes) [b->pso_hcb_mixes release]; if (b->pso_hcb_sink) [b->pso_hcb_sink release];
     if (b->pso_hcb_norm) [b->pso_hcb_norm release]; if (b->pso_hcb_post) [b->pso_hcb_post release];
     if (b->pso_mm_iq2a) [b->pso_mm_iq2a release]; if (b->pso_mm_q2ka) [b->pso_mm_q2ka release]; if (b->pso_mm_q4ka) [b->pso_mm_q4ka release];
@@ -2111,6 +2127,40 @@ int llm_dsv4_metal_hc_post_batch(LlmDsv4Metal* b, int nt, int HC, int D, const f
     [cb waitUntilCompleted];
     if (cb.error) return -3;
     memcpy(out, [O contents], (size_t)nt * hcd * 4);
+    return 0;
+}
+
+/* Routing di `nt` token su GPU: logits = gate_inp[n_expert x embd] · x (gemv multi-token), poi top-k/pesi. hsel [nt*used] (esperti da tabella hash) o NULL.
+ * bias [n_expert] o NULL. sel [nt*used], wt [nt*used] in uscita. 0 = ok. */
+int llm_dsv4_metal_route_batch(LlmDsv4Metal* b, int nt, int n_expert, int embd, int used, const float* gate_inp, const float* bias,
+        const int* hsel, float scale, const float* x, int* sel, float* wt) {
+    if (!b || nt <= 0 || !b->pso_route_b || !b->pso_gemv_nt || n_expert > 256 || used > 16 || (embd % 4)) return -1;
+    id<MTLBuffer> X  = dsv4_scratch(b, &b->sx[68], &b->sx_cap[68], (size_t)nt * embd * 4);
+    id<MTLBuffer> LG = dsv4_scratch(b, &b->sx[69], &b->sx_cap[69], (size_t)nt * n_expert * 4);
+    id<MTLBuffer> SL = dsv4_scratch(b, &b->sx[70], &b->sx_cap[70], (size_t)nt * used * 4);
+    id<MTLBuffer> WT = dsv4_scratch(b, &b->sx[71], &b->sx_cap[71], (size_t)nt * used * 4);
+    id<MTLBuffer> HS = dsv4_scratch(b, &b->sx[72], &b->sx_cap[72], (size_t)nt * used * 4);
+    id<MTLBuffer> BI = dsv4_scratch(b, &b->sx[73], &b->sx_cap[73], (size_t)n_expert * 4);
+    size_t lead; id<MTLBuffer> WG = dsv4_nocopy_view(b, gate_inp, (size_t)n_expert * embd * 4, &lead);
+    if (!X || !LG || !SL || !WT || !HS || !BI || !WG || (lead & 3u)) return -2;
+    memcpy([X contents], x, (size_t)nt * embd * 4);
+    if (bias) memcpy([BI contents], bias, (size_t)n_expert * 4); else memset([BI contents], 0, (size_t)n_expert * 4);
+    if (hsel) memcpy([HS contents], hsel, (size_t)nt * used * 4); else memset([HS contents], 0, (size_t)nt * used * 4);
+    id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:b->pso_gemv_nt];
+    [e setBuffer:WG offset:(NSUInteger)lead atIndex:0]; [e setBuffer:X offset:0 atIndex:1]; [e setBuffer:LG offset:0 atIndex:2];
+    { uint32_t P[3] = { (uint32_t)embd, (uint32_t)nt, (uint32_t)n_expert }; [e setBytes:P length:sizeof P atIndex:3]; }
+    [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_expert, ((NSUInteger)nt + 15) / 16, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [e setComputePipelineState:b->pso_route_b];
+    [e setBuffer:LG offset:0 atIndex:0]; [e setBuffer:BI offset:0 atIndex:1]; [e setBuffer:HS offset:0 atIndex:2]; [e setBuffer:SL offset:0 atIndex:3]; [e setBuffer:WT offset:0 atIndex:4];
+    { uint32_t P[5] = { (uint32_t)n_expert, (uint32_t)used, bias ? 1u : 0u, hsel ? 1u : 0u, (uint32_t)nt }; [e setBytes:P length:sizeof P atIndex:5]; [e setBytes:&scale length:4 atIndex:6]; }
+    [e dispatchThreads:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [e endEncoding];
+    dsv4_res_commit(b); [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) return -3;
+    memcpy(sel, [SL contents], (size_t)nt * used * 4); memcpy(wt, [WT contents], (size_t)nt * used * 4);
     return 0;
 }
 

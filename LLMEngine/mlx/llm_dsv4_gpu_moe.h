@@ -16,6 +16,13 @@
 #include "llm_dsv4_metal.h"     /* backend Metal (C API) */
 #include "llm_dsv4_moe_fwd.h"   /* router/swiglu/linear riusati */
 #include "llm_engine_opts.h"       /* registro opzioni (dsv4_prefill_f16) */
+#ifdef __cplusplus
+extern "C" {
+#endif
+int llm_dsv4_gpu_route_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il, const float* x, const int* tokens, int nt, int* sel, float* wt);
+#ifdef __cplusplus
+}
+#endif
 #define LLM_DSV4_MM_MIN_TOKENS 192   /* soglia chunk per mul_mm_id (sotto: kernel per-token) */
 
 typedef struct {
@@ -269,7 +276,9 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
     int* sel_all = (int*)malloc(sizeof(int) * (size_t)nt * used);
     float* w_all = (float*)malloc(sizeof(float) * (size_t)nt * used);
     if (!sel_all || !w_all) { free(sel_all); free(w_all); free(gp); free(rw); return false; }
-    for (int t = 0; t < nt; t++) llm_dsv4_moe_route(c, L, X + (size_t)t * embd, il, tokens[t], sel_all + (size_t)t * used, w_all + (size_t)t * used);
+    { int gpu_rt = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_gpu_hc", &v) == 0) gpu_rt = v; }   /* stessa opzione dell'mHC GPU */
+      if (!(gpu_rt && llm_dsv4_gpu_route_batch_try(c, L, il, X, tokens, nt, sel_all, w_all)))
+          for (int t = 0; t < nt; t++) llm_dsv4_moe_route(c, L, X + (size_t)t * embd, il, tokens[t], sel_all + (size_t)t * used, w_all + (size_t)t * used); }
     if (streaming && pe->store_prefetch) pe->store_prefetch(pe->store, il, sel_all, nt * used);   /* letture parallele dei mancanti */
     for (int t = 0; ok && t < nt; t++) {
         int* selected = sel_all + (size_t)t * used; float* weight = w_all + (size_t)t * used;
