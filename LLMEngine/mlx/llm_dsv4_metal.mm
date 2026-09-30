@@ -992,7 +992,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_pair;   /* MoE fuso gate+up+swiglu (ds4 pair) */
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
-    id<MTLComputePipelineState> pso_mmp_iq2, pso_mmp_q2k, pso_mmp_q4k, pso_mmp_iq2a, pso_mmp_q2ka, pso_mmp_q4ka;   /* MPP (nil se non disponibile) */
+    id<MTLComputePipelineState> pso_mmp_q8, pso_mmp_iq2, pso_mmp_q2k, pso_mmp_q4k, pso_mmp_iq2a, pso_mmp_q2ka, pso_mmp_q4ka;   /* MPP (nil se non disponibile) */
     id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
@@ -1149,7 +1149,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
         if (!mlib) fprintf(stderr, "dsv4_metal: kernel MPP non disponibili (%s) -> simdgroup\n", merr ? [[merr localizedDescription] UTF8String] : "?");
         else {
             struct { const char* n; id<MTLComputePipelineState> __strong* dst; } mk[] = {
-                { "kernel_mul_mm_id_iq2_xxs_f32_mpp", &b->pso_mmp_iq2 }, { "kernel_mul_mm_id_q2_K_f32_mpp", &b->pso_mmp_q2k }, { "kernel_mul_mm_id_q4_K_f32_mpp", &b->pso_mmp_q4k },
+                { "kernel_mul_mm_id_q8_0_f32_mpp", &b->pso_mmp_q8 }, { "kernel_mul_mm_id_iq2_xxs_f32_mpp", &b->pso_mmp_iq2 }, { "kernel_mul_mm_id_q2_K_f32_mpp", &b->pso_mmp_q2k }, { "kernel_mul_mm_id_q4_K_f32_mpp", &b->pso_mmp_q4k },
                 { "kernel_mul_mm_id_iq2_xxs_addr_f32_mpp", &b->pso_mmp_iq2a }, { "kernel_mul_mm_id_q2_K_addr_f32_mpp", &b->pso_mmp_q2ka }, { "kernel_mul_mm_id_q4_K_addr_f32_mpp", &b->pso_mmp_q4ka } };
             for (size_t i = 0; i < sizeof mk / sizeof mk[0]; i++) {
                 id<MTLFunction> mf = [mlib newFunctionWithName:[NSString stringWithUTF8String:mk[i].n]];
@@ -1251,7 +1251,7 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_pair)     [b->pso_pair release];
     if (b->pso_sum6_q2k) [b->pso_sum6_q2k release];
     if (b->pso_attn_part) [b->pso_attn_part release];
-    if (b->pso_mmp_iq2) [b->pso_mmp_iq2 release]; if (b->pso_mmp_q2k) [b->pso_mmp_q2k release]; if (b->pso_mmp_q4k) [b->pso_mmp_q4k release];
+    if (b->pso_mmp_q8) [b->pso_mmp_q8 release]; if (b->pso_mmp_iq2) [b->pso_mmp_iq2 release]; if (b->pso_mmp_q2k) [b->pso_mmp_q2k release]; if (b->pso_mmp_q4k) [b->pso_mmp_q4k release];
     if (b->pso_mmp_iq2a) [b->pso_mmp_iq2a release]; if (b->pso_mmp_q2ka) [b->pso_mmp_q2ka release]; if (b->pso_mmp_q4ka) [b->pso_mmp_q4ka release];
     if (b->pso_route_b) [b->pso_route_b release]; if (b->pso_gemv_nt) [b->pso_gemv_nt release]; if (b->pso_state_store) [b->pso_state_store release];
     if (b->pso_hcb_scale) [b->pso_hcb_scale release]; if (b->pso_hcb_mixes) [b->pso_hcb_mixes release]; if (b->pso_hcb_sink) [b->pso_hcb_sink release];
@@ -1774,7 +1774,10 @@ typedef struct { int32_t ne02, ne10, ne11; uint64_t nb11, nb12; int32_t ne21, ne
 typedef struct { int32_t ne00, ne02; uint64_t nb01, nb02, nb03; int32_t ne11; uint64_t nb10, nb11, nb12, nb13;
                  int32_t ne20, ne21, ne0, ne1; int16_t r2, r3; int32_t tp_rank, tp_world, tp_expert_base; } Dsv4MmArgs;
 
+static int dsv4_use_mpp(void);
+static id<MTLComputePipelineState> dsv4_pso_q8(LlmDsv4Metal* b);
 static int dsv4_use_mpp(void) { int v = 1; if (llm_ai_mlx_opt_get_bool("dsv4_mpp", &v) != 0) v = 1; return v; }
+static id<MTLComputePipelineState> dsv4_pso_q8(LlmDsv4Metal* b) { return (dsv4_use_mpp() && b->pso_mmp_q8) ? b->pso_mmp_q8 : b->pso_mm_q8; }
 static id<MTLComputePipelineState> dsv4_mm_pso_addr(LlmDsv4Metal* b, int ggml_type) {
     if (dsv4_use_mpp()) { id<MTLComputePipelineState> m = ggml_type == 16 ? b->pso_mmp_iq2a : ggml_type == 10 ? b->pso_mmp_q2ka : ggml_type == 12 ? b->pso_mmp_q4ka : nil; if (m) return m; }
     return ggml_type == 16 ? b->pso_mm_iq2a : ggml_type == 10 ? b->pso_mm_q2ka : ggml_type == 12 ? b->pso_mm_q4ka : nil;
@@ -1906,13 +1909,13 @@ int llm_dsv4_metal_moe_mm_batch(LlmDsv4Metal* b, int nt, const void* gate_w, con
     { uint32_t P[2] = { embd, (uint32_t)nt }; [e setBytes:P length:sizeof P atIndex:2]; }
     [e dispatchThreads:MTLSizeMake(embd, nt, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     if (hasShared) {   /* shared expert Q8_0 batched: gate/up mul_mm_id (1 esperto), swiglu (peso 1), down, somma in OUT */
-        dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &mh, &sga, IDB, MAPS, SWG, slg, X, 0, SG_);
-        dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &mh, &sga, IDB, MAPS, SWU, slu, X, 0, SU_);
+        dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &mh, &sga, IDB, MAPS, SWG, slg, X, 0, SG_);
+        dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &mh, &sga, IDB, MAPS, SWU, slu, X, 0, SU_);
         [e setComputePipelineState:b->pso_swiglu_w];
         [e setBuffer:SG_ offset:0 atIndex:0]; [e setBuffer:SU_ offset:0 atIndex:1]; [e setBuffer:ONES offset:0 atIndex:2]; [e setBuffer:SMID offset:0 atIndex:3];
         { uint32_t P[2] = { ff, (uint32_t)nt }; [e setBytes:P length:sizeof P atIndex:4]; [e setBytes:&clamp length:sizeof(float) atIndex:5]; }
         [e dispatchThreads:MTLSizeMake(ff, nt, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-        dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &mhd, &sda, IDB, MAPS, SWD, sld, SMID, 0, SD_);
+        dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &mhd, &sda, IDB, MAPS, SWD, sld, SMID, 0, SD_);
         [e setComputePipelineState:b->pso_add];
         [e setBuffer:OUT offset:0 atIndex:0]; [e setBuffer:SD_ offset:0 atIndex:1];
         { uint32_t P[1] = { embd * (uint32_t)nt }; [e setBytes:P length:sizeof P atIndex:2]; }
@@ -2030,13 +2033,13 @@ int llm_dsv4_metal_moe_mm_addr_batch(LlmDsv4Metal* b, int nt, const void* const*
     { uint32_t P[2] = { embd, (uint32_t)nt }; [e setBytes:P length:sizeof P atIndex:2]; }
     [e dispatchThreads:MTLSizeMake(embd, nt, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     if (hasShared) {   /* shared expert Q8_0 batched: gate/up mul_mm_id (1 esperto), swiglu (peso 1), down, somma in OUT */
-        dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &mh, &sga, IDB, MAPS, SWG, slg, X, 0, SG_);
-        dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &mh, &sga, IDB, MAPS, SWU, slu, X, 0, SU_);
+        dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &mh, &sga, IDB, MAPS, SWG, slg, X, 0, SG_);
+        dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &mh, &sga, IDB, MAPS, SWU, slu, X, 0, SU_);
         [e setComputePipelineState:b->pso_swiglu_w];
         [e setBuffer:SG_ offset:0 atIndex:0]; [e setBuffer:SU_ offset:0 atIndex:1]; [e setBuffer:ONES offset:0 atIndex:2]; [e setBuffer:SMID offset:0 atIndex:3];
         { uint32_t P[2] = { ff, (uint32_t)nt }; [e setBytes:P length:sizeof P atIndex:4]; [e setBytes:&clamp length:sizeof(float) atIndex:5]; }
         [e dispatchThreads:MTLSizeMake(ff, nt, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-        dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &mhd, &sda, IDB, MAPS, SWD, sld, SMID, 0, SD_);
+        dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &mhd, &sda, IDB, MAPS, SWD, sld, SMID, 0, SD_);
         [e setComputePipelineState:b->pso_add];
         [e setBuffer:OUT offset:0 atIndex:0]; [e setBuffer:SD_ offset:0 atIndex:1];
         { uint32_t P[1] = { embd * (uint32_t)nt }; [e setBytes:P length:sizeof P atIndex:2]; }
@@ -2083,8 +2086,8 @@ int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w
     ab.ne20 = 1; ab.ne21 = nt; ab.ne0 = (int32_t)embd; ab.ne1 = 1; ab.r2 = 1; ab.r3 = 1;
     id<MTLCommandBuffer> cb = [b->queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
-    dsv4_encode_mm_id_full(e, b->pso_mm_map8, b->pso_mm_q8, &ma, &aa, IDS, MA, WA, la, H, 0, LOW);
-    dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &mb, &ab, IDB, MB, WB, lb, LOW, 0, OUT);
+    dsv4_encode_mm_id_full(e, b->pso_mm_map8, dsv4_pso_q8(b), &ma, &aa, IDS, MA, WA, la, H, 0, LOW);
+    dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &mb, &ab, IDB, MB, WB, lb, LOW, 0, OUT);
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
     [cb waitUntilCompleted];
@@ -2234,13 +2237,13 @@ int llm_dsv4_metal_attn_proj_mm_batch(LlmDsv4Metal* b, int nt,
     #undef MMARGS
     id<MTLCommandBuffer> cb = [b->queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
-    dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &m1, &aqa, IDS, MP, WA, la, X, 0, QR);
-    dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &m1, &akv, IDS, MP, WK, lk, X, 0, KVR);
+    dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &m1, &aqa, IDS, MP, WA, la, X, 0, QR);
+    dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &m1, &akv, IDS, MP, WK, lk, X, 0, KVR);
     [e setComputePipelineState:b->pso_rms_rows];   /* QRN = rms(QR) * q_a_norm */
     [e setBuffer:QR offset:0 atIndex:0]; [e setBuffer:WQAN offset:0 atIndex:1]; [e setBuffer:QRN offset:0 atIndex:2];
     { uint32_t P[1] = { lq }; [e setBytes:P length:sizeof P atIndex:3]; float cf[1] = { eps }; [e setBytes:cf length:sizeof cf atIndex:4]; }
     [e dispatchThreadgroups:MTLSizeMake(1, nt, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-    dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &m3, &aqb, IDS, MP, WQ, lb, QRN, 0, QB);
+    dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &m3, &aqb, IDS, MP, WQ, lb, QRN, 0, QB);
     [e setComputePipelineState:b->pso_head_rms_rows];
     [e setBuffer:QB offset:0 atIndex:0];
     { uint32_t P[2] = { hdim, (uint32_t)n_head }; [e setBytes:P length:sizeof P atIndex:1]; float cf[1] = { eps }; [e setBytes:cf length:sizeof cf atIndex:2]; }

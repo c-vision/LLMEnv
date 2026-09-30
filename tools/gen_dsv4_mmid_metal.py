@@ -118,6 +118,7 @@ inst = ["typedef decltype(kernel_mul_mm_id_mpp<half, half4x4, simdgroup_half8x8,
 for host, blk, deq in (("iq2_xxs", "block_iq2_xxs", "dequantize_iq2_xxs"), ("q2_K", "block_q2_K", "dequantize_q2_K"), ("q4_K", "block_q4_K", "dequantize_q4_K")):
     for suf, addr in (("", ""), ("_addr", ", true")):
         inst.append(f'template [[host_name("kernel_mul_mm_id_{host}{suf}_f32_mpp")]] kernel mul_mm_id_mpp_t kernel_mul_mm_id_mpp<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, {blk}, QK_NL, {deq}, float, float4x4, float, float2x4{addr}>;')
+inst.append('template [[host_name("kernel_mul_mm_id_q8_0_f32_mpp")]] kernel mul_mm_id_mpp_t kernel_mul_mm_id_mpp<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, block_q8_0, 2, dequantize_q8_0, float, float4x4, float, float2x4>;')
 body = mpp + "\n\n" + "\n".join(inst)
 assert ')MSL"' not in body
 OUT_MPP.write_text("/* GENERATO da tools/gen_dsv4_mmid_metal.py — NON modificare a mano. Kernel mul_mm_id su tensor ops MPP (Metal 4), estratti da ds4. */\n"
