@@ -56,6 +56,11 @@ int main(int argc, char** argv) {
     int nd = dfgen(d, sd, -1, N, df);
     double df_ms = now_ms() - d0;
     printf("DF1 n=%d %.1f ms (%.1f tok/s)\n", nd, df_ms, nd>0?nd*1e3/df_ms:0);
+    { int minb = na < nd ? na : nd, fb = -1;
+      for (int i = 0; i < minb; i++) if (ar[i] != df[i]) { fb = i; break; }
+      printf("PARITA AR vs DF1: %s (primo diff %d, na=%d nd=%d)\n", (fb<0 && na==nd)?"OK":"DIVERGE", fb, na, nd);
+      if (fb >= 0) printf("   ar[%d]=%d df[%d]=%d\n", fb, ar[fb], fb, df[fb]);
+    }
 
     /* DFlash2 STREAMING (continuazione) */
     sess_h ss = create(m); append(ss, ids, n);

@@ -917,11 +917,17 @@ int llm_ai_mlx_dflash2_generate_multi(llm_ai_mlx_dflash2_handle handle,
             free_output_tensors(&t);
             return -1;
         }
-        /* Verify: di DEFAULT per-sessione (df2_dflash_verify, corretto). Il forward BATCHED
-         * multi-sessione e' sotto gate diagnostico LLM_DF2_BATCH_VERIFY per la messa a punto. */
+        /* Verify BATCHED multi-sessione (fix A2 2026-09-30): la root cause della divergenza era
+         * la FFN batchata su `total` token (kernel MLX diverso per M, amplificato dalla GDN) ->
+         * ora `forward_tokens_batch_multi_cap` usa la FFN PER-SESSIONE e il batched e' ESATTO
+         * (parita' verificata). Fallback per-sessione per sliding-window/KV-quant, che arch->attn
+         * da solo non gestisce (lo fa layer_forward). LLM_DF2_SEQ_VERIFY forza il per-sessione. */
         {
             int vfail = 0;
-            if (llm_ai_mlx_opt_env("LLM_DF2_BATCH_VERIFY")) {
+            bool batch_ok = !m->cfg.kv_quantize &&
+                            !(m->cfg.is_sliding_layer && m->cfg.sliding_window > 0) &&
+                            llm_ai_mlx_opt_env("LLM_DF2_SEQ_VERIFY") == NULL;
+            if (batch_ok) {
                 if (df2_dflash_verify_multi(rt, vsess, nv, anchorsA, drafts, Ks, 8,
                                             caplayers, ncap, vctx, vca, nextA, accA) != 0) vfail = 1;
             } else {

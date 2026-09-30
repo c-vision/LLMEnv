@@ -391,7 +391,29 @@ bool forward_tokens_batch_multi_cap(LlmMlxModel* m, LlmMlxSession** sess, const 
         if (ok) ok = mlx_concatenate_axis(&hb, hs, 1, m->stream) == 0;
         mlx_vector_array_free(hs);
         mlx_array layer_out = mlx_array_new();
-        if (ok) ok = m->arch->ffn(m, layer, total, hb, &layer_out);
+        /* FFN PER-SESSIONE (fix A2 2026-09-30): la FFN batchata su `total` token (tutte le
+         * sessioni in una GEMM) NON e' numericamente identica alla per-sessione: il kernel
+         * quantizzato MLX sceglie tiling/accumulo diversi al variare di M, e la ricorrenza GDN
+         * AMPLIFICA la differenza fino a ribaltare l'argmax (verificato: diff esatta 0 con FFN
+         * per-sessione, vs divergenza della sessione con FFN batchata). La parita' col greedy
+         * (path single) richiede la FFN per-sessione; l'attenzione e' gia' per-sessione. */
+        {
+            mlx_vector_array fo = mlx_vector_array_new();
+            for (int s = 0; s < n_sess && ok; s++) {
+                int k = ks[s];
+                if (k <= 0) continue;
+                mlx_array x_s = mlx_array_new(), o_s = mlx_array_new();
+                const int st[3] = {0, offs[s], 0};
+                const int sp[3] = {1, offs[s] + k, m->cfg.hidden_size};
+                const int ss[3] = {1, 1, 1};
+                ok = mlx_slice(&x_s, hb, st, 3, sp, 3, ss, 3, m->stream) == 0 &&
+                     m->arch->ffn(m, layer, k, x_s, &o_s);
+                if (ok) mlx_vector_array_append_value(fo, o_s);
+                mlx_array_free(x_s); mlx_array_free(o_s);
+            }
+            if (ok) ok = mlx_concatenate_axis(&layer_out, fo, 1, m->stream) == 0;
+            mlx_vector_array_free(fo);
+        }
         mlx_array_free(hb);
         mlx_array_free(h);
         if (!ok) { mlx_array_free(layer_out); return false; }
