@@ -676,7 +676,10 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
 /* Tappa 3 DFlash2 MULTI-SESSIONE: N sessioni (stesso target) in round-loop batched (propose
  * per-sessione sugli slot + UN verify N×K per round + emit per-sessione). out_ids row-major con
  * stride `stride` (= max(max_tokens)); out_counts[i] = token emessi per la sessione i. Ritorna 0
- * / -1. NON eseguito/testato: richiede la verifica su modello reale. */
+ * / -1. VERIFICATO 2026-09-30 (Qwen3.8-27B-8bit + DFlash2, 3 sessioni prompt distinti):
+ * parita' greedy col single (OK). NOTA: il verify BATCHED multi-sessione
+ * (`df2_dflash_verify_multi`) diverge sugli ibridi (stato ricorrente GDN non ricostruito);
+ * generate_multi usa il verify PER-SESSIONE (corretto). */
 int llm_ai_mlx_dflash2_generate_multi(llm_ai_mlx_dflash2_handle handle,
                                       llm_ai_mlx_session_handle* sessions, int n,
                                       int32_t eos_token, const int* max_tokens, int stride,
