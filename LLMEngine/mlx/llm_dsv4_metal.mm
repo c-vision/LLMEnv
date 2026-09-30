@@ -445,6 +445,74 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        tail[i + 1] = x0 * s + x1 * c;\n"
 "    }\n"
 "}\n"
+/* ── mHC BATCHED (token = grid y): stessa matematica di llm_dsv4_block_pre/post, per il prefill a chunk ── */
+/* scale[t] = 1/sqrt(mean(x^2)+eps) sull'intero stato [HC*D] del token. P={n}. */
+"kernel void dsv4_hcb_scale(device const float* X [[buffer(0)]], device float* SC [[buffer(1)]], constant uint* P [[buffer(2)]], constant float* CF [[buffer(3)]],\n"
+"    uint t [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]], ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {\n"
+"    const uint n = P[0]; device const float* x = X + (ulong)t * n; float s = 0.f;\n"
+"    for (uint i = tid; i < n; i += 256u) { float v = x[i]; s += v * v; }\n"
+"    s = simd_sum(s); threadgroup float sh[8]; if (lane == 0u) sh[sg] = s;\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    if (tid == 0u) { float a = 0.f; for (uint k = 0; k < 8u; k++) a += sh[k]; SC[t] = 1.f / sqrt(a / (float)n + CF[0]); }\n"
+"}\n"
+/* mix[t][r] = scale[t] * dot(fn[r], x[t]); grid (SIZE, N), 128 thread. P={HCD, SIZE}. */
+"kernel void dsv4_hcb_mixes(device const float* X [[buffer(0)]], device const float* FN [[buffer(1)]], device const float* SC [[buffer(2)]],\n"
+"    device float* MIX [[buffer(3)]], constant uint* P [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],\n"
+"    ushort tid [[thread_index_in_threadgroup]], ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {\n"
+"    const uint n = P[0], size = P[1], r = tg.x, t = tg.y;\n"
+"    device const float4* w = (device const float4*)(FN + (ulong)r * n); device const float4* x = (device const float4*)(X + (ulong)t * n);\n"
+"    float s = 0.f; for (uint i = tid; i < n / 4u; i += 128u) s += dot(w[i], x[i]);\n"
+"    s = simd_sum(s); threadgroup float sh[4]; if (lane == 0u) sh[sg] = s;\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    if (tid == 0u) MIX[(ulong)t * size + r] = (sh[0] + sh[1] + sh[2] + sh[3]) * SC[t];\n"
+"}\n"
+/* sinkhorn per token (1 thread/token): copia di dsv4_hc_sinkhorn con offset di token. P={n_hc, iters, size}. */
+"kernel void dsv4_hcb_sinkhorn(device const float* MIX [[buffer(0)]], device const float* SCALE [[buffer(1)]],\n"
+"    device const float* BASE [[buffer(2)]], device float* OUT [[buffer(3)]],\n"
+"    constant uint* P [[buffer(4)]], constant float* CF [[buffer(5)]], uint t [[thread_position_in_grid]]) {\n"
+"    const uint n_hc = P[0], iters = P[1], size = P[2]; const float eps = CF[0];\n"
+"    device const float* mix = MIX + (ulong)t * size; device float* out = OUT + (ulong)t * size;\n"
+"    const float pre_scale = SCALE[0], post_scale = SCALE[1], comb_scale = SCALE[2];\n"
+"    for (uint i = 0; i < n_hc; i++) { float z = mix[i]*pre_scale + BASE[i]; out[i] = 1.f/(1.f+exp(-z)) + eps; }\n"
+"    for (uint i = 0; i < n_hc; i++) { uint off = n_hc+i; float z = mix[off]*post_scale + BASE[off]; out[off] = 2.f/(1.f+exp(-z)); }\n"
+"    thread float c[256];\n"
+"    for (uint dst = 0; dst < n_hc; dst++) {\n"
+"        float rm = -INFINITY;\n"
+"        for (uint src = 0; src < n_hc; src++) { uint idx=src+dst*n_hc; uint off=2*n_hc+idx; float v=mix[off]*comb_scale+BASE[off]; c[idx]=v; if(v>rm)rm=v; }\n"
+"        float rs=0.f; for(uint src=0;src<n_hc;src++){uint idx=src+dst*n_hc;float v=exp(c[idx]-rm);c[idx]=v;rs+=v;}\n"
+"        float iv=1.f/rs; for(uint src=0;src<n_hc;src++){uint idx=src+dst*n_hc;c[idx]=c[idx]*iv+eps;}\n"
+"    }\n"
+"    for (uint src=0;src<n_hc;src++){float sum=0.f;for(uint dst=0;dst<n_hc;dst++)sum+=c[src+dst*n_hc];float iv=1.f/(sum+eps);for(uint dst=0;dst<n_hc;dst++)c[src+dst*n_hc]*=iv;}\n"
+"    for (uint it=1;it<iters;it++){\n"
+"        for(uint dst=0;dst<n_hc;dst++){float sum=0.f;for(uint src=0;src<n_hc;src++)sum+=c[src+dst*n_hc];float iv=1.f/(sum+eps);for(uint src=0;src<n_hc;src++)c[src+dst*n_hc]*=iv;}\n"
+"        for(uint src=0;src<n_hc;src++){float sum=0.f;for(uint dst=0;dst<n_hc;dst++)sum+=c[src+dst*n_hc];float iv=1.f/(sum+eps);for(uint dst=0;dst<n_hc;dst++)c[src+dst*n_hc]*=iv;}\n"
+"    }\n"
+"    for (uint i=0;i<n_hc*n_hc;i++) out[2*n_hc+i]=c[i];\n"
+"}\n"
+/* normed[t][d] = rms_weight( sum_h res[t][h][d]*pre[t][h] ) ; TG per token, 256 thread. P={D, HC, size}. */
+"kernel void dsv4_hcb_norm(device const float* RES [[buffer(0)]], device const float* SPL [[buffer(1)]], device const float* W [[buffer(2)]],\n"
+"    device float* NORMED [[buffer(3)]], constant uint* P [[buffer(4)]], constant float* CF [[buffer(5)]],\n"
+"    uint t [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]], ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {\n"
+"    const uint D = P[0], HC = P[1], size = P[2];\n"
+"    threadgroup float hin[4096]; threadgroup float sh[8];\n"
+"    device const float* pre = SPL + (ulong)t * size; device const float* res = RES + (ulong)t * HC * D;\n"
+"    float s = 0.f;\n"
+"    for (uint d = tid; d < D; d += 256u) { float a = 0.f; for (uint h = 0; h < HC; h++) a += res[(ulong)h * D + d] * pre[h]; hin[d] = a; s += a * a; }\n"
+"    s = simd_sum(s); if (lane == 0u) sh[sg] = s;\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    float tot = 0.f; for (uint k = 0; k < 8u; k++) tot += sh[k];\n"
+"    const float scale = 1.f / sqrt(tot / (float)D + CF[0]);\n"
+"    for (uint d = tid; d < D; d += 256u) NORMED[(ulong)t * D + d] = hin[d] * scale * W[d];\n"
+"}\n"
+/* out[t][dst][d] = bo[t][d]*post[t][dst] + sum_src comb[t][dst+src*HC]*res[t][src][d]; grid (ceil(HC*D/256), N). P={D, HC, size}. */
+"kernel void dsv4_hcb_post(device const float* BO [[buffer(0)]], device const float* RES [[buffer(1)]], device const float* SPL [[buffer(2)]],\n"
+"    device float* OUT [[buffer(3)]], constant uint* P [[buffer(4)]], uint2 g [[thread_position_in_grid]]) {\n"
+"    const uint D = P[0], HC = P[1], size = P[2]; const uint t = g.y, i = g.x; if (i >= HC * D) return;\n"
+"    const uint dst = i / D, d = i % D; device const float* spl = SPL + (ulong)t * size; device const float* res = RES + (ulong)t * HC * D;\n"
+"    float acc = BO[(ulong)t * D + d] * spl[HC + dst];\n"
+"    for (uint src = 0; src < HC; src++) acc += spl[2*HC + dst + src*HC] * res[(ulong)src * D + d];\n"
+"    OUT[(ulong)t * HC * D + i] = acc;\n"
+"}\n"
 "kernel void dsv4_swiglu(device const float* G [[buffer(0)]], device const float* U [[buffer(1)]],\n"
 "    device float* MID [[buffer(2)]], constant uint* P [[buffer(3)]], constant float* CF [[buffer(4)]],\n"
 "    uint gid [[thread_position_in_grid]]) {\n"
@@ -887,7 +955,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_pair;   /* MoE fuso gate+up+swiglu (ds4 pair) */
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
-    id<MTLComputePipelineState> pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
+    id<MTLComputePipelineState> pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
@@ -1035,7 +1103,8 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_sum6_q2k = f6 ? [dev newComputePipelineStateWithFunction:f6 error:&err] : nil;
     {   /* MoE batched (mul_mm_id): opzionale, se manca il path per-token resta valido */
         struct { const char* n; id<MTLComputePipelineState> __strong* dst; } mmk[] = {
-            { "kernel_mul_mm_id_map0_ne20_6", &b->pso_mm_map0 }, { "kernel_mul_mm_id_map0_ne20_1", &b->pso_mm_map1 }, { "kernel_mul_mm_id_iq2_xxs_addr_f32", &b->pso_mm_iq2a },
+            { "kernel_mul_mm_id_map0_ne20_6", &b->pso_mm_map0 }, { "kernel_mul_mm_id_map0_ne20_1", &b->pso_mm_map1 }, { "dsv4_hcb_scale", &b->pso_hcb_scale }, { "dsv4_hcb_mixes", &b->pso_hcb_mixes },
+            { "dsv4_hcb_sinkhorn", &b->pso_hcb_sink }, { "dsv4_hcb_norm", &b->pso_hcb_norm }, { "dsv4_hcb_post", &b->pso_hcb_post }, { "kernel_mul_mm_id_iq2_xxs_addr_f32", &b->pso_mm_iq2a },
             { "kernel_mul_mm_id_q2_K_addr_f32", &b->pso_mm_q2ka }, { "kernel_mul_mm_id_q4_K_addr_f32", &b->pso_mm_q4ka }, { "kernel_mul_mv_slots6_q4_K_pair_swiglu_f32", &b->pso_q4_pair },
             { "kernel_mul_mv_slots6_q4_K_sum6_f32", &b->pso_q4_sum6 }, { "dsv4_rms_w_rows", &b->pso_rms_rows },
             { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_rope_rows", &b->pso_rope_rows },
@@ -1124,6 +1193,8 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_pair)     [b->pso_pair release];
     if (b->pso_sum6_q2k) [b->pso_sum6_q2k release];
     if (b->pso_attn_part) [b->pso_attn_part release];
+    if (b->pso_hcb_scale) [b->pso_hcb_scale release]; if (b->pso_hcb_mixes) [b->pso_hcb_mixes release]; if (b->pso_hcb_sink) [b->pso_hcb_sink release];
+    if (b->pso_hcb_norm) [b->pso_hcb_norm release]; if (b->pso_hcb_post) [b->pso_hcb_post release];
     if (b->pso_mm_iq2a) [b->pso_mm_iq2a release]; if (b->pso_mm_q2ka) [b->pso_mm_q2ka release]; if (b->pso_mm_q4ka) [b->pso_mm_q4ka release];
     if (b->pso_q4_pair) [b->pso_q4_pair release]; if (b->pso_q4_sum6) [b->pso_q4_sum6 release];
     if (b->pso_rms_rows) [b->pso_rms_rows release]; if (b->pso_head_rms_rows) [b->pso_head_rms_rows release]; if (b->pso_rope_rows) [b->pso_rope_rows release];
@@ -1954,6 +2025,75 @@ int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w
     [cb waitUntilCompleted];
     if (cb.error) return -3;
     memcpy(out, [OUT contents], (size_t)nt * embd * sizeof(float));
+    return 0;
+}
+
+/* mHC pre per `nt` token in UNA command buffer: res [nt*HC*D] -> normed [nt*D], sp [nt*size] (= pre|post|comb, size=(2+HC)*HC).
+ * Stessa matematica di llm_dsv4_block_pre (accumuli float su GPU, ordine diverso). 0 = ok. */
+int llm_dsv4_metal_hc_pre_batch(LlmDsv4Metal* b, int nt, int HC, int D, int iters, float hc_eps, float rms_eps, const float* res,
+        const float* fn, const float* scale, const float* base, const float* norm_w, float* normed, float* sp) {
+    if (!b || nt <= 0 || !b->pso_hcb_scale || !b->pso_hcb_mixes || !b->pso_hcb_sink || !b->pso_hcb_norm || D > 4096 || (D % 4) || HC > 16) return -1;
+    const uint32_t size = (uint32_t)((2 + HC) * HC), hcd = (uint32_t)(HC * D);
+    if ((hcd % 4u)) return -1;
+    id<MTLBuffer> R  = dsv4_scratch(b, &b->sx[54], &b->sx_cap[54], (size_t)nt * hcd * 4);
+    id<MTLBuffer> SC = dsv4_scratch(b, &b->sx[55], &b->sx_cap[55], (size_t)nt * 4);
+    id<MTLBuffer> MX = dsv4_scratch(b, &b->sx[56], &b->sx_cap[56], (size_t)nt * size * 4);
+    id<MTLBuffer> SP = dsv4_scratch(b, &b->sx[57], &b->sx_cap[57], (size_t)nt * size * 4);
+    id<MTLBuffer> NM = dsv4_scratch(b, &b->sx[58], &b->sx_cap[58], (size_t)nt * D * 4);
+    id<MTLBuffer> FNb = [b->dev newBufferWithBytes:fn length:(NSUInteger)size * hcd * 4 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> SCb = [b->dev newBufferWithBytes:scale length:12 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BSb = [b->dev newBufferWithBytes:base length:(NSUInteger)size * 4 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> NWb = [b->dev newBufferWithBytes:norm_w length:(NSUInteger)D * 4 options:MTLResourceStorageModeShared];
+    if (!R || !SC || !MX || !SP || !NM || !FNb || !SCb || !BSb || !NWb) { if (FNb) [FNb release]; if (SCb) [SCb release]; if (BSb) [BSb release]; if (NWb) [NWb release]; return -2; }
+    memcpy([R contents], res, (size_t)nt * hcd * 4);
+    id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:b->pso_hcb_scale];
+    [e setBuffer:R offset:0 atIndex:0]; [e setBuffer:SC offset:0 atIndex:1];
+    { uint32_t P[1] = { hcd }; [e setBytes:P length:sizeof P atIndex:2]; [e setBytes:&rms_eps length:4 atIndex:3]; }
+    [e dispatchThreadgroups:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [e setComputePipelineState:b->pso_hcb_mixes];
+    [e setBuffer:R offset:0 atIndex:0]; [e setBuffer:FNb offset:0 atIndex:1]; [e setBuffer:SC offset:0 atIndex:2]; [e setBuffer:MX offset:0 atIndex:3];
+    { uint32_t P[2] = { hcd, size }; [e setBytes:P length:sizeof P atIndex:4]; }
+    [e dispatchThreadgroups:MTLSizeMake(size, nt, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [e setComputePipelineState:b->pso_hcb_sink];
+    [e setBuffer:MX offset:0 atIndex:0]; [e setBuffer:SCb offset:0 atIndex:1]; [e setBuffer:BSb offset:0 atIndex:2]; [e setBuffer:SP offset:0 atIndex:3];
+    { uint32_t P[3] = { (uint32_t)HC, (uint32_t)iters, size }; [e setBytes:P length:sizeof P atIndex:4]; [e setBytes:&hc_eps length:4 atIndex:5]; }
+    [e dispatchThreads:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [e setComputePipelineState:b->pso_hcb_norm];
+    [e setBuffer:R offset:0 atIndex:0]; [e setBuffer:SP offset:0 atIndex:1]; [e setBuffer:NWb offset:0 atIndex:2]; [e setBuffer:NM offset:0 atIndex:3];
+    { uint32_t P[3] = { (uint32_t)D, (uint32_t)HC, size }; [e setBytes:P length:sizeof P atIndex:4]; [e setBytes:&rms_eps length:4 atIndex:5]; }
+    [e dispatchThreadgroups:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [e endEncoding];
+    dsv4_res_commit(b); [cb commit];
+    [cb waitUntilCompleted];
+    int rc = cb.error ? -3 : 0;
+    if (rc == 0) { memcpy(normed, [NM contents], (size_t)nt * D * 4); memcpy(sp, [SP contents], (size_t)nt * size * 4); }
+    [FNb release]; [SCb release]; [BSb release]; [NWb release];
+    return rc;
+}
+
+/* mHC post per `nt` token: bo [nt*D], res [nt*HC*D], sp [nt*size] (pre|post|comb) -> out [nt*HC*D]. 0 = ok. */
+int llm_dsv4_metal_hc_post_batch(LlmDsv4Metal* b, int nt, int HC, int D, const float* bo, const float* res, const float* sp, float* out) {
+    if (!b || nt <= 0 || !b->pso_hcb_post || HC > 16) return -1;
+    const uint32_t size = (uint32_t)((2 + HC) * HC), hcd = (uint32_t)(HC * D);
+    id<MTLBuffer> BO = dsv4_scratch(b, &b->sx[59], &b->sx_cap[59], (size_t)nt * D * 4);
+    id<MTLBuffer> R  = dsv4_scratch(b, &b->sx[60], &b->sx_cap[60], (size_t)nt * hcd * 4);
+    id<MTLBuffer> SP = dsv4_scratch(b, &b->sx[61], &b->sx_cap[61], (size_t)nt * size * 4);
+    id<MTLBuffer> O  = dsv4_scratch(b, &b->sx[62], &b->sx_cap[62], (size_t)nt * hcd * 4);
+    if (!BO || !R || !SP || !O) return -2;
+    memcpy([BO contents], bo, (size_t)nt * D * 4); memcpy([R contents], res, (size_t)nt * hcd * 4); memcpy([SP contents], sp, (size_t)nt * size * 4);
+    id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:b->pso_hcb_post];
+    [e setBuffer:BO offset:0 atIndex:0]; [e setBuffer:R offset:0 atIndex:1]; [e setBuffer:SP offset:0 atIndex:2]; [e setBuffer:O offset:0 atIndex:3];
+    { uint32_t P[3] = { (uint32_t)D, (uint32_t)HC, size }; [e setBytes:P length:sizeof P atIndex:4]; }
+    [e dispatchThreads:MTLSizeMake(hcd, nt, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [e endEncoding];
+    dsv4_res_commit(b); [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) return -3;
+    memcpy(out, [O contents], (size_t)nt * hcd * 4);
     return 0;
 }
 

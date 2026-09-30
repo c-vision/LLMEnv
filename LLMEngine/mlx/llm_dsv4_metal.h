@@ -157,6 +157,10 @@ int llm_dsv4_metal_moe_mm_batch(LlmDsv4Metal* b, int nt, const void* gate_w, con
 int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes, int ng, uint32_t gd,
         uint32_t rank, const void* outb_w, size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
         const float* heads, float* out);
+/* mHC batched (token = dimensione griglia): pre = rms(no weight) -> mixes -> sinkhorn -> somma pesata -> rms(weight); sp [nt*size] = pre|post|comb. */
+int llm_dsv4_metal_hc_pre_batch(LlmDsv4Metal* b, int nt, int HC, int D, int iters, float hc_eps, float rms_eps, const float* res,
+        const float* fn, const float* scale, const float* base, const float* norm_w, float* normed, float* sp);
+int llm_dsv4_metal_hc_post_batch(LlmDsv4Metal* b, int nt, int HC, int D, const float* bo, const float* res, const float* sp, float* out);
 /* Proiezioni Q-LoRA+KV del chunk via mul_mm_id Q8_0 (come attn_proj_fused_batch; attivazioni half). */
 int llm_dsv4_metal_attn_proj_mm_batch(LlmDsv4Metal* b, int nt, const void* qa_w, size_t qa_row_bytes,
         const void* kv_w, size_t kv_row_bytes, const void* qb_w, size_t qb_row_bytes,

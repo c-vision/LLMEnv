@@ -319,6 +319,15 @@ int llm_dsv4_gpu_moe_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, i
     return r;
 }
 
+int llm_dsv4_gpu_hc_pre_batch_try(const LlmDsv4Config* c, const float* fn, const float* scale, const float* base, const float* norm_w,
+                                  const float* res, int nt, float* normed, float* sp) {
+    if (!g_on || !g_be) return 0;
+    return llm_dsv4_metal_hc_pre_batch(g_be, nt, c->n_hc, c->n_embd, c->n_hc_sinkhorn_iter, c->hc_eps, c->rms_eps, res, fn, scale, base, norm_w, normed, sp) == 0;
+}
+int llm_dsv4_gpu_hc_post_batch_try(const LlmDsv4Config* c, const float* bo, const float* res, const float* sp, int nt, float* out) {
+    if (!g_on || !g_be) return 0;
+    return llm_dsv4_metal_hc_post_batch(g_be, nt, c->n_hc, c->n_embd, bo, res, sp, out) == 0;
+}
 int llm_dsv4_gpu_moe_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                const float* x, const int* tokens, int nt, float* out) {
     if (!g_on) return 0;

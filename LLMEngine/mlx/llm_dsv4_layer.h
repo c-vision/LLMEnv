@@ -9,6 +9,7 @@
 #include "llm_dsv4_block.h"
 #include "llm_dsv4_moe_fwd.h"
 #include "llm_dsv4_cache.h"
+#include "llm_engine_opts.h"   /* opzione dsv4_gpu_hc (registro, no env) */
 
 /* Un layer su un token. hc [n_hc*embd] in ingresso, out_hc [n_hc*embd] in uscita.
  * kv = righe KV (raw+compresse) se presenti, altrimenti NULL (solo kv corrente). */
@@ -141,32 +142,37 @@ static inline void llm_dsv4_layer_forward_cached(const LlmDsv4Config* c, const L
 static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
         const LlmDsv4PackedExperts* pe, LlmDsv4LayerCache* cache, const float* hc_in, const int* tokens,
         int pos0, int N, int il, float* hc_out) {
-    const int HC = c->n_hc, D = c->n_embd; const size_t hcn = (size_t)HC * D;
+    const int HC = c->n_hc, D = c->n_embd; const size_t hcn = (size_t)HC * D; const int SZ = (2 + HC) * HC;
+    /* mHC su GPU (opzione di registro dsv4_gpu_hc, default 0: percorso CPU bit-exact col token-per-token). Layout `sp` per token:
+     * pre[HC] | post[HC] | comb[HC*HC]; il percorso CPU lo riempie nello stesso layout (post/comb) cosi' i due si alternano. */
+    int gpu_hc = 0; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_gpu_hc", &v) == 0) gpu_hc = v; }
     float* after  = (float*)malloc(sizeof(float) * hcn * (size_t)N);
     float* ffn_x  = (float*)malloc(sizeof(float) * (size_t)D * N);
     float* ffn_o  = (float*)malloc(sizeof(float) * (size_t)D * N);
-    float* post_f = (float*)malloc(sizeof(float) * (size_t)HC * N);
-    float* comb_f = (float*)malloc(sizeof(float) * (size_t)HC * HC * N);
-    /* fase 1: mHC pre attn (tutti i token) -> attenzione (chunk su GPU, o per-token) -> mHC post attn + mHC pre ffn */
+    float* sp_f   = (float*)malloc(sizeof(float) * (size_t)SZ * N);
+    float* sp_a   = (float*)malloc(sizeof(float) * (size_t)SZ * N);
     float* normed_all = (float*)malloc(sizeof(float) * (size_t)D * N);
     float* attn_all   = (float*)malloc(sizeof(float) * (size_t)D * N);
-    float* post_a     = (float*)malloc(sizeof(float) * (size_t)HC * N);
-    float* comb_a     = (float*)malloc(sizeof(float) * (size_t)HC * HC * N);
-    for (int t = 0; t < N; t++)
+    #define SP_POST(sp, t) ((sp) + (size_t)SZ * (t) + HC)
+    #define SP_COMB(sp, t) ((sp) + (size_t)SZ * (t) + 2 * HC)
+    /* fase 1: mHC pre attn (tutti i token) -> attenzione (chunk su GPU, o per-token) -> mHC post attn + mHC pre ffn */
+    int hc_a = gpu_hc && llm_dsv4_gpu_hc_pre_batch_try(c, L->hc_attn_fn, L->hc_attn_scale, L->hc_attn_base, L->attn_norm, hc_in, N, normed_all, sp_a);
+    for (int t = 0; !hc_a && t < N; t++)
         llm_dsv4_block_pre(c, L->hc_attn_fn, L->hc_attn_scale, L->hc_attn_base, L->attn_norm, hc_in + hcn * t,
-                           normed_all + (size_t)D * t, post_a + (size_t)HC * t, comb_a + (size_t)HC * HC * t);
+                           normed_all + (size_t)D * t, SP_POST(sp_a, t), SP_COMB(sp_a, t));
     if (!llm_dsv4_gpu_attn_batch_try(c, L, il, cache->compress_ratio, cache->raw_cap, cache->comp_cap,
                                      normed_all, pos0, N, attn_all)) {
         for (int t = 0; t < N; t++)
             llm_dsv4_attn_cached(c, L, pe, cache, normed_all + (size_t)D * t, pos0 + t, il, attn_all + (size_t)D * t);
     }
-    for (int t = 0; t < N; t++) {
-        llm_dsv4_block_post(c, attn_all + (size_t)D * t, hc_in + hcn * t, post_a + (size_t)HC * t,
-                            comb_a + (size_t)HC * HC * t, after + hcn * t);
+    int post_a_gpu = gpu_hc && llm_dsv4_gpu_hc_post_batch_try(c, attn_all, hc_in, sp_a, N, after);
+    for (int t = 0; !post_a_gpu && t < N; t++)
+        llm_dsv4_block_post(c, attn_all + (size_t)D * t, hc_in + hcn * t, SP_POST(sp_a, t), SP_COMB(sp_a, t), after + hcn * t);
+    int hc_f = gpu_hc && llm_dsv4_gpu_hc_pre_batch_try(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, after, N, ffn_x, sp_f);
+    for (int t = 0; !hc_f && t < N; t++)
         llm_dsv4_block_pre(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, after + hcn * t,
-                           ffn_x + (size_t)D * t, post_f + (size_t)HC * t, comb_f + (size_t)HC * HC * t);
-    }
-    free(comb_a); free(post_a); free(attn_all); free(normed_all);
+                           ffn_x + (size_t)D * t, SP_POST(sp_f, t), SP_COMB(sp_f, t));
+    free(sp_a); free(attn_all); free(normed_all);
     /* fase 2: MoE su tutti i token */
     const int moe_batched = llm_dsv4_gpu_moe_batch_try(c, L, il, ffn_x, tokens, N, ffn_o);
     for (int t = 0; !moe_batched && t < N; t++) {
@@ -177,10 +183,12 @@ static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const Ll
         }
     }
     /* fase 3: mHC post ffn */
-    for (int t = 0; t < N; t++)
-        llm_dsv4_block_post(c, ffn_o + (size_t)D * t, after + hcn * t, post_f + (size_t)HC * t,
-                            comb_f + (size_t)HC * HC * t, hc_out + hcn * t);
-    free(comb_f); free(post_f); free(ffn_o); free(ffn_x); free(after);
+    int post_f_gpu = gpu_hc && llm_dsv4_gpu_hc_post_batch_try(c, ffn_o, after, sp_f, N, hc_out);
+    for (int t = 0; !post_f_gpu && t < N; t++)
+        llm_dsv4_block_post(c, ffn_o + (size_t)D * t, after + hcn * t, SP_POST(sp_f, t), SP_COMB(sp_f, t), hc_out + hcn * t);
+    #undef SP_POST
+    #undef SP_COMB
+    free(sp_f); free(ffn_o); free(ffn_x); free(after);
 }
 
 /* Tutti i layer su un token (nessuna cache: attenzione solo sul token corrente). */
