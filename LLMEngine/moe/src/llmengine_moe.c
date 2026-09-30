@@ -42,6 +42,7 @@ struct LlmEngineMoeRuntime {
     char stats_path[1200];
     /* M17: controller ADATTIVO (opt-in LLMENGINE_MOE_ADAPTIVE=1) — prefetch depth + cache budget. */
     int adaptive;
+    int hotness;                /* D19: expert cache adattiva (hotness+profilo) */
     uint32_t adapt_topn, adapt_pf_min, adapt_pf_max;
     uint32_t adapt_cache_mb, adapt_cache_min, adapt_cache_max;
     uint32_t adapt_steps, adapt_interval;
@@ -115,6 +116,18 @@ void llmengine_moe_config_defaults(LlmEngineMoeRuntimeConfig* out) {
     out->prefetch_topn = (pt != NULL && atoi(pt) > 0) ? (uint32_t)atoi(pt) : 0;
     const char* pc = llm_ai_mlx_opt_env("LLMENGINE_MOE_PREFETCH_CAP");
     out->prefetch_cap = (pc != NULL && atoi(pc) > 0) ? (uint32_t)atoi(pc) : 0;
+    const char* ht = llm_ai_mlx_opt_env("LLMENGINE_MOE_HOTNESS");
+    out->hotness = (ht != NULL && atoi(ht) > 0) ? 1 : 0;
+}
+
+/* D19: configura una cache appena creata (dims + hotness + profilo `<container>.stats`). */
+static void moe_cache_configure(LlmEngineMoeRuntime* rt, LlmEngineMoeExpertCache* cache, int hotness) {
+    if (rt == NULL || cache == NULL) return;
+    (void)llmengine_moe_cache_set_dims(cache, rt->meta.layer_count, rt->meta.expert_count);
+    if (hotness) {
+        llmengine_moe_cache_set_hotness(cache, 1);
+        (void)llmengine_moe_cache_profile_load(cache, rt->stats_path);   /* advisory: file assente ok */
+    }
 }
 
 LlmEngineMoeStatus llmengine_moe_load_model_ex(LlmEngineMoeRuntime* rt, const char* path, const LlmEngineMoeRuntimeConfig* cfg) {
@@ -143,6 +156,7 @@ LlmEngineMoeStatus llmengine_moe_load_model_ex(LlmEngineMoeRuntime* rt, const ch
     rt->mode = c.mode;
     rt->device = c.device;
     rt->cfg_cache_mb = c.cache_mb;
+    rt->hotness = c.hotness;
 
     if (rt->meta.layer_count > 0 && rt->meta.expert_count > 0) {
         if (c.mode == LLMENGINE_MOE_MODE_RESIDENT) {
@@ -201,6 +215,13 @@ LlmEngineMoeStatus llmengine_moe_load_model_ex(LlmEngineMoeRuntime* rt, const ch
             rt->active = i;
             rt->loaded = 1;
             if (rt->meta.total_bytes == 0) rt->meta.total_bytes = size;
+            /* D19: hotness opt-in — la cache va creata ORA (meta noto: l'adapter lo riempie qui). */
+            if (rt->hotness && rt->cache == NULL && c.cache_mb > 0) {
+                LlmEngineMoeExpertCache* hc = NULL;
+                if (llmengine_moe_cache_create(&hc, c.cache_mb * 1024ull * 1024ull) == LLMENGINE_MOE_OK) {
+                    rt->cache = hc; moe_cache_configure(rt, hc, 1);
+                }
+            }
             if (c.mode == LLMENGINE_MOE_MODE_RESIDENT) llmengine_moe_preload_resident(rt);
             return LLMENGINE_MOE_OK;
         }
@@ -258,6 +279,13 @@ LlmEngineMoeStatus llmengine_moe_notify_routing(LlmEngineMoeRuntime* rt, uint32_
     if (rt == NULL) return LLMENGINE_MOE_ERR_INVALID;
     if (rt->prof != NULL)
         llmengine_moe_prof_event(rt->prof, LLMENGINE_MOE_TRACE_ROUTER, layer, n > 0 ? experts[0] : 0, 0, n);
+    /* D19: registra la hotness dei routing OSSERVATI (anche senza predictor/prefetch). */
+    if (rt->cache != NULL) {
+        for (uint32_t i = 0; i < n; ++i) { LlmEngineMoeExpertKey k = { layer, experts[i] }; llmengine_moe_cache_note_route(rt->cache, k, 1); }
+    } else if (rt->freq != NULL && layer < rt->freq_layers) {
+        for (uint32_t i = 0; i < n; ++i) if (experts[i] < rt->freq_experts) rt->freq[(size_t)layer * rt->freq_experts + experts[i]]++;
+    }
+    rt->expert_fetches += n;
     if (rt->predictor == NULL) return LLMENGINE_MOE_OK; /* no-op: prefetch speculativo */
     LlmEngineMoeStatus s = llmengine_moe_predictor_notify(rt->predictor, layer, experts, n);
     if (s != LLMENGINE_MOE_OK) return s;
@@ -374,6 +402,7 @@ LlmEngineMoeStatus llmengine_moe_set_cache_budgets(LlmEngineMoeRuntime* rt, uint
     llmengine_moe_kv_destroy(rt->kv);
     rt->cache = ec;
     rt->kv = kv;
+    if (ec != NULL) moe_cache_configure(rt, ec, rt->hotness);
     return LLMENGINE_MOE_OK;
 }
 
@@ -478,6 +507,7 @@ LlmEngineMoeStatus llmengine_moe_set_cache_mb(LlmEngineMoeRuntime* rt, uint64_t 
     if (rt->async != NULL) { llmengine_moe_async_destroy(rt->async); rt->async = NULL; }
     llmengine_moe_cache_destroy(rt->cache);
     rt->cache = nc;
+    if (nc != NULL) moe_cache_configure(rt, nc, rt->hotness);
     return LLMENGINE_MOE_OK;
 }
 
@@ -553,18 +583,35 @@ LlmEngineMoeStatus llmengine_moe_get_tensor(const LlmEngineMoeRuntime* rt, const
 /* ── M18: statistiche d'uso per-esperto, persistite in `<container>.stats` — ADVISORY ──
  * Un file mancante o corrotto NON blocca il load: il chiamante ignora l'errore. */
 uint64_t llmengine_moe_expert_hits(const LlmEngineMoeRuntime* rt, LlmEngineMoeExpertKey key) {
-    if (rt == NULL || rt->freq == NULL || key.layer >= rt->freq_layers || key.expert >= rt->freq_experts) return 0;
+    if (rt == NULL) return 0;
+    if (rt->cache != NULL) return llmengine_moe_cache_freq(rt->cache, key);   /* D19: tabella della cache */
+    if (rt->freq == NULL || key.layer >= rt->freq_layers || key.expert >= rt->freq_experts) return 0;
     return rt->freq[(size_t)key.layer * rt->freq_experts + key.expert];
+}
+
+/* D19: attiva/disattiva la expert cache adattiva. */
+LlmEngineMoeStatus llmengine_moe_set_hotness(LlmEngineMoeRuntime* rt, int on) {
+    if (rt == NULL) return LLMENGINE_MOE_ERR_INVALID;
+    rt->hotness = on ? 1 : 0;
+    if (rt->cache != NULL) {
+        (void)llmengine_moe_cache_set_dims(rt->cache, rt->meta.layer_count, rt->meta.expert_count);
+        llmengine_moe_cache_set_hotness(rt->cache, rt->hotness);
+    }
+    return LLMENGINE_MOE_OK;
 }
 
 /* M20: fetch totali di esperti (hit+miss) in questa sessione. */
 uint64_t llmengine_moe_expert_fetches(const LlmEngineMoeRuntime* rt) {
-    return rt == NULL ? 0 : rt->expert_fetches;
+    if (rt == NULL) return 0;
+    if (rt->cache != NULL) return llmengine_moe_cache_fetches(rt->cache);   /* D19 */
+    return rt->expert_fetches;
 }
 
 LlmEngineMoeStatus llmengine_moe_stats_save(const LlmEngineMoeRuntime* rt, const char* path) {
-    if (rt == NULL || rt->freq == NULL) return LLMENGINE_MOE_ERR_INVALID;
+    if (rt == NULL) return LLMENGINE_MOE_ERR_INVALID;
     if (path == NULL || *path == 0) path = rt->stats_path;
+    if (rt->cache != NULL) return llmengine_moe_cache_profile_save(rt->cache, path);   /* D19 */
+    if (rt->freq == NULL) return LLMENGINE_MOE_ERR_INVALID;
     if (path == NULL || *path == 0) return LLMENGINE_MOE_ERR_INVALID;
     FILE* f = fopen(path, "wb");
     if (f == NULL) return LLMENGINE_MOE_ERR_IO;
@@ -579,8 +626,10 @@ LlmEngineMoeStatus llmengine_moe_stats_save(const LlmEngineMoeRuntime* rt, const
 }
 
 LlmEngineMoeStatus llmengine_moe_stats_load(LlmEngineMoeRuntime* rt, const char* path) {
-    if (rt == NULL || rt->freq == NULL) return LLMENGINE_MOE_ERR_INVALID;
+    if (rt == NULL) return LLMENGINE_MOE_ERR_INVALID;
     if (path == NULL || *path == 0) path = rt->stats_path;
+    if (rt->cache != NULL) return llmengine_moe_cache_profile_load(rt->cache, path);   /* D19 */
+    if (rt->freq == NULL) return LLMENGINE_MOE_ERR_INVALID;
     if (path == NULL || *path == 0) return LLMENGINE_MOE_ERR_INVALID;
     FILE* f = fopen(path, "rb");
     if (f == NULL) return LLMENGINE_MOE_ERR_IO;

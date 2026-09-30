@@ -61,6 +61,7 @@ typedef struct {
     uint32_t async_workers;      /* worker di I/O asincrono (0 = disabilitato) */
     uint32_t prefetch_topn;      /* esperti predetti per layer (0 = nessun prefetch) */
     uint32_t prefetch_cap;       /* bound della coda prefetch */
+    int hotness;                 /* D19: expert cache ADATTIVA (hotness appresa + profilo) */
 } LlmEngineMoeRuntimeConfig;
 
 /* Config di default: SWAP, AUTO, e i valori dalle env LLMENGINE_MOE_* (compatibilita'). */
@@ -132,6 +133,10 @@ uint64_t llmengine_moe_bytes_read(const LlmEngineMoeRuntime* rt);
 /* ── M17: controller ADATTIVO (prefetch depth + cache budget), opt-in LLMENGINE_MOE_ADAPTIVE=1 ── */
 int llmengine_moe_adaptive_enabled(const LlmEngineMoeRuntime* rt);
 uint32_t llmengine_moe_adaptive_topn(const LlmEngineMoeRuntime* rt);
+
+/* ── D19: attiva/disattiva la expert cache ADATTIVA (hotness appresa + profilo `<container>.stats`).
+ * Richiede una cache (cache_mb>0). Default OFF (policy LRU, comportamento invariato). ── */
+LlmEngineMoeStatus llmengine_moe_set_hotness(LlmEngineMoeRuntime* rt, int on);
 
 /* ── M18: statistiche d'uso per-esperto, persistite in `<container>.stats` — ADVISORY ──
  * File mancante/corrotto NON blocca il load (il chiamante ignora l'errore). */

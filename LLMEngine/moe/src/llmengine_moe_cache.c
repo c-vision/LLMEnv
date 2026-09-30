@@ -6,6 +6,7 @@
 #include "llmengine_moe_cache.h"
 
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -37,6 +38,10 @@ struct LlmEngineMoeExpertCache {
     LlmEngineMoeCachePolicy policy;             /* M7 */
     float alpha, beta, gamma, delta;      /* pesi scoring (M7) */
     uint64_t tick;                        /* orologio logico per la recency */
+    /* D19: hotness appresa (freq[layer*experts+expert]) + profilo persistito. NULL = non attiva. */
+    uint32_t* freq;
+    uint32_t f_layers, f_experts;
+    uint64_t fetches;
 };
 
 static size_t cache_hash(LlmEngineMoeExpertKey k) {
@@ -89,8 +94,11 @@ static void entry_free(LlmEngineMoeExpertCache* c, LlmEngineMoeCacheEntry* e) {
 
 /* score di eviction (M7): piu' basso = evincibile prima. LRU = caso con alpha=1, beta=gamma=delta=0. */
 static double entry_score(const LlmEngineMoeExpertCache* c, const LlmEngineMoeCacheEntry* e) {
+    double freq = (double)e->use_count;   /* fallback: frequenza del solo-residente */
+    if (c->freq != NULL && e->key.layer < c->f_layers && e->key.expert < c->f_experts)
+        freq = (double)c->freq[(size_t)e->key.layer * c->f_experts + e->key.expert];
     return (double)c->alpha * (double)e->last_used
-         + (double)c->beta  * (double)e->use_count
+         + (double)c->beta  * freq
          + (double)c->gamma * (double)e->route_prob
          + (double)c->delta * (double)e->future;
 }
@@ -143,6 +151,7 @@ void llmengine_moe_cache_destroy(LlmEngineMoeExpertCache* c) {
     }
     free(c->buckets);
     free(c->scratch);
+    free(c->freq);
     pthread_mutex_destroy(&c->mu);
     pthread_cond_destroy(&c->cv);
     free(c);
@@ -310,3 +319,70 @@ void llmengine_moe_cache_stats(LlmEngineMoeExpertCache* c, LlmEngineMoeCacheStat
 
 uint64_t llmengine_moe_cache_bytes_used(const LlmEngineMoeExpertCache* c) { return c == NULL ? 0 : c->total; }
 uint64_t llmengine_moe_cache_budget(const LlmEngineMoeExpertCache* c) { return c == NULL ? 0 : c->budget; }
+
+/* ── D19: hotness appresa + profilo ─────────────────────────────────────────── */
+LlmEngineMoeStatus llmengine_moe_cache_set_dims(LlmEngineMoeExpertCache* c, uint32_t layers, uint32_t experts) {
+    if (c == NULL || layers == 0 || experts == 0) return LLMENGINE_MOE_ERR_INVALID;
+    pthread_mutex_lock(&c->mu);
+    if (c->freq != NULL && c->f_layers == layers && c->f_experts == experts) { pthread_mutex_unlock(&c->mu); return LLMENGINE_MOE_OK; }
+    uint32_t* nf = (uint32_t*)calloc((size_t)layers * (size_t)experts, sizeof(uint32_t));
+    if (nf == NULL) { pthread_mutex_unlock(&c->mu); return LLMENGINE_MOE_ERR_NO_MEMORY; }
+    free(c->freq);
+    c->freq = nf; c->f_layers = layers; c->f_experts = experts;
+    pthread_mutex_unlock(&c->mu);
+    return LLMENGINE_MOE_OK;
+}
+
+void llmengine_moe_cache_note_route(LlmEngineMoeExpertCache* c, LlmEngineMoeExpertKey key, uint32_t count) {
+    if (c == NULL || count == 0) return;
+    pthread_mutex_lock(&c->mu);
+    if (c->freq != NULL && key.layer < c->f_layers && key.expert < c->f_experts)
+        c->freq[(size_t)key.layer * c->f_experts + key.expert] += count;
+    c->fetches += count;
+    pthread_mutex_unlock(&c->mu);
+}
+
+uint64_t llmengine_moe_cache_freq(const LlmEngineMoeExpertCache* c, LlmEngineMoeExpertKey key) {
+    if (c == NULL || c->freq == NULL) return 0;
+    if (key.layer >= c->f_layers || key.expert >= c->f_experts) return 0;
+    return c->freq[(size_t)key.layer * c->f_experts + key.expert];
+}
+uint64_t llmengine_moe_cache_fetches(const LlmEngineMoeExpertCache* c) { return c == NULL ? 0 : c->fetches; }
+
+void llmengine_moe_cache_set_hotness(LlmEngineMoeExpertCache* c, int on) {
+    if (c == NULL) return;
+    if (on) llmengine_moe_cache_set_policy(c, LLMENGINE_MOE_CACHE_ROUTING, 0.0f, 1.0f, 0.0f, 0.0f);
+    else    llmengine_moe_cache_set_policy(c, LLMENGINE_MOE_CACHE_LRU, 1.0f, 0.0f, 0.0f, 0.0f);
+}
+
+LlmEngineMoeStatus llmengine_moe_cache_profile_save(const LlmEngineMoeExpertCache* c, const char* path) {
+    if (c == NULL || c->freq == NULL || path == NULL || *path == 0) return LLMENGINE_MOE_ERR_INVALID;
+    FILE* f = fopen(path, "wb");
+    if (f == NULL) return LLMENGINE_MOE_ERR_IO;
+    if (fprintf(f, "GMSTATS 1\n") < 0) { fclose(f); return LLMENGINE_MOE_ERR_IO; }
+    for (uint32_t l = 0; l < c->f_layers; ++l)
+        for (uint32_t e = 0; e < c->f_experts; ++e) {
+            uint32_t v = c->freq[(size_t)l * c->f_experts + e];
+            if (v != 0) fprintf(f, "%u %u %u\n", l, e, v);
+        }
+    fclose(f);
+    return LLMENGINE_MOE_OK;
+}
+
+LlmEngineMoeStatus llmengine_moe_cache_profile_load(LlmEngineMoeExpertCache* c, const char* path) {
+    if (c == NULL || c->freq == NULL || path == NULL || *path == 0) return LLMENGINE_MOE_ERR_INVALID;
+    FILE* f = fopen(path, "rb");
+    if (f == NULL) return LLMENGINE_MOE_ERR_IO;
+    char magic[16] = {0}; int ver = 0;
+    if (fscanf(f, "%15s", magic) != 1 || strcmp(magic, "GMSTATS") != 0) { fclose(f); return LLMENGINE_MOE_ERR_FORMAT; }
+    if (fscanf(f, "%d", &ver) != 1 || ver != 1) { fclose(f); return LLMENGINE_MOE_ERR_FORMAT; }
+    unsigned l = 0, e = 0, v = 0; int nread = 0;
+    pthread_mutex_lock(&c->mu);
+    while (fscanf(f, "%u %u %u", &l, &e, &v) == 3) {
+        if (l < c->f_layers && e < c->f_experts) c->freq[(size_t)l * c->f_experts + e] += v;
+        nread++;
+    }
+    pthread_mutex_unlock(&c->mu);
+    fclose(f);
+    return nread > 0 ? LLMENGINE_MOE_OK : LLMENGINE_MOE_ERR_FORMAT;
+}

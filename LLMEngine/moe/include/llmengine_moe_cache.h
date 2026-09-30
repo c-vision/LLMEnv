@@ -67,4 +67,16 @@ void llmengine_moe_cache_stats(LlmEngineMoeExpertCache* c, LlmEngineMoeCacheStat
 uint64_t llmengine_moe_cache_bytes_used(const LlmEngineMoeExpertCache* c);
 uint64_t llmengine_moe_cache_budget(const LlmEngineMoeExpertCache* c);
 
+/* ── D19: hotness appresa (frequenza per (layer,expert) dai routing osservati) + profilo ──
+ * La cache puo' possedere una tabella `freq` alimentata da `note_route`; la policy ROUTING puo'
+ * cosi' preferire gli esperti storicamente piu' caldi (che sopravvivono all'eviction) e la tabella
+ * si persiste in un profilo (formato `GMSTATS 1`). Default: nessuna tabella, policy LRU invariata. */
+LlmEngineMoeStatus llmengine_moe_cache_set_dims(LlmEngineMoeExpertCache* c, uint32_t layers, uint32_t experts);
+void llmengine_moe_cache_note_route(LlmEngineMoeExpertCache* c, LlmEngineMoeExpertKey key, uint32_t count);
+uint64_t llmengine_moe_cache_freq(const LlmEngineMoeExpertCache* c, LlmEngineMoeExpertKey key);
+uint64_t llmengine_moe_cache_fetches(const LlmEngineMoeExpertCache* c);
+void llmengine_moe_cache_set_hotness(LlmEngineMoeExpertCache* c, int on);
+LlmEngineMoeStatus llmengine_moe_cache_profile_save(const LlmEngineMoeExpertCache* c, const char* path);
+LlmEngineMoeStatus llmengine_moe_cache_profile_load(LlmEngineMoeExpertCache* c, const char* path);
+
 #endif /* LLMENGINE_MOE_CACHE_H */
