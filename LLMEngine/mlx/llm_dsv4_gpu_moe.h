@@ -240,9 +240,13 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
     if (!gp || !rw) { free(gp); free(rw); return false; }
     const void** upp = gp + (size_t)nt * used; const void** dp = upp + (size_t)nt * used;
     bool ok = true;
+    int* sel_all = (int*)malloc(sizeof(int) * (size_t)nt * used);
+    float* w_all = (float*)malloc(sizeof(float) * (size_t)nt * used);
+    if (!sel_all || !w_all) { free(sel_all); free(w_all); free(gp); free(rw); return false; }
+    for (int t = 0; t < nt; t++) llm_dsv4_moe_route(c, L, X + (size_t)t * embd, il, tokens[t], sel_all + (size_t)t * used, w_all + (size_t)t * used);
+    if (streaming && pe->store_prefetch) pe->store_prefetch(pe->store, il, sel_all, nt * used);   /* letture parallele dei mancanti */
     for (int t = 0; ok && t < nt; t++) {
-        int selected[LLM_DSV4_MAX_EXPERT_USED]; float weight[LLM_DSV4_MAX_EXPERT_USED];
-        llm_dsv4_moe_route(c, L, X + (size_t)t * embd, il, tokens[t], selected, weight);
+        int* selected = sel_all + (size_t)t * used; float* weight = w_all + (size_t)t * used;
         for (int i = 0; ok && i < used; i++) {
             const int e = selected[i], k = t * used + i;
             if (streaming) {
@@ -268,7 +272,7 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
         /* senza shared expert su GPU il path per-token lo aggiunge su CPU: qui non e' coperto -> false */
         if (ok && !sg) ok = false;
     }
-    free(gp); free(rw);
+    free(sel_all); free(w_all); free(gp); free(rw);
     return ok;
 }
 

@@ -11,6 +11,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <dispatch/dispatch.h>
 #include "llm_dsv4.h"
 #include "llm_dsv4_packed.h"
 #include "llm_gguf.h"
@@ -122,8 +123,49 @@ static inline void llm_dsv4_store_ht_del(LlmDsv4Store* s, int layer, int e) {
         if (k == key) { s->ht_keys[i] = -2; return; }
     }
 }
+/* Assegna lo slot della cache a (layer, e): hit -> idx e *miss=0; miss -> sceglie/ sfratta uno slot, prepara il buffer
+ * (allineato a pagina + padding, per le view Metal no-copy) e ritorna idx con *miss=1 (I RECORD NON SONO ANCORA LETTI:
+ * li legge chi chiama, vedi llm_dsv4_store_read_ent). Ritorna -1 se non c'e' memoria (fallback mmap). */
+static inline int llm_dsv4_store_claim(LlmDsv4Store* s, int layer, int e, int* miss) {
+    LlmDsv4StoreLayer* L = &s->layers[layer];
+    *miss = 0;
+    int idx = llm_dsv4_store_find(s, layer, e);
+    if (idx >= 0) { s->hits++; s->ents[idx].age = ++s->tick; return idx; }
+    s->misses++;
+    for (int i = 0; i < s->cap; i++) if (!s->ents[i].valid) { idx = i; break; }
+    if (idx < 0) {  /* evict LRU */
+        uint64_t oldest = ~0ull; for (int i = 0; i < s->cap; i++) if (s->ents[i].age < oldest) { oldest = s->ents[i].age; idx = i; }
+        s->evictions++;
+        llm_dsv4_store_ht_del(s, s->ents[idx].layer, s->ents[idx].e);
+    }
+    LlmDsv4StoreEnt* en = &s->ents[idx];
+    size_t len = L->nb_g + L->nb_u + L->nb_d;
+    /* Buffer ALLINEATO a pagina + paddato: le view Metal zero-copy (newBufferWithBytesNoCopy) mappano pagine intere
+     * [align_down, align_up) -> il buffer deve coprirle, altrimenti la view esce dall'allocazione. */
+    const size_t page = 16384;
+    size_t padded = ((len + page - 1) / page) * page + page;
+    if (en->cap < padded) { free(en->buf); en->buf = NULL; en->cap = 0; }
+    if (!en->buf) {
+        void* p = NULL;
+        if (posix_memalign(&p, page, padded) == 0) { en->buf = (uint8_t*)p; en->cap = padded; }
+    }
+    if (!en->buf) { en->valid = 0; return -1; }
+    en->len = len;
+    en->valid = 1; en->layer = layer; en->e = e; en->age = ++s->tick;
+    llm_dsv4_store_ht_put(s, layer, e, idx);
+    if (idx >= s->n) s->n = idx + 1;
+    *miss = 1;
+    return idx;
+}
+/* Legge i 3 record (gate/up/down) dell'esperto nello slot. 0 = ok. */
+static inline int llm_dsv4_store_read_ent(LlmDsv4Store* s, int layer, int e, int idx, int part) {
+    LlmDsv4StoreLayer* L = &s->layers[layer]; LlmDsv4StoreEnt* en = &s->ents[idx];
+    if (part == 0) return pread(s->fd, en->buf, L->nb_g, (off_t)(L->off_g + (uint64_t)e * L->stride_g)) == (ssize_t)L->nb_g ? 0 : -1;
+    if (part == 1) return pread(s->fd, en->buf + L->nb_g, L->nb_u, (off_t)(L->off_u + (uint64_t)e * L->stride_u)) == (ssize_t)L->nb_u ? 0 : -1;
+    return pread(s->fd, en->buf + L->nb_g + L->nb_u, L->nb_d, (off_t)(L->off_d + (uint64_t)e * L->stride_d)) == (ssize_t)L->nb_d ? 0 : -1;
+}
+
 /* Ritorna i puntatori ai tre record-esperto (validi fino alla prossima chiamata). */
-static inline const uint8_t* llm_dsv4_store_expert_impl(LlmDsv4Store*, int, int, const uint8_t**, const uint8_t**, const uint8_t**);
 static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, int e,
         const uint8_t** gate, const uint8_t** up, const uint8_t** down) {
     LlmDsv4StoreLayer* L = &s->layers[layer];
@@ -133,45 +175,47 @@ static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, i
     const uint8_t* r_d = s->resident_base + L->off_d + (uint64_t)e * L->stride_d;
     *gate = r_g; *up = r_u; *down = r_d;
     if (s->mode == LLM_DSV4_STORE_RESIDENT) return r_g;
-    int idx = llm_dsv4_store_find(s, layer, e);
-    if (idx >= 0) { s->hits++; s->ents[idx].age = ++s->tick; }
-    else {
-        s->misses++;
-        idx = -1;
-        for (int i = 0; i < s->cap; i++) if (!s->ents[i].valid) { idx = i; break; }
-        if (idx < 0) {  /* evict LRU */
-            uint64_t oldest = ~0ull; for (int i = 0; i < s->cap; i++) if (s->ents[i].age < oldest) { oldest = s->ents[i].age; idx = i; }
-            s->evictions++;
-            llm_dsv4_store_ht_del(s, s->ents[idx].layer, s->ents[idx].e);
-        }
-        LlmDsv4StoreEnt* en = &s->ents[idx];
-        size_t len = L->nb_g + L->nb_u + L->nb_d;
-        /* Buffer ALLINEATO a pagina + paddato: le view Metal zero-copy (newBufferWithBytesNoCopy)
-         * mappano pagine intere [align_down, align_up) → il buffer deve coprirle, altrimenti la
-         * view esce dall'allocazione. Necessario per usare la cache nel path GPU. */
-        const size_t page = 16384;
-        size_t padded = ((len + page - 1) / page) * page + page;
-        if (en->cap < padded) { free(en->buf); en->buf = NULL; en->cap = 0; }
-        if (!en->buf) {
-            void* p = NULL;
-            if (posix_memalign(&p, page, padded) == 0) { en->buf = (uint8_t*)p; en->cap = padded; }
-        }
-        if (!en->buf) { *gate = r_g; *up = r_u; *down = r_d; return r_g; }
-        en->len = len;
-        if (pread(s->fd, en->buf, L->nb_g, (off_t)(L->off_g + (uint64_t)e * L->stride_g)) != (ssize_t)L->nb_g ||
-            pread(s->fd, en->buf + L->nb_g, L->nb_u, (off_t)(L->off_u + (uint64_t)e * L->stride_u)) != (ssize_t)L->nb_u ||
-            pread(s->fd, en->buf + L->nb_g + L->nb_u, L->nb_d, (off_t)(L->off_d + (uint64_t)e * L->stride_d)) != (ssize_t)L->nb_d) {
-            en->valid = 0; fprintf(stderr, "llm_dsv4_store: read fallita layer=%d e=%d (fallback mmap)\n", layer, e);
+    int miss = 0, idx = llm_dsv4_store_claim(s, layer, e, &miss);
+    if (idx < 0) return r_g;
+    LlmDsv4StoreEnt* en = &s->ents[idx];
+    if (miss) {
+        if (llm_dsv4_store_read_ent(s, layer, e, idx, 0) || llm_dsv4_store_read_ent(s, layer, e, idx, 1) ||
+            llm_dsv4_store_read_ent(s, layer, e, idx, 2)) {
+            en->valid = 0; llm_dsv4_store_ht_del(s, layer, e);
+            fprintf(stderr, "llm_dsv4_store: read fallita layer=%d e=%d (fallback mmap)\n", layer, e);
             return r_g;   /* output gia' settati ai puntatori resident */
         }
-        s->bytes_read += len;
-        en->valid = 1; en->layer = layer; en->e = e; en->age = ++s->tick;
-        llm_dsv4_store_ht_put(s, layer, e, idx);
-        if (idx >= s->n) s->n = idx + 1;
+        s->bytes_read += en->len;
     }
-    LlmDsv4StoreEnt* en = &s->ents[idx];
     *gate = en->buf; *up = en->buf + L->nb_g; *down = en->buf + L->nb_g + L->nb_u;
     return en->buf;
+}
+
+/* PREFETCH parallelo di un insieme di esperti di un layer (es. i 6 esperti di ogni token di un chunk): gli slot sono
+ * assegnati in serie (logica LRU), le letture dei record mancanti (3 pread per esperto) girano in parallelo su GCD
+ * (l'NVMe/page cache scalano con piu' richieste). Dopo, llm_dsv4_store_expert() e' tutto hit. `n` fino a 4096. */
+static inline void llm_dsv4_store_prefetch(LlmDsv4Store* s, int layer, const int* experts, int n) {
+    if (!s || s->mode != LLM_DSV4_STORE_SWAP || n <= 0) return;
+    typedef struct { int e, idx; } Job;
+    Job* jobs = (Job*)malloc(sizeof(Job) * (size_t)n);   /* heap: letto dai worker GCD (un __thread non sarebbe condiviso) */
+    if (!jobs) return;
+    int nj = 0;
+    for (int i = 0; i < n; i++) {
+        int miss = 0, idx = llm_dsv4_store_claim(s, layer, experts[i], &miss);
+        if (idx >= 0 && miss) { jobs[nj].e = experts[i]; jobs[nj].idx = idx; nj++; }
+    }
+    if (nj == 0) { free(jobs); return; }
+    __block int bad = 0;
+    dispatch_apply((size_t)nj * 3, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t k) {
+        if (llm_dsv4_store_read_ent(s, layer, jobs[k / 3].e, jobs[k / 3].idx, (int)(k % 3))) bad = 1;
+    });
+    LlmDsv4StoreLayer* L = &s->layers[layer];
+    for (int j = 0; j < nj; j++) {
+        LlmDsv4StoreEnt* en = &s->ents[jobs[j].idx];
+        if (bad) { en->valid = 0; llm_dsv4_store_ht_del(s, layer, jobs[j].e); }   /* rilegge (serie) al primo uso */
+        else s->bytes_read += L->nb_g + L->nb_u + L->nb_d;
+    }
+    free(jobs);
 }
 
 #endif /* LLM_DSV4_STORE_H */

@@ -35,6 +35,7 @@ typedef struct {
     int q_a_type, q_b_type, kv_type, out_a_type, out_b_type;
     void* store;   /* LlmDsv4Store* opzionale (swap/residency esperti); NULL = mmap residente */
     const uint8_t* (*store_get)(void* store, int layer, int e, const uint8_t** g, const uint8_t** u, const uint8_t** d);
+    void (*store_prefetch)(void* store, int layer, const int* experts, int n);   /* letture parallele dei mancanti (opz.) */
 } LlmDsv4PackedExperts;
 
 typedef struct {

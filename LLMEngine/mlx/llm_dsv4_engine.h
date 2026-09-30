@@ -32,6 +32,10 @@ static inline const uint8_t* llm_dsv4_engine_store_cb(void* s, int layer, int e,
     return llm_dsv4_store_expert((LlmDsv4Store*)s, layer, e, g, u, d);
 }
 
+static inline void llm_dsv4_engine_store_prefetch_cb(void* s, int layer, const int* experts, int n) {
+    llm_dsv4_store_prefetch((LlmDsv4Store*)s, layer, experts, n);
+}
+
 /* Abilita lo SWAP degli esperti: store con cache LRU (cap_bundles bundle gate+up+down).
  * Va chiamata dopo il load (usa path+gguf+cfg). Ritorna false su errore. */
 static inline bool llm_dsv4_engine_enable_swap(LlmDsv4Engine* e, int cap_bundles) {
@@ -41,6 +45,7 @@ static inline bool llm_dsv4_engine_enable_swap(LlmDsv4Engine* e, int cap_bundles
     for (int il = 0; il < e->w.cfg.n_layer; il++) {
         e->w.exps[il].store = e->store;
         e->w.exps[il].store_get = llm_dsv4_engine_store_cb;
+        e->w.exps[il].store_prefetch = llm_dsv4_engine_store_prefetch_cb;
     }
     return true;
 }
