@@ -2037,6 +2037,76 @@ static int llmmodelio_arch_resolve_gguf(const char* gguf_path) {
     }
     g_arch_ok = 0; return -1;
 }
+/* ── AGGIUNGERE modulo dichiarato (.gmmod): dichiarata nell'ABI + risolta + eseguita ── */
+static char* lj_slurp(const char* p) {
+    FILE* f = fopen(p, "rb"); if (!f) return NULL;
+    fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
+    char* b=(char*)malloc((size_t)n+1); if(!b){fclose(f);return NULL;}
+    if (fread(b,1,(size_t)n,f)!=(size_t)n){free(b);fclose(f);return NULL;} b[n]=0; fclose(f); return b;
+}
+static const char* lj_v(const char* j, const char* key) {
+    if (!j) return NULL;
+    char pat[96]; snprintf(pat,sizeof pat,"\"%s\"",key);
+    const char* p=j;
+    while ((p=strstr(p,pat))) { const char* c=p+strlen(pat); while(*c==' '||*c=='\t')c++; if(*c==':'){c++;while(*c==' '||*c=='\t')c++;return c;} p++; }
+    return NULL;
+}
+static void lj_s(const char* p, char* out, size_t cap) {
+    if (cap) out[0]=0;
+    if (!p) return;
+    while (*p==' '||*p=='\t') p++;
+    if (*p!='"') return; p++;
+    size_t i=0; while (*p && *p!='"') { if (i<cap-1) out[i++]=*p; p++; } out[i]=0;
+}
+/* il tensore `name` appartiene alla famiglia della modalita' dichiarata? */
+static int lj_mod_role(const LlmDesc* a, const char* name, const char* modality) {
+    const char* role = llmdesc_role(a, name);
+    int vis = (strcmp(role,"VISION")==0 || strcmp(role,"VISION_ALIGNER")==0 || strstr(name,"vision") || strstr(name,"mmproj") || strstr(name,"image_"));
+    int aud = (strncmp(role,"AUDIO",5)==0 || strstr(name,"audio") || strstr(name,"whisper"));
+    int mtp = (strcmp(role,"MTP")==0 || strncmp(name,"mtp.",4)==0);
+    if (strcasecmp(modality,"vision")==0 || strcasecmp(modality,"ocr")==0) return vis;
+    if (strcasecmp(modality,"audio")==0) return aud;
+    if (strcasecmp(modality,"mtp")==0) return mtp;
+    if (strcasecmp(modality,"omni")==0) return vis || aud;
+    return 1;   /* adapter|text|module: nessun vincolo di ruolo */
+}
+int llmmodelio_model_module(const char* base_path, const char* gmmod_path, const char* module_path, const char* out_path) {
+    if (base_path==NULL || gmmod_path==NULL || module_path==NULL || out_path==NULL) return -1;
+    char* j = lj_slurp(gmmod_path); if (j == NULL) return -1;
+    char modality[32]; lj_s(lj_v(j,"modality"), modality, sizeof modality);
+    char arch[96]; lj_s(lj_v(j,"arch"), arch, sizeof arch);
+    char mmproj[256]; lj_s(lj_v(j,"mmproj"), mmproj, sizeof mmproj);
+    free(j);
+    if (!modality[0]) return -1;                 /* la modalita' DEVE essere dichiarata nel .gmmod */
+    /* 1) RISOLVI l'ABI dell'arch (dal .gmmod o dal modulo gguf). */
+    int ok = 0;
+    if (arch[0]) {
+        char abi[2048];
+        if (llmdesc_abi_dir(abi, sizeof abi)) {
+            char path[4096];
+            snprintf(path,sizeof path,"%s/%s.llmarch", abi, arch);
+            if (llmdesc_load(path,&g_arch)==0){ snprintf(g_arch_path,sizeof g_arch_path,"%s",path); g_arch_ok=1; ok=1; }
+            if (!ok){ snprintf(path,sizeof path,"%s/%s.gmbarch", abi, arch); if (llmdesc_load(path,&g_arch)==0){ snprintf(g_arch_path,sizeof g_arch_path,"%s",path); g_arch_ok=1; ok=1; } }
+        }
+    }
+    if (!ok) { if (llmmodelio_arch_resolve_gguf(module_path)!=0) return -1; }
+    if (!g_arch_ok) return -1;
+    /* 2) VALIDA: l'ABI dichiara la modalita'? (dichiarata nell'ABI) */
+    const char* amod = llmdesc_modality(&g_arch);
+    int declared = (strcasecmp(amod, modality)==0)
+        || (strcasecmp(amod,"omni")==0 && (strcasecmp(modality,"vision")==0||strcasecmp(modality,"audio")==0||strcasecmp(modality,"ocr")==0));
+    if (!declared) return -1;
+    /* 3) VALIDA: il modulo porta almeno un tensore della famiglia dichiarata (risolta via ruoli ABI). */
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv=NULL; int nkv=0;
+    if (llmcodec_gguf_read_meta(module_path, &kv, &nkv, &fi) != 0) return -1;
+    int carry = 0;
+    for (uint64_t i=0;i<fi.n_tensors;i++) if (lj_mod_role(&g_arch, fi.tensors[i].name, modality)) { carry=1; break; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    if (!carry) return -1;
+    (void)mmproj;
+    /* 4) ESEGUI: fondi il modulo nella base. */
+    return llmmodelio_model_add(base_path, module_path, out_path);
+}
 int llmmodelio_model_convert(const char* src, const char* dst, const char* fmt)
 {
     const char* s = src ? src : "";
