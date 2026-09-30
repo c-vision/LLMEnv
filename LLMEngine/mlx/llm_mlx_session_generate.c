@@ -427,7 +427,15 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
     if (!m->dsv4 && !m->dsv41) {
         int ord = 8;   /* default built-in (opt-out `spec_ngram=0`) */
         if (llm_ai_mlx_opt_get_int("spec_ngram", &ord) != 0) ord = 8;
-        if (ord >= 2) {
+        /* Modelli IBRIDI con stato ricorrente (GDN qwen3_5, MLA+KDA kimi): lo stato vive in
+         * sess->aux_cache, che il checkpoint/rollback del draft NON copre -> il rollback
+         * lascerebbe un aux stantio/NULL (array vuoto CMLX / risultato errato, cfr. il
+         * side-channel di forward_tokens_batch_multi_cap). Finche' il rollback non include
+         * l'aux, il percorso self-speculative si disattiva per questi modelli. */
+        const bool hybrid_recurrent = (m->cfg.model_type != NULL &&
+                                       strcmp(m->cfg.model_type, "kimi_linear") == 0) ||
+                                      (m->cfg.is_linear_layer != NULL);
+        if (ord >= 2 && !hybrid_recurrent) {
             llm_mlx_sampling_t smn = llm_mlx_session_sampling(s);
             if (!smn.active || smn.temperature <= 0.0f) {
                 if (!s->ngram_built) llm_ai_mlx_session_build_ngram(handle, ord);
