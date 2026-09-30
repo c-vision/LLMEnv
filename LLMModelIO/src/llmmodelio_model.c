@@ -1553,6 +1553,8 @@ void llmmodelio_arch_show(void) {
     fprintf(LOUT, "  quant (%d):", g_arch.n_quant);
     for (int i = 0; i < g_arch.n_quant; i++) fprintf(LOUT, " %s=%s", g_arch.quant[i].role, g_arch.quant[i].fmt);
     fprintf(LOUT, "\n  recipe=%s boost_fmt=%s scale_suffix=%s\n", g_arch.recipe, g_arch.boost_fmt, g_arch.scale_suffix);
+    fprintf(LOUT, "  modality=%s source.format=%s mmproj=%s\n", llmdesc_modality(&g_arch),
+            g_arch.source_format[0] ? g_arch.source_format : "-", llmdesc_source_mmproj(&g_arch));
 }
 /* Valida un modello: ogni tensore dell'index ha un ruolo noto (non OTHER)? Ritorna il n. di OTHER.
  * DETERMINISTICO sull'argomento: `CHECK <hf_dir>` risolve SEMPRE la descrizione di QUELLA dir
@@ -1653,6 +1655,9 @@ static const char* llmmodelio_arch_dest(const char* role)
     if (role == NULL) return "text";
     if (strcmp(role, "VISION") == 0) return "vision";
     if (strcmp(role, "VISION_ALIGNER") == 0) return "aligner";
+    if (strncmp(role, "AUDIO", 5) == 0) return "audio";
+    if (strcmp(role, "MTP") == 0) return "mtp";
+    if (strcmp(role, "ENGRAM") == 0) return "engram";
     return "text";
 }
 

@@ -20,6 +20,12 @@ static int jcopy_str(const char* p, char* out, size_t cap) {
     size_t i=0; while (*p && *p!='"' && i<cap-1) out[i++]=*p++;
     out[i]=0; return i>0;
 }
+static int jbool(const char* j, const char* key) {
+    char pat[96]; snprintf(pat,sizeof pat,"\"%s\"",key);
+    const char* p=j;
+    while ((p=strstr(p,pat))) { const char* c=p+strlen(pat); while(*c==' '||*c=='\t')c++; if(*c==':'){c++;while(*c==' '||*c=='\t')c++; return strncmp(c,"true",4)==0;} p++; }
+    return 0;
+}
 static const char* jv(const char* j, const char* key) {
     char pat[96]; snprintf(pat,sizeof pat,"\"%s\"",key);
     const char* p=j;
@@ -127,6 +133,39 @@ int llmdesc_load(const char* path, LlmDesc* out) {
             memcpy(acobj,ac,AL); acobj[AL]=0;
             jcopy_str(jv(acobj,"dtype"),out->runtime_activation_dtype,sizeof out->runtime_activation_dtype);
           } }
+      } }
+    /* source: { "format":"gguf", "mmproj":"..." } — dichiarazione di composizione/modality. */
+    { const char* sc=jv(j,"source");
+      if (sc && *sc=='{') {
+        const char* seo=sc; int d=0; do { if(*seo=='{')d++; else if(*seo=='}'){d--; if(d==0)break;} seo++; } while(*seo);
+        char sobj[8192]; size_t SL=(size_t)(seo-sc+1); if(SL>=sizeof sobj)SL=sizeof sobj-1;
+        memcpy(sobj,sc,SL); sobj[SL]=0;
+        jcopy_str(jv(sobj,"format"),out->source_format,sizeof out->source_format);
+        jcopy_str(jv(sobj,"mmproj"),out->source_mmproj,sizeof out->source_mmproj);
+      } }
+    /* runtime.multimodal / runtime.decode (gia' isolati in `rtobj` sopra). */
+    { const char* rt=jv(j,"runtime");
+      if (rt && *rt=='{') {
+        const char* reo=rt; int rd=0; do { if(*reo=='{')rd++; else if(*reo=='}'){rd--; if(rd==0)break;} reo++; } while(*reo);
+        char rtobj[16384]; size_t RL=(size_t)(reo-rt+1); if(RL>=sizeof rtobj)RL=sizeof rtobj-1;
+        memcpy(rtobj,rt,RL); rtobj[RL]=0;
+        const char* mm=jv(rtobj,"multimodal");
+        if (mm && *mm=='{') {
+          const char* meo=mm; int md=0; do { if(*meo=='{')md++; else if(*meo=='}'){md--; if(md==0)break;} meo++; } while(*meo);
+          char mmobj[2048]; size_t ML=(size_t)(meo-mm+1); if(ML>=sizeof mmobj)ML=sizeof mmobj-1;
+          memcpy(mmobj,mm,ML); mmobj[ML]=0;
+          jcopy_str(jv(mmobj,"vision"),out->mm_vision,sizeof out->mm_vision);
+          out->mm_aligner = jbool(mmobj,"aligner");
+          out->mm_present = jbool(mmobj,"present");
+        }
+        const char* dc=jv(rtobj,"decode");
+        if (dc && *dc=='{') {
+          const char* deo=dc; int dd=0; do { if(*deo=='{')dd++; else if(*deo=='}'){dd--; if(dd==0)break;} deo++; } while(*deo);
+          char dobj[2048]; size_t DL=(size_t)(deo-dc+1); if(DL>=sizeof dobj)DL=sizeof dobj-1;
+          memcpy(dobj,dc,DL); dobj[DL]=0;
+          out->mm_mtp = jbool(dobj,"mtp");
+          out->mm_dspark = jbool(dobj,"dspark");
+        }
       } }
     free(j);
 
@@ -253,4 +292,23 @@ const char* llmdesc_fmt(const LlmDesc* a, const char* role) {
     if (!a||!role) return NULL;
     for (int i=0;i<a->n_quant;i++) if (strcmp(a->quant[i].role, role)==0) return a->quant[i].fmt;
     return NULL;
+}
+
+const char* llmdesc_source_mmproj(const LlmDesc* a) { return (a && a->source_mmproj[0]) ? a->source_mmproj : ""; }
+const char* llmdesc_modality(const LlmDesc* a) {
+    if (!a) return "text";
+    int vision = 0, audio = 0;
+    for (int i = 0; i < a->n_roles; i++) {
+        const char* r = a->roles[i].role;
+        if (strncmp(r, "AUDIO", 5) == 0) audio = 1;
+        else if (strcmp(r, "VISION") == 0 || strcmp(r, "VISION_ALIGNER") == 0) vision = 1;
+    }
+    if (llmdesc_struct(a, "vision")) vision = 1;
+    if (llmdesc_struct(a, "audio")) audio = 1;
+    if (audio && vision) return "omni";
+    if (audio) return "audio";
+    if (vision) return (strstr(a->arch, "ocr") || strstr(a->arch, "paddle")) ? "ocr" : "vision";
+    if (a->mm_mtp) return "mtp";
+    if (a->mm_vision[0]) return "vision";
+    return "text";
 }
