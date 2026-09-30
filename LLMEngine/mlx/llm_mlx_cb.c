@@ -1515,3 +1515,66 @@ int llm_ai_mlx_kvq_spill_policy_selftest(char* out, size_t cap) {
     llm_kv_disk_close(&d);
     return pass ? 0 : 1;
 }
+
+/* F19 (state oracle, sintetico, NESSUN modello): verifica i fondamenti del rewind/truncate
+ * speculativo sugli ibridi GDN — che le primitive di cache (checkpoint/rollback) + il ri-append
+ * siano BYTE-ESATTI e DETERMINISTICI. Stato sintetico [nkv,L0,hd].
+ *  (1) checkpoint -> append -> rollback  ==> bytes IDENTICI al checkpoint;
+ *  (2) determinismo: la stessa operazione due volte ==> bytes identici;
+ *  (3) re-forward identity: (rollback+append) == append diretto ==> byte-identici (come fa il verify
+ *      DFlash2 dopo un reject). */
+int llm_ai_mlx_spec_state_selftest(char* out, size_t cap) {
+    if (out == NULL || cap == 0) return -1;
+    out[0] = '\0';
+    const int nkv = 2, L0 = 8, Q = 4, hd = 64;
+    const size_t n0 = (size_t)nkv * L0 * hd, nq = (size_t)nkv * Q * hd, nt = n0 + nq;
+    mlx_stream s = mlx_default_gpu_stream_new();
+    float* base = (float*)malloc(n0 * 4);
+    float* qd = (float*)malloc(nq * 4);
+    float* A = (float*)malloc(nt * 4);
+    float* B = (float*)malloc(nt * 4);
+    if (!base || !qd || !A || !B) { free(base); free(qd); free(A); free(B); snprintf(out, cap, "alloc FAIL"); return 1; }
+    for (size_t i = 0; i < n0; i++) base[i] = sinf((float)i * 0.7f) * 3.0f;
+    for (size_t i = 0; i < nq; i++) qd[i] = cosf((float)i * 0.31f) * 2.0f;
+    mlx_array st = mlx_array_new_data(base, (int[]){nkv, L0, hd}, 3, MLX_FLOAT32);
+    mlx_array q  = mlx_array_new_data(qd,   (int[]){nkv, Q,  hd}, 3, MLX_FLOAT32);
+    mlx_array_eval(st); mlx_array_eval(q);
+
+    /* helper: concat(st, q) lungo l'asse sequenza. */
+    #define APPEND(dst) do { mlx_vector_array _v = mlx_vector_array_new(); \
+        mlx_vector_array_append_value(_v, st); mlx_vector_array_append_value(_v, q); \
+        mlx_concatenate_axis(&(dst), _v, 1, s); mlx_vector_array_free(_v); mlx_array_eval(dst); } while (0)
+
+    /* (1) checkpoint -> append -> rollback == base */
+    mlx_array ck = mlx_array_new();
+    llm_mlx_cache_checkpoint(&ck, st, s);
+    mlx_array ap = mlx_array_new(); APPEND(ap);
+    mlx_array_set(&st, ap);                     /* simula l'append che muta lo stato */
+    llm_mlx_cache_rollback(&st, ck, s); mlx_array_eval(st);
+    int rt = 1;
+    { const float* d = mlx_array_data_float32(st);
+      if (!d) rt = 0; else for (size_t i = 0; i < n0; i++) if (d[i] != base[i]) { rt = 0; break; } }
+
+    /* (2) determinismo: concat(base,q) due volte -> identici */
+    mlx_array a1 = mlx_array_new(); APPEND(a1);
+    mlx_array a2 = mlx_array_new(); APPEND(a2);
+    { const float* d1 = mlx_array_data_float32(a1); const float* d2 = mlx_array_data_float32(a2);
+      if (d1 && d2) { memcpy(A, d1, nt * 4); memcpy(B, d2, nt * 4); } else { A[0] = B[0] = -1; } }
+    int det = 1; for (size_t i = 0; i < nt; i++) if (A[i] != B[i]) { det = 0; break; }
+
+    /* (3) re-forward identity: (rollback + append) == append diretto (a1) */
+    llm_mlx_cache_rollback(&st, ck, s); mlx_array_eval(st);
+    mlx_array a3 = mlx_array_new(); APPEND(a3);
+    { const float* d3 = mlx_array_data_float32(a3);
+      if (d3) memcpy(B, d3, nt * 4); else B[0] = -2; }
+    int ref = 1; for (size_t i = 0; i < nt; i++) if (A[i] != B[i]) { ref = 0; break; }
+    #undef APPEND
+
+    int pass = rt && det && ref;
+    snprintf(out, cap, "spec_state selftest: rollback_roundtrip=%s deterministic=%s reforward_identity=%s %s",
+             rt ? "OK" : "FAIL", det ? "OK" : "FAIL", ref ? "OK" : "FAIL", pass ? "OK" : "FAIL");
+    mlx_array_free(st); mlx_array_free(q); mlx_array_free(ck); mlx_array_free(ap);
+    mlx_array_free(a1); mlx_array_free(a2); mlx_array_free(a3);
+    free(base); free(qd); free(A); free(B);
+    return pass ? 0 : 1;
+}
