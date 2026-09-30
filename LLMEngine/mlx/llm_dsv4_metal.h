@@ -67,6 +67,12 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
                                uint32_t down_nb01, const void* sg, const void* su, const void* sd,
                                uint32_t s_nb_g, uint32_t s_nb_d, float* out);
 
+/* MoE batched via mul_mm_id con TABELLA DI INDIRIZZI per esperto (gli esperti stanno in buffer separati dello store): gate_p/up_p/down_p
+ * [n_expert] = puntatore all'esperto (NULL se non usato in questo chunk). Stessa semantica di moe_mm_batch (shared expert incluso). */
+int llm_dsv4_metal_moe_mm_addr_batch(LlmDsv4Metal* b, int nt, const void* const* gate_p, const void* const* up_p, const void* const* down_p,
+        int gtype, int dtype, uint32_t n_expert, uint32_t embd, uint32_t ff, uint32_t gu_row_bytes, uint32_t down_row_bytes,
+        const int* ids, const float* rws, const float* x, float clamp,
+        const void* sg, const void* su, const void* sd, uint32_t s_nb_g, uint32_t s_nb_d, float* out);
 /* MoE Q4_K (gate/up/down tutti Q4_K) per `nt` token in UNA cb: kernel ds4 slots6 pair_swiglu + sum6. Stessa interfaccia del batch IQ2. */
 int llm_dsv4_metal_moe_q4k_batch(LlmDsv4Metal* b, int nt, const void* const* gates, const void* const* ups,
                                const void* const* downs, const float* x, const float* rws, int n,

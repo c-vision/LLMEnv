@@ -76,6 +76,11 @@ parts.append("typedef decltype(kernel_mul_mm_id<32, half, half4x4, simdgroup_hal
 for host, blk, deq in (("q8_0", "block_q8_0", "dequantize_q8_0"), ("iq2_xxs", "block_iq2_xxs", "dequantize_iq2_xxs"), ("q2_K", "block_q2_K", "dequantize_q2_K"), ("q4_K", "block_q4_K", "dequantize_q4_K")):
     parts.append(f'template [[host_name("kernel_mul_mm_id_{host}_f32")]] kernel mul_mm_id kernel_mul_mm_id<32, half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, {blk}, {'2' if host == 'q8_0' else 'QK_NL'}, {deq}, float, float4x4, float, float2x4>;')
 
+# variante ADDRESS-TABLE (ds4 EXPERT_ADDRESSES): src0 = tabella di indirizzi GPU uint64 per esperto (gli esperti stanno in buffer
+# separati dello store, tutti nel residency set) -> nessuna copia e nessuno stack contiguo.
+for host, blk, deq in (("iq2_xxs", "block_iq2_xxs", "dequantize_iq2_xxs"), ("q2_K", "block_q2_K", "dequantize_q2_K"), ("q4_K", "block_q4_K", "dequantize_q4_K")):
+    parts.append(f'template [[host_name("kernel_mul_mm_id_{host}_addr_f32")]] kernel mul_mm_id kernel_mul_mm_id<32, half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, {blk}, QK_NL, {deq}, float, float4x4, float, float2x4, false, true>;')
+
 # --- MoE Q4_K "slots6" (decode/prefill per token, come ds4): pair+swiglu e down+sum6, kernel mul_mv Q4_K ---
 parts.append("#define N_R0_Q4_K 2\nconstant short FC_mul_mv_nsg = 2;   /* ds4: nsg=2 per Q4_K (function constant nel sorgente ds4) */")
 parts.append(DENSE_STRUCT_MUL_MV)

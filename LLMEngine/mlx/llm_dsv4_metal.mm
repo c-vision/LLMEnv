@@ -887,7 +887,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_pair;   /* MoE fuso gate+up+swiglu (ds4 pair) */
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
-    id<MTLComputePipelineState> pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
+    id<MTLComputePipelineState> pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
@@ -1035,7 +1035,8 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_sum6_q2k = f6 ? [dev newComputePipelineStateWithFunction:f6 error:&err] : nil;
     {   /* MoE batched (mul_mm_id): opzionale, se manca il path per-token resta valido */
         struct { const char* n; id<MTLComputePipelineState> __strong* dst; } mmk[] = {
-            { "kernel_mul_mm_id_map0_ne20_6", &b->pso_mm_map0 }, { "kernel_mul_mm_id_map0_ne20_1", &b->pso_mm_map1 }, { "kernel_mul_mv_slots6_q4_K_pair_swiglu_f32", &b->pso_q4_pair },
+            { "kernel_mul_mm_id_map0_ne20_6", &b->pso_mm_map0 }, { "kernel_mul_mm_id_map0_ne20_1", &b->pso_mm_map1 }, { "kernel_mul_mm_id_iq2_xxs_addr_f32", &b->pso_mm_iq2a },
+            { "kernel_mul_mm_id_q2_K_addr_f32", &b->pso_mm_q2ka }, { "kernel_mul_mm_id_q4_K_addr_f32", &b->pso_mm_q4ka }, { "kernel_mul_mv_slots6_q4_K_pair_swiglu_f32", &b->pso_q4_pair },
             { "kernel_mul_mv_slots6_q4_K_sum6_f32", &b->pso_q4_sum6 }, { "dsv4_rms_w_rows", &b->pso_rms_rows },
             { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_rope_rows", &b->pso_rope_rows },
             { "kernel_mul_mm_id_map0_ne20_8", &b->pso_mm_map8 }, { "kernel_mul_mm_id_q8_0_f32", &b->pso_mm_q8 }, { "kernel_mul_mm_id_iq2_xxs_f32", &b->pso_mm_iq2 },
@@ -1123,6 +1124,7 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_pair)     [b->pso_pair release];
     if (b->pso_sum6_q2k) [b->pso_sum6_q2k release];
     if (b->pso_attn_part) [b->pso_attn_part release];
+    if (b->pso_mm_iq2a) [b->pso_mm_iq2a release]; if (b->pso_mm_q2ka) [b->pso_mm_q2ka release]; if (b->pso_mm_q4ka) [b->pso_mm_q4ka release];
     if (b->pso_q4_pair) [b->pso_q4_pair release]; if (b->pso_q4_sum6) [b->pso_q4_sum6 release];
     if (b->pso_rms_rows) [b->pso_rms_rows release]; if (b->pso_head_rms_rows) [b->pso_head_rms_rows release]; if (b->pso_rope_rows) [b->pso_rope_rows release];
     if (b->pso_mm_map1) [b->pso_mm_map1 release]; if (b->pso_mm_map8) [b->pso_mm_map8 release]; if (b->pso_mm_q8) [b->pso_mm_q8 release];
@@ -1639,6 +1641,9 @@ typedef struct { int32_t ne02, ne10, ne11; uint64_t nb11, nb12; int32_t ne21, ne
 typedef struct { int32_t ne00, ne02; uint64_t nb01, nb02, nb03; int32_t ne11; uint64_t nb10, nb11, nb12, nb13;
                  int32_t ne20, ne21, ne0, ne1; int16_t r2, r3; int32_t tp_rank, tp_world, tp_expert_base; } Dsv4MmArgs;
 
+static id<MTLComputePipelineState> dsv4_mm_pso_addr(LlmDsv4Metal* b, int ggml_type) {
+    return ggml_type == 16 ? b->pso_mm_iq2a : ggml_type == 10 ? b->pso_mm_q2ka : ggml_type == 12 ? b->pso_mm_q4ka : nil;
+}
 static id<MTLComputePipelineState> dsv4_mm_pso(LlmDsv4Metal* b, int ggml_type) {
     return ggml_type == 16 ? b->pso_mm_iq2 : ggml_type == 10 ? b->pso_mm_q2k : ggml_type == 12 ? b->pso_mm_q4k : nil;
 }
@@ -1747,6 +1752,130 @@ int llm_dsv4_metal_moe_mm_batch(LlmDsv4Metal* b, int nt, const void* gate_w, con
 
     id<MTLCommandBuffer> cb = [b->queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    [e setComputePipelineState:b->pso_mm_map0];
+    [e setBytes:&ma length:sizeof ma atIndex:0];
+    [e setBuffer:IDS offset:0 atIndex:1]; [e setBuffer:MAP offset:0 atIndex:2];
+    [e setBuffer:MAP offset:tpe_bytes atIndex:3]; [e setBuffer:MAP offset:work_off atIndex:4];
+    [e setThreadgroupMemoryLength:(NSUInteger)n_expert * ne20 * 2u atIndex:0];
+    [e dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(n_expert, 1, 1)];
+    dsv4_encode_mm_id(e, pg, &ga, WG, lg, X, 0, GT, MAP, tpe_bytes, work_off, work_cap);
+    dsv4_encode_mm_id(e, pg, &ga, WU, lu, X, 0, UP, MAP, tpe_bytes, work_off, work_cap);
+    [e setComputePipelineState:b->pso_swiglu_w];
+    [e setBuffer:GT offset:0 atIndex:0]; [e setBuffer:UP offset:0 atIndex:1]; [e setBuffer:RW offset:0 atIndex:2]; [e setBuffer:MID offset:0 atIndex:3];
+    { uint32_t P[2] = { ff, (uint32_t)pairs }; [e setBytes:P length:sizeof P atIndex:4]; [e setBytes:&clamp length:sizeof(float) atIndex:5]; }
+    [e dispatchThreads:MTLSizeMake(ff, pairs, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    dsv4_encode_mm_id(e, pd, &da, WD, ld, MID, 0, DN, MAP, tpe_bytes, work_off, work_cap);
+    [e setComputePipelineState:b->pso_sum_slots6];
+    [e setBuffer:DN offset:0 atIndex:0]; [e setBuffer:OUT offset:0 atIndex:1];
+    { uint32_t P[2] = { embd, (uint32_t)nt }; [e setBytes:P length:sizeof P atIndex:2]; }
+    [e dispatchThreads:MTLSizeMake(embd, nt, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    if (hasShared) {   /* shared expert Q8_0 batched: gate/up mul_mm_id (1 esperto), swiglu (peso 1), down, somma in OUT */
+        dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &mh, &sga, IDB, MAPS, SWG, slg, X, 0, SG_);
+        dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &mh, &sga, IDB, MAPS, SWU, slu, X, 0, SU_);
+        [e setComputePipelineState:b->pso_swiglu_w];
+        [e setBuffer:SG_ offset:0 atIndex:0]; [e setBuffer:SU_ offset:0 atIndex:1]; [e setBuffer:ONES offset:0 atIndex:2]; [e setBuffer:SMID offset:0 atIndex:3];
+        { uint32_t P[2] = { ff, (uint32_t)nt }; [e setBytes:P length:sizeof P atIndex:4]; [e setBytes:&clamp length:sizeof(float) atIndex:5]; }
+        [e dispatchThreads:MTLSizeMake(ff, nt, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        dsv4_encode_mm_id_full(e, b->pso_mm_map1, b->pso_mm_q8, &mhd, &sda, IDB, MAPS, SWD, sld, SMID, 0, SD_);
+        [e setComputePipelineState:b->pso_add];
+        [e setBuffer:OUT offset:0 atIndex:0]; [e setBuffer:SD_ offset:0 atIndex:1];
+        { uint32_t P[1] = { embd * (uint32_t)nt }; [e setBytes:P length:sizeof P atIndex:2]; }
+        [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)embd * nt + 63) / 64, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    }
+    [e endEncoding];
+    dsv4_res_commit(b); [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error) return -3;
+    memcpy(out, [OUT contents], (size_t)nt * embd * sizeof(float));
+    return 0;
+}
+
+int llm_dsv4_metal_moe_mm_addr_batch(LlmDsv4Metal* b, int nt, const void* const* gate_p, const void* const* up_p, const void* const* down_p,
+        int gtype, int dtype, uint32_t n_expert, uint32_t embd, uint32_t ff, uint32_t gu_row_bytes, uint32_t down_row_bytes,
+        const int* ids, const float* rws, const float* x, float clamp,
+        const void* sg, const void* su, const void* sd, uint32_t s_nb_g, uint32_t s_nb_d, float* out) {
+    if (!b || nt <= 0 || nt > 4096 || !gate_p || !up_p || !down_p || !ids || !rws || !x || !out) return -1;
+    id<MTLComputePipelineState> pg = dsv4_mm_pso_addr(b, gtype), pd = dsv4_mm_pso_addr(b, dtype);
+    if (!b->pso_mm_map0 || !pg || !pd || !b->pso_swiglu_w || !b->pso_sum_slots6 || n_expert > 1024u) return -1;
+    if ((ff % 64u) != 0u || (embd % 64u) != 0u) return -1;
+    const uint32_t ne20 = 6;
+    const NSUInteger pairs = (NSUInteger)nt * ne20;
+    const NSUInteger tpe_bytes = (NSUInteger)n_expert * sizeof(int32_t), hids_bytes = (NSUInteger)n_expert * nt * sizeof(int32_t);
+    const NSUInteger work_off = (tpe_bytes + hids_bytes + 7u) & ~(NSUInteger)7u;
+    const NSUInteger work_cap = (pairs + 31u * n_expert + 31u) / 32u;
+    id<MTLBuffer> IDS = dsv4_scratch(b, &b->sx[20], &b->sx_cap[20], pairs * sizeof(int32_t));
+    id<MTLBuffer> X   = dsv4_scratch(b, &b->sx[21], &b->sx_cap[21], (size_t)nt * embd * sizeof(float));
+    id<MTLBuffer> RW  = dsv4_scratch(b, &b->sx[22], &b->sx_cap[22], pairs * sizeof(float));
+    id<MTLBuffer> MAP = dsv4_scratch(b, &b->sx[23], &b->sx_cap[23], work_off + 8u + work_cap * 8u);
+    id<MTLBuffer> GT  = dsv4_scratch(b, &b->sx[24], &b->sx_cap[24], pairs * ff * sizeof(float));
+    id<MTLBuffer> UP  = dsv4_scratch(b, &b->sx[25], &b->sx_cap[25], pairs * ff * sizeof(float));
+    id<MTLBuffer> MID = dsv4_scratch(b, &b->sx[26], &b->sx_cap[26], pairs * ff * sizeof(float));
+    id<MTLBuffer> DN  = dsv4_scratch(b, &b->sx[27], &b->sx_cap[27], pairs * embd * sizeof(float));
+    id<MTLBuffer> OUT = dsv4_scratch(b, &b->sx[28], &b->sx_cap[28], (size_t)nt * embd * sizeof(float));
+    /* Tabelle di indirizzi GPU per esperto (gate/up/down): gli esperti stanno in buffer separati dello store, tutti nel
+     * residency set; useResource li rende accessibili anche dalla cb (come fa ds4). */
+    id<MTLBuffer> WG = dsv4_scratch(b, &b->sx[51], &b->sx_cap[51], (size_t)n_expert * 8);
+    id<MTLBuffer> WU = dsv4_scratch(b, &b->sx[52], &b->sx_cap[52], (size_t)n_expert * 8);
+    id<MTLBuffer> WD = dsv4_scratch(b, &b->sx[53], &b->sx_cap[53], (size_t)n_expert * 8);
+    size_t lg = 0, lu = 0, ld = 0;
+    NSMutableArray<id<MTLBuffer>>* used_views = [NSMutableArray arrayWithCapacity:(NSUInteger)n_expert * 3];
+    if (WG && WU && WD) {
+        uint64_t* tg = (uint64_t*)[WG contents]; uint64_t* tu = (uint64_t*)[WU contents]; uint64_t* td = (uint64_t*)[WD contents];
+        for (uint32_t ex = 0; ex < n_expert; ex++) {
+            tg[ex] = tu[ex] = td[ex] = 0;
+            if (!gate_p[ex]) continue;
+            size_t l0, l1, l2;
+            id<MTLBuffer> v0 = dsv4_nocopy_view(b, gate_p[ex], (size_t)ff * gu_row_bytes, &l0);
+            id<MTLBuffer> v1 = dsv4_nocopy_view(b, up_p[ex],   (size_t)ff * gu_row_bytes, &l1);
+            id<MTLBuffer> v2 = dsv4_nocopy_view(b, down_p[ex], (size_t)embd * down_row_bytes, &l2);
+            if (!v0 || !v1 || !v2) return -2;
+            tg[ex] = [v0 gpuAddress] + l0; tu[ex] = [v1 gpuAddress] + l1; td[ex] = [v2 gpuAddress] + l2;
+            [used_views addObject:v0]; [used_views addObject:v1]; [used_views addObject:v2];
+        }
+    }
+    if (!IDS || !X || !RW || !MAP || !GT || !UP || !MID || !DN || !OUT || !WG || !WU || !WD) return -2;
+    memcpy([IDS contents], ids, pairs * sizeof(int32_t));
+    memcpy([X contents], x, (size_t)nt * embd * sizeof(float));
+    memcpy([RW contents], rws, pairs * sizeof(float));
+    const int hasShared = (sg && su && sd);
+    id<MTLBuffer> IDB = nil, MAPS = nil, SWG = nil, SWU = nil, SWD = nil, SG_ = nil, SU_ = nil, SMID = nil, SD_ = nil, ONES = nil;
+    size_t slg = 0, slu = 0, sld = 0;
+    Dsv4MmMapArgs mh; Dsv4MmArgs sga, sda, mhd_dummy; memset(&mh, 0, sizeof mh); memset(&sga, 0, sizeof sga); memset(&sda, 0, sizeof sda); memset(&mhd_dummy, 0, sizeof mhd_dummy);
+    Dsv4MmMapArgs mhd; memset(&mhd, 0, sizeof mhd);
+    if (hasShared) {
+        IDB  = dsv4_scratch(b, &b->sx[35], &b->sx_cap[35], (size_t)nt * 4);
+        MAPS = dsv4_scratch(b, &b->sx[36], &b->sx_cap[36], dsv4_mm_map_bytes(1, nt, 1));
+        SG_  = dsv4_scratch(b, &b->sx[37], &b->sx_cap[37], (size_t)nt * ff * sizeof(float));
+        SU_  = dsv4_scratch(b, &b->sx[38], &b->sx_cap[38], (size_t)nt * ff * sizeof(float));
+        SMID = dsv4_scratch(b, &b->sx[39], &b->sx_cap[39], (size_t)nt * ff * sizeof(float));
+        SD_  = dsv4_scratch(b, &b->sx[49], &b->sx_cap[49], (size_t)nt * embd * sizeof(float));
+        ONES = dsv4_scratch(b, &b->sx[50], &b->sx_cap[50], (size_t)nt * sizeof(float));
+        SWG = dsv4_nocopy_view(b, sg, (size_t)ff * s_nb_g, &slg);
+        SWU = dsv4_nocopy_view(b, su, (size_t)ff * s_nb_g, &slu);
+        SWD = dsv4_nocopy_view(b, sd, (size_t)embd * s_nb_d, &sld);
+        if (!IDB || !MAPS || !SG_ || !SU_ || !SMID || !SD_ || !ONES || !SWG || !SWU || !SWD) return -2;
+        memset([IDB contents], 0, (size_t)nt * 4); { float* o = (float*)[ONES contents]; for (int t = 0; t < nt; t++) o[t] = 1.0f; }
+        mh = (Dsv4MmMapArgs){ 1, (int32_t)embd, 1, (uint64_t)embd * 4, (uint64_t)embd * 4, nt, 1, 4 };
+        mhd = (Dsv4MmMapArgs){ 1, (int32_t)ff, 1, (uint64_t)ff * 4, (uint64_t)ff * 4, nt, 1, 4 };
+        sga.ne00 = (int32_t)embd; sga.ne02 = 1; sga.nb01 = s_nb_g; sga.nb02 = (uint64_t)ff * s_nb_g; sga.nb03 = sga.nb02; sga.ne11 = 1; sga.nb10 = 4;
+        sga.nb11 = (uint64_t)embd * 4; sga.nb12 = sga.nb11; sga.nb13 = (uint64_t)nt * sga.nb12; sga.ne20 = 1; sga.ne21 = nt; sga.ne0 = (int32_t)ff; sga.ne1 = 1; sga.r2 = 1; sga.r3 = 1;
+        sda.ne00 = (int32_t)ff; sda.ne02 = 1; sda.nb01 = s_nb_d; sda.nb02 = (uint64_t)embd * s_nb_d; sda.nb03 = sda.nb02; sda.ne11 = 1; sda.nb10 = 4;
+        sda.nb11 = (uint64_t)ff * 4; sda.nb12 = sda.nb11; sda.nb13 = (uint64_t)nt * sda.nb12; sda.ne20 = 1; sda.ne21 = nt; sda.ne0 = (int32_t)embd; sda.ne1 = 1; sda.r2 = 1; sda.r3 = 1;
+    }
+
+    Dsv4MmMapArgs ma = { (int32_t)n_expert, (int32_t)embd, 1, (uint64_t)embd * 4, (uint64_t)embd * 4, nt, (int32_t)ne20, (uint64_t)ne20 * 4 };
+    Dsv4MmArgs ga; memset(&ga, 0, sizeof ga);
+    ga.ne00 = (int32_t)embd; ga.ne02 = (int32_t)n_expert; ga.nb01 = gu_row_bytes; ga.nb02 = (uint64_t)ff * gu_row_bytes;
+    ga.nb03 = (uint64_t)n_expert * ga.nb02; ga.ne11 = 1; ga.nb10 = 4; ga.nb11 = (uint64_t)embd * 4; ga.nb12 = ga.nb11;
+    ga.nb13 = (uint64_t)nt * ga.nb12; ga.ne20 = (int32_t)ne20; ga.ne21 = nt; ga.ne0 = (int32_t)ff; ga.ne1 = (int32_t)ne20; ga.r2 = 1; ga.r3 = 1;
+    Dsv4MmArgs da; memset(&da, 0, sizeof da);
+    da.ne00 = (int32_t)ff; da.ne02 = (int32_t)n_expert; da.nb01 = down_row_bytes; da.nb02 = (uint64_t)embd * down_row_bytes;
+    da.nb03 = (uint64_t)n_expert * da.nb02; da.ne11 = (int32_t)ne20; da.nb10 = 4; da.nb11 = (uint64_t)ff * 4; da.nb12 = ne20 * da.nb11;
+    da.nb13 = (uint64_t)nt * da.nb12; da.ne20 = (int32_t)ne20; da.ne21 = nt; da.ne0 = (int32_t)embd; da.ne1 = (int32_t)ne20; da.r2 = 1; da.r3 = 1;
+
+    id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    for (id<MTLBuffer> v in used_views) [e useResource:v usage:MTLResourceUsageRead];
     [e setComputePipelineState:b->pso_mm_map0];
     [e setBytes:&ma length:sizeof ma atIndex:0];
     [e setBuffer:IDS offset:0 atIndex:1]; [e setBuffer:MAP offset:0 atIndex:2];
