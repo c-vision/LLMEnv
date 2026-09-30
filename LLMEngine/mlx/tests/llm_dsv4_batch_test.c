@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
     int tok[4096]; unsigned s = 12345; for (int i = 0; i < n; i++) { s = s * 1103515245u + 12345u; tok[i] = 1000 + (int)((s >> 8) % 20000); }
     double ta, tb, tc, td; int aa, ab, ac, ad;
     const int nv = 129280;
-    llm_ai_mlx_opt_set("dsv4_prefill_f16", "0");   /* percorso f32: deve essere BIT-EXACT col token-per-token */
+    llm_ai_mlx_opt_set("dsv4_prefill_f16", "0"); llm_ai_mlx_opt_set("dsv4_gpu_hc", "0");   /* percorso f32 + mHC CPU: deve essere BIT-EXACT col token-per-token */
     float* A = run(path, tok, n, 1, &ta, &aa);
     float* B = run(path, tok, n, chunk, &tb, &ab);
     float* A2 = run(path, tok, n, 1, &tc, &ac);

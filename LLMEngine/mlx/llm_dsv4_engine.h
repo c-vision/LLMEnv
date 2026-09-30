@@ -12,7 +12,7 @@
 #include "llm_gguf.h"
 #include "llm_engine_opts.h"   /* opzioni dsv4_prefill_chunk / dsv4_prefill_mm (registro, no env) */
 
-#define LLM_DSV4_PREFILL_CHUNK 64    /* default; opzione dsv4_prefill_chunk (es. 512, come ds4) con dsv4_prefill_mm=1 */
+#define LLM_DSV4_PREFILL_CHUNK 512   /* default (come ds4: chunk grandi); opzione dsv4_prefill_chunk */
 
 typedef struct {
     LlmDsv4Weights w;

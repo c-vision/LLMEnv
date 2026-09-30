@@ -291,7 +291,7 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
     /* Chunk grande (come ds4: tanti token per esperto): mul_mm_id con tabella di indirizzi degli esperti dello store, shared expert incluso.
      * Sotto la soglia i kernel per-token (slots6) sono piu' veloci. Attivazioni half (opzione dsv4_prefill_f16). */
     int done_mm = 0;
-    int mm_on = 0; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_mm", &v) == 0) mm_on = v; }   /* SPERIMENTALE: default OFF finche' non verificato */
+    int mm_on = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_mm", &v) == 0) mm_on = v; }   /* default ON (verificato E2E: prefill 2000 tok 13 -> 38 t/s) */
     if (ok && streaming && mm_on && f16_ok && nt >= LLM_DSV4_MM_MIN_TOKENS && c->n_expert > 0 && c->n_expert <= 1024 &&
         pe->shexp_gate && pe->shexp_up && pe->shexp_down) {
         const int ne = c->n_expert;

@@ -143,9 +143,9 @@ static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const Ll
         const LlmDsv4PackedExperts* pe, LlmDsv4LayerCache* cache, const float* hc_in, const int* tokens,
         int pos0, int N, int il, float* hc_out) {
     const int HC = c->n_hc, D = c->n_embd; const size_t hcn = (size_t)HC * D; const int SZ = (2 + HC) * HC;
-    /* mHC su GPU (opzione di registro dsv4_gpu_hc, default 0: percorso CPU bit-exact col token-per-token). Layout `sp` per token:
+    /* mHC su GPU (opzione di registro dsv4_gpu_hc, default 1; 0 = percorso CPU bit-exact col token-per-token). Layout `sp` per token:
      * pre[HC] | post[HC] | comb[HC*HC]; il percorso CPU lo riempie nello stesso layout (post/comb) cosi' i due si alternano. */
-    int gpu_hc = 0; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_gpu_hc", &v) == 0) gpu_hc = v; }
+    int gpu_hc = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_gpu_hc", &v) == 0) gpu_hc = v; }   /* default ON (verificato); 0 = CPU bit-exact */
     float* after  = (float*)malloc(sizeof(float) * hcn * (size_t)N);
     float* ffn_x  = (float*)malloc(sizeof(float) * (size_t)D * N);
     float* ffn_o  = (float*)malloc(sizeof(float) * (size_t)D * N);
