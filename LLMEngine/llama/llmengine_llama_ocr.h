@@ -36,6 +36,8 @@ typedef struct llm_ai_ocr_ctx* llm_ai_ocr_handle;
 llm_ai_ocr_handle llm_ai_ocr_load(const char* model_path, const char* mmproj_path,
                                   int n_ctx, int n_gpu_layers);
 
+llm_ai_ocr_handle llm_ai_ocr_load_gmmod(const char* gmmod_path, int n_ctx, int n_gpu_layers);
+
 // Esegue l'OCR/visione sull'immagine al path indicato. image_prompt è il testo
 // della richiesta (per PaddleOCR basta la domanda in lingua; il template chat
 // del modello viene applicato internamente). Ritorna una stringa UTF-8

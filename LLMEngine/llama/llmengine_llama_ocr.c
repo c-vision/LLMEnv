@@ -117,6 +117,38 @@ llm_ai_ocr_handle llm_ai_ocr_load(const char* model_path, const char* mmproj_pat
     return ctx;
 }
 
+/* Legge un campo stringa da un descriptor .gmmod (JSON minimale). 0/-1. */
+static int gmmod_field(const char* path, const char* key, char* out, size_t cap) {
+    if (out && cap) out[0] = 0;
+    FILE* f = fopen(path, "rb"); if (f == NULL) return -1;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    if (n <= 0 || n > (1 << 20)) { fclose(f); return -1; }
+    char* b = (char*)malloc((size_t)n + 1);
+    if (b == NULL) { fclose(f); return -1; }
+    if (fread(b, 1, (size_t)n, f) != (size_t)n) { free(b); fclose(f); return -1; }
+    b[n] = 0; fclose(f);
+    char pat[64]; snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char* p = strstr(b, pat);
+    int ok = 0;
+    if (p != NULL) {
+        p += strlen(pat); while (*p == ' ' || *p == '\t') p++;
+        if (*p == ':') { p++; while (*p == ' ' || *p == '\t') p++;
+            if (*p == '"') { p++; size_t i = 0; while (*p && *p != '"' && i < cap - 1) out[i++] = *p++; out[i] = 0; ok = i > 0; } }
+    }
+    free(b);
+    return ok ? 0 : -1;
+}
+
+/* Loader guidato dal descriptor .gmmod: base + mmproj dalla DICHIARAZIONE (non dal naming). */
+llm_ai_ocr_handle llm_ai_ocr_load_gmmod(const char* gmmod_path, int n_ctx, int n_gpu_layers) {
+    if (gmmod_path == NULL) return NULL;
+    char base[2048] = {0}, mmproj[2048] = {0};
+    if (gmmod_field(gmmod_path, "base", base, sizeof base) != 0) return NULL;
+    if (gmmod_field(gmmod_path, "mmproj", mmproj, sizeof mmproj) != 0) return NULL;
+    return llm_ai_ocr_load(base, mmproj, n_ctx, n_gpu_layers);
+}
+
+
 /* run_media_pipeline: percorso comune per immagine e audio -- carica il media da
  * file (auto-detect magic bytes via mtmd helper), tokenizza testo+media, eval dei
  * chunk (prefill), genera fino a max_tokens o EOG. Ritorna stringa heap-allocata
