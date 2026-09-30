@@ -99,3 +99,27 @@ out = ("/* GENERATO da tools/gen_dsv4_mmid_metal.py — NON modificare a mano.\n
        "static const char* const LLM_DSV4_METAL_MMID = R\"MSL(\n" + body + "\n)MSL\";\n\n#endif /* LLM_DSV4_METAL_MMID_H */\n")
 OUT.write_text(out)
 print("scritto", OUT, len(body), "byte MSL")
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Variante MPP (Metal 4 tensor ops, `mpp::tensor_ops::matmul2d`): stesso kernel mul_mm_id ma con il matmul cooperativo dei tensor core
+# (ds4 la usa su M5). Va compilata in una libreria SEPARATA con languageVersion 4.0 e gli include <metal_tensor> + MetalPerformancePrimitives;
+# se la compilazione fallisce il motore usa i kernel simdgroup.
+OUT_MPP = ROOT / "LLMEngine/mlx/llm_dsv4_metal_mmid_mpp.h"
+_m = re.search(r"template<typename S0, typename S0_4x4, typename S0_8x8, typename S1, typename S1_2x4, typename S1_8x8, typename block_q, short nl, void \(\*dequantize_func\)\(device const block_q \*, short, thread S0_4x4 &\), typename T0, typename T0_4x4, typename T1, typename T1_2x4, bool EXPERT_ADDRESSES = false>\s*kernel void kernel_mul_mm_id_mpp\(", s)
+if not _m: raise SystemExit("kernel_mul_mm_id_mpp non trovato")
+_i = _m.start(); _j = s.index("{", _m.end()); _d = 0; _k = _j
+while True:
+    _d += (s[_k] == "{") - (s[_k] == "}")
+    if _d == 0 and s[_k] == "}": break
+    _k += 1
+mpp = s[_i:_k + 1]
+inst = ["typedef decltype(kernel_mul_mm_id_mpp<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, block_q2_K, QK_NL, dequantize_q2_K, float, float4x4, float, float2x4>) mul_mm_id_mpp_t;"]
+for host, blk, deq in (("iq2_xxs", "block_iq2_xxs", "dequantize_iq2_xxs"), ("q2_K", "block_q2_K", "dequantize_q2_K"), ("q4_K", "block_q4_K", "dequantize_q4_K")):
+    for suf, addr in (("", ""), ("_addr", ", true")):
+        inst.append(f'template [[host_name("kernel_mul_mm_id_{host}{suf}_f32_mpp")]] kernel mul_mm_id_mpp_t kernel_mul_mm_id_mpp<half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, {blk}, QK_NL, {deq}, float, float4x4, float, float2x4{addr}>;')
+body = mpp + "\n\n" + "\n".join(inst)
+assert ')MSL"' not in body
+OUT_MPP.write_text("/* GENERATO da tools/gen_dsv4_mmid_metal.py — NON modificare a mano. Kernel mul_mm_id su tensor ops MPP (Metal 4), estratti da ds4. */\n"
+    "#ifndef LLM_DSV4_METAL_MMID_MPP_H\n#define LLM_DSV4_METAL_MMID_MPP_H\n\nstatic const char* const LLM_DSV4_METAL_MMID_MPP = R\"MSL(\n" + body + "\n)MSL\";\n\n#endif\n")
+print("scritto", OUT_MPP, len(body), "byte MSL (MPP)")

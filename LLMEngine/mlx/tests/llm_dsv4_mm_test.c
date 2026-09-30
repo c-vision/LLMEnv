@@ -8,6 +8,7 @@
 static double now(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec + t.tv_nsec*1e-9; }
 #include "llm_dsv4_engine.h"
 #include "llm_dsv4_metal.h"
+#include "llm_engine_opts.h"
 
 static unsigned st = 987654321u;
 static float fr(void) { st = st * 1103515245u + 12345u; return (float)((st >> 8) & 0xFFFF) / 65535.0f * 2.0f - 1.0f; }
@@ -46,15 +47,16 @@ int main(int argc, char** argv) {
     { double t0 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_moe_iq2_q2k_batch(be, nt, gp, up, dp, x, rw, 6, c->swiglu_clamp_exp, embd, (uint32_t)gnb, ff, (uint32_t)dnb, NULL, NULL, NULL, 0, 0, ref);
       double t1 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_moe_mm_batch(be, nt, pe->gate, pe->up, pe->down, pe->gate_type, pe->down_type, ne, embd, ff, (uint32_t)gnb, (uint32_t)dnb, ids, rw, x, c->swiglu_clamp_exp, NULL, NULL, NULL, 0, 0, got);
       double t2 = now(); printf("tempo (caldo, 5 iter): pair/sum6 %.1f ms  |  mul_mm_id %.1f ms per chunk di %d token\n", (t1 - t0) * 200, (t2 - t1) * 200, nt); }
-    {   /* variante con TABELLA DI INDIRIZZI per esperto (buffer separati, come lo store) */
+    for (int mpp = 0; mpp <= 1; mpp++) {   /* variante con TABELLA DI INDIRIZZI, kernel simdgroup (mpp=0) e tensor ops MPP (mpp=1) */
+        llm_ai_mlx_opt_set("dsv4_mpp", mpp ? "1" : "0");
         const void** ga = calloc((size_t)ne, sizeof(void*)); const void** ua = calloc((size_t)ne, sizeof(void*)); const void** da = calloc((size_t)ne, sizeof(void*));
         for (int k = 0; k < nt * 6; k++) { size_t ex = (size_t)ids[k]; ga[ex] = (const uint8_t*)pe->gate + ex * ff * gnb; ua[ex] = (const uint8_t*)pe->up + ex * ff * gnb; da[ex] = (const uint8_t*)pe->down + ex * embd * dnb; }
         float* got2 = malloc(sizeof(float) * (size_t)nt * embd);
         int r3 = llm_dsv4_metal_moe_mm_addr_batch(be, nt, ga, ua, da, pe->gate_type, pe->down_type, ne, embd, ff, (uint32_t)gnb, (uint32_t)dnb, ids, rw, x, c->swiglu_clamp_exp, NULL, NULL, NULL, 0, 0, got2);
         double m2 = 0, s2 = 0, sr2 = 0; int nf = 0; for (int i = 0; i < nt * embd; i++) { nf += !isfinite(got2[i]); double d = fabs((double)ref[i] - got2[i]); if (d > m2) m2 = d; s2 += d*d; sr2 += (double)ref[i]*ref[i]; }
-        printf("[MM-ADDR] rc=%d nonfiniti=%d max|diff|=%.3e rel=%.3e\n", r3, nf, m2, sqrt(s2 / (sr2 > 0 ? sr2 : 1)));
+        printf("[MM-ADDR mpp=%d] rc=%d nonfiniti=%d max|diff|=%.3e rel=%.3e\n", mpp, r3, nf, m2, sqrt(s2 / (sr2 > 0 ? sr2 : 1)));
         double t0 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_moe_mm_addr_batch(be, nt, ga, ua, da, pe->gate_type, pe->down_type, ne, embd, ff, (uint32_t)gnb, (uint32_t)dnb, ids, rw, x, c->swiglu_clamp_exp, NULL, NULL, NULL, 0, 0, got2);
-        printf("tempo addr (caldo): %.1f ms per chunk di %d token\n", (now() - t0) * 200, nt);
+        printf("tempo addr mpp=%d (caldo): %.1f ms per chunk di %d token\n", mpp, (now() - t0) * 200, nt);
         if (r3 != 0 || nf) { printf("FAIL mm_addr\n"); return 1; } }
     int ok = r1 == 0 && r2 == 0 && rel < 5e-3;
     printf(ok ? "PASS mm_id: routed MoE batched == pair/sum6 (rel < 5e-3)\n" : "FAIL mm_id\n");
