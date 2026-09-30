@@ -36,7 +36,8 @@ static FILE* g_llm_out = NULL;
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <unistd.h>   /* getcwd (arch-resolution da file .gguf) */
+#include <unistd.h>
+#include <sys/stat.h>   /* mkdir (checkpoint store) */   /* getcwd (arch-resolution da file .gguf) */
 
 static uint64_t llm_numel(const uint64_t* dims, int ndim) {
     uint64_t numel = 1; for (int d = 0; d < ndim; d++) numel *= dims[d]; return numel;
@@ -181,6 +182,73 @@ int llmmodelio_model_ablate(const char* in_path, const char* out_path, const cha
     fclose(src); free(ts); free(dims); free(wkv);
     llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fi);
     return rc == 0 ? 0 : -1;
+}
+/* ── Checkpoint/rollback: copia file + hash di integrita' (FNV-1a 64) ── */
+static int llm_copy_file(const char* src, const char* dst) {
+    FILE* a = fopen(src, "rb"); if (a == NULL) return -1;
+    FILE* b = fopen(dst, "wb"); if (b == NULL) { fclose(a); return -1; }
+    const size_t BUF = (size_t)1 << 20; unsigned char* buf = (unsigned char*)malloc(BUF);
+    if (buf == NULL) { fclose(a); fclose(b); return -1; }
+    size_t n; int rc = 0;
+    while ((n = fread(buf, 1, BUF, a)) > 0) if (fwrite(buf, 1, n, b) != n) { rc = -1; break; }
+    if (ferror(a)) rc = -1;
+    free(buf); fclose(a); if (fclose(b) != 0) rc = -1;
+    return rc;
+}
+static int llm_fnv64_file(const char* path, unsigned long long* out_size, unsigned long long* out_hash) {
+    FILE* f = fopen(path, "rb"); if (f == NULL) return -1;
+    const size_t BUF = (size_t)1 << 20; unsigned char* buf = (unsigned char*)malloc(BUF);
+    if (buf == NULL) { fclose(f); return -1; }
+    unsigned long long h = 1469598103934665603ULL, sz = 0; size_t n;
+    while ((n = fread(buf, 1, BUF, f)) > 0) { for (size_t i = 0; i < n; i++) { h ^= buf[i]; h *= 1099511628211ULL; } sz += n; }
+    int err = ferror(f); free(buf); fclose(f);
+    if (err) return -1;
+    if (out_size) *out_size = sz; if (out_hash) *out_hash = h;
+    return 0;
+}
+/* nome-checkpoint sicuro (nessun path traversal). */
+static int llm_name_safe(const char* n) {
+    if (n == NULL || !*n) return 0;
+    if (strcmp(n, ".") == 0 || strcmp(n, "..") == 0) return 0;
+    for (const char* p = n; *p; p++) if (*p == '/' || *p == '\\') return 0;
+    return 1;
+}
+/* CHECKPOINT: snapshot di <src> nel checkpoint-store <store_dir> con nome <name>
+ * (+ <name>.meta con size/fnv64 = integrita' per il rollback). */
+int llmmodelio_model_checkpoint(const char* src, const char* store_dir, const char* name) {
+    if (src == NULL || store_dir == NULL || name == NULL || !llm_name_safe(name)) return -1;
+    unsigned long long sz = 0, h = 0;
+    if (llm_fnv64_file(src, &sz, &h) != 0) return -1;   /* src inesistente/illeggibile -> errore */
+    mkdir(store_dir, 0777);   /* -1 se esiste: ok (single-level store) */
+    char ckpt[4096], meta[4096];
+    snprintf(ckpt, sizeof ckpt, "%s/%s.ckpt", store_dir, name);
+    snprintf(meta, sizeof meta, "%s/%s.meta", store_dir, name);
+    if (llm_copy_file(src, ckpt) != 0) return -1;
+    FILE* m = fopen(meta, "w"); if (m == NULL) return -1;
+    fprintf(m, "name=%s\nsize=%llu\nfnv64=%016llx\nsrc=%s\n", name, sz, h, src);
+    fclose(m);
+    return 0;
+}
+/* ROLLBACK: ripristina <store_dir>/<name>.ckpt su <dst>, verificando l'integrita' col meta. */
+int llmmodelio_model_rollback(const char* store_dir, const char* name, const char* dst) {
+    if (store_dir == NULL || name == NULL || dst == NULL || !llm_name_safe(name)) return -1;
+    char ckpt[4096], meta[4096];
+    snprintf(ckpt, sizeof ckpt, "%s/%s.ckpt", store_dir, name);
+    snprintf(meta, sizeof meta, "%s/%s.meta", store_dir, name);
+    unsigned long long sz = 0, h = 0;
+    if (llm_fnv64_file(ckpt, &sz, &h) != 0) return -1;   /* checkpoint assente */
+    FILE* m = fopen(meta, "r");
+    if (m != NULL) {
+        char line[512]; unsigned long long msz = 0, mh = 0;
+        while (fgets(line, sizeof line, m)) {
+            unsigned long long v = 0;
+            if (sscanf(line, "size=%llu", &v) == 1) msz = v;
+            if (sscanf(line, "fnv64=%llx", &v) == 1) mh = v;
+        }
+        fclose(m);
+        if (msz != 0 && (msz != sz || mh != h)) return -1;   /* checkpoint corrotto -> errore */
+    }
+    return llm_copy_file(ckpt, dst);
 }
 /* DIFF (model surgery: checkpoint/rollback + quality gate) — confronta due artefatti GGUF:
  * tensori presenti solo in A/B, e per i comuni differenze di tipo/forma/contenuto (byte).
