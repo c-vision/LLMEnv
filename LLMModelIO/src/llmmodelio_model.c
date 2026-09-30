@@ -425,6 +425,35 @@ int llmmodelio_model_rollback(const char* store_dir, const char* name, const cha
 /* DIFF (model surgery: checkpoint/rollback + quality gate) — confronta due artefatti GGUF:
  * tensori presenti solo in A/B, e per i comuni differenze di tipo/forma/contenuto (byte).
  * Scrive un report testuale in out_path. A/B non GGUF o illeggibili -> -1 (mai silenzioso). */
+/* VALIDATE (model surgery: integrita' strutturale di un artefatto) — per ogni tensore: forma/
+ * tipo calcolabili e dati dentro il file; + conteggio kv. Report in out_path; issues>0 -> -1. */
+int llmmodelio_model_validate(const char* path, const char* out_path) {
+    if (path == NULL || out_path == NULL) return -1;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    if (fi.n_tensors == 0) { llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fi); return -1; }
+    long fsz = 0; { FILE* f = fopen(path, "rb"); if (f) { fseek(f, 0, SEEK_END); fsz = ftell(f); fclose(f); } }
+    FILE* o = fopen(out_path, "w");
+    if (o == NULL) { llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fi); return -1; }
+    fprintf(o, "# LLM MODEL VALIDATE %s\n", path);
+    fprintf(o, "tensors=%llu kv=%d data_start=%llu file_size=%ld\n",
+            (unsigned long long)fi.n_tensors, nkv, (unsigned long long)fi.data_start, fsz);
+    int issues = 0;
+    for (uint64_t i = 0; i < fi.n_tensors; i++) {
+        LlmCodecGgufTensorInfo* t = &fi.tensors[i];
+        uint64_t numel = 1; for (int d = 0; d < t->ndim; d++) numel *= t->dims[d];
+        uint64_t b = 0; const char* why = NULL;
+        if (t->ndim <= 0) why = "ndim<=0";
+        else if (numel == 0) why = "numel=0";
+        else if (llmcodec_ggml_type_bytes(t->ggml_type, numel, &b) != 0 || b == 0) why = "tipo/byte non calcolabile";
+        else if (fsz > 0 && (long)(fi.data_start + t->offset + b) > fsz) why = "offset+dati oltre la fine del file";
+        if (why) { issues++; fprintf(o, "ISSUE %s: %s\n", t->name, why); }
+    }
+    fprintf(o, "SUMMARY tensors=%llu issues=%d -> %s\n", (unsigned long long)fi.n_tensors, issues, issues ? "INVALID" : "VALID");
+    fclose(o);
+    llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fi);
+    return issues ? -1 : 0;
+}
 int llmmodelio_model_diff(const char* a_path, const char* b_path, const char* out_path) {
     if (a_path == NULL || b_path == NULL || out_path == NULL) return -1;
     LlmCodecGgufFileInfo fa, fb;
