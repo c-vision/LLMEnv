@@ -245,44 +245,35 @@ static llm_kvq_sdpa_cache llm_kvq_sdpa_singleton = { {0}, {0}, false };
  * riletta ad ogni step inizia a dominare molto prima dei bucket 512/1024 di MLX. Sweep
  * misurato (nc~30720, decode 24 token): split_tokens=4096 (splits=8) 53,3 tok/s;
  * 2048 (splits=15) 56,1; 1024 (splits=30) 56,3 — plateau gia' raggiunto a ~15-30 split, NON
- * a centinaia. Override: LLM_KVQ_SPLIT_TOKENS. */
+ * a centinaia. Override: opzione di registro `kvq_split_tokens`. */
 #ifndef LLM_KVQ_SPLIT_TOKENS
 #define LLM_KVQ_SPLIT_TOKENS 1024
 #endif
 /* Tetto di split: tenuto DELIBERATAMENTE lontano dalla zona misurata come dannosa (~480,
  * 5,2 tok/s vs il plateau ~56 tok/s misurato a splits=15-30) finche' llm_kvq_combine_src non
  * viene riscritto per ridurre in parallelo (schema BN di MLX) invece che serialmente per
- * lane — vedi nota sopra. Override: LLM_KVQ_SPLITS_MAX. */
+ * lane — vedi nota sopra. Override: opzione di registro `kvq_splits_max`. */
 #ifndef LLM_KVQ_SPLITS_MAX
 #define LLM_KVQ_SPLITS_MAX 64
 #endif
 static int llm_mlx_kvq_splits_max(void) {
     static int v = -1;
-    if (v < 0) {
-        int o = 0;
-        if (llm_ai_mlx_opt_get_int("kvq_splits_max", &o) == 0 && o > 0) v = o;
-        else { const char* e = llm_ai_mlx_opt_env("LLM_KVQ_SPLITS_MAX"); v = (e != NULL && atoi(e) > 0) ? atoi(e) : LLM_KVQ_SPLITS_MAX; }
-    }
+    if (v < 0) { int o = 0; v = (llm_ai_mlx_opt_get_int("kvq_splits_max", &o) == 0 && o > 0) ? o : LLM_KVQ_SPLITS_MAX; }
     return v;
 }
 static int llm_mlx_kvq_split_tokens(void) {
     static int v = -1;
-    if (v < 0) {
-        int o = 0;
-        if (llm_ai_mlx_opt_get_int("kvq_split_tokens", &o) == 0 && o > 0) v = o;
-        else { const char* e = llm_ai_mlx_opt_env("LLM_KVQ_SPLIT_TOKENS"); v = (e != NULL && atoi(e) > 0) ? atoi(e) : LLM_KVQ_SPLIT_TOKENS; }
-    }
+    if (v < 0) { int o = 0; v = (llm_ai_mlx_opt_get_int("kvq_split_tokens", &o) == 0 && o > 0) ? o : LLM_KVQ_SPLIT_TOKENS; }
     return v;
 }
 
 /* v2 GQA-shared: OPT-IN. Misurato 2026-09-19 (8B, ctxdecode 8k, finestra ~quieta):
  * v2 23,8/27,2 tok/s vs v1 29,4/32,6 -> ~15% PIU' LENTO. Il riuso di K/V tra le query head
  * NON e' il collo di bottiglia (la riduzione di grid da nh=32 a nkv=8 costa piu' di quanto
- * il riuso renda). Tenuto come esperimento riproducibile dietro LLM_KVQ_GQA=1. */
+ * il riuso renda). Tenuto come esperimento riproducibile dietro l'opzione `kvq_gqa=1`. */
 static bool llm_kvq_gqa(void) {
     int b = 0;
-    if (llm_ai_mlx_opt_get_bool("kvq_gqa", &b) == 0 && b != 0) return true;
-    return llm_ai_mlx_opt_env("LLM_KVQ_GQA") != NULL;
+    return llm_ai_mlx_opt_get_bool("kvq_gqa", &b) == 0 && b != 0;
 }
 
 static int llm_mlx_kvq_sdpa_kernel_build(void) {
@@ -347,9 +338,9 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     if (mlx_array_dtype(Kr) != T || mlx_array_dtype(Vr) != T) return false;
 
     /* Split-K dinamico: almeno LLM_KVQ_SPLITS (piccoli contesti, dove piu' split
-     * aggiungerebbero solo overhead di combine), altrimenti nc/LLM_KVQ_SPLIT_TOKENS
+     * aggiungerebbero solo overhead di combine), altrimenti nc/kvq_split_tokens
      * arrotondato per eccesso, cosi' il numero di token scansionati IN SEQUENZA da ogni
-     * thread resta vicino a LLM_KVQ_SPLIT_TOKENS indipendentemente da quanto e' lungo il
+     * thread resta vicino a kvq_split_tokens indipendentemente da quanto e' lungo il
      * contesto (prima: SPLITS fisso a 8, lavoro sequenziale per thread = nc/8, cresce senza
      * limite col contesto — la causa misurata della pendenza 5-7x peggiore della fp16). */
     int split_tokens = llm_mlx_kvq_split_tokens();

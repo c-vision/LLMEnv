@@ -50,6 +50,7 @@ static Opt g_opts[] = {
     /* DFlash2 (A1): se impostata a un path di draft DFlash2, il decode greedy usa il drafter a
      * contesto PERSISTENTE (spec streaming). "" = off. */
     { "dflash_model",     "draft DFlash2 (path) per la speculazione a contesto persistente", T_STR, 0, 0, 0, 0, 0, 0, "", "", 0 },
+    { "df2_seq_verify",   "DFlash2: verify per-sessione (1 = forza; A/B diagnostico, default batched)", T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0 },
 };
 #define NOPTS ((int)(sizeof g_opts / sizeof g_opts[0]))
 

@@ -15,6 +15,12 @@
 #include <stdint.h>
 #include <math.h>
 
+/* A/B: forza il verify per-sessione di DFlash2 (opzione di registro `df2_seq_verify`, niente env). */
+static bool df2_seq_verify_on(void) {
+    int b = 0;
+    return llm_ai_mlx_opt_get_bool("df2_seq_verify", &b) == 0 && b != 0;
+}
+
 /* Blocco signpost DFlash2 (spostato dal monolite: era l'unico consumatore). */
 #if defined(__APPLE__)
 #include <os/log.h>
@@ -443,7 +449,7 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
     float* cap = (float*)malloc((size_t)capneed * sizeof(float));
     mlx_array h = mlx_array_new();
     bool ok;
-    if (llm_ai_mlx_opt_env("LLM_DF2_SEQ_VERIFY")) {
+    if (df2_seq_verify_on()) {
         /* ESPERIMENTO (parita' DFlash2 vs greedy): feed 1 token per volta (come il decode greedy)
          * invece del batch N=K+1. Se l'output torna == greedy, la divergenza e' la numerica del
          * forward batch; se resta, e' la logica del round-loop. A/B diagnostico. */
@@ -921,12 +927,12 @@ int llm_ai_mlx_dflash2_generate_multi(llm_ai_mlx_dflash2_handle handle,
          * la FFN batchata su `total` token (kernel MLX diverso per M, amplificato dalla GDN) ->
          * ora `forward_tokens_batch_multi_cap` usa la FFN PER-SESSIONE e il batched e' ESATTO
          * (parita' verificata). Fallback per-sessione per sliding-window/KV-quant, che arch->attn
-         * da solo non gestisce (lo fa layer_forward). LLM_DF2_SEQ_VERIFY forza il per-sessione. */
+         * da solo non gestisce (lo fa layer_forward). df2_seq_verify (registro) forza il per-sessione. */
         {
             int vfail = 0;
             bool batch_ok = !m->cfg.kv_quantize &&
                             !(m->cfg.is_sliding_layer && m->cfg.sliding_window > 0) &&
-                            llm_ai_mlx_opt_env("LLM_DF2_SEQ_VERIFY") == NULL;
+                            !df2_seq_verify_on();
             if (batch_ok) {
                 if (df2_dflash_verify_multi(rt, vsess, nv, anchorsA, drafts, Ks, 8,
                                             caplayers, ncap, vctx, vca, nextA, accA) != 0) vfail = 1;
