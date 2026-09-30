@@ -1950,6 +1950,13 @@ int llmmodelio_module_cmd(const char* sub, const char* a, const char* b)
         fprintf(stderr, "LLM MODULE %s: riservato (registrazione moduli/librerie richiede permesso esplicito)\n", s);
         return -1;
     }
+    if (strcasecmp(s, "MODALITY") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM MODULE MODALITY: atteso <path>\n"); return -1; }
+        char mod[32], mm[512], ar[96];
+        if (llmmodelio_model_modality_of(dir, mod, sizeof mod, mm, sizeof mm, ar, sizeof ar) != 0) return -1;
+        fprintf(LOUT, "LLM MODULE MODALITY '%s': arch=%s modality=%s mmproj=%s\n", dir, ar, mod, mm[0] ? mm : "-");
+        return 0;
+    }
     if (strcasecmp(s, "SHOW") == 0 || strcasecmp(s, "SUPPORT") == 0 || *s == 0) {
         if (!*dir) { fprintf(stderr, "LLM MODULE: atteso <dir>\n"); return -1; }
         char buf[4096];
@@ -2156,6 +2163,31 @@ int llmmodelio_model_module(const char* base_path, const char* gmmod_path, const
     (void)mmproj;
     /* 4) ESEGUI: fondi il modulo nella base. */
     return llmmodelio_model_add(base_path, module_path, out_path);
+}
+/* ── MODALITY OF: query della modality dichiarata (per consumatori: loader/scanner) ──
+ * .gmmod -> legge {modality,arch,mmproj}; dir HF -> config.json + .llmarch; .gguf -> arch resolve. */
+int llmmodelio_model_modality_of(const char* path, char* modality, size_t mcap, char* mmproj, size_t mmcap, char* arch, size_t acap) {
+    if (path == NULL) return -1;
+    if (modality && mcap) modality[0] = 0;
+    if (mmproj && mmcap) mmproj[0] = 0;
+    if (arch && acap) arch[0] = 0;
+    size_t ln = strlen(path);
+    if (ln > 6 && strcasecmp(path + ln - 6, ".gmmod") == 0) {
+        char* j = lj_slurp(path); if (j == NULL) return -1;
+        lj_s(lj_v(j,"modality"), modality, mcap);
+        lj_s(lj_v(j,"arch"), arch, acap);
+        lj_s(lj_v(j,"mmproj"), mmproj, mmcap);
+        free(j);
+        return (modality && modality[0]) ? 0 : -1;
+    }
+    int ok = 0;
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) { if (llmmodelio_arch_resolve_gguf(path) == 0) ok = 1; }
+    else { if (llmmodelio_arch_resolve(path) == 0) ok = 1; }
+    if (!ok || !g_arch_ok) return -1;
+    if (modality && mcap) snprintf(modality, mcap, "%s", llmdesc_modality(&g_arch));
+    if (mmproj && mmcap) snprintf(mmproj, mmcap, "%s", llmdesc_source_mmproj(&g_arch));
+    if (arch && acap) snprintf(arch, acap, "%s", g_arch.arch);
+    return 0;
 }
 int llmmodelio_model_convert(const char* src, const char* dst, const char* fmt)
 {
