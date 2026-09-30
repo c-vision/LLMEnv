@@ -306,7 +306,9 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_dispatch_profile.cpp
     # ABI plugin + descrizione .llmarch: progetti autonomi (non piu' nel runtime).
     ${CMAKE_CURRENT_SOURCE_DIR}/../plugin/llmengine_plugin.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMDesc/llmdesc.c
+    # LLMDesc/llmdesc.c NON piu' compilato qui: l'engine lo USA (llm_mlx_gguf_io.c) quindi si
+    # linka il target `llmdesc` (sotto), cosi' l'oggetto esiste una volta sola (libllmdesc.a)
+    # invece di essere ricompilato anche dentro libllm_ai_mlx.
     # ENGINE container reader: container `GGUF` -> f32 (denso + esperti GMQF) per il forward.
     # Delega i DEQUANT di formato al codec (§0bis); il container runtime dà record+byte.
     llm_engine_container.c
@@ -347,8 +349,13 @@ endif()
 if(NOT TARGET llmengine_opts)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../Options llmengine_opts_build)
 endif()
+# LLMDesc (descrizione .llmarch, llmdesc.h/.c): progetto autonomo — l'engine lo USA
+# (llm_mlx_gguf_io.c) quindi lo LINK, non lo ricompila (dedup sorgente).
+if(NOT TARGET llmdesc)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../LLMDesc llmdesc_mlx_build)
+endif()
 target_link_libraries(llm_ai_mlx PRIVATE
-    llmengine_moe llmcodec llmengine_opts
+    llmengine_moe llmcodec llmengine_opts llmdesc
     # i DEQUANT di formato (llmcodec_dsv41_dequant_fp8_block/_fp8_row/_fp4_expert) vivono nel plugIN fp8;
     # il layer ggml-type (llmcodec_ggml_dequant_row/block_vals/type_name/q*_value) nel plugIN ggml.
     llmcodec_fp8 llmcodec_ggml
