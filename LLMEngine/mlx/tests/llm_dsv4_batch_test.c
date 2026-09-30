@@ -6,6 +6,7 @@
 #include <math.h>
 #include <time.h>
 #include "llm_dsv4_engine.h"
+#include "llm_engine_opts.h"
 
 static float* run(const char* path, const int* tok, int n, int chunk, double* secs, int* am) {
     LlmDsv4Engine* e = llm_dsv4_engine_load_swap(path, 1024, 3000);
@@ -26,19 +27,28 @@ static float* run(const char* path, const int* tok, int n, int chunk, double* se
     return out;
 }
 static double maxdiff(const float* a, const float* b, int n) { double m = 0; for (int i = 0; i < n; i++) { double d = fabs((double)a[i] - b[i]); if (d > m) m = d; } return m; }
+static int topk_overlap(const float* a, const float* b, int n, int k) {
+    int ia[16], ib[16]; for (int r = 0; r < k; r++) { int ba = -1, bb = -1;
+        for (int i = 0; i < n; i++) { int ua = 0, ub = 0; for (int q = 0; q < r; q++) { ua |= (ia[q] == i); ub |= (ib[q] == i); }
+            if (!ua && (ba < 0 || a[i] > a[ba])) ba = i; if (!ub && (bb < 0 || b[i] > b[bb])) bb = i; } ia[r] = ba; ib[r] = bb; }
+    int c = 0; for (int i = 0; i < k; i++) for (int j = 0; j < k; j++) if (ia[i] == ib[j]) c++; return c; }
 int main(int argc, char** argv) {
     const char* path = argc > 1 ? argv[1] : "/Users/gaetano/ds4/ds4flash.gguf";
     int n = argc > 2 ? atoi(argv[2]) : 40, chunk = argc > 3 ? atoi(argv[3]) : 16;
     int tok[4096]; unsigned s = 12345; for (int i = 0; i < n; i++) { s = s * 1103515245u + 12345u; tok[i] = 1000 + (int)((s >> 8) % 20000); }
-    double ta, tb, tc; int aa, ab, ac;
+    double ta, tb, tc, td; int aa, ab, ac, ad;
+    const int nv = 129280;
+    llm_ai_mlx_opt_set("dsv4_prefill_f16", "0");   /* percorso f32: deve essere BIT-EXACT col token-per-token */
     float* A = run(path, tok, n, 1, &ta, &aa);
     float* B = run(path, tok, n, chunk, &tb, &ab);
     float* A2 = run(path, tok, n, 1, &tc, &ac);
-    const int nv = 129280;
-    double dab = maxdiff(A, B, nv), daa = maxdiff(A, A2, nv);
-    printf("n=%d chunk=%d  A %.1fs  B %.1fs  A2 %.1fs | argmax A=%d B=%d A2=%d | max|A-B|=%.3e  max|A-A2|=%.3e\n",
-           n, chunk, ta, tb, tc, aa, ab, ac, dab, daa);
-    int ok = (aa == ab) && dab <= 1e-2 + 4 * daa;
-    printf(ok ? "PASS batch: logit e argmax equivalenti al token-per-token\n" : "FAIL batch\n");
+    llm_ai_mlx_opt_set("dsv4_prefill_f16", "1");   /* attivazioni half (come ds4): differenza statistica, non bit-exact */
+    float* C = run(path, tok, n, chunk, &td, &ad);
+    double dab = maxdiff(A, B, nv), daa = maxdiff(A, A2, nv), dac = maxdiff(A, C, nv);
+    printf("n=%d chunk=%d  A %.1fs B %.1fs A2 %.1fs C(f16) %.1fs\n", n, chunk, ta, tb, tc, td);
+    printf("f32: max|A-A2|=%.3e (determinismo)  max|A-B|=%.3e (chunk vs token)\n", daa, dab);
+    printf("f16: max|A-C|=%.3e  argmax A=%d C=%d  top5-overlap=%d/5  (il modello amplifica il rumore: confronto statistico)\n", dac, aa, ad, topk_overlap(A, C, nv, 5));
+    int ok = (aa == ab) && dab <= 1e-4 && daa <= 1e-4;
+    printf(ok ? "PASS batch: f32 chunk == token-per-token (bit-exact), run-to-run deterministico\n" : "FAIL batch\n");
     return ok ? 0 : 1;
 }

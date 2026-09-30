@@ -13,6 +13,7 @@
 #include "llm_dsv4_attn_fwd.h"   /* rms/rope riusati */
 #include "llm_dsv4_gpu.h"
 #include "llm_dsv4_metal.h"
+#include "llm_engine_opts.h"   /* registro opzioni (dsv4_prefill_f16), niente env */
 
 typedef struct {
     LlmDsv4Metal* be;
@@ -173,6 +174,12 @@ static inline bool llm_dsv4_gpu_attn_finish_batch(LlmDsv4AttnGpu* m, const LlmDs
     const int gd = c->n_head_dim * (c->n_head / ng), ol = ng * rank, ht = c->n_head * c->n_head_dim;
     for (int t = 0; t < nt; t++)
         llm_dsv4_rope_tail_layer_inplace(c, heads + (size_t)t * ht, c->n_head, c->n_head_dim, c->n_rot, pos0 + t, il, 1);
+    /* chunk grande: out_a/out_b come mul_mm_id Q8_0 (pesi letti una volta per il chunk; attivazioni a half come ds4, quindi
+     * NON bit-exact col per-token: opzione dsv4_prefill_f16=0 per il percorso f32 identico al token-per-token) */
+    int f16_ok = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_f16", &v) == 0) f16_ok = v; }   /* default: ON (come ds4) */
+    if (f16_ok && nt >= 16 && llm_dsv4_metal_attn_out_mm_batch(m->be, nt, m->outa[il].w, m->outa[il].row_bytes, ng, (uint32_t)gd, (uint32_t)rank,
+                                                     m->outb[il].w, m->outb[il].row_bytes, (uint32_t)ol, (uint32_t)embd,
+                                                     (uint32_t)ht, heads, out) == 0) return true;
     return llm_dsv4_metal_attn_out_fused_batch(m->be, nt, m->outa[il].w, m->outa[il].row_bytes, 0, ng, (uint32_t)gd,
                                                (uint32_t)rank, m->outb[il].w, m->outb[il].row_bytes, (uint32_t)ol,
                                                (uint32_t)embd, (uint32_t)ht, heads, out) == 0;
