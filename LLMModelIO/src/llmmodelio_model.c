@@ -2116,6 +2116,26 @@ static void lj_s(const char* p, char* out, size_t cap) {
     size_t i=0; while (*p && *p!='"') { if (i<cap-1) out[i++]=*p; p++; } out[i]=0;
 }
 /* il tensore `name` appartiene alla famiglia della modalita' dichiarata? */
+/* L'arch DICHIARA la modalita' `mod`? (per-famiglia: MTP/VISION/AUDIO/OCR coesistono). */
+static int llm_desc_has_modality(const LlmDesc* a, const char* mod) {
+    if (a == NULL || mod == NULL || !*mod) return 0;
+    if (strcasecmp(mod, "text") == 0 || strcasecmp(mod, "adapter") == 0 || strcasecmp(mod, "module") == 0) return 1;
+    if (strcasecmp(mod, "mtp") == 0) {
+        if (a->mm_mtp) return 1;
+        for (int i = 0; i < a->n_roles; i++) if (strcmp(a->roles[i].role, "MTP") == 0) return 1;
+        return 0;
+    }
+    if (strcasecmp(mod, "audio") == 0) {
+        for (int i = 0; i < a->n_roles; i++) if (strncmp(a->roles[i].role, "AUDIO", 5) == 0) return 1;
+        return llmdesc_struct(a, "audio") != NULL;
+    }
+    if (strcasecmp(mod, "vision") == 0 || strcasecmp(mod, "ocr") == 0) {
+        for (int i = 0; i < a->n_roles; i++) { const char* r = a->roles[i].role; if (strcmp(r, "VISION") == 0 || strcmp(r, "VISION_ALIGNER") == 0) return 1; }
+        return llmdesc_struct(a, "vision") != NULL;
+    }
+    if (strcasecmp(mod, "omni") == 0) return llm_desc_has_modality(a, "vision") && llm_desc_has_modality(a, "audio");
+    return 1;
+}
 static int lj_mod_role(const LlmDesc* a, const char* name, const char* modality) {
     const char* role = llmdesc_role(a, name);
     int vis = (strcmp(role,"VISION")==0 || strcmp(role,"VISION_ALIGNER")==0 || strstr(name,"vision") || strstr(name,"mmproj") || strstr(name,"image_"));
@@ -2149,10 +2169,8 @@ int llmmodelio_model_module(const char* base_path, const char* gmmod_path, const
     if (!ok) { if (llmmodelio_arch_resolve_gguf(module_path)!=0) return -1; }
     if (!g_arch_ok) return -1;
     /* 2) VALIDA: l'ABI dichiara la modalita'? (dichiarata nell'ABI) */
-    const char* amod = llmdesc_modality(&g_arch);
-    int declared = (strcasecmp(amod, modality)==0)
-        || (strcasecmp(amod,"omni")==0 && (strcasecmp(modality,"vision")==0||strcasecmp(modality,"audio")==0||strcasecmp(modality,"ocr")==0));
-    if (!declared) return -1;
+    if (!llm_desc_has_modality(&g_arch, modality)) return -1;   /* la modality dev'essere DICHIARATA dall'ABI */
+    (void)llmdesc_modality;
     /* 3) VALIDA: il modulo porta almeno un tensore della famiglia dichiarata (risolta via ruoli ABI). */
     LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv=NULL; int nkv=0;
     if (llmcodec_gguf_read_meta(module_path, &kv, &nkv, &fi) != 0) return -1;
