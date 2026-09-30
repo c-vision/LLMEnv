@@ -53,6 +53,8 @@ parts.append(block(r"static inline uchar2 get_scale_min_k4_just2\([^)]*\)\s*\{")
 for fn in ("dequantize_q2_K", "dequantize_q4_K", "dequantize_iq2_xxs"):
     parts.append("template <typename type4x4>\n" + block(r"void " + fn + r"\("))
 DENSE = pathlib.Path(str(SRC).replace("moe.metal", "dense.metal")).read_text()
+_ms = re.search(r"struct ds4_metal_args_mul_mv\s*\{", DENSE); _me = DENSE.index("};", _ms.start()) + 2
+DENSE_STRUCT_MUL_MV = DENSE[_ms.start():_me]
 _m = re.search(r"template <typename type4x4>\s*void dequantize_q8_0\(", DENSE)
 _i = DENSE.index("{", _m.end()); _d = 0; _k = _i
 while True:
@@ -73,6 +75,15 @@ parts.append(block(re.escape(sub[:mm.end() - mm.start()])))
 parts.append("typedef decltype(kernel_mul_mm_id<32, half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, block_q2_K, QK_NL, dequantize_q2_K, float, float4x4, float, float2x4>) mul_mm_id;")
 for host, blk, deq in (("q8_0", "block_q8_0", "dequantize_q8_0"), ("iq2_xxs", "block_iq2_xxs", "dequantize_iq2_xxs"), ("q2_K", "block_q2_K", "dequantize_q2_K"), ("q4_K", "block_q4_K", "dequantize_q4_K")):
     parts.append(f'template [[host_name("kernel_mul_mm_id_{host}_f32")]] kernel mul_mm_id kernel_mul_mm_id<32, half, half4x4, simdgroup_half8x8, half, half2x4, simdgroup_half8x8, {blk}, {'2' if host == 'q8_0' else 'QK_NL'}, {deq}, float, float4x4, float, float2x4>;')
+
+# --- MoE Q4_K "slots6" (decode/prefill per token, come ds4): pair+swiglu e down+sum6, kernel mul_mv Q4_K ---
+parts.append("#define N_R0_Q4_K 2\nconstant short FC_mul_mv_nsg = 2;   /* ds4: nsg=2 per Q4_K (function constant nel sorgente ds4) */")
+parts.append(DENSE_STRUCT_MUL_MV)
+parts.append(block(r"struct ds4_metal_args_mul_mv_id\s*\{"))
+parts.append(block(r"struct ds4_metal_dsv4_moe_swiglu_weight_args\s*\{"))
+parts.append("template<int nr0, typename args_t>\n" + block(r"void kernel_mul_mv_q4_K_f32_impl\("))
+parts.append(block(r"kernel void kernel_mul_mv_slots6_q4_K_pair_swiglu_f32\("))
+parts.append(block(r"kernel void kernel_mul_mv_slots6_q4_K_sum6_f32\("))
 
 body = "\n\n".join(parts)
 # stringa C: raw literal (MSL contiene virgolette e backslash)

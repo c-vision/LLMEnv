@@ -75,8 +75,8 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
     bool ok = true;
     int shexp_gpu = 0;
 
-    if (gt == 16 && ut == 16 && dt == 10) {
-        /* PATH ds4: pair_swiglu + sum6 in UNA command buffer (mid f32 su device, nessun
+    if ((gt == 16 && ut == 16 && dt == 10) || (gt == 12 && ut == 12 && dt == 12)) {
+        /* PATH ds4 (IQ2_XXS/Q2_K o Q4_K): pair_swiglu + sum6 in UNA command buffer (mid f32 su device, nessun
          * round-trip CPU). 37/43 layer di ds4flash (gate/up IQ2_XXS, down Q2_K). */
         const void* gp[LLM_DSV4_MAX_EXPERT_USED];
         const void* upp[LLM_DSV4_MAX_EXPERT_USED];
@@ -97,14 +97,19 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
             rw[i] = weight[i];
         }
         const void* sg = (pe->shexp_gate && pe->shexp_up && pe->shexp_down) ? pe->shexp_gate : NULL;
-        if (ok) ok = llm_dsv4_metal_moe_iq2_q2k(m->be, gp, upp, dp, x, rw, used,
+        if (ok) ok = (gt == 12 ? llm_dsv4_metal_moe_q4k_batch(m->be, 1, gp, upp, dp, x, rw, used,
                                                 c->swiglu_clamp_exp, (uint32_t)embd,
                                                 (uint32_t)m->gate[il].row_bytes, (uint32_t)ff,
                                                 (uint32_t)m->down[il].row_bytes,
                                                 sg, sg ? pe->shexp_up : NULL, sg ? pe->shexp_down : NULL,
                                                 (uint32_t)llm_ggml_nbytes(pe->shexp_gate_type, embd),
                                                 (uint32_t)llm_ggml_nbytes(pe->shexp_down_type, ff),
-                                                out) == 0;
+                                                out) : llm_dsv4_metal_moe_iq2_q2k(m->be, gp, upp, dp, x, rw, used, c->swiglu_clamp_exp, (uint32_t)embd,
+                                                (uint32_t)m->gate[il].row_bytes, (uint32_t)ff, (uint32_t)m->down[il].row_bytes,
+                                                (pe->shexp_gate && pe->shexp_up && pe->shexp_down) ? pe->shexp_gate : NULL,
+                                                (pe->shexp_gate && pe->shexp_up && pe->shexp_down) ? pe->shexp_up : NULL,
+                                                (pe->shexp_gate && pe->shexp_up && pe->shexp_down) ? pe->shexp_down : NULL,
+                                                (uint32_t)llm_ggml_nbytes(pe->shexp_gate_type, embd), (uint32_t)llm_ggml_nbytes(pe->shexp_down_type, ff), out)) == 0;
         if (ok && sg) shexp_gpu = 1;
     } else {
         float* midv  = (float*)malloc(sizeof(float) * (size_t)ff * used);
@@ -238,13 +243,11 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
     const int is_iq2 = m->gate[il].type == 16 && m->up[il].type == 16 && m->down[il].type == 10;
     const int is_q4  = m->gate[il].type == 12 && m->up[il].type == 12 && m->down[il].type == 12;
     if (!(is_iq2 || is_q4) || used != 6) return false;
-    if (is_q4) {
-        int f16_ok = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_f16", &v) == 0) f16_ok = v; }
-        if (!f16_ok) return false;   /* percorso f32 per-token (bit-exact col token-per-token) */
-        /* Layer Q4_K: tensori impilati nell'ARENA dello store + mul_mm_id (ds4) per tutto il chunk, shared expert incluso. */
-        const uint8_t *g = NULL, *u = NULL, *d = NULL;
-        if (!pe->q4_stacks || !pe->q4_ensure || !pe->q4_stacks(pe->store, il, &g, &u, &d)) return false;
-        if (!(pe->shexp_gate && pe->shexp_up && pe->shexp_down)) return false;
+    const uint8_t *g = NULL, *u = NULL, *d = NULL;
+    int f16_ok = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_f16", &v) == 0) f16_ok = v; }
+    /* Layer Q4_K con ARENA (opzione dsv4_q4_arena, SPERIMENTALE) + attivazioni half: mul_mm_id sui tensori impilati. Altrimenti
+     * il percorso normale sotto (kernel ds4 slots6 Q4_K, attivazioni f32) con gli esperti dello store. */
+    if (is_q4 && f16_ok && pe->q4_stacks && pe->q4_ensure && pe->q4_stacks(pe->store, il, &g, &u, &d) && pe->shexp_gate && pe->shexp_up && pe->shexp_down) {
         int* sel = (int*)malloc(sizeof(int) * (size_t)nt * used); float* wts = (float*)malloc(sizeof(float) * (size_t)nt * used);
         if (!sel || !wts) { free(sel); free(wts); return false; }
         for (int t = 0; t < nt; t++) llm_dsv4_moe_route(c, L, X + (size_t)t * embd, il, tokens[t], sel + (size_t)t * used, wts + (size_t)t * used);
@@ -286,7 +289,7 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
     }
     if (ok) {
         const void* sg = (pe->shexp_gate && pe->shexp_up && pe->shexp_down) ? pe->shexp_gate : NULL;
-        ok = llm_dsv4_metal_moe_iq2_q2k_batch(m->be, nt, gp, upp, dp, X, rw, used, c->swiglu_clamp_exp, (uint32_t)embd,
+        ok = (is_q4 ? llm_dsv4_metal_moe_q4k_batch : llm_dsv4_metal_moe_iq2_q2k_batch)(m->be, nt, gp, upp, dp, X, rw, used, c->swiglu_clamp_exp, (uint32_t)embd,
                                               (uint32_t)m->gate[il].row_bytes, (uint32_t)ff, (uint32_t)m->down[il].row_bytes,
                                               sg, sg ? pe->shexp_up : NULL, sg ? pe->shexp_down : NULL,
                                               (uint32_t)llm_ggml_nbytes(pe->shexp_gate_type, embd),

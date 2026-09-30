@@ -67,6 +67,12 @@ int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const 
                                uint32_t down_nb01, const void* sg, const void* su, const void* sd,
                                uint32_t s_nb_g, uint32_t s_nb_d, float* out);
 
+/* MoE Q4_K (gate/up/down tutti Q4_K) per `nt` token in UNA cb: kernel ds4 slots6 pair_swiglu + sum6. Stessa interfaccia del batch IQ2. */
+int llm_dsv4_metal_moe_q4k_batch(LlmDsv4Metal* b, int nt, const void* const* gates, const void* const* ups,
+                               const void* const* downs, const float* x, const float* rws, int n,
+                               float clamp, uint32_t embd, uint32_t gu_nb01, uint32_t ff,
+                               uint32_t down_nb01, const void* sg, const void* su, const void* sd,
+                               uint32_t s_nb_g, uint32_t s_nb_d, float* out);
 /* Come sopra per `nt` token in UNA command buffer: gates/ups/downs [nt*n], x [nt*embd], rws [nt*n], out [nt*embd]. */
 int llm_dsv4_metal_moe_iq2_q2k_batch(LlmDsv4Metal* b, int nt, const void* const* gates, const void* const* ups,
                                const void* const* downs, const float* x, const float* rws, int n,
