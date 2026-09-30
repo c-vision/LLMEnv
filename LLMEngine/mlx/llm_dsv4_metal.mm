@@ -124,7 +124,7 @@ static const char* const LLM_DSV4_METAL_Q8K =
 "        int bsum = 0; for (uint z = 0u; z < 8u; z++) bsum += out8[z];\n"
 "        ushort dh = (ushort)blk[0] | ((ushort)blk[1] << 8);\n"
 "        float d = (float)as_type<half>(dh);\n"
-"        atomic_fetch_add_explicit((device atomic_float*)&O[row], 0.125f * d * y->d * (float)bsum, memory_order_relaxed);\n"
+"        O[(ulong)row * nblk + b] = 0.125f * d * y->d * (float)bsum;\n"
 "    }\n"
 "}\n"
 "static inline int q2_16(device const uchar* q2, device const char* q8, uint shift) {\n"
@@ -151,7 +151,7 @@ static const char* const LLM_DSV4_METAL_Q8K =
 "        ushort dh = (ushort)blk[80] | ((ushort)blk[81] << 8);\n"
 "        ushort mh = (ushort)blk[82] | ((ushort)blk[83] << 8);\n"
 "        float dall = y->d * (float)as_type<half>(dh), dmin = y->d * (float)as_type<half>(mh);\n"
-"        atomic_fetch_add_explicit((device atomic_float*)&O[row], dall * (float)isum - dmin * (float)summs, memory_order_relaxed);\n"
+"        O[(ulong)row * nblk + b] = dall * (float)isum - dmin * (float)summs;\n"
 "    }\n"
 "}\n"
 "static inline void q4k_scale_min(uint j, device const uchar* q, thread uchar* sd, thread uchar* sm) {\n"
@@ -180,8 +180,14 @@ static const char* const LLM_DSV4_METAL_Q8K =
 "        ushort dh = (ushort)blk[0] | ((ushort)blk[1] << 8);\n"
 "        ushort mh = (ushort)blk[2] | ((ushort)blk[3] << 8);\n"
 "        float dall = y->d * (float)as_type<half>(dh), dmin = -(y->d * (float)as_type<half>(mh));\n"
-"        atomic_fetch_add_explicit((device atomic_float*)&O[row], dall * (float)isum + dmin * (float)summs, memory_order_relaxed);\n"
+"        O[(ulong)row * nblk + b] = dall * (float)isum + dmin * (float)summs;\n"
 "    }\n"
+"}\n"
+/* Somma ORDINATA dei parziali per riga (deterministica: niente atomic float). P={nblk, out_dim}. */
+"kernel void dsv4_red_parts(device const float* PT [[buffer(0)]], device float* O [[buffer(1)]], constant uint* P [[buffer(2)]], uint row [[thread_position_in_grid]]) {\n"
+"    const uint nblk = P[0]; if (row >= P[1]) return;\n"
+"    float s = 0.f; for (uint b = 0; b < nblk; b++) s += PT[(ulong)row * nblk + b];\n"
+"    O[row] = s;\n"
 "}\n";
 
 /* Port FEDELE di ds4 `kernel_mul_mv_iq2_xxs_pair_f32_impl` (metal/moe.metal:3137): simdgroup,
@@ -821,6 +827,8 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_q8k_iq2;
     id<MTLComputePipelineState> pso_q8k_q2k;
     id<MTLComputePipelineState> pso_q8k_q4k;
+    id<MTLComputePipelineState> pso_red_parts;   /* somma ordinata dei parziali Q8K (determinismo) */
+    id<MTLBuffer> spt[64]; size_t spt_cap[64];   /* parziali per job di gemv_batch */
     id<MTLComputePipelineState> pso_q8_0;  /* GEMV Q8_0 veloce (scale 1x/blocco) */
     id<MTLComputePipelineState> pso_pair;   /* MoE fuso gate+up+swiglu (ds4 pair) */
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
@@ -965,6 +973,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_q8k_iq2 = [dev newComputePipelineStateWithFunction:f2 error:&err];
     b->pso_q8k_q2k = [dev newComputePipelineStateWithFunction:f3 error:&err];
     b->pso_q8k_q4k = [dev newComputePipelineStateWithFunction:f4 error:&err];
+    { id<MTLFunction> fr = [lib newFunctionWithName:@"dsv4_red_parts"]; b->pso_red_parts = fr ? [dev newComputePipelineStateWithFunction:fr error:&err] : nil; if (fr) [fr release]; }
     { id<MTLFunction> fq0 = [lib newFunctionWithName:@"dsv4_gemv_q8_0"];
       b->pso_q8_0 = fq0 ? [dev newComputePipelineStateWithFunction:fq0 error:&err] : nil;
       if (!fq0) fprintf(stderr, "dsv4_metal: kernel dsv4_gemv_q8_0 NON compilato\n"); }
@@ -1037,7 +1046,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_f16 = f34 ? [dev newComputePipelineStateWithFunction:f34 error:&err] : nil;
     if (!f34) fprintf(stderr, "dsv4_metal: kernel dsv4_f16 NON compilato\n");
     [lib release];
-    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->pso_route || !b->pso_addr_pair || !b->pso_addr_sum6 || !b->queue) {
+    if (!b->pso || !b->pso_q8k_iq2 || !b->pso_q8k_q2k || !b->pso_q8k_q4k || !b->pso_red_parts || !b->pso_pair || !b->pso_sum6_q2k || !b->pso_rms_w || !b->pso_head_rms || !b->pso_rope || !b->pso_slots6 || !b->pso_swiglu || !b->pso_add || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_hc_post || !b->pso_route || !b->pso_addr_pair || !b->pso_addr_sum6 || !b->queue) {
         fprintf(stderr, "dsv4_metal: pipeline fallita: %s\n",
                 err ? [[err localizedDescription] UTF8String] : "?");
         llm_dsv4_metal_destroy(b); return NULL;
@@ -1052,6 +1061,8 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_q8k_iq2)  [b->pso_q8k_iq2 release];
     if (b->pso_q8k_q2k)  [b->pso_q8k_q2k release];
     if (b->pso_q8k_q4k)  [b->pso_q8k_q4k release];
+    if (b->pso_red_parts) [b->pso_red_parts release];
+    for (int i = 0; i < 64; i++) if (b->spt[i]) [b->spt[i] release];
     if (b->pso_q8_0)     [b->pso_q8_0 release];
     if (b->pso_pair)     [b->pso_pair release];
     if (b->pso_sum6_q2k) [b->pso_sum6_q2k release];
@@ -1203,18 +1214,22 @@ int llm_dsv4_metal_gemv_batch(LlmDsv4Metal* b, const LlmDsv4GpuJob* jobs, int n_
             if (xs[i]) memcpy([xs[i] contents], y, (size_t)nblk * sizeof(LlmDsv4Q8K));
             free(y);
             os[i] = dsv4_scratch(b, &b->so[i], &b->so_cap[i], (size_t)j->out_dim * sizeof(float));
-            if (os[i]) memset([os[i] contents], 0, (size_t)j->out_dim * sizeof(float));
+            id<MTLBuffer> PT = dsv4_scratch(b, &b->spt[i], &b->spt_cap[i], (size_t)j->out_dim * nblk * sizeof(float));
             uint32_t P[4] = { (uint32_t)lead, (uint32_t)j->row_bytes, nblk, j->out_dim };
             pbs[i] = dsv4_scratch(b, &b->spb[i], &b->spb_cap[i], sizeof P);
             if (pbs[i]) memcpy([pbs[i] contents], P, sizeof P);
             [e setComputePipelineState:(t == 16) ? b->pso_q8k_iq2 : (t == 10) ? b->pso_q8k_q2k : b->pso_q8k_q4k];
-            if (!ws[i] || !xs[i] || !os[i] || !pbs[i]) { rc = -2; break; }
+            if (!ws[i] || !xs[i] || !os[i] || !pbs[i] || !PT) { rc = -2; break; }
             [e setBuffer:ws[i] offset:0 atIndex:0];
             [e setBuffer:xs[i] offset:0 atIndex:1];
-            [e setBuffer:os[i] offset:0 atIndex:2];
+            [e setBuffer:PT offset:0 atIndex:2];
             [e setBuffer:pbs[i] offset:0 atIndex:3];
             [e dispatchThreadgroups:MTLSizeMake((NSUInteger)j->out_dim * nblk, 1, 1)
              threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            [e setComputePipelineState:b->pso_red_parts];
+            [e setBuffer:PT offset:0 atIndex:0]; [e setBuffer:os[i] offset:0 atIndex:1];
+            { uint32_t RP[2] = { nblk, j->out_dim }; [e setBytes:RP length:sizeof RP atIndex:2]; }
+            [e dispatchThreads:MTLSizeMake(j->out_dim, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         }
         nq++;
     }
@@ -1230,7 +1245,6 @@ int llm_dsv4_metal_gemv_batch(LlmDsv4Metal* b, const LlmDsv4GpuJob* jobs, int n_
     if (rc == 0)
         for (int i = 0; i < nq; i++)
             memcpy((void*)jobs[i].out, [os[i] contents], (size_t)jobs[i].out_dim * sizeof(float));
-    for (int i = 0; i < 64; i++)
     return rc;
 }
 
