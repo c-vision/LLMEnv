@@ -532,6 +532,7 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
         accepted = 1;
         for (int j = 1; j < K; j++) { if (greedy[j] == d[j]) accepted++; else break; }
     }
+    if (s) { s->spec_drafts += K; s->spec_accepted += accepted; }   /* F20: acceptance cumulativa */
     if (ok && getenv("DF2_VDBG")) {
         static int vn = 0;
         if (vn < 100000) { vn++;
@@ -794,6 +795,7 @@ static int df2_dflash_verify_multi(DFlash2Runtime* rt, LlmMlxSession** sess, int
             for (int j = 1; j < K; j++) { if ((int32_t)g[j] == drafts[i][j]) accepted++; else break; }
         }
         out_accepted[i] = accepted;
+        { LlmMlxSession* _s = sess[i]; if (_s) { _s->spec_drafts += K; _s->spec_accepted += accepted; } }  /* F20 */
         out_next[i] = (int32_t)g[accepted];
         int keep = nprev[i] + 1 + accepted;
         if (accepted < K) {

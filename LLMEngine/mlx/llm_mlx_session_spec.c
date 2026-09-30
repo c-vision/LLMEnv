@@ -999,6 +999,8 @@ int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_
         int M = 1;
         if (okb) { for (int i = 1; i < nd; i++) { if (greedy[i - 1] == draft[i]) M++; else break; } }
         int32_t next = okb ? greedy[M - 1] : 0;
+        /* F20: acceptance cumulativa (draft proposti vs accettati). */
+        s->spec_drafts += nd; s->spec_accepted += M;
         /* Feedback al controllore adattivo (Gufo): EWMA dell'acceptance + streak full-accept. */
         s->spec_acc_ewma = (s->spec_acc_ewma <= 0.0f) ? (float)M : 0.75f * s->spec_acc_ewma + 0.25f * (float)M;
         s->spec_full_streak = (okb && M == nd) ? s->spec_full_streak + 1 : 0;
@@ -1090,6 +1092,18 @@ void llm_mlx_session_spec_free(LlmMlxSession* s) {
         free(s->spec_ckpt_v); s->spec_ckpt_v = NULL;
     }
     s->spec_ckpt_valid = false; s->spec_buf_len = 0; s->spec_buf_pos = 0;
+}
+
+/* F20: acceptance CUMULATIVA della speculazione per la sessione (draft proposti vs accettati dal
+ * target) — metrica di primo livello, non solo tok/s o errore numerico. `rate`=accepted/drafts. */
+int llm_ai_mlx_session_spec_stats(llm_ai_mlx_session_handle handle,
+                                  long long* out_drafts, long long* out_accepted, double* out_rate) {
+    if (handle == NULL) return -1;
+    LlmMlxSession* s = (LlmMlxSession*)handle;
+    if (out_drafts) *out_drafts = s->spec_drafts;
+    if (out_accepted) *out_accepted = s->spec_accepted;
+    if (out_rate) *out_rate = (s->spec_drafts > 0) ? (double)s->spec_accepted / (double)s->spec_drafts : 0.0;
+    return 0;
 }
 
 /* Scarta i token del chunk non consumati (append esterno, nuovo turno). Riporta la cache al

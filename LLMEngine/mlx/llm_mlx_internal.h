@@ -296,6 +296,9 @@ typedef struct LlmMlxSession {
      * di full-accept per sondare più largo. Deterministico (nessuna timing della richiesta). */
     float spec_acc_ewma;
     int spec_full_streak;
+    /* F20: acceptance CUMULATIVA per sessione (metrica di primo livello: draft proposti vs
+     * accettati dal target). Esposta da llm_ai_mlx_session_spec_stats(). */
+    long long spec_drafts, spec_accepted;
     /* RMLX10 Fase B (2026-09-03): decode-step compilato (mlx_compile). La
      * closure e' creata lazy al primo step compilato e VIVE per tutta la
      * sessione (la cache di compile di mlx core e' keyed per fun_id: riusare

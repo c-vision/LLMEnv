@@ -56,6 +56,13 @@ int main(int argc, char** argv) {
     int nd = dfgen(d, sd, -1, N, df);
     double df_ms = now_ms() - d0;
     printf("DF1 n=%d %.1f ms (%.1f tok/s)\n", nd, df_ms, nd>0?nd*1e3/df_ms:0);
+    {   /* F20: acceptance (draft proposti vs accettati) come metrica di primo livello. */
+        int (*specstats)(sess_h, long long*, long long*, double*) =
+            dlsym(h, "llm_ai_mlx_session_spec_stats");
+        long long sdd = 0, sda = 0; double sdr = 0;
+        if (specstats && specstats(sd, &sdd, &sda, &sdr) == 0)
+            printf("DF1 acceptance: %lld/%lld = %.3f\n", sda, sdd, sdr);
+    }
     { int minb = na < nd ? na : nd, fb = -1;
       for (int i = 0; i < minb; i++) if (ar[i] != df[i]) { fb = i; break; }
       printf("PARITA AR vs DF1: %s (primo diff %d, na=%d nd=%d)\n", (fb<0 && na==nd)?"OK":"DIVERGE", fb, na, nd);

@@ -99,6 +99,13 @@ int main(int argc, char** argv) {
                NP, tp, tg, tg > 0 ? g * 1e3 / tg : 0.0,
                a / 1e6, p / 1e6, c / 1e6);
         if (!quiet) printf("      (gen=%d token)\n", g);
+        {   /* F20: acceptance (draft proposti vs accettati) se la spec e' attiva. */
+            int (*specstats)(S, long long*, long long*, double*) =
+                dlsym(h, "llm_ai_mlx_session_spec_stats");
+            long long dd = 0, aa = 0; double rr = 0;
+            if (specstats && specstats(s, &dd, &aa, &rr) == 0 && dd > 0)
+                printf("      acceptance %lld/%lld = %.3f\n", aa, dd, rr);
+        }
         free(out);
         if (destroy) destroy(s);
     }

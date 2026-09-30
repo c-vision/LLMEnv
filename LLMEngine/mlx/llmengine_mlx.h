@@ -382,6 +382,9 @@ int llm_ai_mlx_session_reset(llm_ai_mlx_session_handle handle);
  * configurato (cfg.kv_max_tokens > 0), altrimenti la lunghezza ALLOCATA della cache del layer 0
  * (per la KV dinamica corrente coincide con l'uso). Scrive i due valori non-NULL. 0 / -1. */
 int llm_ai_mlx_session_kv_stats(llm_ai_mlx_session_handle handle, int* out_used, int* out_cap);
+/* F20: acceptance cumulativa della speculazione (draft proposti vs accettati + rate). */
+int llm_ai_mlx_session_spec_stats(llm_ai_mlx_session_handle handle,
+                                  long long* out_drafts, long long* out_accepted, double* out_rate);
 
 /* FASE 3: native tool dispatch -- decides exactly ONE token at the session's current
  * (already-pending, undecided) position via an argmax restricted to allowed_ids, instead of
