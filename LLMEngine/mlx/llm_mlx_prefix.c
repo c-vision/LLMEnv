@@ -96,6 +96,12 @@ static uint64_t llm_prefix_kvdisk_key(LlmMlxModel* m, const int32_t* toks, int n
  * O(window), §G-ter) e libera gli array MLX (tokens/name/history restano). 0 ok / -1. */
 static int llm_prefix_spill(LlmMlxModel* m, SavedPrefix* p) {
     if (!m || !p || !p->has_kv || p->token_len <= 0 || m->kvdisk_state != 1) return -1;
+    /* Modelli con layer SLIDING (gpt-oss): la KV sliding e' finestrata e NON viene spillata
+     * (vedi skip sotto), quindi il blob su disco resterebbe PARZIALE -> alla reuse si
+     * imposta cache_offset=N con i layer sliding vuoti => CMLX "non-empty mlx_array".
+     * Non spillare affatto: la reuse fallira' il restore e fara' un prefill completo
+     * (fail-open, corretto). In RAM il riuso resta valido. */
+    if (m->cfg.is_sliding_layer) return -1;
     uint8_t* buf = NULL; size_t len = 0, cap = 0;
     if (llm_kvdisk_buf_reserve(&buf, &cap, len, 20) != 0) return -1;
     uint32_t magic = LLM_KVDISK_BLOB_MAGIC, ver = LLM_KVDISK_BLOB_VER, nt = 0;
@@ -124,6 +130,9 @@ static int llm_prefix_spill(LlmMlxModel* m, SavedPrefix* p) {
 /* Ripristina da disco la KV spillata nel prefisso p (layer global). 0 ok / -1. */
 static int llm_prefix_restore(LlmMlxModel* m, SavedPrefix* p) {
     if (!m || !p || p->token_len <= 0 || m->kvdisk_state != 1) return -1;
+    /* Speculare alla spill: un blob di un modello SLIDING e' intrinsecamente PARZIALE (la KV
+     * finestrata non e' salvata) -> rifiutare il restore. La reuse fara' un prefill completo. */
+    if (m->cfg.is_sliding_layer) return -1;
     uint64_t key = llm_prefix_kvdisk_key(m, p->tokens, p->token_len);
     size_t need = 0;
     if (!llm_kv_disk_has(&m->kvdisk, key, &need) || need < 20) return -1;
