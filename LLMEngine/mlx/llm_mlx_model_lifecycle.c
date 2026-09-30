@@ -125,7 +125,13 @@ void llm_mlx_model_init(LlmMlxModel* m) {
     llm_radix_init(&m->radix);
     m->kvpool = llm_kv_page_pool_new(/*n_pages=*/1024, /*block_size=*/16);
     m->kvdisk_state = -1; /* §G: tier SSD KV non inizializzato (lazy sull'opzione `kvdisk`) */
-    m->kvckpt_block = 256; /* §G-ter: checkpoint del rewind ogni 256 token (LLM_KVCHECKPOINT_BLOCK) */
+    /* §G-ter checkpoint del rewind: DEFAULT 0 (OFF). I checkpoint DI PREFILL scrivono la KV su
+     * kvdisk ogni `block` token; con il kvdisk persistente della prefix-cache (D15, default ON via
+     * `prefix_cache=auto`) `llm_kvdisk_enabled` e' vero e questo blocco partiva SEMPRE, costando
+     * ~19% di prefill (misurato: Llama-1B 19.4k -> 23.1k tok/s con block=0). E' una feature
+     * AGENTICA (rewind a prefissi intermedi): deve essere ESPLICITA, non implicita dal prefix-cache.
+     * Opt-in: `LLM_KVCHECKPOINT_BLOCK=<n>` (es. 256). */
+    m->kvckpt_block = 0;
     { const char* kb = llm_ai_mlx_opt_env("LLM_KVCHECKPOINT_BLOCK"); if (kb) m->kvckpt_block = atoi(kb); }
     /* §G-bis leva 1 — sparse page-level attention (default OFF) */
     m->pagesel_on = (llm_ai_mlx_opt_env("LLM_PAGESEL") != NULL);
