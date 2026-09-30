@@ -26,6 +26,31 @@ llm_sdpa_hook_slot llm_kvq_hook = { NULL, NULL };
 llm_sdpa_hook_slot llm_pagesel_hook = { NULL, NULL };
 llm_sdpa_hook_slot llm_train_sdpa_hook = { NULL, NULL };
 
+/* (B7, 2026-09-30) Il registry `g_kvq_pools` e' `static` NELL'HEADER llm_mlx_kvq_pool.h -> una
+ * copia PER TU. Il pool di generazione vive in QUESTA TU (layer_forward.c); session_destroy/_reset
+ * (altra TU, llm_mlx_session_lifecycle.c) non poteva raggiungerlo -> il pool non veniva MAI
+ * liberato (byte/token cold trattenuti per sessione) e il cap di 8 si esauriva (oltre 8 sessioni:
+ * `llm_kvq_pool_for` ritornava NULL e la KV-quant si spegneva IN SILENZIO). Queste due funzioni
+ * non-static sono l'unico punto d'accesso dal lifecycle. */
+void llm_mlx_kvq_pool_release_session(void* model, void* sess) {
+    for (int i = 0; i < g_kvq_pools_n; i++) {
+        if (g_kvq_pools[i].model == model && g_kvq_pools[i].sess == sess) {
+            llm_kvq_pool_free(&g_kvq_pools[i].p);
+            g_kvq_pools[i] = g_kvq_pools[--g_kvq_pools_n];
+            memset(&g_kvq_pools[g_kvq_pools_n], 0, sizeof(g_kvq_pools[0]));
+            return;
+        }
+    }
+}
+void llm_mlx_kvq_pool_reset_session(void* model, void* sess) {
+    for (int i = 0; i < g_kvq_pools_n; i++)
+        if (g_kvq_pools[i].model == model && g_kvq_pools[i].sess == sess) {
+            llm_kvq_pool* p = &g_kvq_pools[i].p;
+            if (p->committed_l) for (int l = 0; l < p->layers; l++) p->committed_l[l] = 0;
+            return;
+        }
+}
+
 /* ── LLM_KV_DEQUANT_READ (2026-09-13): attenzione decode che legge la KV cold QUANTIZZATA
  * direttamente (kernel Metal dequant-on-read, llm_mlx_kv_quant_sdpa_kernel.h), senza
  * dequant+concat. Il cold e' "a blocchi": a ogni step si quantizza SOLO il token che scade

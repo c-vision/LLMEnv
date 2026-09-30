@@ -478,6 +478,8 @@ void llm_mlx_session_destroy(LlmMlxSession* s) {
     llm_mlx_ngram_free(&s->ngram);
     free(s->history);
     if (s->compiled_decode_valid) mlx_closure_free(s->compiled_decode);
+    /* B7: libera il pool int8 paged della sessione (registry in llm_mlx_layer_forward.c). */
+    llm_mlx_kvq_pool_release_session((void*)s->model, (void*)s);
     free(s);
 }
 
@@ -494,6 +496,8 @@ int llm_ai_mlx_session_reset(llm_ai_mlx_session_handle handle) {
     /* KV quant: azzera i contatori cold (i buffer quantizzati restano allocati, riusati). */
     if (s->kvq_len)   for (int l = 0; l < s->n_layers; l++) s->kvq_len[l] = 0;
     if (s->kvq_v_len) for (int l = 0; l < s->n_layers; l++) s->kvq_v_len[l] = 0;
+    /* B7: azzera anche il cold del POOL int8 paged (altrimenti l'hook rileggerebbe cold stale). */
+    llm_mlx_kvq_pool_reset_session((void*)s->model, (void*)s);
     /* KV principale: libera e ricrea vuota per layer. */
     for (int l = 0; l < s->n_layers; l++) {
         mlx_array_free(s->k_cache[l]); s->k_cache[l] = mlx_array_new();

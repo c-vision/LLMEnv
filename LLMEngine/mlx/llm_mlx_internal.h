@@ -846,6 +846,9 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
                    mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out);
 /* --- dominio layer_forward KV-quant/pagesel (llm_mlx_layer_forward.c) --- */
 void llm_mlx_set_layer_ops(const char* const* ops, int n);
+/* B7: accesso al registry dei pool int8 (definito in llm_mlx_layer_forward.c) dal lifecycle. */
+void llm_mlx_kvq_pool_release_session(void* model, void* sess);
+void llm_mlx_kvq_pool_reset_session(void* model, void* sess);
 /* Definiti nel monolite, usati da layer_forward (llm_mlx_layer_forward.c). */
 bool llm_env_prof(void);
 bool llm_env_phase(void);
