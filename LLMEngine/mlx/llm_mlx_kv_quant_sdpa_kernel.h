@@ -245,9 +245,14 @@ static llm_kvq_sdpa_cache llm_kvq_sdpa_singleton = { {0}, {0}, false };
  * riletta ad ogni step inizia a dominare molto prima dei bucket 512/1024 di MLX. Sweep
  * misurato (nc~30720, decode 24 token): split_tokens=4096 (splits=8) 53,3 tok/s;
  * 2048 (splits=15) 56,1; 1024 (splits=30) 56,3 — plateau gia' raggiunto a ~15-30 split, NON
- * a centinaia. Override: opzione di registro `kvq_split_tokens`. */
+ * a centinaia. Override: opzione di registro `kvq_split_tokens`.
+ *
+ * AGGIORNAMENTO (2026-09-30, M5 Max, Llama-3.2-1B, A/B interleaved, mediane): il default 1024
+ * lasciava solo splits=8 a 8k (nc~7.7k) e 16 a 16k — SOTTO il plateau. Con split_tokens=256
+ * (splits=30 a 8k, 62 a 16k): decode 8k 88 -> 101 tok/s (+15%), 16k 92 -> 102 (+11%). Il kernel
+ * e' quindi parallelismo-bound sotto il plateau. Default abbassato a 256. */
 #ifndef LLM_KVQ_SPLIT_TOKENS
-#define LLM_KVQ_SPLIT_TOKENS 1024
+#define LLM_KVQ_SPLIT_TOKENS 256
 #endif
 /* Tetto di split: tenuto DELIBERATAMENTE lontano dalla zona misurata come dannosa (~480,
  * 5,2 tok/s vs il plateau ~56 tok/s misurato a splits=15-30) finche' llm_kvq_combine_src non
