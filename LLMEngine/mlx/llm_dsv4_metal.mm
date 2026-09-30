@@ -2446,7 +2446,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
     if (!b->pso_gemv_f32 || !b->pso_rms_w || !b->pso_rope || !b->pso_add || !b->pso_comp_pool || !b->pso_attn_mixed) return -1;
     const LlmDsv4MidParams* p0 = &ps[0];
     const int embd = p0->embd, hd = p0->hd, ratio = p0->ratio, co = p0->co;
-    if (ratio <= 0 || (co != 1 && co != 2)) return -1;
+    if (ratio < 0 || (co != 1 && co != 2)) return -1;   /* ratio 0 = solo finestra raw */
     int max_icomp = 1; for (int t = 0; t < nt; t++) if (ps[t].n_icomp > max_icomp) max_icomp = ps[t].n_icomp;
     id<MTLBuffer> X   = dsv4_scratch(b, &b->sx[40], &b->sx_cap[40], (size_t)nt * embd * sizeof(float));
     id<MTLBuffer> KVC = dsv4_scratch(b, &b->sx[41], &b->sx_cap[41], (size_t)nt * hd * sizeof(float));
@@ -2478,6 +2478,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         id<MTLBuffer> allowedB = (id<MTLBuffer>)p->allowed;
         const NSUInteger off_a = (NSUInteger)((size_t)p->state_row * width * 4);
         const NSUInteger off_i = (NSUInteger)((size_t)p->state_row * iwidth * 4);
+        if (ratio > 0) {   /* ratio 0: nessun compressor */
         /* 1) compressor attn: kv/gate f32 + ape */
         [e setComputePipelineState:b->pso_gemv_f32];
         [e setBuffer:(id<MTLBuffer>)p->w_ckv offset:0 atIndex:0]; [e setBuffer:X offset:xo atIndex:1]; [e setBuffer:sakv offset:off_a atIndex:2];
@@ -2492,6 +2493,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         { uint32_t P[1] = { (uint32_t)width }; [e setBytes:P length:sizeof(P) atIndex:2]; }
         [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)width + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
+        }
         /* 2) raw: shift se pieno, fp8 della riga, copia in raw[raw_off] */
         if (p->raw_full) {
             [e setComputePipelineState:b->pso_comp_shift];

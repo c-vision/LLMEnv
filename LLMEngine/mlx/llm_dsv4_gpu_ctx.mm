@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include "llm_dsv4_gpu_ctx.h"
+#include "llm_engine_opts.h"
 #include "llm_dsv4_gpu.h"
 #include "llm_dsv4_gpu_moe.h"
 #include "llm_dsv4_gpu_attn.h"
@@ -123,17 +124,22 @@ static void dsv4_mid_free(Dsv4Mid* m) {
     llm_dsv4_metal_buf_free(m->raw); llm_dsv4_metal_buf_free(m->acomp); llm_dsv4_metal_buf_free(m->icomp); llm_dsv4_metal_buf_free(m->allowed);
     memset(m, 0, sizeof *m);
 }
+/* Attenzione solo-raw (layer 0-1, ratio 0) su GPU: opzione di registro dsv4_gpu_raw_attn (default 1; 0 = percorso CPU). */
+static int dsv4_raw_attn_gpu(void) { int v = 1; if (llm_ai_mlx_opt_get_bool("dsv4_gpu_raw_attn", &v) != 0) v = 1; return v; }
 static int dsv4_mid_init(Dsv4Mid* m, const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int ratio, int raw_cap, int comp_cap) {
-    if (!g_be || (ratio != 4 && ratio != 128) || !L->comp_kv || !L->comp_gate || !L->comp_ape || !L->comp_norm || !L->attn_sinks) return 0;
+    if (!g_be || (ratio != 0 && ratio != 4 && ratio != 128) || !L->attn_sinks) return 0;
+    if (ratio != 0 && (!L->comp_kv || !L->comp_gate || !L->comp_ape || !L->comp_norm)) return 0;
     memset(m, 0, sizeof *m);
     int co = (ratio == 4) ? 2 : 1, hd = c->n_head_dim, ihd = c->n_indexer_head_dim, embd = c->n_embd;
     int width = co * hd, iwidth = co * ihd;
     m->ratio = ratio; m->co = co; m->hd = hd; m->ihd = ihd; m->width = width; m->iwidth = iwidth;
     m->raw_cap = raw_cap; m->comp_cap = comp_cap;
+    if (ratio > 0) {
     m->w_ckv  = llm_dsv4_metal_buf_alloc(g_be, (size_t)width * embd * 4);  llm_dsv4_metal_buf_write(m->w_ckv, 0, L->comp_kv,   (size_t)width * embd * 4);
     m->w_cgate= llm_dsv4_metal_buf_alloc(g_be, (size_t)width * embd * 4);  llm_dsv4_metal_buf_write(m->w_cgate, 0, L->comp_gate, (size_t)width * embd * 4);
     m->w_cape = llm_dsv4_metal_buf_alloc(g_be, (size_t)ratio * width * 4); llm_dsv4_metal_buf_write(m->w_cape, 0, L->comp_ape,  (size_t)ratio * width * 4);
     m->w_cnorm= llm_dsv4_metal_buf_alloc(g_be, (size_t)hd * 4);            llm_dsv4_metal_buf_write(m->w_cnorm, 0, L->comp_norm, (size_t)hd * 4);
+    }
     m->sinks  = llm_dsv4_metal_buf_alloc(g_be, (size_t)c->n_head * 4);     llm_dsv4_metal_buf_write(m->sinks, 0, L->attn_sinks,  (size_t)c->n_head * 4);
     if (ratio == 4) {
         if (!L->idx_c_kv || !L->idx_c_gate || !L->idx_c_ape || !L->idx_c_norm || !L->idx_q_b || !L->idx_proj) { dsv4_mid_free(m); return 0; }
@@ -145,15 +151,18 @@ static int dsv4_mid_init(Dsv4Mid* m, const LlmDsv4Config* c, const LlmDsv4LayerW
         m->w_iqb   = llm_dsv4_metal_buf_alloc(g_be, (size_t)qdim * c->n_lora_q * 4); llm_dsv4_metal_buf_write(m->w_iqb, 0, L->idx_q_b, (size_t)qdim * c->n_lora_q * 4);
         m->w_iproj = llm_dsv4_metal_buf_alloc(g_be, (size_t)c->n_indexer_head * embd * 4); llm_dsv4_metal_buf_write(m->w_iproj, 0, L->idx_proj, (size_t)c->n_indexer_head * embd * 4);
     }
+    if (ratio > 0) {
     m->st_akv = llm_dsv4_metal_buf_alloc(g_be, (size_t)co * ratio * width * 4);
     m->st_asc = llm_dsv4_metal_buf_alloc(g_be, (size_t)co * ratio * width * 4);
+    }
     if (ratio == 4) { m->st_ikv = llm_dsv4_metal_buf_alloc(g_be, (size_t)co * ratio * iwidth * 4); m->st_isc = llm_dsv4_metal_buf_alloc(g_be, (size_t)co * ratio * iwidth * 4); }
     m->raw   = llm_dsv4_metal_buf_alloc(g_be, (size_t)raw_cap * hd * 4);
-    m->acomp = llm_dsv4_metal_buf_alloc(g_be, (size_t)comp_cap * hd * 4);
-    m->icomp = llm_dsv4_metal_buf_alloc(g_be, (size_t)comp_cap * ihd * 4);
-    m->allowed = llm_dsv4_metal_buf_alloc(g_be, (size_t)comp_cap * sizeof(int));
-    if (!m->w_ckv || !m->w_cgate || !m->w_cape || !m->w_cnorm || !m->sinks || !m->st_akv || !m->st_asc || !m->raw || !m->acomp || !m->icomp || !m->allowed) { dsv4_mid_free(m); return 0; }
-    dsv4_mid_state_zero(m->st_akv, m->st_asc, co * ratio * width);
+    { const size_t cc = comp_cap > 0 ? (size_t)comp_cap : 4;   /* ratio 0: buffer minimi (mai letti) */
+    m->acomp = llm_dsv4_metal_buf_alloc(g_be, cc * hd * 4);
+    m->icomp = llm_dsv4_metal_buf_alloc(g_be, cc * ihd * 4);
+    m->allowed = llm_dsv4_metal_buf_alloc(g_be, cc * sizeof(int)); }
+    if (!m->sinks || !m->raw || !m->acomp || !m->icomp || !m->allowed || (ratio > 0 && (!m->w_ckv || !m->w_cgate || !m->w_cape || !m->w_cnorm || !m->st_akv || !m->st_asc))) { dsv4_mid_free(m); return 0; }
+    if (ratio > 0) dsv4_mid_state_zero(m->st_akv, m->st_asc, co * ratio * width);
     if (ratio == 4) dsv4_mid_state_zero(m->st_ikv, m->st_isc, co * ratio * iwidth);
     m->inited = 1;
     return 1;
@@ -165,7 +174,7 @@ static void dsv4_mid_fill(const Dsv4Mid* m, const LlmDsv4Config* c, int ratio, i
         int n_raw0, int n_acomp0, int n_icomp0, const float* q, const float* kv, const float* qrn, const float* xn,
         int pos, float* heads, LlmDsv4MidParams* p, int* nr_out, int* na_out, int* ni_out) {
     const int hd = c->n_head_dim, ihd = c->n_indexer_head_dim;
-    int due = ((pos + 1) % ratio) == 0, pos_mod = pos % ratio;
+    int due = ratio > 0 && ((pos + 1) % ratio) == 0, pos_mod = ratio > 0 ? pos % ratio : 0;
     int state_row = (ratio == 4) ? (ratio + pos_mod) : pos_mod;
     int raw_full = (n_raw0 >= raw_cap);
     int raw_off = raw_full ? (raw_cap - 1) * hd : n_raw0 * hd;
@@ -204,8 +213,8 @@ int llm_dsv4_gpu_attn_mid_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights*
         int ratio, int raw_cap, int comp_cap,
         const float* q, const float* kv, const float* qrn, const float* xn, int pos, float* heads) {
     if (!g_on || !g_be || !c || !L || il < 0 || il >= LLM_DSV4_MAX_LAYER) return 0;
-    if (ratio != 4 && ratio != 128) return 0;
-    if (il < c->n_hash_layer) return 0;
+    if (ratio != 0 && ratio != 4 && ratio != 128) return 0;   /* ratio 0 (layer 0-1): solo finestra raw; i layer hash (routing) hanno attenzione normale */
+    if (ratio == 0 && !dsv4_raw_attn_gpu()) return 0;
     Dsv4Mid* m = &g_mid[il];
     if (!m->inited && !dsv4_mid_init(m, c, L, ratio, raw_cap, comp_cap)) return 0;
     LlmDsv4MidParams p; int nr, na, ni;
@@ -222,8 +231,8 @@ int llm_dsv4_gpu_attn_mid_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights*
 int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
         int ratio, int raw_cap, int comp_cap, const float* xn, int pos0, int nt, float* out) {
     if (!g_on || !g_be || !c || !L || il < 0 || il >= LLM_DSV4_MAX_LAYER || nt <= 0) return 0;
-    if (ratio != 4 && ratio != 128) return 0;
-    if (il < c->n_hash_layer) return 0;
+    if (ratio != 0 && ratio != 4 && ratio != 128) return 0;
+    if (ratio == 0 && !dsv4_raw_attn_gpu()) return 0;
     if (!llm_dsv4_gpu_attn_batch_ready(&g_attn, il)) return 0;
     Dsv4Mid* m = &g_mid[il];
     if (!m->inited && !dsv4_mid_init(m, c, L, ratio, raw_cap, comp_cap)) return 0;

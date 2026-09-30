@@ -52,6 +52,10 @@ int main(int argc, char** argv) {
     llm_ai_mlx_opt_set("dsv4_prefill_f16", "0"); llm_ai_mlx_opt_set("dsv4_gpu_hc", "1");   /* mHC su GPU: accumuli float (non double) -> confronto statistico */
     double te; int ae; float* E = run(path, tok, n, chunk, &te, &ae);
     llm_ai_mlx_opt_set("dsv4_gpu_hc", "0");
+    llm_ai_mlx_opt_set("dsv4_prefill_f16", "0"); llm_ai_mlx_opt_set("dsv4_gpu_raw_attn", "0");   /* layer 0-1 (ratio 0) su CPU: riferimento per la nuova attenzione raw su GPU */
+    double tf; int af; float* F = run(path, tok, n, chunk, &tf, &af);
+    llm_ai_mlx_opt_set("dsv4_gpu_raw_attn", "1");
+    printf("raw-attn GPU vs CPU: max|A-F|=%.3e KL(A||F)=%.4f argmax A=%d F=%d top5=%d/5\n", maxdiff(A, F, nv), kl_div(A, F, nv), aa, af, topk_overlap(A, F, nv, 5));
     printf("gpu_hc: max|A-E|=%.3e KL(A||E)=%.4f argmax A=%d E=%d top5=%d/5  (%.1fs)\n", maxdiff(A, E, nv), kl_div(A, E, nv), aa, ae, topk_overlap(A, E, nv, 5), te);
     double dab = maxdiff(A, B, nv), daa = maxdiff(A, A2, nv), dac = maxdiff(A, C, nv);
     printf("n=%d chunk=%d  A %.1fs B %.1fs A2 %.1fs C(f16) %.1fs\n", n, chunk, ta, tb, tc, td);
