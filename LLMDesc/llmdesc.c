@@ -231,13 +231,26 @@ int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out
 /* Cartella ABI/ canonica: risale dal cwd cercando una dir `ABI` (dove vivono le descrizioni).
  * Ritorna 1 e scrive il path in `out` se trovata. Usata da LLM ARCH LIST e dal resolve. */
 int llmdesc_abi_dir(char* out, size_t cap) {
+    /* (0) Override esplicito (installazioni fuori dall'albero sorgente). */
+    const char* env = getenv("LLMDESC_ABI_DIR");
+    if (env != NULL && *env != '\0') { if (out && cap) snprintf(out, cap, "%s", env); return 1; }
     char cwd[2048];
     if (getcwd(cwd, sizeof cwd) == NULL) return 0;
     char dir[2048]; snprintf(dir, sizeof dir, "%s", cwd);
     for (int up = 0; up < 12 && dir[0]; ++up) {
-        char path[4096]; snprintf(path, sizeof path, "%s/ABI", dir);
-        DIR* dp = opendir(path);
-        if (dp != NULL) { closedir(dp); if (out && cap) snprintf(out, cap, "%s", path); return 1; }
+        /* (a) <dir>/ABI
+         * (b) <dir>/LLMEnv/ABI e (c) <dir>/../LLMEnv/ABI: l'engine vive DENTRO LLMEnv, ma i
+         *     consumatori (FastLLM, GMBasic) sono progetti FRATELLI -> l'ABI non e' un semplice
+         *     ANTENATO della cwd. Senza (b)/(c) la role map .llmarch non si carica e il loader
+         *     GGUF generico cerca i nomi HF (lm_head/embed_tokens/norm) che il store GGUF non
+         *     ha -> "lookup fallito" (es. olmoe). */
+        char path[4096];
+        static const char* tails[] = { "/ABI", "/LLMEnv/ABI", "/../LLMEnv/ABI" };
+        for (int t = 0; t < 3; ++t) {
+            snprintf(path, sizeof path, "%s%s", dir, tails[t]);
+            DIR* dp = opendir(path);
+            if (dp != NULL) { closedir(dp); if (out && cap) snprintf(out, cap, "%s", path); return 1; }
+        }
         char* sl = strrchr(dir, '/');
         if (sl == NULL) break;
         if (sl == dir) { dir[1] = 0; } else *sl = 0;
