@@ -24,8 +24,11 @@ endif()
 if(NOT TARGET llmengine_opts)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../Options llmengine_opts_moe)
 endif()
+# NIENTE LLMDesc/llmdesc.c qui: il MoE non referenzia alcun llmdesc_* (0 simboli U) e llmdesc
+# e' gia' un target a se' (LLMDesc/, add_library(llmdesc STATIC llmdesc.c)). Compilarlo anche
+# qui era duplicazione sorgente: lo stesso llmdesc.c.o finiva in libllmengine_moe.a E in
+# libllmdesc.a E in libllm_ai_mlx.
 add_library(llmengine_moe STATIC
-    ../../LLMDesc/llmdesc.c
     llm_engine_moe.c   # adapter all'ABI comune llmengine
     src/llmengine_moe_arch.c
     src/llmengine_moe_json.c
