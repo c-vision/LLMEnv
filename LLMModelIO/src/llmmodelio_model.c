@@ -182,6 +182,63 @@ int llmmodelio_model_ablate(const char* in_path, const char* out_path, const cha
     llmcodec_gguf_meta_free(kv, nkv); llmcodec_gguf_free_info(&fi);
     return rc == 0 ? 0 : -1;
 }
+/* DIFF (model surgery: checkpoint/rollback + quality gate) — confronta due artefatti GGUF:
+ * tensori presenti solo in A/B, e per i comuni differenze di tipo/forma/contenuto (byte).
+ * Scrive un report testuale in out_path. A/B non GGUF o illeggibili -> -1 (mai silenzioso). */
+int llmmodelio_model_diff(const char* a_path, const char* b_path, const char* out_path) {
+    if (a_path == NULL || b_path == NULL || out_path == NULL) return -1;
+    LlmCodecGgufFileInfo fa, fb;
+    LlmCodecGgufMetaKVOwned* kva = NULL; LlmCodecGgufMetaKVOwned* kvb = NULL; int nkva = 0, nkvb = 0;
+    if (llmcodec_gguf_read_meta(a_path, &kva, &nkva, &fa) != 0) return -1;
+    if (llmcodec_gguf_read_meta(b_path, &kvb, &nkvb, &fb) != 0) {
+        llmcodec_gguf_meta_free(kva, nkva); llmcodec_gguf_free_info(&fa); return -1;
+    }
+    FILE* os = fopen(out_path, "w");
+    FILE* afp = fopen(a_path, "rb");
+    FILE* bfp = fopen(b_path, "rb");
+    if (os == NULL || afp == NULL || bfp == NULL) {
+        if (os) fclose(os); if (afp) fclose(afp); if (bfp) fclose(bfp);
+        llmcodec_gguf_meta_free(kva, nkva); llmcodec_gguf_meta_free(kvb, nkvb);
+        llmcodec_gguf_free_info(&fa); llmcodec_gguf_free_info(&fb); return -1;
+    }
+    uint64_t eq = 0, differ = 0, only_a = 0, only_b = 0, bytes_differ = 0;
+    for (uint64_t i = 0; i < fa.n_tensors; i++) {
+        LlmCodecGgufTensorInfo* ta = &fa.tensors[i];
+        LlmCodecGgufTensorInfo* tb = NULL;
+        for (uint64_t j = 0; j < fb.n_tensors; j++)
+            if (strcmp(fa.tensors[i].name, fb.tensors[j].name) == 0) { tb = &fb.tensors[j]; break; }
+        if (tb == NULL) { only_a++; fprintf(os, "ONLY_A %s\n", ta->name); continue; }
+        if (ta->ggml_type != tb->ggml_type || ta->ndim != tb->ndim) {
+            differ++; fprintf(os, "META_DIFF %s (type %d/%d ndim %d/%d)\n", ta->name, ta->ggml_type, tb->ggml_type, ta->ndim, tb->ndim); continue;
+        }
+        int dims_ok = 1;
+        for (int d = 0; d < ta->ndim; d++) if (ta->dims[d] != tb->dims[d]) dims_ok = 0;
+        if (!dims_ok) { differ++; fprintf(os, "SHAPE_DIFF %s\n", ta->name); continue; }
+        uint64_t b = 0, numel = llm_numel(ta->dims, ta->ndim);
+        if (llmcodec_ggml_type_bytes(ta->ggml_type, numel, &b) != 0 || b == 0) { differ++; fprintf(os, "UNKNOWN_TYPE %s\n", ta->name); continue; }
+        unsigned char* buf = (unsigned char*)malloc((size_t)b);
+        unsigned char* buf2 = (unsigned char*)malloc((size_t)b);
+        if (buf == NULL || buf2 == NULL) { free(buf); free(buf2); differ++; continue; }
+        int ok = (fseek(afp, (long)(fa.data_start + ta->offset), SEEK_SET) == 0) && (fread(buf, 1, (size_t)b, afp) == (size_t)b)
+              && (fseek(bfp, (long)(fb.data_start + tb->offset), SEEK_SET) == 0) && (fread(buf2, 1, (size_t)b, bfp) == (size_t)b);
+        if (!ok) { free(buf); free(buf2); differ++; fprintf(os, "READ_ERR %s\n", ta->name); continue; }
+        if (memcmp(buf, buf2, (size_t)b) == 0) eq++;
+        else { differ++; bytes_differ += b; fprintf(os, "DIFF %s (%llu bytes)\n", ta->name, (unsigned long long)b); }
+        free(buf); free(buf2);
+    }
+    for (uint64_t j = 0; j < fb.n_tensors; j++) {
+        int found = 0;
+        for (uint64_t i = 0; i < fa.n_tensors; i++) if (strcmp(fa.tensors[i].name, fb.tensors[j].name) == 0) { found = 1; break; }
+        if (!found) { only_b++; fprintf(os, "ONLY_B %s\n", fb.tensors[j].name); }
+    }
+    fprintf(os, "SUMMARY tensors_a=%llu tensors_b=%llu equal=%llu differ=%llu only_a=%llu only_b=%llu bytes_differ=%llu\n",
+            (unsigned long long)fa.n_tensors, (unsigned long long)fb.n_tensors, (unsigned long long)eq,
+            (unsigned long long)differ, (unsigned long long)only_a, (unsigned long long)only_b, (unsigned long long)bytes_differ);
+    fclose(afp); fclose(bfp); fclose(os);
+    llmcodec_gguf_meta_free(kva, nkva); llmcodec_gguf_meta_free(kvb, nkvb);
+    llmcodec_gguf_free_info(&fa); llmcodec_gguf_free_info(&fb);
+    return 0;
+}
 int llmmodelio_model_quantize(const char* in_path, const char* out_path) {
     if (in_path == NULL || out_path == NULL) return -1;
     LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;

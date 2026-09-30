@@ -53,6 +53,7 @@ int llmmodelio_model_save(const char* in_path, const char* out_path);
 /* Round-trip con QUANTIZE: F32 (ultima dim %32==0) -> Q8_0; altri tensori copiati. 0/-1. */
 int llmmodelio_model_quantize(const char* in_path, const char* out_path);
 int llmmodelio_model_ablate(const char* in_path, const char* out_path, const char* pattern);
+int llmmodelio_model_diff(const char* a_path, const char* b_path, const char* out_path);
 
 /* Q4_K weighted, stessa convenzione di llama.cpp: quant_weights contiene `weight_sets` vettori
  * consecutivi da n_per_row elementi; ogni vettore si applica a nrows/weight_sets righe. */
