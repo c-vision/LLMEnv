@@ -2,6 +2,7 @@
  * Tre engine freschi: A (forward_step), B (forward_batch, chunk N), A2 (forward_step, per misurare il rumore di
  * fondo run-to-run). Confronta i logit finali: max|diff| e argmax. Uso: batch_test [gguf] [n_tok] [chunk] */
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
@@ -38,30 +39,25 @@ static int topk_overlap(const float* a, const float* b, int n, int k) {
             if (!ua && (ba < 0 || a[i] > a[ba])) ba = i; if (!ub && (bb < 0 || b[i] > b[bb])) bb = i; } ia[r] = ba; ib[r] = bb; }
     int c = 0; for (int i = 0; i < k; i++) for (int j = 0; j < k; j++) if (ia[i] == ib[j]) c++; return c; }
 int main(int argc, char** argv) {
+    /* UN CASO ALLA VOLTA (ogni caso = piu' caricamenti del modello, quindi mai tutti insieme):
+     *   f32  : token-per-token vs chunk, opzioni f32 -> deve essere BIT-EXACT (2 caricamenti)           [default]
+     *   half : f32 vs attivazioni half (dsv4_prefill_f16=1)  -> statistico (2 caricamenti)
+     *   hc   : mHC CPU vs GPU (dsv4_gpu_hc=1)               -> statistico (2 caricamenti)
+     *   raw  : attenzione layer 0-1 GPU vs CPU              -> statistico (2 caricamenti) */
     const char* path = argc > 1 ? argv[1] : "/Users/gaetano/ds4/ds4flash.gguf";
     int n = argc > 2 ? atoi(argv[2]) : 40, chunk = argc > 3 ? atoi(argv[3]) : 16;
+    const char* cs = argc > 4 ? argv[4] : "f32";
     int tok[4096]; unsigned s = 12345; for (int i = 0; i < n; i++) { s = s * 1103515245u + 12345u; tok[i] = 1000 + (int)((s >> 8) % 20000); }
-    double ta, tb, tc, td; int aa, ab, ac, ad;
-    const int nv = 129280;
-    llm_ai_mlx_opt_set("dsv4_prefill_f16", "0"); llm_ai_mlx_opt_set("dsv4_gpu_hc", "0");   /* percorso f32 + mHC CPU: deve essere BIT-EXACT col token-per-token */
-    float* A = run(path, tok, n, 1, &ta, &aa);
-    float* B = run(path, tok, n, chunk, &tb, &ab);
-    float* A2 = run(path, tok, n, 1, &tc, &ac);
-    llm_ai_mlx_opt_set("dsv4_prefill_f16", "1");   /* attivazioni half (come ds4): differenza statistica, non bit-exact */
-    float* C = run(path, tok, n, chunk, &td, &ad);
-    llm_ai_mlx_opt_set("dsv4_prefill_f16", "0"); llm_ai_mlx_opt_set("dsv4_gpu_hc", "1");   /* mHC su GPU: accumuli float (non double) -> confronto statistico */
-    double te; int ae; float* E = run(path, tok, n, chunk, &te, &ae);
-    llm_ai_mlx_opt_set("dsv4_gpu_hc", "0");
-    llm_ai_mlx_opt_set("dsv4_prefill_f16", "0"); llm_ai_mlx_opt_set("dsv4_gpu_raw_attn", "0");   /* layer 0-1 (ratio 0) su CPU: riferimento per la nuova attenzione raw su GPU */
-    double tf; int af; float* F = run(path, tok, n, chunk, &tf, &af);
-    llm_ai_mlx_opt_set("dsv4_gpu_raw_attn", "1");
-    printf("raw-attn GPU vs CPU: max|A-F|=%.3e KL(A||F)=%.4f argmax A=%d F=%d top5=%d/5\n", maxdiff(A, F, nv), kl_div(A, F, nv), aa, af, topk_overlap(A, F, nv, 5));
-    printf("gpu_hc: max|A-E|=%.3e KL(A||E)=%.4f argmax A=%d E=%d top5=%d/5  (%.1fs)\n", maxdiff(A, E, nv), kl_div(A, E, nv), aa, ae, topk_overlap(A, E, nv, 5), te);
-    double dab = maxdiff(A, B, nv), daa = maxdiff(A, A2, nv), dac = maxdiff(A, C, nv);
-    printf("n=%d chunk=%d  A %.1fs B %.1fs A2 %.1fs C(f16) %.1fs\n", n, chunk, ta, tb, tc, td);
-    printf("f32: max|A-A2|=%.3e (determinismo)  max|A-B|=%.3e (chunk vs token)\n", daa, dab);
-    printf("f16: max|A-C|=%.3e  KL(A||C)=%.4f  argmax A=%d C=%d  top5-overlap=%d/5  (il modello amplifica il rumore: confronto statistico)\n", dac, kl_div(A, C, nv), aa, ad, topk_overlap(A, C, nv, 5));
-    int ok = (aa == ab) && dab <= 1e-4 && daa <= 1e-4;
-    printf(ok ? "PASS batch: f32 chunk == token-per-token (bit-exact), run-to-run deterministico\n" : "FAIL batch\n");
+    const int nv = 129280; double ta, tb; int aa, ab;
+    llm_ai_mlx_opt_set("dsv4_prefill_f16", "0"); llm_ai_mlx_opt_set("dsv4_gpu_hc", "0"); llm_ai_mlx_opt_set("dsv4_gpu_raw_attn", "1"); llm_ai_mlx_opt_set("dsv4_prefill_mm", "0");
+    float* A = run(path, tok, n, 1, &ta, &aa);                     /* riferimento: token-per-token, percorso f32 */
+    if (!strcmp(cs, "half")) llm_ai_mlx_opt_set("dsv4_prefill_f16", "1");
+    if (!strcmp(cs, "hc"))   llm_ai_mlx_opt_set("dsv4_gpu_hc", "1");
+    if (!strcmp(cs, "raw"))  llm_ai_mlx_opt_set("dsv4_gpu_raw_attn", "0");
+    float* B = run(path, tok, n, chunk, &tb, &ab);                 /* chunk con la variante del caso */
+    double dab = maxdiff(A, B, nv);
+    printf("caso=%s n=%d chunk=%d  A %.1fs  B %.1fs | argmax A=%d B=%d | max|A-B|=%.3e KL(A||B)=%.4f top5=%d/5\n", cs, n, chunk, ta, tb, aa, ab, dab, kl_div(A, B, nv), topk_overlap(A, B, nv, 5));
+    int ok = !strcmp(cs, "f32") ? (aa == ab && dab <= 1e-4) : (aa == ab);
+    printf(ok ? "PASS caso %s\n" : "FAIL caso %s\n", cs);
     return ok ? 0 : 1;
 }
