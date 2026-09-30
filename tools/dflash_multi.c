@@ -1,8 +1,10 @@
 /* tools/dflash_multi.c — A2: verifica `llm_ai_mlx_dflash2_generate_multi` (N sessioni in
  * round-loop batched) contro N esecuzioni single-sessione. Parità = stessi id greedy.
  *
- * Uso: dflash_multi <dylib> <target_dir> <draft_dir> <N_out> <nsess>
+ * Uso: dflash_multi <dylib> <target_dir> <draft_dir> <N_out> <nsess> [ctx_span]
  * (prompt: lista id fissa, valida per il modello; la parità non dipende dal testo.)
+ * ctx_span: se dato, il MULTI usa `df2_ctx_span=ctx_span` (chunking del ctx del draft, A4) mentre
+ * il riferimento single gira con span=0 (un solo span) -> verifica che il chunking sia bit-identico.
  */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -41,7 +43,9 @@ int main(int argc, char** argv) {
     DF d = dfcreate(m, argv[3]);
     if (!d) { fprintf(stderr, "dflash2_create NULL\n"); return 5; }
 
-    /* riferimento: NS sessioni single (una per volta), prompt distinto per sessione. */
+    /* riferimento: NS sessioni single (una per volta), prompt distinto per sessione. Span=0 =
+     * un solo span (baseline NON chunked) cosi' il multi (chunked) e' verificabile vs di esso. */
+    if (optset) optset("df2_ctx_span", "0");
     int32_t ref[8][256]; int rn[8];
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -54,7 +58,8 @@ int main(int argc, char** argv) {
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double single_ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
 
-    /* multi: NS sessioni in batch, stesso prompt distinto. */
+    /* multi: NS sessioni in batch, stesso prompt distinto. Chunking ctx (A4) da argv[6]. */
+    if (optset && argc > 6) optset("df2_ctx_span", argv[6]);
     S ss[8];
     for (int i = 0; i < NS; i++) {
         nids = 0; for (int k = 0; k < nb; k++) ids[nids++] = base[k];

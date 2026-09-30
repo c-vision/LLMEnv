@@ -20,6 +20,12 @@ static bool df2_seq_verify_on(void) {
     int b = 0;
     return llm_ai_mlx_opt_get_bool("df2_seq_verify", &b) == 0 && b != 0;
 }
+/* A4: righe di ctx del draft per SPAN (chunking del prefill del ctx). 0 = un solo span. */
+static int df2_ctx_span(void) {
+    int v = 0;
+    if (llm_ai_mlx_opt_get_int("df2_ctx_span", &v) == 0 && v > 0) return v;
+    return 0;
+}
 
 /* Blocco signpost DFlash2 (spostato dal monolite: era l'unico consumatore). */
 #if defined(__APPLE__)
@@ -178,31 +184,53 @@ static int df2_propose_impl(DFlash2Runtime* rt,
     if (max_out < K) return -1;
     bool ok = true;
 
-    /* ---- ctx host fp32 -> bf16 [1,S,ctx_dim] ---- */
-    mlx_array x_ctx = mlx_array_new();
-    {
-        /* ctx feature dal target in FP32: NON castare a bf16 (il reference fc() gira
-         * sul contesto fp32; il cast bf16 introduceva la prima divergenza, poi amplificata
-         * fino a ~1e5 dai valori reali del draft vicini alla saturazione bf16). */
-        const int sh3[3] = {1, S, ctx_dim};
-        mlx_array ctx_arr = mlx_array_new_data(ctx_feature, ((const int[2]){S, ctx_dim}), 2, MLX_FLOAT32);
-        ok = mlx_reshape(&x_ctx, ctx_arr, sh3, 3, st) == 0;
-        mlx_array_free(ctx_arr);
-    }
-    if (!ok) { fprintf(stderr, "dflash_propose: ctx astype/reshape fallito\n"); return -1; }
-
     /* ---- block = [anchor] + mask*(L-1) ---- */
     int32_t* block_ids = (int32_t*)malloc((size_t)L * sizeof(int32_t));
     block_ids[0] = last_verified_token;
     for (int i = 1; i < L; i++) block_ids[i] = c->dflash_mask_token;
 
-    /* ---- backbone ---- */
+    /* ---- ctx -> cache del draft, in SPAN (A4): se S supera lo span si iniettano `span` righe
+     * per volta con df2_backbone (blocco reale nell'ULTIMO span: output utile; negli span
+     * precedenti l'output e' SCARTATO, l'effetto utile e' solo l'append del ctx k/v nella cache
+     * + l'avanzamento di ctx_pos). Stessa cache/ordine/offset rope -> risultato identico, ma grafo
+     * per-span (picco memoria bounded). ctx feature in FP32 (NON castare: il reference fc() gira
+     * sul contesto fp32). ---- */
     mlx_array hidden = mlx_array_new();
     double _bt0 = g_df2_time_on() ? g_df2_now() : 0.0;
-    ok = df2_backbone(rt, block_ids, L, x_ctx, S, &hidden, NULL);
+    {
+        const int span = df2_ctx_span();
+        if (span > 0 && S > span) {
+            int off = 0;
+            while (ok && off < S) {
+                int ch = (S - off > span) ? span : (S - off);
+                mlx_array ctx_arr = mlx_array_new_data(ctx_feature + (size_t)off * (size_t)ctx_dim,
+                                                       ((const int[2]){ch, ctx_dim}), 2, MLX_FLOAT32);
+                mlx_array xc = mlx_array_new();
+                ok = mlx_reshape(&xc, ctx_arr, ((const int[3]){1, ch, ctx_dim}), 3, st) == 0;
+                mlx_array_free(ctx_arr);
+                if (ok) {
+                    mlx_array h2 = mlx_array_new();
+                    ok = df2_backbone(rt, block_ids, L, xc, ch, &h2, NULL);
+                    mlx_array_free(hidden); hidden = h2;
+                    if (ok) rt->ctx[rt->cur_ctx].ctx_pos += ch;
+                }
+                mlx_array_free(xc);
+                off += ch;
+            }
+        } else {
+            mlx_array x_ctx = mlx_array_new();
+            mlx_array ctx_arr = mlx_array_new_data(ctx_feature, ((const int[2]){S, ctx_dim}), 2, MLX_FLOAT32);
+            ok = mlx_reshape(&x_ctx, ctx_arr, ((const int[3]){1, S, ctx_dim}), 3, st) == 0;
+            mlx_array_free(ctx_arr);
+            if (ok) {
+                ok = df2_backbone(rt, block_ids, L, x_ctx, S, &hidden, NULL);
+                if (ok) rt->ctx[rt->cur_ctx].ctx_pos += S;
+            }
+            mlx_array_free(x_ctx);
+        }
+    }
     if (g_df2_time_on()) g_df2_t_bb += g_df2_now() - _bt0;
     free(block_ids);
-    mlx_array_free(x_ctx);
     if (!ok) { mlx_array_free(hidden); return -1; }
 
     /* ---- hidden_post = hidden[:, 1:]  ;  logits = lm_head(hidden_post) ---- */
@@ -238,8 +266,7 @@ static int df2_propose_impl(DFlash2Runtime* rt,
     mlx_array_free(hidden); mlx_array_free(hidden_post); mlx_array_free(logits);
     if (!ok) return -1;
 
-    /* ---- cache ctx avanza di S (dopo il forward completo dei layer) ---- */
-    rt->ctx[rt->cur_ctx].ctx_pos += S;
+    /* (cache ctx gia' avanzata: per-span nel loop, o di S nel ramo singolo) */
     return K;
 }
 
