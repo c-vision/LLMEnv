@@ -257,18 +257,20 @@ static llm_kvq_sdpa_cache llm_kvq_sdpa_singleton = { {0}, {0}, false };
 #define LLM_KVQ_SPLITS_MAX 64
 #endif
 static int llm_mlx_kvq_splits_max(void) {
-    static int v = 0;
-    if (v == 0) {
-        const char* e = llm_ai_mlx_opt_env("LLM_KVQ_SPLITS_MAX");
-        v = (e != NULL && atoi(e) > 0) ? atoi(e) : LLM_KVQ_SPLITS_MAX;
+    static int v = -1;
+    if (v < 0) {
+        int o = 0;
+        if (llm_ai_mlx_opt_get_int("kvq_splits_max", &o) == 0 && o > 0) v = o;
+        else { const char* e = llm_ai_mlx_opt_env("LLM_KVQ_SPLITS_MAX"); v = (e != NULL && atoi(e) > 0) ? atoi(e) : LLM_KVQ_SPLITS_MAX; }
     }
     return v;
 }
 static int llm_mlx_kvq_split_tokens(void) {
-    static int v = 0;
-    if (v == 0) {
-        const char* e = llm_ai_mlx_opt_env("LLM_KVQ_SPLIT_TOKENS");
-        v = (e != NULL && atoi(e) > 0) ? atoi(e) : LLM_KVQ_SPLIT_TOKENS;
+    static int v = -1;
+    if (v < 0) {
+        int o = 0;
+        if (llm_ai_mlx_opt_get_int("kvq_split_tokens", &o) == 0 && o > 0) v = o;
+        else { const char* e = llm_ai_mlx_opt_env("LLM_KVQ_SPLIT_TOKENS"); v = (e != NULL && atoi(e) > 0) ? atoi(e) : LLM_KVQ_SPLIT_TOKENS; }
     }
     return v;
 }
@@ -278,6 +280,8 @@ static int llm_mlx_kvq_split_tokens(void) {
  * NON e' il collo di bottiglia (la riduzione di grid da nh=32 a nkv=8 costa piu' di quanto
  * il riuso renda). Tenuto come esperimento riproducibile dietro LLM_KVQ_GQA=1. */
 static bool llm_kvq_gqa(void) {
+    int b = 0;
+    if (llm_ai_mlx_opt_get_bool("kvq_gqa", &b) == 0 && b != 0) return true;
     return llm_ai_mlx_opt_env("LLM_KVQ_GQA") != NULL;
 }
 
