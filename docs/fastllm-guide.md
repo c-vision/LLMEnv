@@ -175,6 +175,18 @@ fastllm --opt context=131072 --opt thinking=on run ds4
 | `kvq_gqa` | KV-quant attn fusa: GQA-shared (1/0, sperimentale) | `--opt kvq_gqa=1` |
 | `kvdisk` | tier SSD KV: `off` / `on` / `<path>` (file scratch) | `--opt kvdisk=on` |
 | `kvdisk_cap_mb` | budget byte vivi del tier SSD KV in MB (0 = illimitato) | `--opt kvdisk_cap_mb=8192` |
+| `prefix_cache` | prefix-cache **persistente**: `auto` (=`~/.cache/llm_engine`, per-modello) / `off` / `<path>` | `--opt prefix_cache=off` |
+| `prefix_min_match` | token comuni minimi per riusare un prefisso | `--opt prefix_min_match=8` |
+| `prefix_min_save_len` | lunghezza minima (token) del prompt per salvarne la KV | `--opt prefix_min_save_len=64` |
+
+> **Prefix cache (riuso prefisso / TTFT cached)**. Dopo il prefill il prompt viene salvato come
+> prefisso; una richiesta successiva che **inizia** con gli stessi token riusa la KV ed esegue il
+> prefill **solo della coda**. Di default (`prefix_cache=auto`) la cache è **persistente su disco**
+> (per-modello, in `~/.cache/llm_engine/prefix_<hash>.cache`: il file dei prefissi + il blob KV
+> `.cache.kv`), quindi il riuso funziona **anche tra riavvii del server** (niente re-prefill).
+> Misurato: 1B ~9× su 2ª richiesta identica; 27B/32K prefill ~39 s → restore ~1 s. `off` la tiene
+> solo in RAM. Le due soglie (`prefix_min_match`, `prefix_min_save_len`) sono **opzioni di registro**
+> (nessuna variabile d'ambiente).
 
 > **KV-quant, trade misurato**: a 8192 token riduce la memoria GPU totale di ~44% ma il decode
 > è ~1.7–2× più lento. Utile **memory-bound** / contesti molto lunghi. Default `auto`
@@ -219,6 +231,9 @@ fastllm --opt offload=on --opt offload_cache_mb=16384 run qwenmoe
 
 # Decode speculativo con DFlash2 (greedy, parità col single)
 fastllm --opt dflash_model=~/ai/Models/Qwen3.8-27B-DFlash2 run qwen38
+
+# Prefix cache persistente con path esplicito (default: auto in ~/.cache/llm_engine)
+fastllm --opt prefix_cache=/tmp/mia_prefix.cache run qwen38
 
 # Greedy riproducibile
 fastllm --opt temp=0 --opt seed=42 run llama1b "Due più due?"
