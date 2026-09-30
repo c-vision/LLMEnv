@@ -2189,6 +2189,15 @@ int llmmodelio_model_modality_of(const char* path, char* modality, size_t mcap, 
     if (arch && acap) snprintf(arch, acap, "%s", g_arch.arch);
     return 0;
 }
+/* Ritorna la modality dichiarata come stringa STATICA (buffer interno) — comodo per P/Invoke.
+ * "" se non risolta. Non liberare: e' un buffer statico interno. */
+const char* llmmodelio_model_modality_str(const char* path) {
+    static char buf[32];
+    char m[32];
+    if (llmmodelio_model_modality_of(path, m, sizeof m, NULL, 0, NULL, 0) != 0) return "";
+    snprintf(buf, sizeof buf, "%s", m);
+    return buf;
+}
 int llmmodelio_model_convert(const char* src, const char* dst, const char* fmt)
 {
     const char* s = src ? src : "";

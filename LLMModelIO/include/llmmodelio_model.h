@@ -62,6 +62,8 @@ int llmmodelio_model_module(const char* base_path, const char* gmmod_path, const
 int llmmodelio_model_modality(const char* base_path, const char* mmproj_path, const char* out_path);
 /* Query della modality dichiarata (per consumatori: loader/scanner). 0/-1. */
 int llmmodelio_model_modality_of(const char* path, char* modality, size_t mcap, char* mmproj, size_t mmcap, char* arch, size_t acap);
+/* modality dichiarata come stringa statica ("" se non risolta) — per P/Invoke. */
+const char* llmmodelio_model_modality_str(const char* path);
 
 /* Q4_K weighted, stessa convenzione di llama.cpp: quant_weights contiene `weight_sets` vettori
  * consecutivi da n_per_row elementi; ogni vettore si applica a nrows/weight_sets righe. */
