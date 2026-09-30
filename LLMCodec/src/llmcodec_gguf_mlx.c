@@ -589,7 +589,9 @@ int llmcodec_gguf_to_mlx_ex(const char* gguf_path, const char* out_dir, uint32_t
                     free(f);
                     if (!cerr) {
                         int od=(E>1)?3:2;
-                        char b1[300]; snprintf(b1,sizeof b1,"%s.weight",t->name);
+                        char base[300]; snprintf(base,sizeof base,"%s",t->name);
+                        { size_t bl=strlen(base); if(bl>7&&strcmp(base+bl-7,".weight")==0) base[bl-7]=0; }
+                        char b1[300]; snprintf(b1,sizeof b1,"%s.weight",base);
                         nms[ns]=strdup(b1);
                         if(od==3){shp[ns*8]=E; shp[ns*8+1]=(int)m0; shp[ns*8+2]=(int)m1;}else{shp[ns*8]=(int)m0; shp[ns*8+1]=(int)m1;}
                         st[ns].name=nms[ns]; st[ns].dtype=tc->dtype_of?tc->dtype_of(0,tfmt):"F32"; st[ns].shape=&shp[ns*8]; st[ns].ndim=od; st[ns].data=obuf; bufs[ns]=(uint8_t*)obuf; ns++;
@@ -599,12 +601,12 @@ int llmcodec_gguf_to_mlx_ex(const char* gguf_path, const char* out_dir, uint32_t
                             const char* ssuf = (rm&&rm->scale_suffix[0])?rm->scale_suffix:".scales";
                             const char* bsuf = (rm&&rm->bias_suffix[0])?rm->bias_suffix:".biases";
                             size_t scb = (tc->aux_kind==LLMCODEC_CODEC_AUX_SCALES_BIASES)? ab/2 : ab;
-                            char b2[300]; snprintf(b2,sizeof b2,"%s%s",t->name,ssuf);
+                            char b2[300]; snprintf(b2,sizeof b2,"%s%s",base,ssuf);
                             nms[ns]=strdup(b2); if(od==3){shp[ns*8]=E; shp[ns*8+1]=(int)a0; shp[ns*8+2]=(int)a1;}else{shp[ns*8]=(int)a0; shp[ns*8+1]=(int)a1;}
                             uint8_t* sb=(uint8_t*)malloc(scb*E); for(int e=0;e<E;e++) memcpy(sb+(size_t)e*scb, abuf+(size_t)e*ab, scb);
                             st[ns].name=nms[ns]; st[ns].dtype=ad; st[ns].shape=&shp[ns*8]; st[ns].ndim=od; st[ns].data=sb; bufs[ns]=(uint8_t*)sb; ns++;
                             if (tc->aux_kind==LLMCODEC_CODEC_AUX_SCALES_BIASES) {
-                                char b3[300]; snprintf(b3,sizeof b3,"%s%s",t->name,bsuf);
+                                char b3[300]; snprintf(b3,sizeof b3,"%s%s",base,bsuf);
                                 nms[ns]=strdup(b3); if(od==3){shp[ns*8]=E; shp[ns*8+1]=(int)a0; shp[ns*8+2]=(int)a1;}else{shp[ns*8]=(int)a0; shp[ns*8+1]=(int)a1;}
                                 uint8_t* bb=(uint8_t*)malloc(scb*E); for(int e=0;e<E;e++) memcpy(bb+(size_t)e*scb, abuf+(size_t)e*ab+scb, scb);
                                 st[ns].name=nms[ns]; st[ns].dtype=ad; st[ns].shape=&shp[ns*8]; st[ns].ndim=od; st[ns].data=bb; bufs[ns]=(uint8_t*)bb; ns++;

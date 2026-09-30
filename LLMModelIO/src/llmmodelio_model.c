@@ -36,6 +36,7 @@ static FILE* g_llm_out = NULL;
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>   /* getcwd (arch-resolution da file .gguf) */
 
 static uint64_t llm_numel(const uint64_t* dims, int ndim) {
     uint64_t numel = 1; for (int d = 0; d < ndim; d++) numel *= dims[d]; return numel;
@@ -1670,6 +1671,31 @@ LLMMODELIO_CMD_TO(llmmodelio_kv_cmd_to,     llmmodelio_kv_cmd)
  *   - MLX   : GGUF -> MLX (safetensors), idem.
  * I converter sono quelli del progetto CODEC (llmcodec_conv_*_arch): una sola sorgente per tutti i
  * backend (IL/PCodeVM/C99/VM-C/C99Native), nessuna ricopiatura. */
+/* Sorgente .gguf: llmmodelio_arch_resolve si aspetta una dir HF (config.json). Per un file
+ * GGUF si ricava `general.architecture` e si risolve <slug>.llmarch cercando in ABI/ (risalendo
+ * dal cwd) o <cwd>/arch/ — stessa logica di llmdesc_resolve, senza config.json. */
+static int llmmodelio_arch_resolve_gguf(const char* gguf_path) {
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(gguf_path, &kv, &nkv, &fi) != 0) return -1;
+    char arch[96] = "";
+    for (int i = 0; i < nkv; i++)
+        if (strcmp(kv[i].key, "general.architecture") == 0 && kv[i].str) { snprintf(arch, sizeof arch, "%s", kv[i].str); break; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    if (!arch[0]) return -1;
+    char slug[96]; { size_t k = 0; for (const char* p = arch; *p && k < sizeof slug - 1; ++p) { char c = *p; if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a'); slug[k++] = c; } slug[k] = 0; }
+    char cwd[2048]; if (getcwd(cwd, sizeof cwd) == NULL) return -1;
+    char path[4096];
+    for (int up = 0; up < 10; up++) {
+        snprintf(path, sizeof path, "%s/ABI/%s.llmarch", cwd, slug);
+        if (llmdesc_load(path, &g_arch) == 0) { snprintf(g_arch_path, sizeof g_arch_path, "%s", path); g_arch_ok = 1; return 0; }
+        snprintf(path, sizeof path, "%s/ABI/%s.gmbarch", cwd, slug);
+        if (llmdesc_load(path, &g_arch) == 0) { snprintf(g_arch_path, sizeof g_arch_path, "%s", path); g_arch_ok = 1; return 0; }
+        snprintf(path, sizeof path, "%s/arch/%s.llmarch", cwd, slug);
+        if (llmdesc_load(path, &g_arch) == 0) { snprintf(g_arch_path, sizeof g_arch_path, "%s", path); g_arch_ok = 1; return 0; }
+        char* sl = strrchr(cwd, '/'); if (sl == NULL || sl == cwd) break; *sl = 0;
+    }
+    g_arch_ok = 0; return -1;
+}
 int llmmodelio_model_convert(const char* src, const char* dst, const char* fmt)
 {
     const char* s = src ? src : "";
@@ -1680,7 +1706,9 @@ int llmmodelio_model_convert(const char* src, const char* dst, const char* fmt)
     /* Nessun diagnostico su stderr: il messaggio d'errore viaggia col CODICE DI RITORNO (il
      * chiamante solleva/`llm_raise_error`). Un fprintf qui romperebbe la parità cross-backend
      * (i runner C fanno `2>&1`, i backend gestiti no) — verificato 2026-09-24. */
-    if (llmmodelio_arch_resolve(s) != 0) return -1;
+    { size_t l = strlen(s); int is_gguf = (l > 5 && strcasecmp(s + l - 5, ".gguf") == 0);
+      if (is_gguf) { if (llmmodelio_arch_resolve_gguf(s) != 0) return -1; }
+      else if (llmmodelio_arch_resolve(s) != 0) return -1; }
     const char* ap = llmmodelio_arch_path();
     if (strcasecmp(f, "GGUF") == 0) {
         /* Tokenizer: unica sorgente = progetto tokenizer (llmtoken). Il codec
