@@ -36,7 +36,7 @@ jval* v_slice(arena* A, jval* v, jval* a, jval* b, jval* stepv) {
         if (hi < 0) hi += n; hi = clampi(hi, 0, n);
         if (v->t == J_ARR) { jval* r = v_arr(A); for (long k = lo; k < hi; k += step) arr_push(r, v->u.arr.items[k]); return r; }
         sb o; sb_init(&o);
-        for (long k = lo; k < hi; k += step) sb_putc(&o, v->u.s[k]);
+        for (long k = lo; k < hi; k += step) jinja_jinja_sb_putc(&o, v->u.s[k]);
         jval* r = v_str(A, o.p); sb_free(&o); return r;
     } else {
         long lo = (a && a->t != J_NULL && a->t != J_UNDEF) ? to_long(a) : n - 1;
@@ -47,7 +47,7 @@ jval* v_slice(arena* A, jval* v, jval* a, jval* b, jval* stepv) {
         else { hi = to_long(b); if (g_err[0]) return NULL; if (hi < 0) hi += n; hi = clampi(hi, -1, n - 1); }
         if (v->t == J_ARR) { jval* r = v_arr(A); for (long k = lo; k > hi; k += step) arr_push(r, v->u.arr.items[k]); return r; }
         sb o; sb_init(&o);
-        for (long k = lo; k > hi; k += step) sb_putc(&o, v->u.s[k]);
+        for (long k = lo; k > hi; k += step) jinja_jinja_sb_putc(&o, v->u.s[k]);
         jval* r = v_str(A, o.p); sb_free(&o); return r;
     }
 }
@@ -122,7 +122,7 @@ jval* apply_filter(arena* A, const char* f, jval* v, jval** args, int na, jval**
         const char* sep = na > 0 ? to_str_alloc(A, args[0]) : "";
         jval* list = items_arr(A, v); if (!list) return NULL;
         sb b; sb_init(&b);
-        for (size_t i = 0; i < list->u.arr.n; i++) { if (i) sb_put(&b, sep); sb_put(&b, to_str_alloc(A, list->u.arr.items[i])); }
+        for (size_t i = 0; i < list->u.arr.n; i++) { if (i) jinja_sb_put(&b, sep); jinja_sb_put(&b, to_str_alloc(A, list->u.arr.items[i])); }
         jval* r = v_str(A, b.p); sb_free(&b); return r;
     }
     if (strcmp(f, "list") == 0) return items_arr(A, v);
@@ -155,12 +155,12 @@ jval* apply_filter(arena* A, const char* f, jval* v, jval** args, int na, jval**
         const char* to = to_str_alloc(A, args[1]);
         sb b; sb_init(&b);
         size_t fl = strlen(from);
-        if (fl == 0) { sb_put(&b, s); }
+        if (fl == 0) { jinja_sb_put(&b, s); }
         else {
             const char* p = s;
             while (*p) {
-                if (strncmp(p, from, fl) == 0) { sb_put(&b, to); p += fl; }
-                else sb_putc(&b, *p++);
+                if (strncmp(p, from, fl) == 0) { jinja_sb_put(&b, to); p += fl; }
+                else jinja_jinja_sb_putc(&b, *p++);
             }
         }
         jval* r = v_str(A, b.p); sb_free(&b); return r;
@@ -298,28 +298,28 @@ jval* strftime_now(arena* A, jval** args, int na) {
     static const char* wdfull[] = { "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday" };
     sb b; sb_init(&b);
     for (size_t i = 0; fmt[i]; i++) {
-        if (fmt[i] != '%' || !fmt[i + 1]) { sb_putc(&b, fmt[i]); continue; }
+        if (fmt[i] != '%' || !fmt[i + 1]) { jinja_jinja_sb_putc(&b, fmt[i]); continue; }
         char c = fmt[++i];
         char tmp[64];
         switch (c) {
-            case 'Y': snprintf(tmp, sizeof tmp, "%04d", tmv.tm_year + 1900); sb_put(&b, tmp); break;
-            case 'y': snprintf(tmp, sizeof tmp, "%02d", (tmv.tm_year + 1900) % 100); sb_put(&b, tmp); break;
-            case 'm': snprintf(tmp, sizeof tmp, "%02d", tmv.tm_mon + 1); sb_put(&b, tmp); break;
-            case 'd': snprintf(tmp, sizeof tmp, "%02d", tmv.tm_mday); sb_put(&b, tmp); break;
-            case 'H': snprintf(tmp, sizeof tmp, "%02d", tmv.tm_hour); sb_put(&b, tmp); break;
-            case 'I': { int h = tmv.tm_hour % 12; if (!h) h = 12; snprintf(tmp, sizeof tmp, "%02d", h); sb_put(&b, tmp); break; }
-            case 'M': snprintf(tmp, sizeof tmp, "%02d", tmv.tm_min); sb_put(&b, tmp); break;
-            case 'S': snprintf(tmp, sizeof tmp, "%02d", tmv.tm_sec); sb_put(&b, tmp); break;
-            case 'p': sb_put(&b, tmv.tm_hour < 12 ? "AM" : "PM"); break;
-            case 'b': sb_put(&b, mon[tmv.tm_mon]); break;
-            case 'B': sb_put(&b, mfull[tmv.tm_mon]); break;
-            case 'a': sb_put(&b, wday[tmv.tm_wday]); break;
-            case 'A': sb_put(&b, wdfull[tmv.tm_wday]); break;
-            case 'j': snprintf(tmp, sizeof tmp, "%03d", tmv.tm_yday + 1); sb_put(&b, tmp); break;
-            case 'z': case 'Z': { size_t n = strftime(tmp, sizeof tmp, c == 'z' ? "%z" : "%Z", &tmv); if (n) sb_putn(&b, tmp, n); break; }
-            case 'f': sb_put(&b, "000000"); break;
-            case '%': sb_putc(&b, '%'); break;
-            default: sb_putc(&b, '%'); sb_putc(&b, c); break;
+            case 'Y': snprintf(tmp, sizeof tmp, "%04d", tmv.tm_year + 1900); jinja_sb_put(&b, tmp); break;
+            case 'y': snprintf(tmp, sizeof tmp, "%02d", (tmv.tm_year + 1900) % 100); jinja_sb_put(&b, tmp); break;
+            case 'm': snprintf(tmp, sizeof tmp, "%02d", tmv.tm_mon + 1); jinja_sb_put(&b, tmp); break;
+            case 'd': snprintf(tmp, sizeof tmp, "%02d", tmv.tm_mday); jinja_sb_put(&b, tmp); break;
+            case 'H': snprintf(tmp, sizeof tmp, "%02d", tmv.tm_hour); jinja_sb_put(&b, tmp); break;
+            case 'I': { int h = tmv.tm_hour % 12; if (!h) h = 12; snprintf(tmp, sizeof tmp, "%02d", h); jinja_sb_put(&b, tmp); break; }
+            case 'M': snprintf(tmp, sizeof tmp, "%02d", tmv.tm_min); jinja_sb_put(&b, tmp); break;
+            case 'S': snprintf(tmp, sizeof tmp, "%02d", tmv.tm_sec); jinja_sb_put(&b, tmp); break;
+            case 'p': jinja_sb_put(&b, tmv.tm_hour < 12 ? "AM" : "PM"); break;
+            case 'b': jinja_sb_put(&b, mon[tmv.tm_mon]); break;
+            case 'B': jinja_sb_put(&b, mfull[tmv.tm_mon]); break;
+            case 'a': jinja_sb_put(&b, wday[tmv.tm_wday]); break;
+            case 'A': jinja_sb_put(&b, wdfull[tmv.tm_wday]); break;
+            case 'j': snprintf(tmp, sizeof tmp, "%03d", tmv.tm_yday + 1); jinja_sb_put(&b, tmp); break;
+            case 'z': case 'Z': { size_t n = strftime(tmp, sizeof tmp, c == 'z' ? "%z" : "%Z", &tmv); if (n) jinja_jinja_sb_putn(&b, tmp, n); break; }
+            case 'f': jinja_sb_put(&b, "000000"); break;
+            case '%': jinja_jinja_sb_putc(&b, '%'); break;
+            default: jinja_jinja_sb_putc(&b, '%'); jinja_jinja_sb_putc(&b, c); break;
         }
     }
     jval* r = v_str(A, b.p); sb_free(&b); return r;
@@ -365,15 +365,15 @@ char* to_str_alloc(arena* A, const jval* v) {
         case J_DOUBLE: { char t[64]; snprintf(t, sizeof t, "%.15g", v->u.d); return A ? a_strdup(A, t) : strdup(t); }
         case J_VAR: return A ? a_strdup(A, "") : strdup("");
         case J_ARR: {
-            sb b; sb_init(&b); sb_putc(&b, '[');
-            for (size_t i = 0; i < v->u.arr.n; i++) { if (i) sb_put(&b, ", "); char* s = to_str_alloc(NULL, v->u.arr.items[i]); sb_put(&b, s); free(s); }
-            sb_putc(&b, ']');
+            sb b; sb_init(&b); jinja_jinja_sb_putc(&b, '[');
+            for (size_t i = 0; i < v->u.arr.n; i++) { if (i) jinja_sb_put(&b, ", "); char* s = to_str_alloc(NULL, v->u.arr.items[i]); jinja_sb_put(&b, s); free(s); }
+            jinja_jinja_sb_putc(&b, ']');
             char* r = A ? a_strdup(A, b.p) : strdup(b.p); sb_free(&b); return r;
         }
         case J_OBJ: {
-            sb b; sb_init(&b); sb_putc(&b, '{');
-            for (size_t i = 0; i < v->u.obj.n; i++) { if (i) sb_put(&b, ", "); sb_put(&b, v->u.obj.items[i].k); sb_put(&b, ": "); char* s = to_str_alloc(NULL, v->u.obj.items[i].v); sb_put(&b, s); free(s); }
-            sb_putc(&b, '}');
+            sb b; sb_init(&b); jinja_jinja_sb_putc(&b, '{');
+            for (size_t i = 0; i < v->u.obj.n; i++) { if (i) jinja_sb_put(&b, ", "); jinja_sb_put(&b, v->u.obj.items[i].k); jinja_sb_put(&b, ": "); char* s = to_str_alloc(NULL, v->u.obj.items[i].v); jinja_sb_put(&b, s); free(s); }
+            jinja_jinja_sb_putc(&b, '}');
             char* r = A ? a_strdup(A, b.p) : strdup(b.p); sb_free(&b); return r;
         }
         default: return A ? a_strdup(A, "") : strdup("");
@@ -381,46 +381,46 @@ char* to_str_alloc(arena* A, const jval* v) {
 }
 void json_ser(sb* b, const jval* v) {
     switch (v->t) {
-        case J_UNDEF: case J_VAR: sb_put(b, "null"); break;
-        case J_NULL: sb_put(b, "null"); break;
-        case J_BOOL: sb_put(b, v->u.b ? "true" : "false"); break;
-        case J_LONG: sb_num(b, v->u.l); break;
-        case J_DOUBLE: { char t[64]; snprintf(t, sizeof t, "%.15g", v->u.d); sb_put(b, t); break; }
+        case J_UNDEF: case J_VAR: jinja_sb_put(b, "null"); break;
+        case J_NULL: jinja_sb_put(b, "null"); break;
+        case J_BOOL: jinja_sb_put(b, v->u.b ? "true" : "false"); break;
+        case J_LONG: jinja_sb_num(b, v->u.l); break;
+        case J_DOUBLE: { char t[64]; snprintf(t, sizeof t, "%.15g", v->u.d); jinja_sb_put(b, t); break; }
         case J_STR: {
-            sb_putc(b, '"');
+            jinja_jinja_sb_putc(b, '"');
             for (const char* p = v->u.s; *p; p++) {
                 unsigned char c = (unsigned char)*p;
                 switch (c) {
-                    case '"': sb_put(b, "\\\""); break;
-                    case '\\': sb_put(b, "\\\\"); break;
-                    case '\n': sb_put(b, "\\n"); break;
-                    case '\r': sb_put(b, "\\r"); break;
-                    case '\t': sb_put(b, "\\t"); break;
+                    case '"': jinja_sb_put(b, "\\\""); break;
+                    case '\\': jinja_sb_put(b, "\\\\"); break;
+                    case '\n': jinja_sb_put(b, "\\n"); break;
+                    case '\r': jinja_sb_put(b, "\\r"); break;
+                    case '\t': jinja_sb_put(b, "\\t"); break;
                     default:
-                        if (c < 0x20) { char t[8]; snprintf(t, sizeof t, "\\u%04x", c); sb_put(b, t); }
-                        else sb_putc(b, (char)c);
+                        if (c < 0x20) { char t[8]; snprintf(t, sizeof t, "\\u%04x", c); jinja_sb_put(b, t); }
+                        else jinja_jinja_sb_putc(b, (char)c);
                 }
             }
-            sb_putc(b, '"');
+            jinja_jinja_sb_putc(b, '"');
             break;
         }
         case J_ARR: {
-            sb_putc(b, '[');
-            for (size_t i = 0; i < v->u.arr.n; i++) { if (i) sb_putc(b, ','); json_ser(b, v->u.arr.items[i]); }
-            sb_putc(b, ']');
+            jinja_jinja_sb_putc(b, '[');
+            for (size_t i = 0; i < v->u.arr.n; i++) { if (i) jinja_jinja_sb_putc(b, ','); json_ser(b, v->u.arr.items[i]); }
+            jinja_jinja_sb_putc(b, ']');
             break;
         }
         case J_OBJ: {
-            sb_putc(b, '{');
+            jinja_jinja_sb_putc(b, '{');
             for (size_t i = 0; i < v->u.obj.n; i++) {
-                if (i) sb_putc(b, ',');
-                sb_putc(b, '"'); sb_put(b, v->u.obj.items[i].k); sb_put(b, "\":");
+                if (i) jinja_jinja_sb_putc(b, ',');
+                jinja_jinja_sb_putc(b, '"'); jinja_sb_put(b, v->u.obj.items[i].k); jinja_sb_put(b, "\":");
                 json_ser(b, v->u.obj.items[i].v);
             }
-            sb_putc(b, '}');
+            jinja_jinja_sb_putc(b, '}');
             break;
         }
-        default: sb_put(b, "null"); break;
+        default: jinja_sb_put(b, "null"); break;
     }
 }
 int v_eq(const jval* a, const jval* b) {

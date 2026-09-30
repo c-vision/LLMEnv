@@ -38,10 +38,10 @@ void a_free(arena* A) { apnode* p = A->head; while (p) { apnode* n = p->next; fr
 /* ================= sb ================= */
 void sb_init(sb* b) { b->cap = 256; b->n = 0; b->p = (char*)malloc(b->cap); b->p[0] = 0; }
 void sb_grow(sb* b, size_t need) { while (b->n + need + 1 > b->cap) { b->cap *= 2; b->p = (char*)realloc(b->p, b->cap); } }
-void sb_put(sb* b, const char* s) { size_t l = strlen(s); sb_grow(b, l); memcpy(b->p + b->n, s, l); b->n += l; b->p[b->n] = 0; }
-void sb_putn(sb* b, const char* s, size_t l) { sb_grow(b, l); memcpy(b->p + b->n, s, l); b->n += l; b->p[b->n] = 0; }
-void sb_putc(sb* b, char c) { sb_grow(b, 1); b->p[b->n++] = c; b->p[b->n] = 0; }
-void sb_num(sb* b, long l) { char t[40]; snprintf(t, sizeof t, "%ld", l); sb_put(b, t); }
+void jinja_sb_put(sb* b, const char* s) { size_t l = strlen(s); sb_grow(b, l); memcpy(b->p + b->n, s, l); b->n += l; b->p[b->n] = 0; }
+void jinja_jinja_sb_putn(sb* b, const char* s, size_t l) { sb_grow(b, l); memcpy(b->p + b->n, s, l); b->n += l; b->p[b->n] = 0; }
+void jinja_jinja_sb_putc(sb* b, char c) { sb_grow(b, 1); b->p[b->n++] = c; b->p[b->n] = 0; }
+void jinja_sb_num(sb* b, long l) { char t[40]; snprintf(t, sizeof t, "%ld", l); jinja_sb_put(b, t); }
 void sb_free(sb* b) { free(b->p); b->p = NULL; b->n = b->cap = 0; }
 
 /* ================= valori ================= */
@@ -223,8 +223,8 @@ seg* tokenize(const char* t, size_t* outn) {
         if (o != (size_t)-1) n = o;
         if (p != (size_t)-1 && p < n) n = p;
         if (cm != (size_t)-1 && cm < n) n = cm;
-        if (n == (size_t)-1) { sb_put(&text, t + i); break; }
-        sb_putn(&text, t + i, n - i);
+        if (n == (size_t)-1) { jinja_sb_put(&text, t + i); break; }
+        jinja_jinja_sb_putn(&text, t + i, n - i);
         i = n;
         if (n == cm) { /* commento: scartato (come C#) */
             const char* cl = strstr(t + n + 2, "#}");
@@ -320,21 +320,21 @@ char** split_top_level(arena* A, const char* s, char sep, size_t* outn) {
     for (size_t i = 0; ; i++) {
         char c = s[i];
         if (q) {
-            sb_putc(&cur, c);
+            jinja_jinja_sb_putc(&cur, c);
             if (esc) esc = 0;
             else if (c == '\\') esc = 1;
             else if (c == q) q = 0;
         } else {
-            if (c == '\'' || c == '"') { q = c; sb_putc(&cur, c); }
-            else if (c == '(' || c == '[' || c == '{') { depth++; sb_putc(&cur, c); }
-            else if (c == ')' || c == ']' || c == '}') { depth--; sb_putc(&cur, c); }
+            if (c == '\'' || c == '"') { q = c; jinja_jinja_sb_putc(&cur, c); }
+            else if (c == '(' || c == '[' || c == '{') { depth++; jinja_jinja_sb_putc(&cur, c); }
+            else if (c == ')' || c == ']' || c == '}') { depth--; jinja_jinja_sb_putc(&cur, c); }
             else if ((c == sep && depth == 0) || c == 0) {
                 if (n == cap) { cap *= 2; res = (char**)realloc(res, sizeof(char*) * cap); }
                 res[n++] = A ? a_strdup(A, cur.p) : strdup(cur.p);
                 sb_free(&cur);
                 if (c == 0) break;
                 sb_init(&cur);
-            } else sb_putc(&cur, c);
+            } else jinja_jinja_sb_putc(&cur, c);
         }
         if (!c) break;
     }
@@ -519,16 +519,16 @@ void lex_expr(const char* s, toks* tk) {
                 if (s[i] == '\\' && i + 1 < L) {
                     i++;
                     switch (s[i]) {
-                        case 'n': sb_putc(&b, '\n'); break;
-                        case 't': sb_putc(&b, '\t'); break;
-                        case 'r': sb_putc(&b, '\r'); break;
-                        case '\\': sb_putc(&b, '\\'); break;
-                        case '"': sb_putc(&b, '"'); break;
-                        case '\'': sb_putc(&b, '\''); break;
-                        default: sb_putc(&b, s[i]); break;
+                        case 'n': jinja_jinja_sb_putc(&b, '\n'); break;
+                        case 't': jinja_jinja_sb_putc(&b, '\t'); break;
+                        case 'r': jinja_jinja_sb_putc(&b, '\r'); break;
+                        case '\\': jinja_jinja_sb_putc(&b, '\\'); break;
+                        case '"': jinja_jinja_sb_putc(&b, '"'); break;
+                        case '\'': jinja_jinja_sb_putc(&b, '\''); break;
+                        default: jinja_jinja_sb_putc(&b, s[i]); break;
                     }
                     i++;
-                } else { sb_putc(&b, s[i]); i++; }
+                } else { jinja_jinja_sb_putc(&b, s[i]); i++; }
             }
             if (!closed) { jerr_set("stringa non chiusa"); sb_free(&b); toks_free(tk); return; }
             char* tok = (char*)malloc(b.n + 5); memcpy(tok, "STR:", 4); memcpy(tok + 4, b.p, b.n + 1);
@@ -901,8 +901,8 @@ int eval_list(nlist* nodes, env* e, sb* out) {
     for (size_t i = 0; i < nodes->n; i++) {
         node* nd = nodes->p[i];
         switch (nd->kind) {
-            case 0: sb_put(out, nd->s); break;
-            case 1: { jval* v = eval_expr_str(nd->expr, e); if (!v) return 1; sb_put(out, to_str_alloc(A, v)); break; }
+            case 0: jinja_sb_put(out, nd->s); break;
+            case 1: { jval* v = eval_expr_str(nd->expr, e); if (!v) return 1; jinja_sb_put(out, to_str_alloc(A, v)); break; }
             case 2: { jval* v = eval_expr_str(nd->expr, e); if (!v) return 1; if (assign_target(nd->s, v, e)) return 1; break; }
             case 6: if (eval_set_block(A, nd, e)) return 1; break;
             case 5: env_set(e, nd->s, make_macro(A, nd, e)); break;
