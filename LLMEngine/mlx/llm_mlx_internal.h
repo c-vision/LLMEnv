@@ -821,6 +821,7 @@ const char* llm_mlx_layer_proj(const ModelConfig* c, int layer);
 void llm_mlx_mode_set(char* dst, size_t cap, const char* s);
 bool llm_mlx_embed_row_from_idx(LlmMlxModel* m, mlx_array embed_w, mlx_array embed_s, mlx_array embed_b, mlx_array tid, mlx_array* out_x);
 bool llm_kvdisk_enabled(LlmMlxModel* m);
+const char* llm_prefix_cache_path(LlmMlxModel* m, char* buf, int cap);
 int llm_session_ckpt_write_k(LlmMlxModel* m, LlmMlxSession* s, int pos, const int32_t* key_tok, int key_n);
 int llm_session_unpark(LlmMlxModel* m, LlmMlxSession* s);
 void session_history_append(LlmMlxSession* s, const int32_t* tok, int n);

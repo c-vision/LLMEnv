@@ -9,8 +9,32 @@
 #include <string.h>
 #include <math.h>
 #include "llm_mlx_kvdisk_io.h"
+#include <sys/stat.h>   /* mkdir (D15: dir cache prefix) */
 #include "llm_pflash.h"
 #include "llm_dsv41_engine.h"
+
+/* D15: path EFFETTIVO della prefix-cache persistente (PER-MODELLO, evita collisioni tra modelli):
+ *   "off"/"0"/"none" -> "" (nessuna persistenza, in-RAM);  "auto"/""/"1"/"on" -> <base>/prefix_<hash(model_dir)>.cache
+ *   con <base> = $HOME/.cache/llm_engine (o $TMPDIR/llm_engine);  qualunque altro valore = path esplicito. */
+const char* llm_prefix_cache_path(LlmMlxModel* m, char* buf, int cap) {
+    if (!buf || cap <= 0) return "";
+    buf[0] = '\0';
+    char v[2048] = "";
+    int is_set = (m && llm_ai_mlx_opt_get_str("prefix_cache", v, (int)sizeof v) == 0);
+    if (is_set && (strcmp(v, "off") == 0 || strcmp(v, "0") == 0 || strcmp(v, "none") == 0)) return buf;
+    if (is_set && v[0] != '\0' && strcmp(v, "auto") != 0 && strcmp(v, "1") != 0 && strcmp(v, "on") != 0) {
+        snprintf(buf, (size_t)cap, "%s", v); return buf;
+    }
+    const char* home = getenv("HOME");
+    const char* base = (home && home[0]) ? home : (getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    char dir[2100];
+    snprintf(dir, sizeof dir, "%s/.cache/llm_engine", base);
+    (void)mkdir(dir, 0700);
+    const char* md = (m && m->model_dir[0]) ? m->model_dir : "model";
+    uint64_t h = llm_kv_disk_hash(md, strlen(md));
+    snprintf(buf, (size_t)cap, "%s/prefix_%016llx.cache", dir, (unsigned long long)h);
+    return buf;
+}
 
 bool llm_kvdisk_enabled(LlmMlxModel* m) {
     if (!m) return false;
@@ -18,7 +42,7 @@ bool llm_kvdisk_enabled(LlmMlxModel* m) {
         /* D15: se `prefix_cache` e' impostata il tier e' PERSISTENTE (path `<prefix_cache>.kv`):
          * i blob KV dei prefissi sopravvivono al riavvio. Altrimenti scratch storico (`kvdisk`). */
         char pc[2048];
-        if (llm_ai_mlx_opt_get_str("prefix_cache", pc, (int)sizeof pc) == 0 && pc[0] != '\0') {
+        if (llm_prefix_cache_path(m, pc, (int)sizeof pc)[0] != '\0') {
             char kpath[2200];
             snprintf(kpath, sizeof kpath, "%s.kv", pc);
             int cap_mb = 0; (void)llm_ai_mlx_opt_get_int("kvdisk_cap_mb", &cap_mb);
@@ -416,6 +440,7 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
     LlmMlxSession* s = (LlmMlxSession*)sh;
 
     if (!s->has_pending) return -1; /* niente da salvare senza prefill */
+    if (s->history_len <= 0) return -1; /* D15: non sovrascrivere un prefisso valido con uno vuoto */
 
     /* DS4 (dsv4): cache per-layer sul device, non c'e' un KV MLX da salvare -> nessun prefix cache. */
     if (m->dsv4) return -1;
@@ -523,7 +548,7 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
      * evitando il re-prefill. Spillando si libera la RAM (on_disk=true → il riuso ripristina). */
     {
         char pp[2048];
-        if (llm_ai_mlx_opt_get_str("prefix_cache", pp, (int)sizeof pp) == 0 && pp[0]) {
+        if (llm_prefix_cache_path(m, pp, (int)sizeof pp)[0] != '\0') {
             if (m->kvdisk_state < 0) (void)llm_kvdisk_enabled(m);
             if (m->kvdisk_state == 1 && p->has_kv && llm_prefix_spill(m, p) == 0) {
                 for (int l = 0; l < p->n_layers; l++) {
@@ -743,6 +768,11 @@ static int llm_prefix_register_persisted(LlmMlxModel* m, const char* name, const
     p->n_layers = m->cfg.n_layers;
     p->tokens = (int32_t*)malloc((size_t)token_len * sizeof(int32_t));
     if (p->tokens) { memcpy(p->tokens, tokens, (size_t)token_len * sizeof(int32_t)); p->token_len = token_len; }
+    /* D15: la history del prefisso CARICATO coincide coi suoi token. Serve al riuso: senza di essa
+     * la sessione riusata resterebbe a history_len=0 e un successivo save_prefix sovrascriverebbe
+     * il prefisso con 0 token (persistenza degradata dopo il primo riavvio). */
+    p->history = (int32_t*)malloc((size_t)token_len * sizeof(int32_t));
+    if (p->history) { memcpy(p->history, tokens, (size_t)token_len * sizeof(int32_t)); p->history_len = token_len; p->history_cap = token_len; }
     p->k_cache = (mlx_array*)calloc((size_t)p->n_layers, sizeof(mlx_array));
     p->v_cache = (mlx_array*)calloc((size_t)p->n_layers, sizeof(mlx_array));
     p->has_cache = (bool*)calloc((size_t)p->n_layers, sizeof(bool));
