@@ -917,15 +917,19 @@ int llm_ai_mlx_dflash2_generate_multi(llm_ai_mlx_dflash2_handle handle,
             free_output_tensors(&t);
             return -1;
         }
-        /* FIX A2: verify PER-SESSIONE (il forward batched multi-sessione diverge sugli ibridi:
-         * attn per-sessione + FFN batched, stato ricorrente GDN non ricostruito — vedi TODO A2).
-         * Usa lo stesso verify del path single (corretto, parità verificata). */
+        /* Verify: di DEFAULT per-sessione (df2_dflash_verify, corretto). Il forward BATCHED
+         * multi-sessione e' sotto gate diagnostico LLM_DF2_BATCH_VERIFY per la messa a punto. */
         {
             int vfail = 0;
-            for (int a = 0; a < nv && !vfail; a++) {
-                int acc = df2_dflash_verify(vsess[a], anchorsA[a], drafts[a], Ks[a],
-                                            caplayers, ncap, vctx[a], vca[a], &nextA[a]);
-                if (acc < 0) vfail = 1; else accA[a] = acc;
+            if (llm_ai_mlx_opt_env("LLM_DF2_BATCH_VERIFY")) {
+                if (df2_dflash_verify_multi(rt, vsess, nv, anchorsA, drafts, Ks, 8,
+                                            caplayers, ncap, vctx, vca, nextA, accA) != 0) vfail = 1;
+            } else {
+                for (int a = 0; a < nv && !vfail; a++) {
+                    int acc = df2_dflash_verify(vsess[a], anchorsA[a], drafts[a], Ks[a],
+                                                caplayers, ncap, vctx[a], vca[a], &nextA[a]);
+                    if (acc < 0) vfail = 1; else accA[a] = acc;
+                }
             }
             if (vfail) {
                 for (int a = 0; a < nv; a++) free(vctx[a]);
