@@ -493,6 +493,14 @@ int llm_ai_mlx_session_reset(llm_ai_mlx_session_handle handle) {
     LlmMlxSession* s = (LlmMlxSession*)handle;
     /* DeepSeek V4.1 whole-model: libera la cache (ricreata lazy al prossimo append/prefill). */
     if (s->dsv41) { llm_dsv41_cache_free((LlmDsv41Cache*)s->dsv41); free(s->dsv41); s->dsv41 = NULL; }
+    /* Spec streaming (§8.4): il generate con spec_ngram/DFlash2/MTP bufferizza un chunk in
+     * `spec_buf` + checkpoint K/V. reset NON lo azzerava -> l'append successivo chiama
+     * `spec_discard`, vede `spec_ckpt_valid` STALE e fa un rollback-riavanzamento FANTASMA su una
+     * cache appena resettata => la generazione dopo reset divergeva da una sessione fresca
+     * (verificato: fresh_vs_reset DIVERGE con spec_ngram ON, OK con OFF). Libera come in create. */
+    llm_mlx_session_spec_free(s);
+    s->spec_ctx_len = 0; s->spec_ctx_off = 0;
+    s->spec_acc_ewma = 0.0f; s->spec_full_streak = 0;
     /* KV quant: azzera i contatori cold (i buffer quantizzati restano allocati, riusati). */
     if (s->kvq_len)   for (int l = 0; l < s->n_layers; l++) s->kvq_len[l] = 0;
     if (s->kvq_v_len) for (int l = 0; l < s->n_layers; l++) s->kvq_v_len[l] = 0;
@@ -516,6 +524,13 @@ int llm_ai_mlx_session_reset(llm_ai_mlx_session_handle handle) {
     s->has_pending = false;
     s->pending_next_id = 0;
     s->history_len = 0;
+    /* B7/reset (2026-09-30): la tabella n-gram va RICREATA vuota (come in create), non solo
+     * marcata non-costruita: le foglie del bucket restavano STALE e il decoder speculativo
+     * n-gram, dopo reset, divergeva da una sessione fresca (verificato: fresh_vs_reset DIVERGE
+     * con spec_ngram ON, OK con OFF). */
+    llm_mlx_ngram_free(&s->ngram);
+    s->ngram = llm_mlx_ngram_new(3, 1024);
+    s->ngram_order = 3;
     s->ngram_built = false;
     s->pinned_tokens = 0;
     s->parked = false;
