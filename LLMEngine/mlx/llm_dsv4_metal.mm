@@ -517,11 +517,15 @@ static const char* const LLM_DSV4_METAL_MOE =
  * per token di dsv4_gemv_f32 (lane i, i+32, ... poi simd_sum) -> risultato identico bit a bit. P={n, nt, out_dim}. Grid (out_dim, ceil(nt/16)). */
 "kernel void dsv4_gemv_f32_nt(device const float* W [[buffer(0)]], device const float* X [[buffer(1)]], device float* O [[buffer(2)]],\n"
 "    constant uint* P [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n"
-"    const uint n = P[0], nt = P[1], od = P[2]; const uint row = tg.x, t0 = tg.y * 16u; if (row >= od) return;\n"
-"    device const float* wr = W + (ulong)row * n;\n"
-"    float acc[16]; for (uint k = 0; k < 16u; k++) acc[k] = 0.f;\n"
-"    for (uint i = tid; i < n; i += 32u) { const float w = wr[i]; for (uint k = 0; k < 16u; k++) { if (t0 + k < nt) acc[k] += w * X[(ulong)(t0 + k) * n + i]; } }\n"
-"    for (uint k = 0; k < 16u; k++) { if (t0 + k < nt) { const float s = simd_sum(acc[k]); if (tid == 0u) O[(ulong)(t0 + k) * od + row] = s; } }\n"
+"    const uint n = P[0], nt = P[1], od = P[2]; const uint row0 = tg.x * 4u, t0 = tg.y * 16u; if (row0 >= od) return;\n"
+"    const uint nr = min(4u, od - row0);\n"
+"    device const float* wr0 = W + (ulong)row0 * n;\n"
+"    float acc[4][16]; for (uint r = 0; r < 4u; r++) for (uint k = 0; k < 16u; k++) acc[r][k] = 0.f;\n"
+"    for (uint i = tid; i < n; i += 32u) {\n"
+"        float xv[16]; for (uint k = 0; k < 16u; k++) xv[k] = (t0 + k < nt) ? X[(ulong)(t0 + k) * n + i] : 0.f;\n"
+"        for (uint r = 0; r < 4u; r++) { if (r < nr) { const float w = wr0[(ulong)r * n + i]; for (uint k = 0; k < 16u; k++) acc[r][k] += w * xv[k]; } }\n"
+"    }\n"
+"    for (uint r = 0; r < 4u; r++) { if (r < nr) { for (uint k = 0; k < 16u; k++) { if (t0 + k < nt) { const float sm = simd_sum(acc[r][k]); if (tid == 0u) O[(ulong)(t0 + k) * od + row0 + r] = sm; } } } }\n"
 "}\n"
 /* Riga di stato del compressor: STKV[i] = PKV[i]; STSC[i] = PSC[i] + APE[i] (gli offset di buffer scelgono token/riga). P={width}. */
 "kernel void dsv4_state_store(device const float* PKV [[buffer(0)]], device const float* PSC [[buffer(1)]], device const float* APE [[buffer(2)]],\n"
@@ -2151,7 +2155,7 @@ int llm_dsv4_metal_route_batch(LlmDsv4Metal* b, int nt, int n_expert, int embd, 
     [e setComputePipelineState:b->pso_gemv_nt];
     [e setBuffer:WG offset:(NSUInteger)lead atIndex:0]; [e setBuffer:X offset:0 atIndex:1]; [e setBuffer:LG offset:0 atIndex:2];
     { uint32_t P[3] = { (uint32_t)embd, (uint32_t)nt, (uint32_t)n_expert }; [e setBytes:P length:sizeof P atIndex:3]; }
-    [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_expert, ((NSUInteger)nt + 15) / 16, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)n_expert + 3) / 4, ((NSUInteger)nt + 15) / 16, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     [e setComputePipelineState:b->pso_route_b];
     [e setBuffer:LG offset:0 atIndex:0]; [e setBuffer:BI offset:0 atIndex:1]; [e setBuffer:HS offset:0 atIndex:2]; [e setBuffer:SL offset:0 atIndex:3]; [e setBuffer:WT offset:0 atIndex:4];
     { uint32_t P[5] = { (uint32_t)n_expert, (uint32_t)used, bias ? 1u : 0u, hsel ? 1u : 0u, (uint32_t)nt }; [e setBytes:P length:sizeof P atIndex:5]; [e setBytes:&scale length:4 atIndex:6]; }
@@ -2547,7 +2551,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         #define GEMV_NT(W_BUF, XBUF, OBUF, NIN, NOUT) do { [e setComputePipelineState:b->pso_gemv_nt]; \
             [e setBuffer:(id<MTLBuffer>)(W_BUF) offset:0 atIndex:0]; [e setBuffer:(XBUF) offset:0 atIndex:1]; [e setBuffer:(OBUF) offset:0 atIndex:2]; \
             { uint32_t P_[3] = { (uint32_t)(NIN), (uint32_t)nt, (uint32_t)(NOUT) }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; } \
-            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)(NOUT), ((NSUInteger)nt + 15) / 16, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; } while (0)
+            [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)(NOUT) + 3) / 4, ((NSUInteger)nt + 15) / 16, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; } while (0)
         GEMV_NT(p0->w_ckv, X, PKV, embd, W_);
         GEMV_NT(p0->w_cgate, X, PSC, embd, W_);
         if (p0->has_idx) {
