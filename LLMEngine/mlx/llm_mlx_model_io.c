@@ -21,6 +21,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <mach/mach.h>
 #include <string.h>
 #include <math.h>
 #include <dlfcn.h>
@@ -189,6 +190,20 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                         LlmMemGov _mg = llm_memgov_from_registry();
                         uint64_t reserve = _mg.reserve_bytes;   /* B9: dal registro (default 2 GiB) */
                         uint64_t avail = (limit > nonexp + reserve) ? (limit - nonexp - reserve) : 0;
+                        /* SICUREZZA: la cache non deve superare la memoria REALMENTE disponibile ora (libera + inattiva, meno un margine di
+                         * 12 GiB per il resto del sistema e gli altri processi): sul 128 GB con altri agenti/app attivi il tetto fisso da 86 GB
+                         * ha gia' portato la macchina al riavvio. Opzione `dsv4_cache_mb` (0 = automatico) per fissarla a mano. */
+                        {
+                            vm_statistics64_data_t vs; mach_msg_type_number_t vc = HOST_VM_INFO64_COUNT;
+                            if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vs, &vc) == KERN_SUCCESS) {
+                                uint64_t pg = (uint64_t)vm_page_size;
+                                uint64_t freeish = ((uint64_t)vs.free_count + (uint64_t)vs.inactive_count + (uint64_t)vs.speculative_count) * pg;
+                                uint64_t margin = 12ull << 30;
+                                uint64_t cap_now = freeish > margin ? freeish - margin : 0;
+                                if (avail > cap_now) avail = cap_now;
+                            }
+                            int mb = 0; if (llm_ai_mlx_opt_get_int("dsv4_cache_mb", &mb) == 0 && mb > 0) avail = (uint64_t)mb * 1024ull * 1024ull;
+                        }
                         int b = (int)(avail / (7ull * 1024 * 1024));
                         if (b > 256) bundles = b;
                         fprintf(stderr, "DSV4 cache: esperti=%.1fGB non-esperto=%.1fGB limit=%.1fGB -> %d bundle (~%.1fGB)\n",
