@@ -159,6 +159,11 @@ static inline bool llm_dsv4_gpu_attn_project_batch(LlmDsv4AttnGpu* m, const LlmD
     if (ext_factor != 0.0f && freq_scale > 0.0f) attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
     float rope_cfg[7] = { freq_base, freq_scale, ext_factor, attn_factor, c->rope_yarn_beta_fast,
                           c->rope_yarn_beta_slow, (float)(compressed ? c->rope_orig_ctx : 0) };
+    int f16_ok = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_f16", &v) == 0) f16_ok = v; }   /* default ON (come ds4) */
+    if (f16_ok && nt >= 16 && llm_dsv4_metal_attn_proj_mm_batch(m->be, nt, m->qa[il].w, m->qa[il].row_bytes, m->kv[il].w, m->kv[il].row_bytes,
+                                                                m->qb[il].w, m->qb[il].row_bytes, xn, (uint32_t)embd, L->attn_q_a_norm,
+                                                                L->attn_kv_a_norm, (uint32_t)lq, (uint32_t)hd, (uint32_t)qd, c->n_head,
+                                                                c->n_rot, rope_cfg, pos0, c->rms_eps, q, kv, qrn) == 0) return true;
     return llm_dsv4_metal_attn_proj_fused_batch(m->be, nt, m->qa[il].w, m->qa[il].row_bytes, m->kv[il].w, m->kv[il].row_bytes,
                                                 m->qb[il].w, m->qb[il].row_bytes, xn, (uint32_t)embd, L->attn_q_a_norm,
                                                 L->attn_kv_a_norm, (uint32_t)lq, (uint32_t)hd, (uint32_t)qd, c->n_head,

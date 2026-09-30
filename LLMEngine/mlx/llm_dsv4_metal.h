@@ -143,6 +143,12 @@ int llm_dsv4_metal_moe_mm_batch(LlmDsv4Metal* b, int nt, const void* gate_w, con
 int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes, int ng, uint32_t gd,
         uint32_t rank, const void* outb_w, size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
         const float* heads, float* out);
+/* Proiezioni Q-LoRA+KV del chunk via mul_mm_id Q8_0 (come attn_proj_fused_batch; attivazioni half). */
+int llm_dsv4_metal_attn_proj_mm_batch(LlmDsv4Metal* b, int nt, const void* qa_w, size_t qa_row_bytes,
+        const void* kv_w, size_t kv_row_bytes, const void* qb_w, size_t qb_row_bytes,
+        const float* xn, uint32_t embd, const float* qan_w, const float* kvan_w,
+        uint32_t lq, uint32_t hd, uint32_t qd, int n_head, int n_rot,
+        const float* rope_cfg, int pos0, float eps, float* q_out, float* kv_out, float* qrn_out);
 /* Come attn_out_fused per `nt` token: heads [nt*heads_total] -> out [nt*embd]. */
 int llm_dsv4_metal_attn_out_fused_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes,
         size_t outa_lead0, int ng, uint32_t gd, uint32_t rank, const void* outb_w,

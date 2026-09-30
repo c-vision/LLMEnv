@@ -27,6 +27,11 @@ static float* run(const char* path, const int* tok, int n, int chunk, double* se
     return out;
 }
 static double maxdiff(const float* a, const float* b, int n) { double m = 0; for (int i = 0; i < n; i++) { double d = fabs((double)a[i] - b[i]); if (d > m) m = d; } return m; }
+static double kl_div(const float* a, const float* b, int n) {   /* KL(softmax(a) || softmax(b)) */
+    double ma = a[0], mb = b[0]; for (int i = 1; i < n; i++) { if (a[i] > ma) ma = a[i]; if (b[i] > mb) mb = b[i]; }
+    double za = 0, zb = 0; for (int i = 0; i < n; i++) { za += exp(a[i] - ma); zb += exp(b[i] - mb); }
+    double kl = 0; for (int i = 0; i < n; i++) { double pa = exp(a[i] - ma) / za, pb = exp(b[i] - mb) / zb; if (pa > 1e-12 && pb > 0) kl += pa * (log(pa) - log(pb)); }
+    return kl; }
 static int topk_overlap(const float* a, const float* b, int n, int k) {
     int ia[16], ib[16]; for (int r = 0; r < k; r++) { int ba = -1, bb = -1;
         for (int i = 0; i < n; i++) { int ua = 0, ub = 0; for (int q = 0; q < r; q++) { ua |= (ia[q] == i); ub |= (ib[q] == i); }
@@ -47,7 +52,7 @@ int main(int argc, char** argv) {
     double dab = maxdiff(A, B, nv), daa = maxdiff(A, A2, nv), dac = maxdiff(A, C, nv);
     printf("n=%d chunk=%d  A %.1fs B %.1fs A2 %.1fs C(f16) %.1fs\n", n, chunk, ta, tb, tc, td);
     printf("f32: max|A-A2|=%.3e (determinismo)  max|A-B|=%.3e (chunk vs token)\n", daa, dab);
-    printf("f16: max|A-C|=%.3e  argmax A=%d C=%d  top5-overlap=%d/5  (il modello amplifica il rumore: confronto statistico)\n", dac, aa, ad, topk_overlap(A, C, nv, 5));
+    printf("f16: max|A-C|=%.3e  KL(A||C)=%.4f  argmax A=%d C=%d  top5-overlap=%d/5  (il modello amplifica il rumore: confronto statistico)\n", dac, kl_div(A, C, nv), aa, ad, topk_overlap(A, C, nv, 5));
     int ok = (aa == ab) && dab <= 1e-4 && daa <= 1e-4;
     printf(ok ? "PASS batch: f32 chunk == token-per-token (bit-exact), run-to-run deterministico\n" : "FAIL batch\n");
     return ok ? 0 : 1;
