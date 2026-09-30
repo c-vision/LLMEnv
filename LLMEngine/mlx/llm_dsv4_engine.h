@@ -10,8 +10,9 @@
 #include "llm_dsv4_store.h"
 #include "llm_dsv4_gpu_ctx.h"
 #include "llm_gguf.h"
+#include "llm_engine_opts.h"   /* opzioni dsv4_prefill_chunk / dsv4_prefill_mm (registro, no env) */
 
-#define LLM_DSV4_PREFILL_CHUNK 64
+#define LLM_DSV4_PREFILL_CHUNK 64    /* default; opzione dsv4_prefill_chunk (es. 512, come ds4) con dsv4_prefill_mm=1 */
 
 typedef struct {
     LlmDsv4Weights w;
@@ -113,7 +114,8 @@ static inline void llm_dsv4_engine_append(LlmDsv4Engine* e, const int* ids, int 
     int HC = e->w.cfg.n_hc, D = e->w.cfg.n_embd;
     float* hc = (float*)malloc(sizeof(float) * (size_t)HC * D);
     for (int i = 0; i < n; ) {   /* chunk layer-major (LLM_DSV4_PREFILL_CHUNK token) */
-        int m = n - i; if (m > LLM_DSV4_PREFILL_CHUNK) m = LLM_DSV4_PREFILL_CHUNK;
+        int chunk = LLM_DSV4_PREFILL_CHUNK; { int v; if (llm_ai_mlx_opt_get_int("dsv4_prefill_chunk", &v) == 0 && v >= 1 && v <= 4096) chunk = v; }
+        int m = n - i; if (m > chunk) m = chunk;
         llm_dsv4_forward_batch(&e->w.cfg, &e->w, &e->caches, ids + i, e->pos, m, hc);
         e->pos += m; i += m;
     }

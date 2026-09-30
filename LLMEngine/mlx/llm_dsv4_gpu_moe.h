@@ -16,6 +16,7 @@
 #include "llm_dsv4_metal.h"     /* backend Metal (C API) */
 #include "llm_dsv4_moe_fwd.h"   /* router/swiglu/linear riusati */
 #include "llm_engine_opts.h"       /* registro opzioni (dsv4_prefill_f16) */
+#define LLM_DSV4_MM_MIN_TOKENS 192   /* soglia chunk per mul_mm_id (sotto: kernel per-token) */
 
 typedef struct {
     LlmDsv4Metal* be;
@@ -287,7 +288,25 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
             rw[k] = weight[i];
         }
     }
-    if (ok) {
+    /* Chunk grande (come ds4: tanti token per esperto): mul_mm_id con tabella di indirizzi degli esperti dello store, shared expert incluso.
+     * Sotto la soglia i kernel per-token (slots6) sono piu' veloci. Attivazioni half (opzione dsv4_prefill_f16). */
+    int done_mm = 0;
+    int mm_on = 0; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_mm", &v) == 0) mm_on = v; }   /* SPERIMENTALE: default OFF finche' non verificato */
+    if (ok && streaming && mm_on && f16_ok && nt >= LLM_DSV4_MM_MIN_TOKENS && c->n_expert > 0 && c->n_expert <= 1024 &&
+        pe->shexp_gate && pe->shexp_up && pe->shexp_down) {
+        const int ne = c->n_expert;
+        const void** ga = (const void**)calloc((size_t)ne, sizeof(void*)); const void** ua = (const void**)calloc((size_t)ne, sizeof(void*));
+        const void** da = (const void**)calloc((size_t)ne, sizeof(void*));
+        if (ga && ua && da) {
+            for (int k = 0; k < nt * used; k++) { const int ex = sel_all[k]; ga[ex] = gp[k]; ua[ex] = upp[k]; da[ex] = dp[k]; }
+            done_mm = llm_dsv4_metal_moe_mm_addr_batch(m->be, nt, ga, ua, da, m->gate[il].type, m->down[il].type, (uint32_t)ne, (uint32_t)embd, (uint32_t)ff,
+                                                       (uint32_t)m->gate[il].row_bytes, (uint32_t)m->down[il].row_bytes, sel_all, rw, X, c->swiglu_clamp_exp,
+                                                       pe->shexp_gate, pe->shexp_up, pe->shexp_down, (uint32_t)llm_ggml_nbytes(pe->shexp_gate_type, embd),
+                                                       (uint32_t)llm_ggml_nbytes(pe->shexp_down_type, ff), OUT) == 0;
+        }
+        free(ga); free(ua); free(da);
+    }
+    if (ok && !done_mm) {
         const void* sg = (pe->shexp_gate && pe->shexp_up && pe->shexp_down) ? pe->shexp_gate : NULL;
         ok = (is_q4 ? llm_dsv4_metal_moe_q4k_batch : llm_dsv4_metal_moe_iq2_q2k_batch)(m->be, nt, gp, upp, dp, X, rw, used, c->swiglu_clamp_exp, (uint32_t)embd,
                                               (uint32_t)m->gate[il].row_bytes, (uint32_t)ff, (uint32_t)m->down[il].row_bytes,
