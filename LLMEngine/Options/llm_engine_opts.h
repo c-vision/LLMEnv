@@ -32,6 +32,8 @@ void llm_ai_mlx_opt_register_tq_setter(void (*fn)(int));
 /* Enumerazione (per `AI OPTION LIST`): ritorna il numero di opzioni; `opt_at` riempie i campi. */
 int llm_ai_mlx_opt_count(void);
 int llm_ai_mlx_opt_at(int i, const char** name, const char** desc, char* value, int cap);
+/* Valore d'esempio dell'i-esima opzione (per l'help: `--opt <nome>=<esempio>`). */
+int llm_ai_mlx_opt_example(int i, char* buf, int cap);
 
 #ifdef __cplusplus
 }

@@ -17,40 +17,41 @@ typedef struct {
     char        s[64];
     const char* def_s;
     int         set;      /* 1 = sovrascritto dall'utente */
+    const char* ex;       /* valore d'esempio per l'help (--opt nome=ex) */
 } Opt;
 
 /* Parametri CURATI (nomi umani). Default compilati; nessuna env. */
 static Opt g_opts[] = {
-    { "context",          "capienza contesto/KV in token (0 = default del modello)", T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "maxtokens",        "tetto sui token generati",                                T_INT,   262144, 262144, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "thinking",         "reasoning on/off",                                        T_BOOL,  0, 0, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "offload",          "streaming/cache esperti MoE da disco",                    T_BOOL,  0, 0, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "offload_cache_mb", "RAM per la cache esperti (MB)",                           T_INT,   14336, 14336, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "dtype",            "auto|f16|bf16",                                           T_STR,   0, 0, 0, 0, 0, 0, "auto", "auto", 0 },
-    { "kvquant",          "off|8[:finestra]|auto[:soglia]|16",                       T_STR,   0, 0, 0, 0, 0, 0, "auto", "auto", 0 },
-    { "kvq_split_tokens", "KV-quant attn fusa: token per split-K (piccolo = piu' split)", T_INT, 0, 1024, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "kvq_splits_max",   "KV-quant attn fusa: n. massimo di split-K",                 T_INT, 0, 64, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "kvq_gqa",          "KV-quant attn fusa: GQA-shared (1/0, sperimentale)",         T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "kvdisk",           "tier SSD KV: off|on|<path> (file scratch)",               T_STR,   0, 0, 0, 0, 0, 0, "off", "off", 0 },
-    { "kvdisk_cap_mb",    "budget byte VIVI del tier SSD KV in MB (0 = illimitato)", T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "memgov",           "memory governor attivo (1/0): tiene ~2 GiB liberi per macOS", T_INT, 1, 1, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "memgov_reserve_mb", "byte da lasciare liberi per il sistema (MB)",            T_INT,   2048, 2048, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "memgov_grow_min_free_mb", "libero minimo richiesto per crescere le cache (MB)", T_INT, 1024, 1024, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "memgov_timeout_ms", "attesa massima del governor per la memoria (ms)",         T_INT,   30000, 30000, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "prefill",          "chunk di prefill (0 = default)",                          T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0 },
-    { "temp",             "temperatura di sampling",                                 T_FLOAT, 0, 0, 1.0, 1.0, 0, 0, {0}, NULL, 0 },
-    { "topp",             "top-p",                                                   T_FLOAT, 0, 0, 1.0, 1.0, 0, 0, {0}, NULL, 0 },
-    { "minp",             "min-p",                                                   T_FLOAT, 0, 0, 0.0, 0.0, 0, 0, {0}, NULL, 0 },
-    { "seed",             "seed (-1 = casuale)",                                     T_INT,   -1, -1, 0, 0, 0, 0, {0}, NULL, 0 },
+    { "context",          "capienza contesto/KV in token (0 = default del modello)", T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0, "131072" },
+    { "maxtokens",        "tetto sui token generati",                                T_INT,   262144, 262144, 0, 0, 0, 0, {0}, NULL, 0, "4096" },
+    { "thinking",         "reasoning on/off",                                        T_BOOL,  0, 0, 0, 0, 0, 0, {0}, NULL, 0, "on" },
+    { "offload",          "streaming/cache esperti MoE da disco",                    T_BOOL,  0, 0, 0, 0, 0, 0, {0}, NULL, 0, "on" },
+    { "offload_cache_mb", "RAM per la cache esperti (MB)",                           T_INT,   14336, 14336, 0, 0, 0, 0, {0}, NULL, 0, "16384" },
+    { "dtype",            "auto|f16|bf16",                                           T_STR,   0, 0, 0, 0, 0, 0, "auto", "auto", 0, "bf16" },
+    { "kvquant",          "off|8[:finestra]|auto[:soglia]|16",                       T_STR,   0, 0, 0, 0, 0, 0, "auto", "auto", 0, "8:8192" },
+    { "kvq_split_tokens", "KV-quant attn fusa: token per split-K (piccolo = piu' split)", T_INT, 0, 1024, 0, 0, 0, 0, {0}, NULL, 0, "256" },
+    { "kvq_splits_max",   "KV-quant attn fusa: n. massimo di split-K",                 T_INT, 0, 64, 0, 0, 0, 0, {0}, NULL, 0, "64" },
+    { "kvq_gqa",          "KV-quant attn fusa: GQA-shared (1/0, sperimentale)",         T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0, "1" },
+    { "kvdisk",           "tier SSD KV: off|on|<path> (file scratch)",               T_STR,   0, 0, 0, 0, 0, 0, "off", "off", 0, "on" },
+    { "kvdisk_cap_mb",    "budget byte VIVI del tier SSD KV in MB (0 = illimitato)", T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0, "8192" },
+    { "memgov",           "memory governor attivo (1/0): tiene ~2 GiB liberi per macOS", T_INT, 1, 1, 0, 0, 0, 0, {0}, NULL, 0, "1" },
+    { "memgov_reserve_mb", "byte da lasciare liberi per il sistema (MB)",            T_INT,   2048, 2048, 0, 0, 0, 0, {0}, NULL, 0, "2048" },
+    { "memgov_grow_min_free_mb", "libero minimo richiesto per crescere le cache (MB)", T_INT, 1024, 1024, 0, 0, 0, 0, {0}, NULL, 0, "1024" },
+    { "memgov_timeout_ms", "attesa massima del governor per la memoria (ms)",         T_INT,   30000, 30000, 0, 0, 0, 0, {0}, NULL, 0, "30000" },
+    { "prefill",          "chunk di prefill (0 = default)",                          T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0, "2048" },
+    { "temp",             "temperatura di sampling",                                 T_FLOAT, 0, 0, 1.0, 1.0, 0, 0, {0}, NULL, 0, "0" },
+    { "topp",             "top-p",                                                   T_FLOAT, 0, 0, 1.0, 1.0, 0, 0, {0}, NULL, 0, "0.95" },
+    { "minp",             "min-p",                                                   T_FLOAT, 0, 0, 0.0, 0.0, 0, 0, {0}, NULL, 0, "0.05" },
+    { "seed",             "seed (-1 = casuale)",                                     T_INT,   -1, -1, 0, 0, 0, 0, {0}, NULL, 0, "42" },
     /* TurboQuant (API del motore llm_ai_mlx_set_tq_memory_opt, ABI v6): gestita qui come parametro. */
-    { "tqmemory",         "TurboQuant esperti: 1=packed (poca RAM) / 0=affine-2bit (max velocita')", T_BOOL, 0, 0, 0, 0, 1, 1, {0}, NULL, 0 },
+    { "tqmemory",         "TurboQuant esperti: 1=packed (poca RAM) / 0=affine-2bit (max velocita')", T_BOOL, 0, 0, 0, 0, 1, 1, {0}, NULL, 0, "0" },
     /* Self-speculative n-gram (generale, tutti i modelli, greedy): draft dalla tabella n-gram del
      * contesto, verificati dal modello. 0=off; N>=2=ordine. Output identico al greedy AR. */
-    { "spec_ngram",       "self-speculative n-gram (greedy): 0=off, N>=2=ordine (es. 8)", T_INT, 8, 8, 0, 0, 0, 0, {0}, NULL, 0 },
+    { "spec_ngram",       "self-speculative n-gram (greedy): 0=off, N>=2=ordine (es. 8)", T_INT, 8, 8, 0, 0, 0, 0, {0}, NULL, 0, "8" },
     /* DFlash2 (A1): se impostata a un path di draft DFlash2, il decode greedy usa il drafter a
      * contesto PERSISTENTE (spec streaming). "" = off. */
-    { "dflash_model",     "draft DFlash2 (path) per la speculazione a contesto persistente", T_STR, 0, 0, 0, 0, 0, 0, "", "", 0 },
-    { "df2_seq_verify",   "DFlash2: verify per-sessione (1 = forza; A/B diagnostico, default batched)", T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0 },
+    { "dflash_model",     "draft DFlash2 (path) per la speculazione a contesto persistente", T_STR, 0, 0, 0, 0, 0, 0, "", "", 0, "~/ai/Models/Qwen3.8-27B-DFlash2" },
+    { "df2_seq_verify",   "DFlash2: verify per-sessione (1 = forza; A/B diagnostico, default batched)", T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0, "1" },
 };
 #define NOPTS ((int)(sizeof g_opts / sizeof g_opts[0]))
 
@@ -195,5 +196,11 @@ int llm_ai_mlx_opt_at(int i, const char** name, const char** desc, char* value, 
     if (name) *name = g_opts[i].name;
     if (desc) *desc = g_opts[i].desc;
     if (value) fmt(&g_opts[i], value, cap);
+    return 0;
+}
+/* Esempio d'uso del valore per l'help: `--opt <nome>=<ex>`. */
+int llm_ai_mlx_opt_example(int i, char* buf, int cap) {
+    if (i < 0 || i >= NOPTS || buf == NULL || cap <= 0) return -1;
+    snprintf(buf, (size_t)cap, "%s", g_opts[i].ex ? g_opts[i].ex : "");
     return 0;
 }
