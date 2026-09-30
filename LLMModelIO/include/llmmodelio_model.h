@@ -59,6 +59,7 @@ int llmmodelio_model_rollback(const char* store_dir, const char* name, const cha
 int llmmodelio_model_add(const char* base_path, const char* module_path, const char* out_path);
 int llmmodelio_model_adapter(const char* base_path, const char* adapter_path, const char* out_path, const char* alpha_str);
 int llmmodelio_model_module(const char* base_path, const char* gmmod_path, const char* module_path, const char* out_path);
+int llmmodelio_model_modality(const char* base_path, const char* mmproj_path, const char* out_path);
 
 /* Q4_K weighted, stessa convenzione di llama.cpp: quant_weights contiene `weight_sets` vettori
  * consecutivi da n_per_row elementi; ogni vettore si applica a nrows/weight_sets righe. */

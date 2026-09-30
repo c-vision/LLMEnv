@@ -2037,6 +2037,56 @@ static int llmmodelio_arch_resolve_gguf(const char* gguf_path) {
     }
     g_arch_ok = 0; return -1;
 }
+/* ── MODALITY: emit automatico del .gmmod da modello+mmproj reali ──
+ * Risolve l'arch DALL'ABI confrontando il basename del mmproj con `source.mmproj` dichiarato in
+ * ogni .llmarch/.gmbarch (fallback: arch del base/ dell mmproj). Deriva la modality dichiarata,
+ * valida che il mmproj porti tensori di quella famiglia, e scrive il descriptor `out_path`. */
+static int lj_mod_role(const LlmDesc* a, const char* name, const char* modality);
+int llmmodelio_model_modality(const char* base_path, const char* mmproj_path, const char* out_path) {
+    if (base_path == NULL || mmproj_path == NULL || out_path == NULL) return -1;
+    const char* sl = strrchr(mmproj_path, '/'); const char* mmb = sl ? sl + 1 : mmproj_path;
+    int found = 0; char arch[96] = "";
+    char abi[2048];
+    if (llmdesc_abi_dir(abi, sizeof abi)) {
+        DIR* dp = opendir(abi);
+        if (dp != NULL) {
+            struct dirent* de;
+            while ((de = readdir(dp)) != NULL && !found) {
+                size_t ln = strlen(de->d_name);
+                int isarch = (ln > 8 && (strcmp(de->d_name + ln - 8, ".llmarch") == 0 || strcmp(de->d_name + ln - 8, ".gmbarch") == 0));
+                if (!isarch) continue;
+                char path[4096]; snprintf(path, sizeof path, "%s/%s", abi, de->d_name);
+                LlmDesc d;
+                if (llmdesc_load(path, &d) != 0) continue;
+                if (d.source_mmproj[0]) {
+                    const char* sb = strrchr(d.source_mmproj, '/'); const char* sbn = sb ? sb + 1 : d.source_mmproj;
+                    if (strcmp(sbn, mmb) == 0) { g_arch = d; snprintf(g_arch_path, sizeof g_arch_path, "%s", path); g_arch_ok = 1; found = 1; snprintf(arch, sizeof arch, "%s", d.arch); }
+                }
+            }
+            closedir(dp);
+        }
+    }
+    if (!found) {
+        if (llmmodelio_arch_resolve_gguf(base_path) != 0 && llmmodelio_arch_resolve_gguf(mmproj_path) != 0) return -1;
+        if (g_arch_ok) snprintf(arch, sizeof arch, "%s", g_arch.arch);
+    }
+    if (!g_arch_ok) return -1;
+    const char* mod = llmdesc_modality(&g_arch);
+    if (strcmp(mod, "text") == 0) return -1;                  /* nessuna modality dichiarata -> errore */
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(mmproj_path, &kv, &nkv, &fi) != 0) return -1;
+    int carry = 0;
+    for (uint64_t i = 0; i < fi.n_tensors; i++)
+        if (lj_mod_role(&g_arch, fi.tensors[i].name, mod) || lj_mod_role(&g_arch, fi.tensors[i].name, "vision")
+            || lj_mod_role(&g_arch, fi.tensors[i].name, "audio") || lj_mod_role(&g_arch, fi.tensors[i].name, "mtp")) { carry = 1; break; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    if (!carry) return -1;                                    /* mmproj incoerente con la modality */
+    FILE* o = fopen(out_path, "w"); if (o == NULL) return -1;
+    fprintf(o, "{\n  \"module\": \"%s\",\n  \"arch\": \"%s\",\n  \"modality\": \"%s\",\n  \"base\": \"%s\",\n  \"mmproj\": \"%s\",\n  \"source\": { \"format\": \"gguf\", \"mmproj\": \"%s\" }\n}\n",
+            mmb, arch, mod, base_path, mmproj_path, mmb);
+    fclose(o);
+    return 0;
+}
 /* ── AGGIUNGERE modulo dichiarato (.gmmod): dichiarata nell'ABI + risolta + eseguita ── */
 static char* lj_slurp(const char* p) {
     FILE* f = fopen(p, "rb"); if (!f) return NULL;
