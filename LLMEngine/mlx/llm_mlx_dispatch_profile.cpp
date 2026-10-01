@@ -244,6 +244,12 @@ void llm_mlx_dp_reset(void) {
     Profile& d = p();
     d.hist.clear();
     d.by_shape.clear();
+    /* Le mappe per-SORGENTE (Reshape/AsType/Squeeze/Sigmoid) vanno azzerate come l'istogramma:
+     * senza, si accumulano prefill+decode e il per-SORGENTE di un report e' falsato. */
+    d.astype_src.clear();
+    d.sig_src.clear();
+    d.sq_src.clear();
+    d.reshape_src.clear();
     d.total = 0;
     d.bytes_total = 0;
     d.bytes_in_total = 0;
