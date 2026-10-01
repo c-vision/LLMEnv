@@ -9,3 +9,7 @@ __pycache__/
 
 # ralph loop local state
 .opencode/ralph-loop.local.md
+
+# build dirs (non tracciare)
+LLMEngine/mlx/build-gmbasic/
+libs/mlx-deps/precompiled/
