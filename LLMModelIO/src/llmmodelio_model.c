@@ -2475,6 +2475,26 @@ static int llmmodelio_model_ir_eplan(const char* path, int world) {
     free(cnt);
     return 0;
 }
+/* CONTEXT (§4.10): budget di contesto (max token da KV) + trim/GC. Report-only. */
+static int llmmodelio_model_ir_context(const char* path) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR CONTEXT: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    unsigned long long wb = 0;
+    for (uint64_t i = 0; i < fi.n_tensors; i++) { uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d]; uint64_t b = 0; if (llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b) == 0) wb += b; }
+    long bc=-1,hkv=-1,hd=-1,kl=-1,vl=-1,en=-1;
+    for (int i=0;i<nkv;i++){ const char* k=kv[i].key; long v=(long)kv[i].u32;
+        if(strstr(k,"head_count_kv"))hkv=v; else if(strstr(k,"head_count"))hd=v; else if(strstr(k,"key_length"))kl=v;
+        else if(strstr(k,"value_length"))vl=v; else if(strstr(k,"block_count"))bc=v; else if(strstr(k,"embedding_length"))en=v; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    double kvpt=-1; if(bc>0&&hkv>0){ long kd=kl>0?kl:((en>0&&hd>0)?en/hd:-1); long vd=vl>0?vl:kd; if(kd>0&&vd>0) kvpt=(double)bc*hkv*(kd+vd)*2.0; }
+    long maxtok = (kvpt>0) ? (long)((96.0*1024.0*1024.0*1024.0 - 2048.0*1024.0*1024.0 - (double)wb) / kvpt) : -1;
+    fprintf(LOUT, "# LLM TENSOR CONTEXT '%s' arch=%s\n  kv/token=%.0f bytes  max_tokens(kv_bound)=%ld\n", path, g_arch_ok?g_arch.arch:"-", kvpt, maxtok);
+    fprintf(LOUT, "  policy: TRIM (drop oldest prefix) | GC (evict prefix-cache) | PAGED (kv pages)\n");
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2507,6 +2527,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
     if (strcasecmp(s, "GPU") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR GPU: atteso <path>\n"); return -1; }
         return llmmodelio_model_ir_gpu(dir);
+    }
+    if (strcasecmp(s, "CONTEXT") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR CONTEXT: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_context(dir);
     }
     if (strcasecmp(s, "EPLAN") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR EPLAN: atteso <path>[, <world>]\n"); return -1; }
