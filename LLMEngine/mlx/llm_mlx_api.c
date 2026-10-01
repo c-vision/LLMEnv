@@ -525,16 +525,35 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
         ok = forward_tokens_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
                                   s->k_cache, s->v_cache, s->has_cache, &h);
         if (ok && caplayers != NULL) {
-            for (int l = 0; l < NL; l++) {
-                llm_mlx_cache_rollback(&s->k_cache[l], ck[l], m->stream);
-                llm_mlx_cache_rollback(&s->v_cache[l], cv[l], m->stream);
-                if (ca != NULL && has_aux[l]) llm_mlx_cache_rollback(&s->aux_cache[l], ca[l], m->stream);
+            /* ctx su CACHE SCRATCH (copia REALE via mlx_copy): la cattura (astype/eval + update
+             * KV in-place) non deve toccare lo stato di sessione. La KV di sessione resta quella
+             * di forward_tokens_batch; l'aux di sessione e' sostituito dalla copia solo durante
+             * la cattura (df2_capture_batch fa m->aux_cache = kvq_sess->aux_cache). */
+            mlx_array* sk = (mlx_array*)malloc((size_t)NL * sizeof(mlx_array));
+            mlx_array* sv = (mlx_array*)malloc((size_t)NL * sizeof(mlx_array));
+            mlx_array* sa = (s->aux_cache != NULL) ? (mlx_array*)malloc((size_t)NL * sizeof(mlx_array)) : NULL;
+            bool* shasc = (bool*)calloc((size_t)NL, sizeof(bool));
+            if (sk == NULL || sv == NULL || shasc == NULL) ok = false;
+            for (int l = 0; ok && l < NL; l++) {
+                sk[l] = mlx_array_new(); sv[l] = mlx_array_new();
+                if (mlx_copy(&sk[l], s->k_cache[l], m->stream) != 0) ok = false;
+                if (ok && mlx_copy(&sv[l], s->v_cache[l], m->stream) != 0) ok = false;
+                shasc[l] = s->has_cache[l];
+                if (sa != NULL) { sa[l] = mlx_array_new();
+                    if (s->aux_cache[l].ctx != NULL && mlx_copy(&sa[l], s->aux_cache[l], m->stream) != 0) ok = false; }
             }
+            mlx_array* saved_aux = s->aux_cache;
+            if (ok) s->aux_cache = sa;
             mlx_array hd = mlx_array_new();
-            ok = df2_capture_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
-                                   s->k_cache, s->v_cache, s->has_cache,
-                                   caplayers, ncap, cap, (int)capneed, &hd);
+            if (ok) ok = df2_capture_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
+                                           sk, sv, shasc, caplayers, ncap, cap, (int)capneed, &hd);
+            s->aux_cache = saved_aux;
             mlx_array_free(hd);
+            for (int l = 0; l < NL; l++) {
+                mlx_array_free(sk[l]); mlx_array_free(sv[l]);
+                if (sa != NULL) mlx_array_free(sa[l]);
+            }
+            free(sk); free(sv); free(sa); free(shasc);
         }
     }
     if (g_df2_time_on()) { g_df2_t_fwd += g_df2_now() - _t0; _t0 = g_df2_now(); }

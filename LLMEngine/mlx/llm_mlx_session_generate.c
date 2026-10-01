@@ -388,13 +388,10 @@ static llm_ai_mlx_dflash2_handle llm_mlx_df2_for(LlmMlxModel* m) {
     char path[1024];
     if (llm_ai_mlx_opt_get_str("dflash_model", path, sizeof(path)) != 0 || path[0] == 0) {
         /* opt vuota: prova l'auto-detect del sibling <stem>-DFlash2 accanto al modello.
-         * ESCLUSI i target ibridi/GDN: su di essi il verify DFlash2 DIVERGE dal greedy (misurato
-         * su qwen3_5/qwen38: "shifting shifting" col batch, output corrotto col seq) -> auto-detect
-         * solo per target densi, finche' lo stato ricorrente non e' gestito nel capture/verify. */
-        const bool hybrid = (m->cfg.model_type != NULL &&
-                             strcmp(m->cfg.model_type, "kimi_linear") == 0) ||
-                            (m->cfg.is_linear_layer != NULL);
-        if (hybrid || !llm_mlx_df2_autodetect(m, path, sizeof(path))) return NULL;
+         * (2026-10-01) La divergenza sui GDN e' RISOLTA: il greedy usa forward_tokens_batch
+         * (la cattura-snap perturbava il forward ricorrente) e il ctx e' ricatturato su cache
+         * scratch. Dump token-id: ON == OFF bit-identici. Auto-detect ora per TUTTI i target. */
+        if (!llm_mlx_df2_autodetect(m, path, sizeof(path))) return NULL;
     }
     g_df2_target = m;
     g_df2_handle = llm_ai_mlx_dflash2_create((llm_ai_mlx_model_handle)m, path);
