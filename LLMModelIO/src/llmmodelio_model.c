@@ -2270,6 +2270,38 @@ static int llmmodelio_model_ir_gpu(const char* path) {
     fprintf(LOUT, "  gpu_cost_model: layers=%ld weights=%llu bytes (%.2f GiB)\n", nl, wb, (double)wb/(1024.0*1024.0*1024.0));
     return 0;
 }
+/* PROFILE (I4) + RESIDENCY (I12) + STATE (I7) — report-only. */
+static int llmmodelio_model_ir_profile(const char* path, int budget_gb) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR PROFILE: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    unsigned long long cat[8] = {0}; unsigned long long wb = 0;
+    for (uint64_t i = 0; i < fi.n_tensors; i++) {
+        const char* r = g_arch_ok ? llmdesc_role(&g_arch, fi.tensors[i].name) : "OTHER";
+        uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d];
+        uint64_t b = 0; llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b); wb += b;
+        int c = (strcmp(r,"EMBEDDING")==0)?0:(strncmp(r,"ATTN",4)==0)?1:((strcmp(r,"ROUTED_EXPERT")==0||strcmp(r,"SHARED_EXPERT")==0)?2:(strcmp(r,"ROUTER")==0)?3:(strncmp(r,"FFN",3)==0)?4:(strstr(r,"NORM")!=NULL)?5:(strcmp(r,"OUTPUT")==0)?6:7);
+        cat[c] += b;
+    }
+    long bc=-1,hkv=-1,hd=-1,kl=-1,vl=-1,en=-1;
+    for (int i=0;i<nkv;i++){ const char* k=kv[i].key; long v=(long)kv[i].u32;
+        if(strstr(k,"attention.head_count_kv"))hkv=v; else if(strstr(k,"attention.head_count"))hd=v;
+        else if(strstr(k,"attention.key_length"))kl=v; else if(strstr(k,"attention.value_length"))vl=v;
+        else if(strstr(k,"block_count"))bc=v; else if(strstr(k,"embedding_length"))en=v; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    double kvpt=-1.0; if(bc>0&&hkv>0){ long kd=kl>0?kl:((en>0&&hd>0)?en/hd:-1); long vd=vl>0?vl:kd; if(kd>0&&vd>0) kvpt=(double)bc*(double)hkv*(double)(kd+vd)*2.0; }
+    double budget = (budget_gb > 0) ? (double)budget_gb*1024.0*1024.0*1024.0 : 96.0*1024.0*1024.0*1024.0;
+    const char* cn[8]={"embedding","attention","experts","router","ffn_dense","norm","output","other"};
+    fprintf(LOUT, "# LLM TENSOR PROFILE '%s' arch=%s weights=%llu (%.2f GiB)\n", path, g_arch_ok?g_arch.arch:"-", wb, (double)wb/(1024.0*1024.0*1024.0));
+    for (int c=0;c<8;c++) if (cat[c]) fprintf(LOUT, "  %-10s %.2f GiB (%.1f%%)\n", cn[c], (double)cat[c]/(1024.0*1024.0*1024.0), 100.0*(double)cat[c]/(double)(wb?wb:1));
+    if (kvpt >= 0) fprintf(LOUT, "  kv/token=%.0f bytes\n", kvpt);
+    int fits = ((double)wb <= budget);
+    fprintf(LOUT, "  RESIDENCY: budget=%.0f GiB -> %s%s\n", budget/(1024.0*1024.0*1024.0), fits ? "RESIDENT (tutto in RAM)" : "SWAP (streaming out-of-core)",
+            (!fits && cat[2]) ? " — esperti candidate al demote/streaming" : "");
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2282,6 +2314,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "PROFILE") == 0 || strcasecmp(s, "RESIDENCY") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR PROFILE: atteso <path>[, <budget_gb>]\n"); return -1; }
+        return llmmodelio_model_ir_profile(dir, *tn ? atoi(tn) : 0);
     }
     if (strcasecmp(s, "GPU") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR GPU: atteso <path>\n"); return -1; }
