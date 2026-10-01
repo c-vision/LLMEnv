@@ -132,8 +132,12 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
     { uint64_t grew = llm_kv_page_bytes(p->fmt == LLM_KVQ_FMT_INT8, (uint32_t)p->kv_heads, (uint32_t)p->head_dim)
                     * (uint64_t)(p->pt.phys_capacity);  /* pagine aggiunte (doppio) */
       if (llm_memgov_wait(&p->gov, grew) != 0) return false; }
-    if (!llm_kv_pt_grow(&p->pt, p->pt.phys_capacity * 2, p->pt.phys_capacity * 2)) return false;
-    const int ncap = p->cap_tokens * 2;
+    /* CRESCITA 1.25x (2026-10-01): il raddoppio portava la cap a ~2x l'usato -> il pool
+     * int8 costava ~66KB/token (misurato +4.5GB@71k, picco 44 vs 39.6 con kvquant=off).
+     * Con +1/8 l'over-allocazione scende a ~1.125x; le riallocazioni restano O(log). */
+    const int ngrow = (p->pt.phys_capacity / 8) > 1 ? (p->pt.phys_capacity / 8) : 1;
+    if (!llm_kv_pt_grow(&p->pt, p->pt.phys_capacity + ngrow, p->pt.phys_capacity + ngrow)) return false;
+    const int ncap = p->cap_tokens + (p->cap_tokens / 8 > (int)LLM_KVQ_PAGE_TOKENS ? p->cap_tokens / 8 : (int)LLM_KVQ_PAGE_TOKENS);
     const mlx_dtype edt = (p->fmt == LLM_KVQ_FMT_INT8) ? MLX_INT8 : MLX_BFLOAT16;
     for (int l = 0; l < p->layers; l++) {
         if (p->keyData[l].ctx == NULL) continue;

@@ -690,9 +690,18 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
                 mlx_array kr = mlx_array_new(), krc = mlx_array_new();
                 mlx_array vr = mlx_array_new(), vrc = mlx_array_new();
                 if (mlx_slice(&kr, *k_cache, r0,4,r1,4,one,4,m->stream) == 0 &&
-                    mlx_contiguous(&krc, kr, false, m->stream) == 0) mlx_array_set(k_cache, krc);
+                    mlx_contiguous(&krc, kr, false, m->stream) == 0) {
+                    mlx_array_set(k_cache, krc);
+                    /* EVAL (2026-10-01): senza, il `contiguous` resta LAZY e la vista slice
+                     * trattiene il BACKING full della KV fp16 finche' il grafo non e' consumato
+                     * -> +1x KV fp16 (~60KB/token, misurato +4.5GB@71k). Valutare qui libera il full. */
+                    mlx_array_eval(*k_cache);
+                }
                 if (mlx_slice(&vr, *v_cache, r0,4,r1,4,one,4,m->stream) == 0 &&
-                    mlx_contiguous(&vrc, vr, false, m->stream) == 0) mlx_array_set(v_cache, vrc);
+                    mlx_contiguous(&vrc, vr, false, m->stream) == 0) {
+                    mlx_array_set(v_cache, vrc);
+                    mlx_array_eval(*v_cache);
+                }
                 mlx_array_free(kr); mlx_array_free(krc); mlx_array_free(vr); mlx_array_free(vrc);
             }
         }
