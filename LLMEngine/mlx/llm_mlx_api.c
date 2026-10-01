@@ -208,7 +208,9 @@ static int df2_propose_impl(DFlash2Runtime* rt,
      * sul contesto fp32). ---- */
     mlx_array hidden = mlx_array_new();
     double _bt0 = g_df2_time_on() ? g_df2_now() : 0.0;
-    {
+    if (getenv("DF2_CTXDBG"))
+        fprintf(stderr, "[ctxdbg] S=%d ctx_pos_before=%d\n", S, rt->ctx[rt->cur_ctx].ctx_pos);
+    if (S > 0) {
         const int span = df2_ctx_span();
         if (span > 0 && S > span) {
             int off = 0;
@@ -285,7 +287,7 @@ int llm_ai_mlx_dflash2_propose(llm_ai_mlx_dflash2_handle handle,
                                int32_t last_verified_token,
                                const float* ctx_feature, int S,
                                int32_t* out_tokens, int max_out) {
-    if (handle == NULL || ctx_feature == NULL || S <= 0 || out_tokens == NULL) return -1;
+    if (handle == NULL || out_tokens == NULL || S < 0 || (S > 0 && ctx_feature == NULL)) return -1;
     DFlash2Runtime* rt = (DFlash2Runtime*)handle;
     bool sv_all; mlx_dtype sv_act;
     df2_mode_enter_draft(rt, &sv_all, &sv_act);      /* forward del draft col SUO modo bf16 */
@@ -712,6 +714,83 @@ static void df2_retain_ctx(DFlash2Runtime* rt, float* ctx, int n) {
     rt->retained_ctx = ctx; rt->retained_n = n;
 }
 
+/* STREAMING INTERLEAVED (2026-10-01): inietta il ctx del prompt nel draft PER SPAN —
+ * cattura uno span alla volta su cache scratch e lo libera subito — invece di catturare
+ * l'intero ctx in un buffer host (n_prompt*ncap*H*4: 26GB a 257k, 37GB a 2M). Cosi' il picco
+ * host e' un solo span (~420MB). Correttezza invariata (il verify resta esatto; cambia solo
+ * la memoria). La cache scratch (pk/pv/ph) PERSISTE tra gli span -> ogni span vede il prefisso
+ * (attenzione corretta). */
+static bool df2_stream_prompt_ctx(DFlash2Runtime* rt, LlmMlxModel* m, LlmMlxSession* s,
+                                  int32_t anchor, const int* caplayers, int ncap, int n_prompt,
+                                  float** out_tail, int* out_tail_n) {
+    *out_tail = NULL; *out_tail_n = 0;
+    if (n_prompt <= 0) return true;
+    const int H = m->cfg.hidden_size;
+    const int ctx_dim = ncap * H;
+    const int L = rt->draft->cfg.dflash_block_size;
+    int span = df2_ctx_span(); if (span <= 0) span = 4096;
+    /* L'ULTIMO span NON si inietta qui: resta al propose (round-1) che cosi' ha comunque un
+     * ctx non vuoto (evita il ramo S==0 di df2_backbone) e sfrutta la macchina d'iniezione
+     * esistente. Il buffer restituito e' un solo span (~420MB) invece dell'intero contesto. */
+    const int tail = (n_prompt < span) ? n_prompt : span;
+    const int inject_upto = n_prompt - tail;
+    OutputTensors t;
+    if (!load_output_tensors(m, &t)) return false;
+    const int tnl = m->cfg.n_layers;
+    mlx_array* pk = (mlx_array*)malloc((size_t)tnl * sizeof(mlx_array));
+    mlx_array* pv = (mlx_array*)malloc((size_t)tnl * sizeof(mlx_array));
+    bool* ph = (bool*)calloc((size_t)tnl, sizeof(bool));
+    int32_t* block_ids = (int32_t*)malloc((size_t)L * sizeof(int32_t));
+    if (!pk || !pv || !ph || !block_ids) { free(pk); free(pv); free(ph); free(block_ids); free_output_tensors(&t); return false; }
+    for (int i = 0; i < tnl; i++) { pk[i] = mlx_array_new(); pv[i] = mlx_array_new(); }
+    block_ids[0] = anchor;
+    for (int i = 1; i < L; i++) block_ids[i] = rt->draft->cfg.dflash_mask_token;
+    bool ok = true;
+    for (int off = 0; off < inject_upto && ok; off += span) {
+        int ch = (inject_upto - off > span) ? span : (inject_upto - off);
+        float* buf = (float*)malloc((size_t)ch * (size_t)ctx_dim * sizeof(float));
+        if (!buf) { ok = false; break; }
+        mlx_array phhidden = mlx_array_new();
+        ok = df2_capture_batch(m, s, t.embed_w, t.embed_s, t.embed_b, s->history + off, ch, off,
+                               pk, pv, ph, caplayers, ncap, buf, ch * ctx_dim, &phhidden);
+        mlx_array_free(phhidden);
+        if (ok) {
+            mlx_array ctx_arr = mlx_array_new_data(buf, ((const int[2]){ch, ctx_dim}), 2, MLX_FLOAT32);
+            mlx_array xc = mlx_array_new();
+            ok = mlx_reshape(&xc, ctx_arr, ((const int[3]){1, ch, ctx_dim}), 3, m->stream) == 0;
+            mlx_array_free(ctx_arr);
+            if (ok) {
+                bool sv_all; mlx_dtype sv_act;
+                df2_mode_enter_draft(rt, &sv_all, &sv_act);
+                mlx_array h2 = mlx_array_new();
+                ok = df2_backbone(rt, block_ids, L, xc, ch, &h2, NULL);
+                mlx_array_free(h2);
+                df2_mode_leave_draft(rt, sv_all, sv_act);
+                if (ok) rt->ctx[rt->cur_ctx].ctx_pos += ch;
+            }
+            mlx_array_free(xc);
+        }
+        free(buf);
+        if (getenv("DF2_CTXDBG"))
+            fprintf(stderr, "[stream] off=%d ch=%d ok=%d ctx_pos=%d\n", off, ch, (int)ok, rt->ctx[rt->cur_ctx].ctx_pos);
+    }
+    /* cattura l'ULTIMO span in un buffer (NON iniettato): lo inietta il propose round-1. */
+    if (ok && tail > 0) {
+        float* buf = (float*)malloc((size_t)tail * (size_t)ctx_dim * sizeof(float));
+        if (!buf) ok = false;
+        else {
+            mlx_array phhidden = mlx_array_new();
+            ok = df2_capture_batch(m, s, t.embed_w, t.embed_s, t.embed_b, s->history + inject_upto, tail,
+                                   inject_upto, pk, pv, ph, caplayers, ncap, buf, tail * ctx_dim, &phhidden);
+            mlx_array_free(phhidden);
+            if (ok) { *out_tail = buf; *out_tail_n = tail; } else free(buf);
+        }
+    }
+    for (int i = 0; i < tnl; i++) { mlx_array_free(pk[i]); mlx_array_free(pv[i]); }
+    free(pk); free(pv); free(ph); free(block_ids); free_output_tensors(&t);
+    return ok;
+}
+
 int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
                                 llm_ai_mlx_session_handle sess_handle,
                                 int32_t eos_token, int max_tokens,
@@ -737,6 +816,11 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
      * chiamante fa FALLBACK alla spec n-gram / decode AR (percorso verificato a 257k, 38.6GB).
      * 0 = nessun limite (forza). Override: opzione di registro `df2_ctx_budget_mb`. */
     {
+        /* Il ctx del prompt e' iniettato per SPAN (streaming interleaved, df2_stream_prompt_ctx):
+         * picco host ~1 span (~420MB) invece di 26-37GB. Resta pero' il PICCO PREFLILL (a 257k
+         * ~80GB attivi, non ancora rilasciato) + drafter + KV scratch -> 1M/2M fanno ancora OOM.
+         * Quindi si mantiene un gate (default 8192MB sull'ampiezza del ctx) che fa FALLBACK a
+         * n-gram/AR oltre ~82k token finche' il picco prefill non e' gestito. */
         int budget_mb = 8192;
         if (llm_ai_mlx_opt_get_int("df2_ctx_budget_mb", &budget_mb) != 0 || budget_mb < 0) budget_mb = 8192;
         if (budget_mb > 0) {
@@ -766,36 +850,20 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
         memcpy(pctx, rt->retained_ctx, (size_t)ctx_n0 * ncap * H * sizeof(float));
     } else {
         /* ctx del prompt: re-forward della history su cache scratch con capture (eval a fine
-         * forward: capture robusta). Round1 usa queste righe come nel reference. */
-        /* LARGE-CONTEXT (2026-10-01): il prefill lascia buffer transitori in cache MLX
-         * (picco ~80GB a 257k, poi attivi 38GB). Liberarli PRIMA della cattura ctx evita
-         * l'overlap picco+ctx (OOM a 1M). La cattura riusa la cache scratch del target. */
+         * forward: capture robusta). */
+        /* STREAMING INTERLEAVED (2026-10-01): il ctx del prompt viene iniettato nel draft
+         * PER SPAN — cattura su cache scratch persistente, iniezione, free per span — invece
+         * di tenere l'intero ctx in un buffer host (n_prompt*ncap*H*4: 26GB@257k, 37GB@2M ->
+         * OOM). Picco = un solo span. Il propose round-1 gira poi con S=0 (ctx gia' in cache:
+         * niente re-iniezione). Il prefill puo' lasciare un picco transitorio: clear prima. */
         mlx_clear_cache();
-        int64_t pctx_cap = (int64_t)n_prompt * ncap * H;
-        pctx = (float*)malloc((size_t)pctx_cap * sizeof(float));
-        if (!pctx) return -1;
-        ctx_n0 = n_prompt;
-        OutputTensors t;
-        bool okc = load_output_tensors(m, &t);
-        const int tnl = m->cfg.n_layers;   /* cache scratch del TARGET (64), NON del draft (5)! */
-        mlx_array* pk = (mlx_array*)malloc((size_t)tnl * sizeof(mlx_array));
-        mlx_array* pv = (mlx_array*)malloc((size_t)tnl * sizeof(mlx_array));
-        bool* ph = (bool*)calloc((size_t)tnl, sizeof(bool));
-        for (int i = 0; i < tnl; i++) { pk[i] = mlx_array_new(); pv[i] = mlx_array_new(); }
-        mlx_array phidden = mlx_array_new();
-        if (okc) okc = df2_capture_batch(m, s, t.embed_w, t.embed_s, t.embed_b,
-                                         s->history, n_prompt, 0, pk, pv, ph,
-                                         caplayers, ncap, pctx, (int)pctx_cap, &phidden);
-        free_output_tensors(&t);
-        for (int i = 0; i < tnl; i++) { mlx_array_free(pk[i]); mlx_array_free(pv[i]); }
-        free(pk); free(pv); free(ph); mlx_array_free(phidden);
-        if (!okc) { free(pctx); fprintf(stderr, "dflash_generate: capture prompt fallita\n"); return -1; }
-        if (getenv("DF2_DUMP_CTX")) {
-            FILE* fc = fopen(getenv("DF2_DUMP_CTX"), "wb");
-            if (fc) { fwrite(pctx, sizeof(float), (size_t)pctx_cap, fc); fclose(fc); }
-            fprintf(stderr, "[ctx] dumped %lld floats\n", (long long)pctx_cap);
-        }
         llm_ai_mlx_dflash2_reset(handle);   /* nuova sequenza: ring del draft pulito */
+        float* tail = NULL; int tail_n = 0;
+        if (!df2_stream_prompt_ctx(rt, m, s, s->pending_next_id, caplayers, ncap, n_prompt, &tail, &tail_n)) {
+            fprintf(stderr, "dflash_generate: streaming ctx fallito\n");
+            return -1;
+        }
+        pctx = tail; ctx_n0 = tail_n;   /* solo l'ULTIMO span -> il propose round-1 inietta quello */
     }
 
     int emitted = 0;
