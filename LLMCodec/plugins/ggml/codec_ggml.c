@@ -19,15 +19,7 @@ static int g_decode(const void* in, size_t in_len, int fmt, int p0, int p1, size
         if (llmcodec_ggml_dequant_row(fmt, (const uint8_t*)in + r*rb, out + r*cols, (int64_t)cols) != 0) return -1;
     return 0;
 }
-static int g_encode(const float* in, size_t rows, size_t cols, int fmt, int p0, int p1,
-                    void* out, size_t out_cap, size_t* out_len, void* aux, size_t aux_cap, size_t* aux_len) {
-    (void)aux; (void)aux_cap; (void)p0; (void)p1;
-    uint64_t rb = 0; if (llmcodec_ggml_type_bytes(fmt, cols, &rb) != 0) return -1;
-    if (out_cap < rb*rows) return -1;
-    for (size_t r = 0; r < rows; ++r)
-        if (llmcodec_ggml_quant_row(fmt, in + r*cols, (uint8_t*)out + r*rb, (int64_t)cols, NULL) != 0) return -1;
-    *out_len = (size_t)rb*rows; *aux_len = 0; return 0;
-}
+static int g_encode(const float* in, size_t rows, size_t cols, int fmt, int p0, int p1, void* out, size_t out_cap, size_t* out_len, void* aux, size_t aux_cap, size_t* aux_len){ (void)in;(void)rows;(void)cols;(void)fmt;(void)p0;(void)p1;(void)out;(void)out_cap;(void)out_len;(void)aux;(void)aux_cap;(void)aux_len; return -1; }
 static const char* g_dt(int which,int fmt){ (void)fmt; return which==0 ? "GGML" : NULL; }
 static int g_shp(int fmt,int p0,int p1,size_t d0,size_t d1,size_t* r,size_t* c){(void)fmt;(void)p0;(void)p1;*r=d0;*c=d1;return 0;}
 static int g_ssh(int w,int fmt,int p0,int p1,size_t r,size_t c,size_t* a,size_t* b){(void)w;(void)fmt;(void)p0;(void)p1;*a=r;*b=c;return 0;}

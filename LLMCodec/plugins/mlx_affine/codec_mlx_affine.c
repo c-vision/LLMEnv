@@ -20,17 +20,7 @@ static int a_decode(const void* in, size_t in_len, int fmt, int p0, int p1, size
     llmcodec_moe_affine_dequantize((const uint32_t*)in, sc, bs, (uint32_t)rows, (uint32_t)cols, group, bits, 1, out);
     return 0;
 }
-static int a_encode(const float* in, size_t rows, size_t cols, int fmt, int p0, int p1,
-                    void* out, size_t out_cap, size_t* out_len, void* aux, size_t aux_cap, size_t* aux_len) {
-    (void)fmt; (void)out_cap;
-    uint32_t group = p0 ? (uint32_t)p0 : 32; uint32_t bits = (uint32_t)(p1 ? p1 : 4);
-    size_t sb = llmcodec_moe_affine_sc_bytes((uint32_t)rows, (uint32_t)cols, group);
-    if (aux == NULL || aux_cap < 2*sb) return -1;
-    uint16_t* sc = (uint16_t*)aux; uint16_t* bs = (uint16_t*)((uint8_t*)aux + sb);
-    if (llmcodec_moe_affine_quantize(in, (uint32_t)rows, (uint32_t)cols, group, bits,
-                                (uint32_t*)out, sc, bs) != 0) return -1;
-    *out_len = llmcodec_moe_affine_w_bytes((uint32_t)rows, (uint32_t)cols, bits); *aux_len = 2*sb; return 0;
-}
+static int a_encode(const float* in, size_t rows, size_t cols, int fmt, int p0, int p1, void* out, size_t oc, size_t* ol, void* aux, size_t ac, size_t* al){ (void)in;(void)rows;(void)cols;(void)fmt;(void)p0;(void)p1;(void)out;(void)oc;(void)ol;(void)aux;(void)ac;(void)al; return -1; }
 static const char* a_dt(int which,int fmt){ (void)fmt; return which==0 ? "U32" : "F16"; }
 static int a_shp(int fmt,int p0,int p1,size_t d0,size_t d1,size_t* r,size_t* c){(void)fmt;int bits=p1?p1:4;*r=d0;*c=(bits?d1*32/(size_t)bits:d1);return 0;}
 static int a_ssh(int w,int fmt,int p0,int p1,size_t r,size_t c,size_t* d0,size_t* d1){(void)fmt;int bits=p1?p1:4,grp=p0?p0:32; if(w==0){*d0=r;*d1=c*(size_t)bits/32;}else{*d0=r;*d1=c/(size_t)grp;} return 0;}

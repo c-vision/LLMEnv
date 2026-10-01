@@ -70,7 +70,7 @@ static inline float llm_dsv4_dot_q8_0_prequant(const uint8_t* w_row, int n, cons
 
 /* Q8_K = formato ggml: delega al CODEC (§0bis). LlmDsv4Q8K ha lo STESSO layout di blk_q8_K. */
 static inline void llm_dsv4_q8_K_quantize_row(const float* x, int n, LlmDsv4Q8K* y) {
-    llmcodec_ggml_quant_row(LLMCODEC_GGML_T_Q8_K, x, y, n, NULL);
+    llmcodec_ggml_q8_K_encode(x, y, n);
 }
 /* Port VERBATIM (scalar) di ds4_vec_dot_q2_K_q8_K: accumulo intero `isum`/`summs`. */
 static inline int llm_dsv4_dot_q2_16(const uint8_t* q2, const int8_t* q8, int shift) {

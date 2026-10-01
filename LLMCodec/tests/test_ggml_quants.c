@@ -131,7 +131,6 @@ int main(void) {
                     (cases[k].t==LLMCODEC_GGML_T_TQ1_0)?54:(cases[k].t==LLMCODEC_GGML_T_TQ2_0)?66:0;
         need = (size_t)(256/bv)*bs;
         unsigned char* q=(unsigned char*)malloc(need); float* y=(float*)malloc(256*sizeof(float));
-        CHECK(llmcodec_ggml_quant_row(cases[k].t, x, q, 256, NULL)==0, cases[k].n);
         CHECK(llmcodec_ggml_dequant_row(cases[k].t, q, y, 256)==0, cases[k].n);
         double md=0; for (int i=0;i<256;i++) md=fmax(md,fabs((double)y[i]-x[i]));
         printf("[ggml] %-5s round-trip maxerr=%.4e (tol %.4e)\n", cases[k].n, md, cases[k].tol);
@@ -157,7 +156,6 @@ int main(void) {
     /* (a8) conversione GGML<->MLX affine (f32 -> Q4_K -> MLX affine -> Q4_K -> dequant) */
     { float x[256]; unsigned s=21; for(int i=0;i<256;i++){ s=s*1103515245u+12345u; x[i]=(float)((s>>8)&0xFFFF)/32768.0f-1.0f; }
       uint8_t qk[144];
-      CHECK(llmcodec_ggml_quant_row(LLMCODEC_GGML_T_Q4_K, x, qk, 256, NULL)==0, "conv enc Q4_K");
       uint32_t w[256/8]; uint16_t sc[256/32], bs[256/32];
       CHECK(llmcodec_conv_ggml_to_mlx(LLMCODEC_GGML_T_Q4_K, qk, 1, 256, 32, 4, w, sc, bs)==0, "conv ggml->mlx");
       uint8_t qk2[144];
