@@ -2702,6 +2702,39 @@ static int llmmodelio_model_ir_policyir(const char* path) {
     return 0;
 }
 /* I7 — fasi PREFILL | PREFILL_KV | DECODE: geometria, KV, classe di op, roofline (§4.5). */
+/* LOGITS (I11/logits report): top-k + entropia della distribuzione del prossimo token. */
+static int llmmodelio_model_ir_logits(const char* model_dir, const char* prompt) {
+    if (model_dir == NULL || prompt == NULL) return -1;
+    /* fail-fast: verifica il tokenizer PRIMA di caricare l'engine (path invalido -> niente dlopen). */
+    char ck[1300]; snprintf(ck,sizeof ck,"%s/tokenizer.json",model_dir);
+    { FILE* tf=fopen(ck,"rb"); if(tf==NULL){fprintf(stderr,"LLM TENSOR LOGITS: tokenizer.json assente in '%s'\n",model_dir);return -1;} fclose(tf); }
+    void* h = dlopen("libgmb_ai_mlx.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (h == NULL) h = dlopen("libllm_ai_mlx.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (h == NULL) { fprintf(stderr, "LLM TENSOR LOGITS: engine MLX non caricabile\n"); return -1; }
+    typedef void* (*load_fn)(const char*); typedef void* (*sess_fn)(void*);
+    typedef int (*app_fn)(void*, const int32_t*, int); typedef void (*free_fn)(void*); typedef void (*dsess_fn)(void*);
+    typedef int (*topk_fn)(void*, int, int32_t*, float*);
+    typedef int (*ent_fn)(void*, float*);
+    load_fn L=(load_fn)dlsym(h,"llm_ai_mlx_load_model"); sess_fn C=(sess_fn)dlsym(h,"llm_ai_mlx_create_session");
+    app_fn A=(app_fn)dlsym(h,"llm_ai_mlx_session_append"); free_fn FM=(free_fn)dlsym(h,"llm_ai_mlx_free_model");
+    dsess_fn DS=(dsess_fn)dlsym(h,"llm_ai_mlx_destroy_session"); topk_fn TK=(topk_fn)dlsym(h,"llm_ai_mlx_session_topk");
+    ent_fn EN=(ent_fn)dlsym(h,"llm_ai_mlx_session_entropy");
+    if (L==NULL||C==NULL||A==NULL||TK==NULL||EN==NULL) { fprintf(stderr,"LLM TENSOR LOGITS: simboli engine assenti\n"); return -1; }
+    char tp[1300]; snprintf(tp,sizeof tp,"%s/tokenizer.json",model_dir);
+    llmtoken_handle th = llmtoken_load(tp); if (th==NULL){fprintf(stderr,"LLM TENSOR LOGITS: tokenizer.json assente\n");return -1;}
+    int32_t ids[2048]; int n = llmtoken_encode(th, prompt, ids, 2048);
+    if (n<1){llmtoken_free(th);fprintf(stderr,"LLM TENSOR LOGITS: prompt vuoto\n");return -1;}
+    void* m=L(model_dir); if(m==NULL){llmtoken_free(th);fprintf(stderr,"LLM TENSOR LOGITS: load modello fallito\n");return -1;}
+    void* se=C(m); if(se==NULL){if(FM)FM(m);llmtoken_free(th);return -1;}
+    int ra=A(se, ids, n); if(ra!=0){if(DS)DS(se);if(FM)FM(m);llmtoken_free(th);fprintf(stderr,"LLM TENSOR LOGITS: append fallito\n");return -1;}
+    int32_t tid[10]; float tlp[10]; int k = TK(se, 10, tid, tlp);
+    float ent = -1.0f; EN(se, &ent);
+    if (k < 0) { if(DS)DS(se);if(FM)FM(m);llmtoken_free(th); fprintf(stderr,"LLM TENSOR LOGITS: topk fallito\n"); return -1; }
+    fprintf(LOUT, "# LLM TENSOR LOGITS '%s' prompt_tokens=%d entropia=%.3f bit (top-%d del prossimo token)\n# rank\tlogprob\tprob\n", model_dir, n, ent, k);
+    for (int i = 0; i < k; i++) fprintf(LOUT, "%d\t%.4f\t%.5f\n", i+1, tlp[i], exp((double)tlp[i]));
+    if (DS)DS(se); if(FM)FM(m); llmtoken_free(th);
+    return 0;
+}
 static int llmmodelio_model_ir_phase(const char* path, long seq) {
     size_t ln = strlen(path);
     if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR PHASE: solo GGUF\n"); return -1; }
@@ -2772,6 +2805,7 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         return llmmodelio_model_ir_gpu(dir);
     }
     if (strcasecmp(s, "POLICYIR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR POLICYIR: atteso <path>\n");return -1;} return llmmodelio_model_ir_policyir(dir); }
+    if (strcasecmp(s, "LOGITS") == 0 || strcasecmp(s, "TOPK") == 0) { if(!*dir||!*tn){fprintf(stderr,"LLM TENSOR LOGITS: attesi <model_dir>, <prompt>\n");return -1;} return llmmodelio_model_ir_logits(dir, tn); }
     if (strcasecmp(s, "PHASE") == 0 || strcasecmp(s, "PREFILL") == 0 || strcasecmp(s, "PREFILL_KV") == 0 || strcasecmp(s, "DECODE") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR PHASE: atteso <path>[, <seqlen>]\n");return -1;} return llmmodelio_model_ir_phase(dir, *tn ? atol(tn) : 0); }
     if (strcasecmp(s, "IRLEVELS") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR IRLEVELS: atteso <path>\n");return -1;} return llmmodelio_model_ir_irlevels(dir); }
     if (strcasecmp(s, "QUANTIR") == 0 || strcasecmp(s, "QUANT_IR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR QUANTIR: atteso <path>\n");return -1;} return llmmodelio_model_ir_quantir(dir); }

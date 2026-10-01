@@ -362,6 +362,8 @@ int llm_ai_mlx_session_last_logprob(llm_ai_mlx_session_handle handle, float* out
  * senza pending). out_ids/out_logprobs hanno almeno k elementi. */
 int llm_ai_mlx_session_topk(llm_ai_mlx_session_handle handle, int k, int32_t* out_ids,
                             float* out_logprobs);
+/* Entropia (bit) della distribuzione completa alla posizione pending (per il report logits). 0/-1. */
+int llm_ai_mlx_session_entropy(llm_ai_mlx_session_handle handle, float* out_entropy);
 
 /* Genera fino a max_new token come llm_ai_mlx_session_generate(max_new) ma, per OGNI token emesso,
  * scrive la sua logprob (out_logprobs[i]). La logprob e' catturata dalla distribuzione del modello

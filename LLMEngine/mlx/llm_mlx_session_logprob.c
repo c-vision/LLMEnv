@@ -174,3 +174,18 @@ int llm_ai_mlx_session_generate_probs(llm_ai_mlx_session_handle handle, int max_
     }
     return n;
 }
+
+/* Entropia (bit) della distribuzione completa alla posizione pending. Usata per il logits report.
+ * Ritorna 0 e scrive *out_entropy (-1.0 se non calcolabile). */
+int llm_ai_mlx_session_entropy(llm_ai_mlx_session_handle handle, float* out_entropy) {
+    if (handle == NULL || out_entropy == NULL) return -1;
+    LlmMlxSession* s = (LlmMlxSession*)handle;
+    float* lg = NULL; double lse = 0.0;
+    int V = position_logits_host(s, &lg, &lse);
+    if (V <= 0) { free(lg); *out_entropy = -1.0f; return -1; }
+    double H = 0.0;
+    for (int i = 0; i < V; i++) { double p = exp((double)lg[i] - lse); if (p > 1e-12) H -= p * log(p); }
+    *out_entropy = (float)(H / log(2.0));
+    free(lg);
+    return 0;
+}
