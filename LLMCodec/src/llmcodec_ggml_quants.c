@@ -29,9 +29,145 @@ int llmcodec_nearest_int(float f) {
 
 /* Ricerca scala+min (asimmetrica) per un gruppo. Riscrittura propria. Riempie L (0..nmax) e
  * *the_min; ritorna lo scale. `use_mad` = errore L1 invece di L2. */
+float llmcodec_make_qkx2_quants(int n, int nmax, const float* x, const float* w, uint8_t* L,
+                                  float* the_min, uint8_t* Laux, float rmin, float rdelta, int nstep, int use_mad) {
+    float mn = x[0], mx = x[0], sum_w = w[0], sum_x = sum_w * x[0];
+    for (int i = 1; i < n; ++i) {
+        if (x[i] < mn) mn = x[i];
+        if (x[i] > mx) mx = x[i];
+        sum_w += w[i]; sum_x += w[i] * x[i];
+    }
+    if (mn > 0) mn = 0;
+    if (mx == mn) { for (int i = 0; i < n; ++i) L[i] = 0; *the_min = -mn; return 0.0f; }
+    float iscale = (float)nmax / (mx - mn);
+    float scale = 1.0f / iscale;
+    float best_error = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        int l = llmcodec_nearest_int(iscale * (x[i] - mn));
+        l = l < 0 ? 0 : (l > nmax ? nmax : l);
+        L[i] = (uint8_t)l;
+        float diff = scale * (float)L[i] + mn - x[i];
+        diff = use_mad ? fabsf(diff) : diff * diff;
+        best_error += w[i] * diff;
+    }
+    if (nstep < 1) { *the_min = -mn; return scale; }
+    for (int is = 0; is <= nstep; ++is) {
+        iscale = (rmin + rdelta * (float)is + (float)nmax) / (mx - mn);
+        float sum_l = 0.0f, sum_l2 = 0.0f, sum_xl = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            int l = llmcodec_nearest_int(iscale * (x[i] - mn));
+            l = l < 0 ? 0 : (l > nmax ? nmax : l);
+            Laux[i] = (uint8_t)l;
+            sum_l += w[i] * (float)l; sum_l2 += w[i] * (float)l * (float)l; sum_xl += w[i] * (float)l * x[i];
+        }
+        float D = sum_w * sum_l2 - sum_l * sum_l;
+        if (D > 0) {
+            float this_scale = (sum_w * sum_xl - sum_x * sum_l) / D;
+            float this_min = (sum_l2 * sum_x - sum_l * sum_xl) / D;
+            if (this_min > 0) { this_min = 0; this_scale = sum_xl / sum_l2; }
+            float cur_error = 0.0f;
+            for (int i = 0; i < n; ++i) {
+                float diff = this_scale * (float)Laux[i] + this_min - x[i];
+                diff = use_mad ? fabsf(diff) : diff * diff;
+                cur_error += w[i] * diff;
+            }
+            if (cur_error < best_error) {
+                for (int i = 0; i < n; ++i) L[i] = Laux[i];
+                best_error = cur_error; scale = this_scale; mn = this_min;
+            }
+        }
+    }
+    *the_min = -mn;
+    return scale;
+}
 /* Ricerca scala (segno, senza min) per un gruppo. Riscrittura propria. */
+float llmcodec_make_q3_quants(int n, int nmax, const float* x, int8_t* L, int do_rmse) {
+    float mx = 0.0f, amax = 0.0f;
+    for (int i = 0; i < n; ++i) { float ax = fabsf(x[i]); if (ax > amax) { amax = ax; mx = x[i]; } }
+    if (amax < 1e-15f) { for (int i = 0; i < n; ++i) L[i] = 0; return 0.0f; }
+    float iscale = -(float)nmax / mx;
+    if (do_rmse) {
+        float sumlx = 0.0f, suml2 = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            int l = llmcodec_nearest_int(iscale * x[i]);
+            l = l < -nmax ? -nmax : (l > nmax - 1 ? nmax - 1 : l);
+            L[i] = (int8_t)l;
+            float w = x[i] * x[i];
+            sumlx += w * x[i] * (float)l; suml2 += w * (float)l * (float)l;
+        }
+        for (int itry = 0; itry < 5; ++itry) {
+            int nch = 0;
+            for (int i = 0; i < n; ++i) {
+                float w = x[i] * x[i];
+                float slx = sumlx - w * x[i] * (float)L[i];
+                if (slx > 0.0f) {
+                    float sl2 = suml2 - w * (float)L[i] * (float)L[i];
+                    int nl = llmcodec_nearest_int(x[i] * sl2 / slx);
+                    nl = nl < -nmax ? -nmax : (nl > nmax - 1 ? nmax - 1 : nl);
+                    if (nl != L[i]) {
+                        slx += w * x[i] * (float)nl; sl2 += w * (float)nl * (float)nl;
+                        if (sl2 > 0.0f && slx * slx * suml2 > sumlx * sumlx * sl2) { L[i] = (int8_t)nl; sumlx = slx; suml2 = sl2; nch++; }
+                    }
+                }
+            }
+            if (!nch) break;
+        }
+        for (int i = 0; i < n; ++i) L[i] = (int8_t)(L[i] + nmax);
+        return suml2 > 0.0f ? sumlx / suml2 : 0.0f;
+    }
+    for (int i = 0; i < n; ++i) {
+        int l = llmcodec_nearest_int(iscale * x[i]);
+        l = l < -nmax ? -nmax : (l > nmax - 1 ? nmax - 1 : l);
+        L[i] = (int8_t)(l + nmax);
+    }
+    return 1.0f / iscale;
+}
 
 /* Ricerca dello scale ottimo per un gruppo (rmse_type: 1 = peso x^2). Riempie L[0..n) e ritorna lo scale. */
+float llmcodec_make_qx_quants(int n, int nmax, const float* x, int8_t* L, int rmse_type, const float* qw) {
+    float mx = 0.0f, amax = 0.0f;
+    for (int i = 0; i < n; ++i) { float ax = fabsf(x[i]); if (ax > amax) { amax = ax; mx = x[i]; } }
+    if (amax < 1e-15f) { for (int i = 0; i < n; ++i) L[i] = 0; return 0.0f; }
+    float iscale = -(float)nmax / mx;
+    /* FUSIONE (2026-09-24): rami `rmse_type<=0` portati dal runtime (erano solo lì). Per
+     * rmse_type>=1 il comportamento è identico (il gate test_ggml_quants resta verde). */
+    if (rmse_type == 0) {
+        for (int i = 0; i < n; ++i) { int l = llmcodec_nearest_int(iscale * x[i]); l = l < -nmax ? -nmax : (l > nmax - 1 ? nmax - 1 : l); L[i] = (int8_t)(nmax + l); }
+        return 1.0f / iscale;
+    }
+    int return_early = 0;
+    if (rmse_type < 0) { rmse_type = -rmse_type; return_early = 1; }
+    float sumlx = 0.0f, suml2 = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        int l = llmcodec_nearest_int(iscale * x[i]);
+        l = l < -nmax ? -nmax : (l > nmax - 1 ? nmax - 1 : l);
+        L[i] = (int8_t)(l + nmax);
+        float w = qw ? qw[i] : (rmse_type == 1 ? x[i] * x[i] : (rmse_type == 2 ? 1.0f : (rmse_type == 3 ? fabsf(x[i]) : sqrtf(fabsf(x[i])))));
+        sumlx += w * x[i] * (float)l; suml2 += w * (float)l * (float)l;
+    }
+    float scale = suml2 ? sumlx / suml2 : 0.0f;
+    if (return_early) return suml2 > 0 ? 0.5f * (scale + 1.0f / iscale) : 1.0f / iscale;
+    float best = scale * sumlx;
+    for (int is = -9; is <= 9; ++is) {
+        if (is == 0) continue;
+        iscale = -((float)nmax + 0.1f * (float)is) / mx;
+        sumlx = suml2 = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            int l = llmcodec_nearest_int(iscale * x[i]);
+            l = l < -nmax ? -nmax : (l > nmax - 1 ? nmax - 1 : l);
+            float w = qw ? qw[i] : (rmse_type == 1 ? x[i] * x[i] : (rmse_type == 2 ? 1.0f : (rmse_type == 3 ? fabsf(x[i]) : sqrtf(fabsf(x[i])))));
+            sumlx += w * x[i] * (float)l; suml2 += w * (float)l * (float)l;
+        }
+        if (suml2 > 0 && sumlx * sumlx > best * suml2) {
+            for (int i = 0; i < n; ++i) {
+                int l = llmcodec_nearest_int(iscale * x[i]);
+                L[i] = (int8_t)(nmax + (l < -nmax ? -nmax : (l > nmax - 1 ? nmax - 1 : l)));
+            }
+            scale = sumlx / suml2; best = scale * sumlx;
+        }
+    }
+    return scale;
+}
 
 /* layout blocchi (ggml-common.h) — natural packing, size = type_size */
 typedef struct { uint16_t d; uint8_t qs[16]; } blk_q4_0;                 /* 18 B / 32 */
@@ -61,6 +197,11 @@ typedef struct { uint8_t d[4]; uint8_t qs[32]; } blk_nvfp4;    /* 36 B / 64 */
 
 /* e2m1/e8m0/ue4m3: atomi del CODEC (llmcodec_fp8_fp4.h / llmcodec_fp16.h, §0bis) — usati direttamente. */
 /* Indice E2M1 (0..15) piu' vicino a x con scala d. */
+static uint8_t llmcodec_best_e2m1(float x, float d) {
+    uint8_t best = 0; float be = fabsf(llmcodec_fp4_nibble_to_f32(0) * d - x);
+    for (int i = 1; i < 16; ++i) { float e = fabsf(llmcodec_fp4_nibble_to_f32(i) * d - x); if (e < be) { be = e; best = (uint8_t)i; } }
+    return best;
+}
 
 /* 1/2-bit e ternari (TQ). */
 typedef struct { uint16_t d; uint8_t qs[16]; } blk_q1_0;       /* 18 B / 128 (1 bit/val) */
@@ -583,12 +724,277 @@ int llmcodec_ggml_dequant_row(int t, const void* src, float* dst, int64_t n) {
 /* ---- Variante IMATRIX dei K-quant (port fedele da ggml: quantize_row_q4_K_impl): la scala/min
  * per-sotto-blocco è pesata con `quant_weights` (imatrix). Una sola sorgente (§0bis): prima
  * viveva in llm_runtime/llmmodelio.c. ---- */
+static float llmcodec_make_qkx3_quants(int n, int nmax, const float* x, const float* weights,
+        uint8_t* L, float* the_min, uint8_t* Laux, float rmin, float rdelta, int nstep, int use_mad) {
+    float min = x[0], max = x[0];
+    float sum_w = weights ? weights[0] : x[0]*x[0];
+    float sum_x = sum_w * x[0];
+    for (int i = 1; i < n; ++i) {
+        if (x[i] < min) min = x[i];
+        if (x[i] > max) max = x[i];
+        float w = weights ? weights[i] : x[i]*x[i];
+        sum_w += w; sum_x += w * x[i];
+    }
+    if (min > 0) min = 0;
+    if (max <= min) { memset(L, 0, (size_t)n); *the_min = -min; return 0.f; }
+    float iscale = nmax/(max - min), scale = 1/iscale, best_mad = 0;
+    for (int i = 0; i < n; ++i) {
+        int l = llmcodec_nearest_int(iscale*(x[i] - min)); L[i] = (uint8_t)(l>nmax?nmax:(l<0?0:l));
+        float diff = scale * L[i] + min - x[i]; diff = use_mad ? fabsf(diff) : diff*diff;
+        float w = weights ? weights[i] : x[i]*x[i];
+        best_mad += w * diff;
+    }
+    if (nstep < 1) { *the_min = -min; return scale; }
+    for (int is = 0; is <= nstep; ++is) {
+        iscale = (rmin + rdelta*is + nmax)/(max - min);
+        float sum_l = 0, sum_l2 = 0, sum_xl = 0;
+        for (int i = 0; i < n; ++i) {
+            int l = llmcodec_nearest_int(iscale*(x[i] - min)); l = l>nmax?nmax:(l<0?0:l); Laux[i] = (uint8_t)l;
+            float w = weights ? weights[i] : x[i]*x[i];
+            sum_l += w*l; sum_l2 += w*l*l; sum_xl += w*l*x[i];
+        }
+        float D = sum_w * sum_l2 - sum_l * sum_l;
+        if (D > 0) {
+            float this_scale = (sum_w * sum_xl - sum_x * sum_l)/D;
+            float this_min = (sum_l2 * sum_x - sum_l * sum_xl)/D;
+            if (this_min > 0) { this_min = 0; this_scale = sum_xl / sum_l2; }
+            float mad = 0;
+            for (int i = 0; i < n; ++i) {
+                float diff = this_scale * Laux[i] + this_min - x[i]; diff = use_mad ? fabsf(diff) : diff*diff;
+                float w = weights ? weights[i] : x[i]*x[i];
+                mad += w * diff;
+            }
+            if (mad < best_mad) {
+                for (int i = 0; i < n; ++i) L[i] = Laux[i];
+                best_mad = mad; scale = this_scale; min = this_min;
+            }
+        }
+    }
+    *the_min = -min;
+    return scale;
+}
+static void llmcodec_q4_K_impl_blk(const float* x, uint8_t* blk, const float* quant_weights) {
+    uint8_t L[256], Laux[32], Ls[8], Lm[8];
+    float weights[32], sw[8], mins[8], scales[8];
+    float sum_x2 = 0;
+    for (int l = 0; l < 256; ++l) sum_x2 += x[l]*x[l];
+    float sigma2 = 2*sum_x2/256, av_x = sqrtf(sigma2);
+    for (int j = 0; j < 8; ++j) {
+        if (quant_weights) { const float* qw = quant_weights + 32*j; for (int l = 0; l < 32; ++l) weights[l] = qw[l]*sqrtf(sigma2 + x[32*j+l]*x[32*j+l]); }
+        else { for (int l = 0; l < 32; ++l) weights[l] = av_x + fabsf(x[32*j+l]); }
+        float sumw = 0; for (int l = 0; l < 32; ++l) sumw += weights[l];
+        sw[j] = sumw;
+        scales[j] = llmcodec_make_qkx3_quants(32, 15, x + 32*j, weights, L + 32*j, &mins[j], Laux, -0.9f, 0.05f, 36, 0);
+    }
+    float d_block = llmcodec_make_qp_quants(8, 63, scales, Ls, sw);
+    float m_block = llmcodec_make_qp_quants(8, 63, mins, Lm, sw);
+    uint8_t* sc12 = blk + 4;
+    for (int j = 0; j < 8; ++j) {
+        uint8_t ls = Ls[j], lm = Lm[j];
+        if (j < 4) { sc12[j] = ls; sc12[j+4] = lm; }
+        else { sc12[j+4] = (uint8_t)((ls & 0xF) | ((lm & 0xF) << 4)); sc12[j-4] |= (uint8_t)((ls >> 4) << 6); sc12[j] |= (uint8_t)((lm >> 4) << 6); }
+    }
+    uint16_t dh = llmcodec_f16_from_f32(d_block), dmh = llmcodec_f16_from_f32(m_block);
+    memcpy(blk, &dh, 2); memcpy(blk+2, &dmh, 2);
+    float df = llmcodec_f16_to_f32(dh), dminf = llmcodec_f16_to_f32(dmh);
+    uint8_t sc, m;
+    for (int j = 0; j < 8; ++j) {
+        k4_scale_min(j, sc12, &sc, &m);
+        const float d = df * sc; if (!d) continue;
+        const float dm = dminf * m;
+        for (int ii = 0; ii < 32; ++ii) { int l = llmcodec_nearest_int((x[32*j+ii] + dm)/d); l = l>15?15:(l<0?0:l); L[32*j+ii] = (uint8_t)l; }
+    }
+    uint8_t* q = blk + 16;
+    for (int j = 0; j < 256; j += 64) {
+        for (int l = 0; l < 32; ++l) q[l] = (uint8_t)(L[j+l] | (L[j+l+32] << 4));
+        q += 32;
+    }
+}
+static void llmcodec_q5_K_impl_blk(const float* x, uint8_t* blk, const float* quant_weights) {
+    uint8_t L[256], Laux[32], Ls[8], Lm[8];
+    float weights[32], sw[8], mins[8], scales[8];
+    float sum_x2 = 0;
+    for (int l = 0; l < 256; ++l) sum_x2 += x[l]*x[l];
+    float sigma2 = 2*sum_x2/256, av_x = sqrtf(sigma2);
+    for (int j = 0; j < 8; ++j) {
+        if (quant_weights) { const float* qw = quant_weights + 32*j; for (int l = 0; l < 32; ++l) weights[l] = qw[l]*sqrtf(sigma2 + x[32*j+l]*x[32*j+l]); }
+        else { for (int l = 0; l < 32; ++l) weights[l] = av_x + fabsf(x[32*j+l]); }
+        float sumw = 0; for (int l = 0; l < 32; ++l) sumw += weights[l];
+        sw[j] = sumw;
+        scales[j] = llmcodec_make_qkx3_quants(32, 31, x + 32*j, weights, L + 32*j, &mins[j], Laux, -0.9f, 0.05f, 36, 0);
+    }
+    float d_block = llmcodec_make_qp_quants(8, 63, scales, Ls, sw);
+    float m_block = llmcodec_make_qp_quants(8, 63, mins, Lm, sw);
+    uint8_t* sc12 = blk + 4;
+    for (int j = 0; j < 8; ++j) {
+        uint8_t ls = Ls[j], lm = Lm[j];
+        ls = ls>63?63:ls; lm = lm>63?63:lm;
+        if (j < 4) { sc12[j] = ls; sc12[j+4] = lm; }
+        else { sc12[j+4] = (uint8_t)((ls & 0xF) | ((lm & 0xF) << 4)); sc12[j-4] |= (uint8_t)((ls >> 4) << 6); sc12[j] |= (uint8_t)((lm >> 4) << 6); }
+    }
+    uint16_t dh = llmcodec_f16_from_f32(d_block), dmh = llmcodec_f16_from_f32(m_block);
+    memcpy(blk, &dh, 2); memcpy(blk+2, &dmh, 2);
+    float df = llmcodec_f16_to_f32(dh), dminf = llmcodec_f16_to_f32(dmh);
+    uint8_t sc, m;
+    for (int j = 0; j < 8; ++j) {
+        k4_scale_min(j, sc12, &sc, &m);
+        const float d = df * sc; if (!d) continue;
+        const float dm = dminf * m;
+        for (int ii = 0; ii < 32; ++ii) { int l = llmcodec_nearest_int((x[32*j+ii] + dm)/d); l = l>31?31:(l<0?0:l); L[32*j+ii] = (uint8_t)l; }
+    }
+    uint8_t* qh = blk + 16; uint8_t* ql = blk + 48;
+    memset(qh, 0, 32);
+    uint8_t m1 = 1, m2 = 2;
+    for (int nn = 0; nn < 256; nn += 64) {
+        for (int j = 0; j < 32; ++j) {
+            int l1 = L[nn+j]; if (l1 > 15) { l1 -= 16; qh[j] |= m1; }
+            int l2 = L[nn+j+32]; if (l2 > 15) { l2 -= 16; qh[j] |= m2; }
+            ql[j] = (uint8_t)(l1 | (l2 << 4));
+        }
+        m1 <<= 2; m2 <<= 2; ql += 32;
+    }
+}
 
-/* APACHE: encode Q8_K (attivazioni, actquant). L encode dei formati di MODELLO e PUL (gmbllm). */
-int llmcodec_ggml_q8_K_encode(const float* src, void* dst, int64_t n) {
-    if (src == NULL || dst == NULL || n <= 0 || (n % 256) != 0) return -1;
-    const int64_t nb = n / 256;
-    {
+int llmcodec_ggml_quant_row(int t, const float* src, void* dst, int64_t n, const float* imatrix) {
+    if (src == NULL || dst == NULL || n <= 0) return -1;
+    switch (t) {
+        case LLMCODEC_GGML_T_F32: memcpy(dst, src, (size_t)n * 4u); return 0;
+        case LLMCODEC_GGML_T_F16: { uint16_t* d = (uint16_t*)dst; for (int64_t i = 0; i < n; ++i) d[i] = llmcodec_f16_from_f32(src[i]); return 0; }
+        case LLMCODEC_GGML_T_BF16: { uint16_t* d = (uint16_t*)dst; for (int64_t i = 0; i < n; ++i) d[i] = q_f32_to_bf16(src[i]); return 0; }
+        default: break;
+    }
+    int64_t qk = llmcodec_ggml_block_vals(t);
+    if (qk == 0 || (n % qk) != 0) return -1;
+    const int64_t nb = n / qk;
+    if (t == LLMCODEC_GGML_T_Q8_0) {
+        blk_q8_0* y = (blk_q8_0*)dst;
+        for (int64_t i = 0; i < nb; ++i) {
+            float amax = 0.0f;
+            for (int j = 0; j < 32; ++j) { float v = src[i*32 + j]; amax = QMAX(amax, fabsf(v)); }
+            const float d = amax / 127.0f;
+            const float id = d ? 1.0f/d : 0.0f;
+            y[i].d = llmcodec_f16_from_f32(d);
+            for (int j = 0; j < 32; ++j) y[i].qs[j] = (int8_t)roundf(src[i*32 + j] * id);
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_Q4_0) {
+        blk_q4_0* y = (blk_q4_0*)dst;
+        for (int64_t i = 0; i < nb; ++i) {
+            float amax = 0.0f, max = 0.0f;
+            for (int j = 0; j < 32; ++j) {
+                const float v = src[i*32 + j];
+                if (amax < fabsf(v)) { amax = fabsf(v); max = v; }
+            }
+            const float d = max / -8.0f;
+            const float id = d ? 1.0f/d : 0.0f;
+            y[i].d = llmcodec_f16_from_f32(d);
+            for (int j = 0; j < 16; ++j) {
+                const float x0 = src[i*32 + j     ] * id;
+                const float x1 = src[i*32 + j + 16] * id;
+                const uint8_t xi0 = QMIN(15, (uint8_t)(int8_t)(x0 + 8.5f));
+                const uint8_t xi1 = QMIN(15, (uint8_t)(int8_t)(x1 + 8.5f));
+                y[i].qs[j] = (uint8_t)(xi0 | (xi1 << 4));
+            }
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_Q4_1) {
+        blk_q4_1* y = (blk_q4_1*)dst;
+        for (int64_t i = 0; i < nb; ++i) {
+            float mn = src[i*32], mx = src[i*32];
+            for (int j = 1; j < 32; ++j) { float v = src[i*32+j]; if (v < mn) mn = v; if (v > mx) mx = v; }
+            const float d = (mx - mn) / 15.0f, id = d ? 1.0f/d : 0.0f;
+            y[i].d = llmcodec_f16_from_f32(d); y[i].m = llmcodec_f16_from_f32(mn);
+            for (int j = 0; j < 16; ++j) {
+                const uint8_t x0 = QMIN(15u, (uint8_t)(int8_t)((src[i*32 + j     ] - mn) * id + 0.5f));
+                const uint8_t x1 = QMIN(15u, (uint8_t)(int8_t)((src[i*32 + j + 16] - mn) * id + 0.5f));
+                y[i].qs[j] = (uint8_t)(x0 | (x1 << 4));
+            }
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_Q5_0) {
+        blk_q5_0* y = (blk_q5_0*)dst;
+        for (int64_t i = 0; i < nb; ++i) {
+            float amax = 0.0f, mx = 0.0f;
+            for (int j = 0; j < 32; ++j) { float v = src[i*32+j]; if (amax < fabsf(v)) { amax = fabsf(v); mx = v; } }
+            const float d = mx / -16.0f, id = d ? 1.0f/d : 0.0f;
+            y[i].d = llmcodec_f16_from_f32(d);
+            uint32_t qh = 0;
+            for (int j = 0; j < 16; ++j) {
+                const uint8_t xi0 = QMIN(31u, (uint8_t)(int8_t)(src[i*32 + j     ] * id + 16.5f));
+                const uint8_t xi1 = QMIN(31u, (uint8_t)(int8_t)(src[i*32 + j + 16] * id + 16.5f));
+                y[i].qs[j] = (uint8_t)((xi0 & 0x0F) | ((xi1 & 0x0F) << 4));
+                qh |= (uint32_t)(xi0 >> 4) << j;
+                qh |= (uint32_t)(xi1 >> 4) << (j + 16);
+            }
+            memcpy(y[i].qh, &qh, 4);
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_Q5_1) {
+        blk_q5_1* y = (blk_q5_1*)dst;
+        for (int64_t i = 0; i < nb; ++i) {
+            float mn = src[i*32], mx = src[i*32];
+            for (int j = 1; j < 32; ++j) { float v = src[i*32+j]; if (v < mn) mn = v; if (v > mx) mx = v; }
+            const float d = (mx - mn) / 31.0f, id = d ? 1.0f/d : 0.0f;
+            y[i].d = llmcodec_f16_from_f32(d); y[i].m = llmcodec_f16_from_f32(mn);
+            uint32_t qh = 0;
+            for (int j = 0; j < 16; ++j) {
+                const uint8_t xi0 = (uint8_t)(int8_t)((src[i*32 + j     ] - mn) * id + 0.5f);
+                const uint8_t xi1 = (uint8_t)(int8_t)((src[i*32 + j + 16] - mn) * id + 0.5f);
+                y[i].qs[j] = (uint8_t)((xi0 & 0x0F) | ((xi1 & 0x0F) << 4));
+                qh |= (uint32_t)(xi0 >> 4) << j;
+                qh |= (uint32_t)(xi1 >> 4) << (j + 16);
+            }
+            memcpy(y[i].qh, &qh, 4);
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_Q6_K) {
+        blk_q6_K* y = (blk_q6_K*)dst;
+        int8_t L[256]; float scales[16];
+        for (int64_t i = 0; i < nb; ++i) {
+            const float* x = src + i*256;
+            float max_scale = 0.0f, max_abs_scale = 0.0f;
+            for (int ib = 0; ib < 16; ++ib) {
+                float sc = llmcodec_make_qx_quants(16, 32, x + 16*ib, L + 16*ib, 1, NULL);
+                scales[ib] = sc;
+                float ab = fabsf(sc);
+                if (ab > max_abs_scale) { max_abs_scale = ab; max_scale = sc; }
+            }
+            if (max_abs_scale < 1e-15f) { memset(&y[i], 0, sizeof y[i]); continue; }
+            const float iscale = -128.0f / max_scale;
+            y[i].d = llmcodec_f16_from_f32(1.0f / iscale);
+            for (int ib = 0; ib < 16; ++ib) {
+                int s = llmcodec_nearest_int(iscale * scales[ib]);
+                y[i].scales[ib] = (int8_t)(s > 127 ? 127 : s);
+            }
+            for (int j = 0; j < 16; ++j) {
+                float dj = q_f16_to_f32(y[i].d) * (float)y[i].scales[j];
+                if (!dj) continue;
+                for (int ii = 0; ii < 16; ++ii) {
+                    int l = llmcodec_nearest_int(x[16*j + ii] / dj);
+                    l = l < -32 ? -32 : (l > 31 ? 31 : l);
+                    L[16*j + ii] = (int8_t)(l + 32);
+                }
+            }
+            uint8_t* ql = y[i].ql; uint8_t* qh = y[i].qh;
+            for (int j = 0; j < 256; j += 128) {
+                for (int l = 0; l < 32; ++l) {
+                    const uint8_t q1 = (uint8_t)(L[j + l +  0] & 0xF), q2 = (uint8_t)(L[j + l + 32] & 0xF);
+                    const uint8_t q3 = (uint8_t)(L[j + l + 64] & 0xF), q4 = (uint8_t)(L[j + l + 96] & 0xF);
+                    ql[l +  0] = (uint8_t)(q1 | (q3 << 4));
+                    ql[l + 32] = (uint8_t)(q2 | (q4 << 4));
+                    qh[l] = (uint8_t)((L[j + l] >> 4) | ((L[j + l + 32] >> 4) << 2) | ((L[j + l + 64] >> 4) << 4) | ((L[j + l + 96] >> 4) << 6));
+                }
+                ql += 64; qh += 32;
+            }
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_Q8_K) {
         blk_q8_K* y = (blk_q8_K*)dst;
         for (int64_t i = 0; i < nb; ++i) {
             const float* x = src + i*256;
@@ -609,6 +1015,313 @@ int llmcodec_ggml_q8_K_encode(const float* src, void* dst, int64_t n) {
         }
         return 0;
     }
+    if (t == LLMCODEC_GGML_T_Q5_K) {
+        if (imatrix) { for (int64_t i = 0; i < nb; ++i) llmcodec_q5_K_impl_blk(src + i*256, (uint8_t*)dst + i*176, imatrix + i*256); return 0; }
+        blk_q5_K* y = (blk_q5_K*)dst;
+        uint8_t L[256], Laux[32]; float scales[8], mins[8], w[32];
+        for (int64_t i = 0; i < nb; ++i) {
+            const float* x = src + i*256;
+            float max_scale = 0.0f, max_min = 0.0f;
+            for (int j = 0; j < 8; ++j) {
+                float sum_x2 = 0.0f;
+                for (int l = 0; l < 32; ++l) sum_x2 += x[32*j+l]*x[32*j+l];
+                const float av_x = sqrtf(sum_x2 / 32.0f);
+                for (int l = 0; l < 32; ++l) w[l] = av_x + fabsf(x[32*j+l]);
+                scales[j] = llmcodec_make_qkx2_quants(32, 31, x + 32*j, w, L + 32*j, &mins[j], Laux, -0.5f, 0.1f, 15, 0);
+                if (scales[j] > max_scale) max_scale = scales[j];
+                if (mins[j] > max_min) max_min = mins[j];
+            }
+            const float inv_scale = max_scale > 0 ? 63.0f / max_scale : 0.0f;
+            const float inv_min = max_min > 0 ? 63.0f / max_min : 0.0f;
+            memset(y[i].scales, 0, 12);
+            for (int j = 0; j < 8; ++j) {
+                int ls = llmcodec_nearest_int(inv_scale * scales[j]);
+                int lm = llmcodec_nearest_int(inv_min * mins[j]);
+                ls = ls > 63 ? 63 : ls; lm = lm > 63 ? 63 : lm;
+                if (j < 4) { y[i].scales[j] = (uint8_t)ls; y[i].scales[j+4] = (uint8_t)lm; }
+                else {
+                    y[i].scales[j+4] = (uint8_t)((ls & 0x0F) | ((lm & 0x0F) << 4));
+                    y[i].scales[j-4] = (uint8_t)(y[i].scales[j-4] | ((ls >> 4) << 6));
+                    y[i].scales[j-0] = (uint8_t)(y[i].scales[j-0] | ((lm >> 4) << 6));
+                }
+            }
+            y[i].d = llmcodec_f16_from_f32(max_scale / 63.0f);
+            y[i].dmin = llmcodec_f16_from_f32(max_min / 63.0f);
+            for (int j = 0; j < 8; ++j) {
+                uint8_t scc, mm; k4_scale_min(j, y[i].scales, &scc, &mm);
+                const float dd = q_f16_to_f32(y[i].d) * (float)scc;
+                if (!dd) continue;
+                const float dm = q_f16_to_f32(y[i].dmin) * (float)mm;
+                for (int ii = 0; ii < 32; ++ii) {
+                    int l = llmcodec_nearest_int((x[32*j+ii] + dm) / dd);
+                    l = l < 0 ? 0 : (l > 31 ? 31 : l);
+                    L[32*j+ii] = (uint8_t)l;
+                }
+            }
+            uint8_t* qh = y[i].qh; uint8_t* ql = y[i].qs;
+            memset(qh, 0, 32);
+            uint8_t m1 = 1, m2 = 2;
+            for (int n0 = 0; n0 < 256; n0 += 64) {
+                for (int j = 0; j < 32; ++j) {
+                    int l1 = L[n0 + j]; if (l1 > 15) { l1 -= 16; qh[j] |= m1; }
+                    int l2 = L[n0 + j + 32]; if (l2 > 15) { l2 -= 16; qh[j] |= m2; }
+                    ql[j] = (uint8_t)(l1 | (l2 << 4));
+                }
+                m1 = (uint8_t)(m1 << 2); m2 = (uint8_t)(m2 << 2);
+                ql += 32;
+            }
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_Q4_K) {
+        if (imatrix) { for (int64_t i = 0; i < nb; ++i) llmcodec_q4_K_impl_blk(src + i*256, (uint8_t*)dst + i*144, imatrix + i*256); return 0; }
+        blk_q4_K* y = (blk_q4_K*)dst;
+        uint8_t L[256], Laux[32]; float scales[8], mins[8], w[32];
+        for (int64_t i = 0; i < nb; ++i) {
+            const float* x = src + i*256;
+            float max_scale = 0.0f, max_min = 0.0f;
+            for (int j = 0; j < 8; ++j) {
+                float sum_x2 = 0.0f;
+                for (int l = 0; l < 32; ++l) sum_x2 += x[32*j+l]*x[32*j+l];
+                const float av_x = sqrtf(sum_x2 / 32.0f);
+                for (int l = 0; l < 32; ++l) w[l] = av_x + fabsf(x[32*j+l]);
+                scales[j] = llmcodec_make_qkx2_quants(32, 15, x + 32*j, w, L + 32*j, &mins[j], Laux, -1.0f, 0.1f, 20, 0);
+                if (scales[j] > max_scale) max_scale = scales[j];
+                if (mins[j] > max_min) max_min = mins[j];
+            }
+            const float inv_scale = max_scale > 0 ? 63.0f / max_scale : 0.0f;
+            const float inv_min = max_min > 0 ? 63.0f / max_min : 0.0f;
+            memset(y[i].scales, 0, 12);
+            for (int j = 0; j < 8; ++j) {
+                int ls = llmcodec_nearest_int(inv_scale * scales[j]);
+                int lm = llmcodec_nearest_int(inv_min * mins[j]);
+                ls = ls > 63 ? 63 : ls; lm = lm > 63 ? 63 : lm;
+                if (j < 4) { y[i].scales[j] = (uint8_t)ls; y[i].scales[j+4] = (uint8_t)lm; }
+                else {
+                    y[i].scales[j+4] = (uint8_t)((ls & 0x0F) | ((lm & 0x0F) << 4));
+                    y[i].scales[j-4] = (uint8_t)(y[i].scales[j-4] | ((ls >> 4) << 6));
+                    y[i].scales[j-0] = (uint8_t)(y[i].scales[j-0] | ((lm >> 4) << 6));
+                }
+            }
+            y[i].d = llmcodec_f16_from_f32(max_scale / 63.0f);
+            y[i].dmin = llmcodec_f16_from_f32(max_min / 63.0f);
+            for (int j = 0; j < 8; ++j) {
+                uint8_t scc, mm; k4_scale_min(j, y[i].scales, &scc, &mm);
+                const float dd = q_f16_to_f32(y[i].d) * (float)scc;
+                if (!dd) continue;
+                const float dm = q_f16_to_f32(y[i].dmin) * (float)mm;
+                for (int ii = 0; ii < 32; ++ii) {
+                    int l = llmcodec_nearest_int((x[32*j+ii] + dm) / dd);
+                    l = l < 0 ? 0 : (l > 15 ? 15 : l);
+                    L[32*j+ii] = (uint8_t)l;
+                }
+            }
+            uint8_t* q = y[i].qs;
+            for (int n0 = 0; n0 < 256; n0 += 64) {
+                for (int l = 0; l < 32; ++l) q[l] = (uint8_t)(L[n0+l] | (L[n0+l+32] << 4));
+                q += 32;
+            }
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_Q2_K) {
+        blk_q2_K* y = (blk_q2_K*)dst;
+        uint8_t L[256], Laux[16]; float wgt[16], mins[16], scales[16];
+        for (int64_t i = 0; i < nb; ++i) {
+            const float* x = src + i*256;
+            float max_scale = 0.0f, max_min = 0.0f;
+            for (int j = 0; j < 16; ++j) {
+                for (int l = 0; l < 16; ++l) wgt[l] = fabsf(x[16*j+l]);
+                scales[j] = llmcodec_make_qkx2_quants(16, 3, x + 16*j, wgt, L + 16*j, &mins[j], Laux, -0.5f, 0.1f, 15, 1);
+                if (scales[j] > max_scale) max_scale = scales[j];
+                if (mins[j] > max_min) max_min = mins[j];
+            }
+            memset(y[i].scales, 0, 16);
+            if (max_scale > 0) {
+                float iscale = 15.0f / max_scale;
+                for (int j = 0; j < 16; ++j) y[i].scales[j] = (uint8_t)llmcodec_nearest_int(iscale * scales[j]);
+                y[i].d = llmcodec_f16_from_f32(max_scale / 15.0f);
+            } else y[i].d = llmcodec_f16_from_f32(0.0f);
+            if (max_min > 0) {
+                float iscale = 15.0f / max_min;
+                for (int j = 0; j < 16; ++j) y[i].scales[j] = (uint8_t)(y[i].scales[j] | ((uint8_t)llmcodec_nearest_int(iscale * mins[j]) << 4));
+                y[i].dmin = llmcodec_f16_from_f32(max_min / 15.0f);
+            } else y[i].dmin = llmcodec_f16_from_f32(0.0f);
+            for (int j = 0; j < 16; ++j) {
+                float dd = q_f16_to_f32(y[i].d) * (float)(y[i].scales[j] & 0x0F);
+                if (!dd) continue;
+                float dm = q_f16_to_f32(y[i].dmin) * (float)(y[i].scales[j] >> 4);
+                for (int ii = 0; ii < 16; ++ii) {
+                    int l = llmcodec_nearest_int((x[16*j+ii] + dm) / dd);
+                    l = l < 0 ? 0 : (l > 3 ? 3 : l);
+                    L[16*j+ii] = (uint8_t)l;
+                }
+            }
+            for (int j = 0; j < 256; j += 128)
+                for (int l = 0; l < 32; ++l)
+                    y[i].qs[j/4 + l] = (uint8_t)(L[j+l] | (L[j+l+32] << 2) | (L[j+l+64] << 4) | (L[j+l+96] << 6));
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_Q3_K) {
+        blk_q3_K* y = (blk_q3_K*)dst;
+        int8_t L[256]; float scales[16];
+        for (int64_t i = 0; i < nb; ++i) {
+            const float* x = src + i*256;
+            float max_scale = 0.0f, amax = 0.0f;
+            for (int j = 0; j < 16; ++j) {
+                scales[j] = llmcodec_make_q3_quants(16, 4, x + 16*j, L + 16*j, 1);
+                float sc = fabsf(scales[j]);
+                if (sc > amax) { amax = sc; max_scale = scales[j]; }
+            }
+            memset(y[i].scales, 0, 12);
+            if (max_scale) {
+                float iscale = -32.0f / max_scale;
+                for (int j = 0; j < 16; ++j) {
+                    int l = llmcodec_nearest_int(iscale * scales[j]);
+                    l = l < -32 ? -32 : (l > 31 ? 31 : l);
+                    l += 32;
+                    if (j < 8) y[i].scales[j] = (uint8_t)(l & 0x0F);
+                    else y[i].scales[j-8] = (uint8_t)(y[i].scales[j-8] | ((l & 0x0F) << 4));
+                    l >>= 4;
+                    y[i].scales[j%4 + 8] = (uint8_t)(y[i].scales[j%4 + 8] | (l << (2*(j/4))));
+                }
+                y[i].d = llmcodec_f16_from_f32(1.0f / iscale);
+            } else y[i].d = llmcodec_f16_from_f32(0.0f);
+            for (int j = 0; j < 16; ++j) {
+                int8_t sc = (j < 8) ? (int8_t)(y[i].scales[j] & 0x0F) : (int8_t)(y[i].scales[j-8] >> 4);
+                sc = (int8_t)((sc | (((y[i].scales[8 + j%4] >> (2*(j/4))) & 3) << 4)) - 32);
+                float dd = q_f16_to_f32(y[i].d) * (float)sc;
+                if (!dd) continue;
+                for (int ii = 0; ii < 16; ++ii) {
+                    int l = llmcodec_nearest_int(x[16*j+ii] / dd);
+                    l = l < -4 ? -4 : (l > 3 ? 3 : l);
+                    L[16*j+ii] = (uint8_t)(l + 4);
+                }
+            }
+            memset(y[i].hmask, 0, 32);
+            int m = 0; uint8_t hm = 1;
+            for (int j = 0; j < 256; ++j) {
+                if (L[j] > 3) { y[i].hmask[m] = (uint8_t)(y[i].hmask[m] | hm); L[j] = (int8_t)(L[j] - 4); }
+                if (++m == 32) { m = 0; hm = (uint8_t)(hm << 1); }
+            }
+            for (int j = 0; j < 256; j += 128)
+                for (int l = 0; l < 32; ++l)
+                    y[i].qs[j/4 + l] = (uint8_t)(L[j+l] | (L[j+l+32] << 2) | (L[j+l+64] << 4) | (L[j+l+96] << 6));
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_MXFP4) {
+        blk_mxfp4* y = (blk_mxfp4*)dst;
+        for (int64_t i = 0; i < nb; ++i) {
+            const float* x = src + i*32;
+            float amax = 0.0f;
+            for (int j = 0; j < 32; ++j) { float a = fabsf(x[j]); if (a > amax) amax = a; }
+            const uint8_t e = amax > 0.0f ? (uint8_t)(floorf(log2f(amax)) - 2.0f + 127.0f) : 0;
+            const float d = llmcodec_e8m0_to_f32(e);
+            y[i].e = e;
+            for (int j = 0; j < 16; ++j)
+                y[i].qs[j] = (uint8_t)(llmcodec_best_e2m1(x[j], d) | (llmcodec_best_e2m1(x[j+16], d) << 4));
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_NVFP4) {
+        blk_nvfp4* y = (blk_nvfp4*)dst;
+        for (int64_t i = 0; i < nb; ++i) {
+            const float* x = src + i*64;
+            for (int s = 0; s < 4; ++s) {
+                const float* xb = x + s*16;
+                float amax = 0.0f;
+                for (int j = 0; j < 16; ++j) { float a = fabsf(xb[j]); if (a > amax) amax = a; }
+                const uint8_t ue = llmcodec_ue4m3_from_f32(amax / 6.0f);
+                y[i].d[s] = ue;
+                const float d = llmcodec_ue4m3_to_f32(ue);
+                for (int j = 0; j < 8; ++j)
+                    y[i].qs[s*8 + j] = (uint8_t)(llmcodec_best_e2m1(xb[j], d) | (llmcodec_best_e2m1(xb[j+8], d) << 4));
+            }
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_Q1_0) {
+        blk_q1_0* y = (blk_q1_0*)dst;
+        for (int64_t i = 0; i < nb; ++i) {
+            const float* x = src + i*128;
+            float sa = 0.0f; for (int j = 0; j < 128; ++j) sa += fabsf(x[j]);
+            y[i].d = llmcodec_f16_from_f32(sa / 128.0f);
+            memset(y[i].qs, 0, 16);
+            for (int j = 0; j < 128; ++j) if (x[j] >= 0.0f) y[i].qs[j/8] = (uint8_t)(y[i].qs[j/8] | (1u << (j%8)));
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_Q2_0) {
+        blk_q2_0* y = (blk_q2_0*)dst;
+        for (int64_t i = 0; i < nb; ++i) {
+            const float* x = src + i*64;
+            float amax = 0.0f; for (int j = 0; j < 64; ++j) { float a = fabsf(x[j]); if (a > amax) amax = a; }
+            const float d = amax, id = d > 0 ? 1.0f/d : 0.0f;
+            y[i].d = llmcodec_f16_from_f32(d);
+            memset(y[i].qs, 0, 16);
+            for (int j = 0; j < 64; ++j) {
+                int q = (int)roundf(x[j]*id) + 1;
+                if (q < 0) q = 0; if (q > 3) q = 3;
+                y[i].qs[j/4] = (uint8_t)(y[i].qs[j/4] | ((uint8_t)q << ((j%4)*2)));
+            }
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_TQ2_0) {
+        blk_tq2_0* y = (blk_tq2_0*)dst;
+        for (int64_t i = 0; i < nb; ++i) {
+            const float* x = src + i*256;
+            float amax = 0.0f; for (int j = 0; j < 256; ++j) { float a = fabsf(x[j]); if (a > amax) amax = a; }
+            const float d = amax, id = d ? 1.0f/d : 0.0f;
+            y[i].d = llmcodec_f16_from_f32(d);
+            const float* xp = x;
+            for (int j = 0; j < 64; j += 32) {
+                for (int m = 0; m < 32; ++m) {
+                    uint8_t q = 0;
+                    for (int n = 0; n < 4; ++n) { int xi = llmcodec_nearest_int(xp[m + n*32]*id) + 1; q = (uint8_t)(q + ((uint8_t)(xi & 3) << (2*n))); }
+                    y[i].qs[j + m] = q;
+                }
+                xp += 4*32;
+            }
+        }
+        return 0;
+    }
+    if (t == LLMCODEC_GGML_T_TQ1_0) {
+        blk_tq1_0* y = (blk_tq1_0*)dst;
+        for (int64_t i = 0; i < nb; ++i) {
+            const float* x = src + i*256;
+            float amax = 0.0f; for (int j = 0; j < 256; ++j) { float a = fabsf(x[j]); if (a > amax) amax = a; }
+            const float d = amax, id = d ? 1.0f/d : 0.0f;
+            y[i].d = llmcodec_f16_from_f32(d);
+            const float* xp = x;
+            for (int j = 0; j < 32; j += 32) {
+                for (int m = 0; m < 32; ++m) {
+                    uint8_t q = 0;
+                    for (int n = 0; n < 5; ++n) { int xi = llmcodec_nearest_int(xp[m + n*32]*id) + 1; q = (uint8_t)(q*3 + (uint8_t)xi); }
+                    y[i].qs[j + m] = (uint8_t)(((uint16_t)q*256u + 242u) / 243u);
+                }
+                xp += 5*32;
+            }
+            for (int j = 32; j < 48; j += 16) {
+                for (int m = 0; m < 16; ++m) {
+                    uint8_t q = 0;
+                    for (int n = 0; n < 5; ++n) { int xi = llmcodec_nearest_int(xp[m + n*16]*id) + 1; q = (uint8_t)(q*3 + (uint8_t)xi); }
+                    y[i].qs[j + m] = (uint8_t)(((uint16_t)q*256u + 242u) / 243u);
+                }
+                xp += 5*16;
+            }
+            for (int j = 0; j < 4; ++j) {
+                uint8_t q = 0;
+                for (int m = 0; m < 4; ++m) { int xi = llmcodec_nearest_int(xp[j + m*4]*id) + 1; q = (uint8_t)(q*3 + (uint8_t)xi); }
+                q = (uint8_t)(q*3);
+                y[i].qh[j] = (uint8_t)(((uint16_t)q*256u + 242u) / 243u);
+            }
+        }
+        return 0;
+    }
+    return -1;   /* IQ encode: step successivo */
 }
 
 /* ── helper PER-VALORE (esposti: anche l'engine DS4 li usa per il compute) ── */

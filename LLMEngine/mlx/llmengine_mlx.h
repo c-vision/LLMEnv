@@ -510,6 +510,18 @@ int llm_ai_mlx_model_imatrix_write(llm_ai_mlx_model_handle handle, const char* p
  * Jetsam. Ritorna 0 ok / -1. */
 int llm_ai_mlx_memory_stats(size_t* out_cache, size_t* out_active, size_t* out_peak);
 
+/* LoRA model-level (registrazione/abilitazione) — run-side (apply adapter a inference). */
+void llm_ai_mlx_model_lora_clear(llm_ai_mlx_model_handle h);
+int  llm_ai_mlx_model_lora_add(llm_ai_mlx_model_handle h, int layer, const char* proj,
+                               int rank, float scale, const float* a, const float* b,
+                               int in_dim, int out_dim);
+int  llm_ai_mlx_model_lora_set_enabled(llm_ai_mlx_model_handle h, bool enabled);
+
+/* §D R4.6 — DEPLOY: salva/carica TUTTI i moduli LoRA registrati (adapter multi-modulo) su file.
+ * Scrittura atomica. `load` azzera i moduli correnti e registra quelli del file. 0 ok / -1. */
+int llm_ai_mlx_model_lora_save(llm_ai_mlx_model_handle h, const char* path);
+int llm_ai_mlx_model_lora_load(llm_ai_mlx_model_handle h, const char* path);
+
 
 
 

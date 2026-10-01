@@ -42,8 +42,7 @@ int llmcodec_ggml_dequant_row(int ggml_type, const void* src, float* dst, int64_
 
 /* Encode: quantizza src[0..n) in `dst` (packed) del tipo `ggml_type`.
  * `imatrix` (opzionale, n pesi) = errore pesato; NULL = RTN. Ritorna 0 / -1. */
-/* APACHE: encode Q8_K (attivazioni, actquant). L encode dei formati di MODELLO e PUL (gmbllm). */
-int llmcodec_ggml_q8_K_encode(const float* src, void* dst, int64_t n);
+int llmcodec_ggml_quant_row(int ggml_type, const float* src, void* dst, int64_t n, const float* imatrix);
 
 /* Valori per blocco del tipo (0 se ignoto). */
 int64_t llmcodec_ggml_block_vals(int ggml_type);

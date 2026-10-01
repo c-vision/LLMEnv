@@ -5,6 +5,7 @@
 #include "llmengine_mlx.h"
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
+#include "llm_mlx_lora.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +73,9 @@ bool qwen2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
     if (ok) { ok = quantized_linear_cfg(&k0, normed, kw, ks, kb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "k_proj matmul"); }
     if (ok) { ok = quantized_linear_cfg(&v0, normed, vw, vs, vb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "v_proj matmul"); }
     /* §D R6 (multi-arch): LoRA su q/k/v_proj (come llama/qwen3) — prima solo o_proj. */
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&q0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "k_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&k0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "v_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&v0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     mlx_array q = mlx_array_new(), k = mlx_array_new(), v = mlx_array_new();
     if (ok) {
@@ -356,6 +360,7 @@ bool qwen2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
     }
     mlx_array attn_out = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&attn_out, attn_flat, ow, os, ob, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "o_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "o_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&attn_out, attn_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     if (ok) { ok = mlx_add(out_h, x, attn_out, m->stream) == 0; CHK(ok, "residual add (attn)"); }
 

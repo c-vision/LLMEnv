@@ -5,6 +5,7 @@
 #include "llmengine_mlx.h"
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
+#include "llm_mlx_lora.h"
 #include "llm_mlx_flash_decode_kernel.h"
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
 #include "llm_mlx_fused_rope_append.h"
@@ -492,6 +493,7 @@ bool gemma4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
     }
     mlx_array attn_out = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&attn_out, attn_flat, ow, os, ob, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "o_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "o_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&attn_out, attn_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     /* post_attention_layernorm applicata al risultato dell'attenzione PRIMA del
      * residuo -- diverso da qwen3_moe_attention_block, dove il residuo è diretto
@@ -607,8 +609,11 @@ bool mixtral_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
 
     mlx_array q = mlx_array_new(), k = mlx_array_new(), v = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&q, normed, qw, qs, qb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "q_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&q, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok) { ok = quantized_linear_cfg(&k, normed, kw, ks, kb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "k_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "k_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&k, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok) { ok = quantized_linear_cfg(&v, normed, vw, vs, vb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "v_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "v_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&v, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     mlx_array q_heads = mlx_array_new(), k_heads = mlx_array_new(), v_heads = mlx_array_new();
     if (ok) {
@@ -802,6 +807,7 @@ bool mixtral_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
     }
     mlx_array attn_out = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&attn_out, attn_flat, ow, os, ob, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "o_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "o_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&attn_out, attn_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     if (ok) { ok = mlx_add(out_h, x, attn_out, m->stream) == 0; CHK(ok, "residual add (attn)"); }
 

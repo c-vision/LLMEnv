@@ -6,6 +6,7 @@
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
+#include "llm_mlx_lora.h"
 #include "llm_mlx_kvpage.h"
 #include "llm_mlx_kvdisk.h"
 #include "llm_mlx_ngram.h"
@@ -241,6 +242,9 @@ void llm_mlx_model_destroy(LlmMlxModel* m) {
     llm_radix_free(&m->radix);
     llm_kv_page_pool_free(&m->kvpool);
     if (m->kvdisk_state == 1) llm_kv_disk_close(&m->kvdisk); /* §G: chiude/rimuove lo scratch SSD */
+    /* LoRA moduli */
+    for (int i = 0; i < m->lora_n; i++) { mlx_array_free(m->lora_A[i]); mlx_array_free(m->lora_B[i]); }
+    free(m->lora_A); free(m->lora_B); free(m->lora_layer); free(m->lora_proj); free(m->lora_scale); free(m->lora_expert);
     /* Imatrix collector */
     if (m->im.active) {
         free(m->im.gate); free(m->im.down); free(m->im.cnt);

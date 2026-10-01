@@ -6,6 +6,7 @@
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
+#include "llm_mlx_lora.h"
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
 #include "llm_mlx_kvq_splash.h"   /* KV-quant port da Splash (store/dequant) */
 #include "llm_mlx_kvq_pool.h"     /* page pool int8 (storage primario cold) */

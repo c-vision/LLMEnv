@@ -7,6 +7,7 @@
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_qwen4exp.h"
+#include "llm_mlx_lora.h"
 #include "llm_mlx_gdn_kernel.h"
 
 #include <stdio.h>
@@ -447,6 +448,7 @@ bool qwen3_next_linear_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
             }
             mlx_array_free(vf);
         } }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "out_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&r, gated_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     /* residual: h = x + r (il layer lineare ritorna la somma, come DecoderLayer.__call__). */
     mlx_array h_out=mlx_array_new();
     if (ok) { ok = mlx_add(&h_out, x, r, s) == 0; CHK(ok, "residual add (gdn)"); }
@@ -582,6 +584,7 @@ bool qwen4_full_qsa_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
 
     mlx_array idx_projected = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&idx_projected, x, idx_w, idx_sc, idx_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "indexer.index_qk_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "indexer.index_qk_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&idx_projected, x, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
 
     mlx_array idx_query_bhtd = mlx_array_new(), idx_raw_key = mlx_array_new();
     if (ok) { ok = llm_mlx_qwen4exp_qsa_indexer_postproject(&idx_query_bhtd, &idx_raw_key, idx_projected, idx_qln,
@@ -623,8 +626,11 @@ bool qwen4_full_qsa_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
 
     mlx_array q_lin=mlx_array_new(), k_lin=mlx_array_new(), v_lin=mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&q_lin, x, qw, qsc, qb, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "q_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&q_lin, x, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (ok) { ok = quantized_linear_cfg(&k_lin, x, kw, ksc, kb, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "k_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "k_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&k_lin, x, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (ok) { ok = quantized_linear_cfg(&v_lin, x, vw, vsc, vb, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "v_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "v_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&v_lin, x, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
 
     mlx_array gated = mlx_array_new();
     if (ok) { ok = llm_mlx_qwen4exp_qsa_attention_postproject(&gated, k_cache, v_cache, q_lin, k_lin, v_lin,
@@ -633,6 +639,7 @@ bool qwen4_full_qsa_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
                                                                m->cfg.rope_theta, m->cfg.rms_norm_eps, sparse_mask, s);
               CHK(ok, "attention postproject"); }
     if (ok) { ok = quantized_linear_cfg(out_h, gated, ow, osc, ob, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "o_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "o_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(out_h, gated, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
 
     mlx_array_free(idx_w); mlx_array_free(idx_sc); mlx_array_free(idx_b);
     mlx_array_free(idx_qln); mlx_array_free(idx_kln); mlx_array_free(idx_projected);

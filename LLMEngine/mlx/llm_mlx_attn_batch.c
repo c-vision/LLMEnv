@@ -61,7 +61,7 @@ static bool llama_attention_block_batch(LlmMlxModel* m, int layer_idx, LlmMlxSes
                 (int)llm_mlx_kvmetal_enabled(), (int)llm_mlx_kvmetal_auth_enabled(),
                 (int)llm_mlx_kvmetal_verify_enabled(), (void*)ac, (int)(ac?ac->valid:0), (int)(ac?ac->has_v:0),
                 (int)(sess && sess[0] ? sess[0]->has_cache[layer_idx] : -1),
-                (int)(0)); }
+                (int)(llm_mlx_model_lora_get(m, layer_idx, "q_proj") >= 0)); }
     }
     if (n_sess < 2 || nh <= 0 || nkv <= 0 || hd <= 0) return false;
     if (m->cfg.nsa_sparse) return false;
@@ -70,10 +70,10 @@ static bool llama_attention_block_batch(LlmMlxModel* m, int layer_idx, LlmMlxSes
     if (llm_mlx_kvslice_enabled() || llm_mlx_kvseg_enabled()) return false;
     if (llm_mlx_kvmetal_enabled() || llm_mlx_kvmetal_auth_enabled() || llm_mlx_kvmetal_verify_enabled()) return false;
     if (!ac || !ac->valid) return false;
-    if (0 ||
-        0 ||
-        0 ||
-        0) return false;
+    if (llm_mlx_model_lora_get(m, layer_idx, "q_proj") >= 0 ||
+        llm_mlx_model_lora_get(m, layer_idx, "k_proj") >= 0 ||
+        llm_mlx_model_lora_get(m, layer_idx, "v_proj") >= 0 ||
+        llm_mlx_model_lora_get(m, layer_idx, "o_proj") >= 0) return false;
     for (int s = 0; s < n_sess; s++)
         if (sess[s] == NULL || !sess[s]->has_cache[layer_idx]) return false;
 
@@ -282,10 +282,10 @@ static bool gemma4_attention_block_batch(LlmMlxModel* m, int layer_idx, LlmMlxSe
     if (llm_mlx_kvslice_enabled() || llm_mlx_kvseg_enabled()) return false;
     if (llm_mlx_kvmetal_enabled() || llm_mlx_kvmetal_auth_enabled() || llm_mlx_kvmetal_verify_enabled()) return false;
     if (llm_mlx_flash_decode_enabled() || llm_mlx_flash_prefill_enabled()) return false;
-    if (0 ||
-        0 ||
-        0 ||
-        0) return false;
+    if (llm_mlx_model_lora_get(m, layer_idx, "q_proj") >= 0 ||
+        llm_mlx_model_lora_get(m, layer_idx, "k_proj") >= 0 ||
+        llm_mlx_model_lora_get(m, layer_idx, "v_proj") >= 0 ||
+        llm_mlx_model_lora_get(m, layer_idx, "o_proj") >= 0) return false;
     for (int s = 0; s < n_sess; s++)
         if (sess[s] == NULL || !sess[s]->has_cache[layer_idx]) return false;
     GattnQuant* ac = llm_mlx_gemma4_attn_quant(m, layer_idx);
@@ -463,7 +463,7 @@ static bool kimi_mla_attention_block_batch(LlmMlxModel* m, int layer_idx, LlmMlx
     if (m->cfg.nsa_sparse || m->cfg.kv_max_tokens > 0 || m->cfg.kv_quantize) return false;
     if (llm_mlx_kvslice_enabled() || llm_mlx_kvseg_enabled()) return false;
     if (llm_mlx_kvmetal_enabled() || llm_mlx_kvmetal_auth_enabled() || llm_mlx_kvmetal_verify_enabled()) return false;
-    if (0) return false;
+    if (llm_mlx_model_lora_get(m, layer_idx, "q_proj") >= 0) return false;
     for (int s = 0; s < n_sess; s++)
         if (sess[s] == NULL || !sess[s]->has_cache[layer_idx] || sess[s]->aux_cache == NULL) return false;
 
