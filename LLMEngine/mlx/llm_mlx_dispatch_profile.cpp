@@ -95,6 +95,10 @@ static int g_dp_top_k = 0;
 /* Banda DRAM di riferimento per il ROOFLINE (GB/s). I byte letti sono DETERMINISTICI (walk a
  * build-time), quindi `bytes_in/BW` = il floor di tempo per-token di ogni funzione, INDIPENDENTE
  * dal carico della macchina: e' la parte "senza lanciare il modello". Override: LLM_DISPATCH_BW. */
+/* Speculazione: token accettati accumulati + passate, per la velocita' reale per token. */
+static long long g_dp_spec_tok = 0;
+static long long g_dp_spec_pass = 0;
+
 static double dp_ceiling_gbs(void) {
     static double v = -1.0;
     if (v < 0.0) {
@@ -227,6 +231,12 @@ void llm_mlx_dp_set_moe(int n_experts, int top_k) {
     g_dp_top_k = (top_k > 0) ? top_k : 0;
 }
 
+void llm_mlx_dp_spec_add(int accepted_tokens) {
+    if (accepted_tokens <= 0) return;
+    g_dp_spec_tok += accepted_tokens;
+    g_dp_spec_pass += 1;
+}
+
 void llm_mlx_dp_reset(void) {
     if (!llm_mlx_dp_enabled()) return;
     Profile& d = p();
@@ -235,6 +245,8 @@ void llm_mlx_dp_reset(void) {
     d.total = 0;
     d.bytes_total = 0;
     d.bytes_in_total = 0;
+    g_dp_spec_tok = 0;
+    g_dp_spec_pass = 0;
     d.build_sec = 0;
     d.eval_sec = 0;
     d.last_new = 0;
@@ -322,6 +334,13 @@ void llm_mlx_dp_report(const char* tag, int steps, int layers, double seconds, i
             const double overhead = meas_us - floor_us;
             fprintf(stderr, " meas_us/tok=%.0f overhead=%.0f%%",
                     meas_us, 100.0 * overhead / (meas_us > 1e-9 ? meas_us : 1.0));
+        }
+        if (g_dp_spec_pass > 0) {
+            /* Spec: il floor e' per PASSATA; diviso per i token accettati/passata da la velocita'
+             * reale per token (l'amortizzazione dei pesi). Deterministico. */
+            const double tpp = (double)g_dp_spec_tok / (double)g_dp_spec_pass;
+            fprintf(stderr, " spec_tok/pass=%.2f floor_us/tokREAL=%.0f",
+                    tpp, floor_us / (tpp > 1e-9 ? tpp : 1.0));
         }
     }
     fprintf(stderr, "\n");

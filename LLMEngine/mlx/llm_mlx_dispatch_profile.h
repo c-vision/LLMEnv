@@ -82,6 +82,10 @@ void llm_mlx_dp_reset(void);
  * il numero di esperti totali e quanti ne attiva il routing (`config.json`). 0 = nessun MoE. */
 void llm_mlx_dp_set_moe(int n_experts, int top_k);
 
+/* Speculazione: registra i token ACCETTATI di una passata (verify). La velocita' reale per token
+ * = `MB_in` per PASSATA / (token accettati per passata). Deterministico (nessuna GPU). */
+void llm_mlx_dp_spec_add(int accepted_tokens);
+
 /* Cammina le radici e conta i nodi con primitive NON gia' visti, accumulandoli nell'istogramma
  * per tipo di primitiva. Da chiamare a grafo del passo COSTRUITO ma PRIMA del dispatch (vedi la
  * REGOLA OPERATIVA sopra: dopo l'eval le radici non sono piu' camminabili). */

@@ -454,6 +454,7 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
                         llm_mlx_session_spec_begin(s);
                         int got = llm_ai_mlx_session_generate_ngram(handle, chunk, eos_token_id, s->spec_buf, w);
                             if (got < 0) break;
+                            if (got > 0) llm_mlx_dp_spec_add(got);
                             s->spec_buf_len = got; s->spec_buf_pos = 0;
                             if (got == 0) break;
                         }
