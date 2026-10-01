@@ -1892,6 +1892,51 @@ int llmmodelio_arch_pipeline(const char* hf_dir, const char* kind, char* out, si
 
 /* TENSOR: sub=ROLE a=<dir> b=<tensor> -> ruolo+formato del tensore; sub=LIST a=<dir> -> tutti i
  * ruoli (match->ruolo + formato proposto). */
+/* ── MODEL IR: tabella per-tensore del MODELLO (ruolo/geometria/tipo/byte) ──
+ * GGUF: legge i tensor-info + ruolo (dall'arch del gguf). Dir MLX/HF: legge weight_map
+ * (index.json) + ruolo/formato dall'arch risolta. Formato-agnostico (§4.2 Model IR). */
+static int llmmodelio_arch_resolve_gguf(const char* gguf_path);
+
+static int llmmodelio_model_ir_print(const char* path) {
+    size_t ln = strlen(path);
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) {
+        if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+        LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+        if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+        fprintf(LOUT, "# LLM TENSOR IR '%s' GGUF arch=%s tensori=%llu\n# name\trole\ttype\tndim\tdims\tbytes\n",
+                path, g_arch_ok ? g_arch.arch : "-", (unsigned long long)fi.n_tensors);
+        for (uint64_t i = 0; i < fi.n_tensors; i++) {
+            LlmCodecGgufTensorInfo* t = &fi.tensors[i];
+            const char* role = g_arch_ok ? llmdesc_role(&g_arch, t->name) : "OTHER";
+            char tn[24]; if (llmcodec_ggml_type_name(t->ggml_type, tn, sizeof tn) != 0) snprintf(tn, sizeof tn, "t%d", t->ggml_type);
+            char ds[96]; size_t o = 0; ds[0] = 0;
+            for (int d = 0; d < t->ndim; d++) o += (size_t)snprintf(ds + o, sizeof ds - o, "%s%llu", d ? "x" : "", (unsigned long long)t->dims[d]);
+            uint64_t numel = 1; for (int d = 0; d < t->ndim; d++) numel *= t->dims[d];
+            uint64_t b = 0; llmcodec_ggml_type_bytes(t->ggml_type, numel, &b);
+            fprintf(LOUT, "%s\t%s\t%s\t%d\t%s\t%llu\n", t->name, role, tn, t->ndim, ds, (unsigned long long)b);
+        }
+        llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+        return 0;
+    }
+    if (llmmodelio_arch_resolve(path) != 0) return -1;
+    char idx[2048]; snprintf(idx, sizeof idx, "%s/model.safetensors.index.json", path);
+    FILE* f = fopen(idx, "rb"); if (f == NULL) { fprintf(LOUT, "# LLM TENSOR IR '%s' MLX arch=%s (index assente)\n", path, g_arch.arch); return 0; }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char* j = (char*)malloc((size_t)n + 1); if (j == NULL || fread(j, 1, (size_t)n, f) != (size_t)n) { free(j); fclose(f); return -1; }
+    j[n] = 0; fclose(f);
+    char* wm = strstr(j, "\"weight_map\""); if (wm == NULL) { free(j); return -1; }
+    fprintf(LOUT, "# LLM TENSOR IR '%s' MLX arch=%s\n# name\trole\tfmt\n", path, g_arch.arch);
+    char* colon = strchr(wm, ':'); char* p = colon ? colon + 1 : wm; int nt = 0;
+    while ((p = strchr(p, '"')) != NULL) {
+        char* q = strchr(p + 1, '"'); if (!q) break;
+        if (q[1] != ':') { p = q + 1; continue; }
+        size_t L = (size_t)(q - p - 1); char nm[512]; if (L > 511) L = 511; memcpy(nm, p + 1, L); nm[L] = 0;
+        const char* role = llmdesc_role(&g_arch, nm); const char* fmt = llmdesc_fmt(&g_arch, role);
+        fprintf(LOUT, "%s\t%s\t%s\n", nm, role, fmt ? fmt : "-"); nt++; p = q + 1;
+    }
+    free(j);
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -1904,6 +1949,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "IR") == 0 || strcasecmp(s, "MAP") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR IR: atteso <path mod?>\n"); return -1; }
+        return llmmodelio_model_ir_print(dir);
     }
     if (strcasecmp(s, "LIST") == 0 || *s == 0) {
         if (!g_arch_ok && (!*dir || llmmodelio_arch_resolve(dir) != 0)) { fprintf(LOUT, "LLM TENSOR: nessuna descrizione risolta\n"); return -1; }
