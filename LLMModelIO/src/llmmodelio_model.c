@@ -2103,6 +2103,34 @@ static int llmmodelio_model_ir_memory(const char* path) {
     for (int c = 0; c < 8; c++) if (cat[c]) fprintf(LOUT, "  %-10s %llu bytes (%.1f%%)\n", cn[c], cat[c], tot ? 100.0*(double)cat[c]/(double)tot : 0.0);
     return 0;
 }
+/* COST MODEL (I3, report-only): pesi + KV byte/token (da metadati GGUF) + totale per contesto. */
+static int llmmodelio_model_ir_cost(const char* path, int ctx) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(LOUT, "LLM TENSOR COST: solo GGUF (per ora)\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    unsigned long long wb = 0;
+    for (uint64_t i = 0; i < fi.n_tensors; i++) { uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d]; uint64_t b = 0; if (llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b) == 0) wb += b; }
+    long bc = -1, hkv = -1, hd = -1, kl = -1, vl = -1, hl = -1, en = -1;
+    for (int i = 0; i < nkv; i++) {
+        const char* k = kv[i].key; long v = (long)kv[i].u32;
+        if (strstr(k, "attention.head_count_kv")) hkv = v; else if (strstr(k, "attention.head_count")) hd = v;
+        else if (strstr(k, "attention.key_length")) kl = v; else if (strstr(k, "attention.value_length")) vl = v;
+        else if (strstr(k, "block_count")) bc = v; else if (strstr(k, "embedding_length")) en = v;
+    }
+    if (ctx <= 0) ctx = 2048;
+    double kvpt = -1.0;
+    if (bc > 0 && hkv > 0) { long kd = (kl > 0) ? kl : ((en > 0 && hd > 0) ? en / hd : -1); long vd = (vl > 0) ? vl : kd;
+        if (kd > 0 && vd > 0) kvpt = (double)bc * (double)hkv * (double)(kd + vd) * 2.0; }  /* 2 = F16 KV */
+    fprintf(LOUT, "# LLM TENSOR COST '%s' arch=%s ctx=%d\n  weights: %llu bytes (%.2f GiB)\n",
+            path, g_arch_ok?g_arch.arch:"-", ctx, wb, (double)wb/(1024.0*1024.0*1024.0));
+    if (kvpt >= 0) fprintf(LOUT, "  kv/token: %.0f bytes (%.2f MiB) -> kv@ctx: %.2f GiB\n  total@ctx: %.2f GiB\n",
+                           kvpt, kvpt/(1024.0*1024.0), kvpt*(double)ctx/(1024.0*1024.0*1024.0), ((double)wb + kvpt*(double)ctx)/(1024.0*1024.0*1024.0));
+    else fprintf(LOUT, "  kv/token: n/d (metadati KV assenti: block_count/head_count_kv/key_length)\n");
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2116,7 +2144,11 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
     }
-    if (strcasecmp(s, "MEMORY") == 0 || strcasecmp(s, "COST") == 0) {
+    if (strcasecmp(s, "COST") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR COST: atteso <path>[, <ctx>]\n"); return -1; }
+        return llmmodelio_model_ir_cost(dir, *tn ? atoi(tn) : 0);
+    }
+    if (strcasecmp(s, "MEMORY") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR MEMORY: atteso <path>\n"); return -1; }
         return llmmodelio_model_ir_memory(dir);
     }
