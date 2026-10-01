@@ -15,7 +15,6 @@ add_subdirectory(LLMCodec)    # 2
 add_subdirectory(LLMJinja)    # 2b (motore Jinja chat-template, port di GMBasic/gmb_jinja)
 add_subdirectory(LLMDesc)     # 3
 add_subdirectory(LLMMetal)    # 4
-add_subdirectory(LLMModelIO)  # 6 (usa 1,2,3 + il plugin engine)
 
 # LLMEngine richiede MLX (mlx-c) e/o llama.cpp via FetchContent: pesante e opzionale.
 # Attivare con -DLLMENV_BUILD_ENGINE=ON (sub-layer: plugin, moe, llama, mlx).
@@ -26,9 +25,8 @@ if(LLMENV_BUILD_ENGINE)
   if(APPLE)
     enable_language(OBJC)
   endif()
-  # `LLMModelIO` (aggiunto sopra) porta già `llmengine_plugin` con la sua guardia: senza questa
-  # guardia il superbuild chiamerebbe `project()`/`add_library()` una SECONDA volta e CMake
-  # fallirebbe con "target already exists". Lo standalone `cmake -S LLMEngine/plugin` resta valido.
+  # Guardia `llmengine_plugin`: senza, il superbuild chiama `project()`/`add_library()` due volte.
+  # (LLMModelIO, che portava il plugin, è stato spostato nel PUL `gmbllm`.)
   if(NOT TARGET llmengine_plugin)
     add_subdirectory(LLMEngine/plugin)
   endif()
