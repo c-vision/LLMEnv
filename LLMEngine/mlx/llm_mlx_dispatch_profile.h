@@ -66,7 +66,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "mlx/c/array.h"
+#include "mlx/c/mlx.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -110,6 +110,10 @@ void llm_mlx_dp_memory(const char* where);
  * primitive per conteggio con i rispettivi MB/token. `steps` e `layers` servono solo a
  * normalizzare; se layers<=0 il campo nodi/layer viene omesso. */
 void llm_mlx_dp_report(const char* tag, int steps, int layers, double seconds, int top_k);
+
+/* Checksum deterministico (somma f32 di tutti gli elementi) di un array: serve al confronto
+ * bit-level per-layer dell'A/B GDN (LLM_GDN_AB). Valuta l'array (astype f32 + eval). */
+double llm_mlx_checksum_f32(mlx_array a, mlx_stream s);
 
 #ifdef __cplusplus
 }

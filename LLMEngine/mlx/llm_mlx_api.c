@@ -6,6 +6,7 @@
 #include "llmengine_mlx.h"
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
+#include "llm_mlx_dispatch_profile.h"
 #include "llm_mlx_ops.h"
 
 #include <stdio.h>
@@ -403,6 +404,8 @@ static bool df2_capture_batch(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array
         hasc[l] = true;
         mlx_array_free(h);
         h = layer_out;
+        if (ok && g_layerh_run != NULL && getenv("LLM_GDN_AB"))
+            fprintf(stderr, "[layerh] run=%s L=%d sum=%.6g\n", g_layerh_run, l, llm_mlx_checksum_f32(h, m->stream));
         if (ok && caplayers != NULL && snaps_n < 8) {
             for (int c = 0; c < ncap; c++)
                 if (caplayers[c] == l) {
@@ -479,6 +482,27 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
                 llm_mlx_cache_checkpoint(&ca[l], s->aux_cache[l], m->stream); has_aux[l] = true;
             } } }
     if (g_df2_time_on()) { g_df2_t_ckpt += g_df2_now() - _t0; _t0 = g_df2_now(); }
+
+    /* A/B bit-level GDN (LLM_GDN_AB, una volta per processo): forward PULITO via
+     * forward_tokens_batch (run "A") sugli STESSI ids, poi rollback; il run "B" e' la cattura
+     * normale. Il diff dei checksum per-layer [layerh] trova la PRIMA divergenza. */
+    if (getenv("LLM_GDN_AB")) {
+        static int g_ab_done = 0;
+        if (!g_ab_done) {
+            g_ab_done = 1;
+            g_layerh_run = "A";
+            mlx_array hA = mlx_array_new();
+            (void)forward_tokens_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
+                                       s->k_cache, s->v_cache, s->has_cache, &hA);
+            mlx_array_free(hA);
+            for (int l = 0; l < NL; l++) {
+                llm_mlx_cache_rollback(&s->k_cache[l], ck[l], m->stream);
+                llm_mlx_cache_rollback(&s->v_cache[l], cv[l], m->stream);
+                if (ca != NULL && has_aux[l]) llm_mlx_cache_rollback(&s->aux_cache[l], ca[l], m->stream);
+            }
+            g_layerh_run = "B";
+        }
+    }
 
     int64_t capneed = (int64_t)N * ncap * m->cfg.hidden_size;
     float* cap = (float*)malloc((size_t)capneed * sizeof(float));

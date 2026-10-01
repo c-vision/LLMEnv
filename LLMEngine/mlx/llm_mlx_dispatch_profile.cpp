@@ -493,4 +493,17 @@ void llm_mlx_dp_report(const char* tag, int steps, int layers, double seconds, i
     }
 }
 
+double llm_mlx_checksum_f32(mlx_array a, mlx_stream s) {
+    if (a.ctx == nullptr) return 0.0;
+    mlx_array f = mlx_array_new();
+    if (mlx_astype(&f, a, MLX_FLOAT32, s) != 0) { mlx_array_free(f); return 0.0; }
+    if (mlx_array_eval(f) != 0) { mlx_array_free(f); return 0.0; }
+    const float* d = mlx_array_data_float32(f);
+    double sum = 0.0;
+    const size_t n = mlx_array_size(f);
+    if (d != nullptr) for (size_t i = 0; i < n; i++) sum += (double)d[i];
+    mlx_array_free(f);
+    return sum;
+}
+
 } /* extern "C" */

@@ -847,6 +847,9 @@ bool llm_mlx_logit_softcap(mlx_array* res, mlx_array logits, float softcap, mlx_
 /* Definiti nel monolite (o in altri domini), usati da llm_mlx_api.c. */
 bool llm_bonsai_rotate(mlx_array* x, LlmMlxModel* m, int layer_idx, const char* suffix, bool invert);
 double llm_mlx_max_abs_diff(mlx_array a, mlx_array b, size_t n, mlx_stream s);
+/* A/B bit-level GDN (LLM_GDN_AB): se non-NULL, i loop per-layer di df2_capture_batch e
+ * forward_tokens_batch stampano il checksum di h con questo tag ("A"/"B") per diffarli. */
+extern const char* g_layerh_run;
 bool load_output_tensors(LlmMlxModel* m, OutputTensors* t);
 void free_output_tensors(OutputTensors* t);
 bool embed_tokens_batch(LlmMlxModel* m, mlx_array embed_w, mlx_array embed_s, mlx_array embed_b,

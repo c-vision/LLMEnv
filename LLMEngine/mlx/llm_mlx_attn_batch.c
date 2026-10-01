@@ -5,6 +5,7 @@
 #include "llmengine_mlx.h"
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
+#include "llm_mlx_dispatch_profile.h"
 #include "llm_mlx_fused_residual_rms.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
@@ -1020,6 +1021,8 @@ bool forward_tokens_batch(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array emb
         has_cache[layer] = true;
         mlx_array_free(h);
         h = layer_out;
+        if (step_ok && g_layerh_run != NULL && getenv("LLM_GDN_AB"))
+            fprintf(stderr, "[layerh] run=%s L=%d sum=%.6g\n", g_layerh_run, layer, llm_mlx_checksum_f32(h, m->stream));
         if (step_ok && layer <= 1 && getenv("LLM_BONSAI_DBG")) {
             mlx_array vf = mlx_array_new();
             if (mlx_astype(&vf, h, MLX_FLOAT32, m->stream) == 0 && mlx_array_eval(vf) == 0) {

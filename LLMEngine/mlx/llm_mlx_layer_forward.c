@@ -19,6 +19,9 @@
 #include <math.h>
 #include <time.h>
 
+/* A/B bit-level GDN (LLM_GDN_AB): tag di run per il dump per-layer di h. NULL = spento. */
+const char* g_layerh_run = NULL;
+
 /* Definizioni UNICHE degli hook SDPA (dichiarati extern in llm_mlx_ops.h).
  * Prima erano `static` per-TU -> l'hook installato qui non era visibile agli archi
  * attention (altre TU) e non veniva mai invocato. */
