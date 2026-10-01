@@ -2495,6 +2495,8 @@ static int llmmodelio_model_ir_context(const char* path) {
     fprintf(LOUT, "  policy: TRIM (drop oldest prefix) | GC (evict prefix-cache) | PAGED (kv pages)\n");
     return 0;
 }
+int llmmodelio_model_compile(const char* path, const char* out_path) { return llmmodelio_model_ir_compile(path, out_path); }
+
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
