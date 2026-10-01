@@ -2479,6 +2479,33 @@ static int llmmodelio_model_ir_eplan(const char* path, int world) {
     return 0;
 }
 /* CONTEXT (§4.10): budget di contesto (max token da KV) + trim/GC. Report-only. */
+/* CONTEXT GC (§4.10): piano di eviction del prefisso KV dato il contesto corrente e il target.
+ * spec = "cur:target" (token) oppure vuoto (solo policy). */
+static int llmmodelio_model_ir_contextgc(const char* path, const char* spec) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR CONTEXTGC: solo GGUF\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    long bc=-1,hkv=-1,hd=-1,kl=-1,vl=-1,en=-1;
+    for (int i=0;i<nkv;i++){ const char* k=kv[i].key; long v=(long)kv[i].u32;
+        if(strstr(k,"head_count_kv"))hkv=v; else if(strstr(k,"head_count"))hd=v; else if(strstr(k,"key_length"))kl=v;
+        else if(strstr(k,"value_length"))vl=v; else if(strstr(k,"block_count"))bc=v; else if(strstr(k,"embedding_length"))en=v; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    double kvpt=-1; if(bc>0&&hkv>0){ long kd=kl>0?kl:((en>0&&hd>0)?en/hd:-1); long vd=vl>0?vl:kd; if(kd>0&&vd>0) kvpt=(double)bc*hkv*(kd+vd)*2.0; }
+    long cur=-1,tgt=-1; if (spec && *spec) { const char* c=strchr(spec,':'); if (c) { cur=atol(spec); tgt=atol(c+1); } else cur=atol(spec); }
+    fprintf(LOUT, "# LLM TENSOR CONTEXTGC '%s' arch=%s kv/token=%.0f B\n", path, g_arch_ok?g_arch.arch:"-", kvpt);
+    fprintf(LOUT, "# politiche: TRIM (drop prefisso piu' vecchio) | GC (evict prefix-cache) | PAGED (kv paginata) | PRESSURE (evict su soglia)\n");
+    if (cur > 0 && tgt > 0 && cur > tgt && kvpt > 0) {
+        long ev = cur - tgt; double freed = kvpt*(double)ev, keep = kvpt*(double)tgt;
+        fprintf(LOUT, "  piano: cur=%ld tgt=%ld -> evict=%ld token (%.1f MiB), keep=%.1f MiB\n  impatto: prefisso %ld token perso (prefix-cache invalidata fino a %ld); ricalcolo al prossimo prompt lungo\n",
+                cur, tgt, ev, freed/(1024.0*1024.0), keep/(1024.0*1024.0), ev, tgt);
+        fprintf(LOUT, "  azione: GC(prefix) + TRIM -> mantieni coda %ld token (recenti, attenzione locale intatta)\n", tgt);
+    } else if (cur > 0) {
+        fprintf(LOUT, "  contesto corrente %ld token = %.1f MiB (nessun target -> nessuna eviction; usare <cur>:<target>)\n", cur, kvpt>0?kvpt*cur/(1024.0*1024.0):-1);
+    }
+    return 0;
+}
 static int llmmodelio_model_ir_context(const char* path) {
     size_t ln = strlen(path);
     if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR CONTEXT: solo GGUF\\n"); return -1; }
@@ -2813,6 +2840,7 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
     if (strcasecmp(s, "MEMPLAN") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR MEMPLAN: atteso <path>\n");return -1;} return llmmodelio_model_ir_memplan(dir); }
     if (strcasecmp(s, "KVPLAN") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR KVPLAN: atteso <path>\n");return -1;} return llmmodelio_model_ir_kvplan(dir); }
     if (strcasecmp(s, "VIEW") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR VIEW: atteso <path>\n");return -1;} return llmmodelio_model_ir_view(dir); }
+    if (strcasecmp(s, "CONTEXTGC") == 0 || strcasecmp(s, "CONTEXT_GC") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR CONTEXTGC: atteso <path>[, <cur:target>]\n");return -1;} return llmmodelio_model_ir_contextgc(dir, tn); }
     if (strcasecmp(s, "CONTEXT") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR CONTEXT: atteso <path>\n"); return -1; }
         return llmmodelio_model_ir_context(dir);
