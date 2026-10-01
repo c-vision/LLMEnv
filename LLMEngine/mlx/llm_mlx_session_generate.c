@@ -462,7 +462,7 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
      * contesto, verificati dal modello con UN forward batch -> output IDENTICO al greedy AR.
      * Config-driven (opzione di registro `spec_ngram`, nessuna env). Default 8 (built-in). */
     if (!m->dsv4 && !m->dsv41) {
-        int ord = 8;   /* default built-in (opt-out `spec_ngram=0`) */
+        int ord = 2;   /* default built-in (bigram: piu' copertura; l'8 dava nd<2 su code/ripetiz.) */
         if (llm_ai_mlx_opt_get_int("spec_ngram", &ord) != 0) ord = 8;
         /* Modelli IBRIDI con stato ricorrente (GDN qwen3_5, MLA+KDA kimi): lo stato vive in
          * sess->aux_cache, che il checkpoint/rollback del draft NON copre -> il rollback

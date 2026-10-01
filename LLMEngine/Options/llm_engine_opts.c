@@ -51,7 +51,7 @@ static Opt g_opts[] = {
     { "tqmemory",         "TurboQuant esperti: 1=packed (poca RAM) / 0=affine-2bit (max velocita')", T_BOOL, 0, 0, 0, 0, 1, 1, {0}, NULL, 0, "0" },
     /* Self-speculative n-gram (generale, tutti i modelli, greedy): draft dalla tabella n-gram del
      * contesto, verificati dal modello. 0=off; N>=2=ordine. Output identico al greedy AR. */
-    { "spec_ngram",       "self-speculative n-gram (greedy): 0=off, N>=2=ordine (es. 8)", T_INT, 8, 8, 0, 0, 0, 0, {0}, NULL, 0, "8" },
+    { "spec_ngram",       "self-speculative n-gram (greedy): 0=off, N>=2=ordine (2=bigram: piu' copertura)", T_INT, 2, 2, 0, 0, 0, 0, {0}, NULL, 0, "2" },
     /* DFlash2 (A1): se impostata a un path di draft DFlash2, il decode greedy usa il drafter a
      * contesto PERSISTENTE (spec streaming). "" = off. */
     { "dflash_model",     "draft DFlash2 (path) per la speculazione a contesto persistente", T_STR, 0, 0, 0, 0, 0, 0, "", "", 0, "~/ai/Models/Qwen3.8-27B-DFlash2" },
