@@ -731,6 +731,27 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
     const int n_prompt = s->cache_offset;
     if (n_prompt <= 0) return -1;
 
+    /* LARGE-CONTEXT GATE (2026-10-01): la cattura ctx del prompt tiene n_prompt*ncap*H*4 byte
+     * in fp32 (a 257k token = 26GB host) + la KV scratch del target -> a contesto grande supera
+     * la RAM (OOM OS a 1M). Oltre il budget si rinuncia al DFlash2 per questa sessione: il
+     * chiamante fa FALLBACK alla spec n-gram / decode AR (percorso verificato a 257k, 38.6GB).
+     * 0 = nessun limite (forza). Override: opzione di registro `df2_ctx_budget_mb`. */
+    {
+        int budget_mb = 8192;
+        if (llm_ai_mlx_opt_get_int("df2_ctx_budget_mb", &budget_mb) != 0 || budget_mb < 0) budget_mb = 8192;
+        if (budget_mb > 0) {
+            const uint64_t need = (uint64_t)n_prompt * (uint64_t)ncap * (uint64_t)H * (uint64_t)sizeof(float);
+            if (need > (uint64_t)budget_mb * 1048576ull) {
+                static int warned = 0;
+                if (!warned++) fprintf(stderr, "[df2] ctx prompt troppo grande (%.1fGB > budget %.1fGB): "
+                                "DFlash2 OFF per questa sessione -> fallback n-gram/AR. Alza "
+                                "df2_ctx_budget_mb (0=forza) per tentare comunque.\n",
+                                need / 1073741824.0, budget_mb / 1024.0);
+                return -1;
+            }
+        }
+    }
+
     /* A1 — CONTESTO PERSISTENTE. Se questa e' la CONTINUAZIONE della stessa sessione (nessun
      * token appeso dal chiamante: cache_offset invariato dall'ultima chiamata), riusiamo il ctx
      * del draft gia' nel ring + l'ultimo vctx, SENZA ri-catturare il prompt ne' resettare il ring. */
@@ -746,6 +767,10 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
     } else {
         /* ctx del prompt: re-forward della history su cache scratch con capture (eval a fine
          * forward: capture robusta). Round1 usa queste righe come nel reference. */
+        /* LARGE-CONTEXT (2026-10-01): il prefill lascia buffer transitori in cache MLX
+         * (picco ~80GB a 257k, poi attivi 38GB). Liberarli PRIMA della cattura ctx evita
+         * l'overlap picco+ctx (OOM a 1M). La cattura riusa la cache scratch del target. */
+        mlx_clear_cache();
         int64_t pctx_cap = (int64_t)n_prompt * ncap * H;
         pctx = (float*)malloc((size_t)pctx_cap * sizeof(float));
         if (!pctx) return -1;
