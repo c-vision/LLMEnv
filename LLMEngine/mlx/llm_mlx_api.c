@@ -21,11 +21,21 @@ static bool df2_seq_verify_on(void) {
     int b = 0;
     return llm_ai_mlx_opt_get_bool("df2_seq_verify", &b) == 0 && b != 0;
 }
-/* A4: righe di ctx del draft per SPAN (chunking del prefill del ctx). 0 = un solo span. */
+/* A4: righe di ctx del draft per SPAN (chunking del prefill del ctx). 0 = un solo span.
+ * DEFAULT 4096 (2026-10-01): senza chunking il capture-ctx del target rifà l'intero
+ * contesto con cache scratch FRESCA -> attenzione [n_heads, S, S] bf16. A S=71061 =
+ * 24*S^2*2 = 242GB -> OOM (mlx malloc buffer max ~86GB). Con lo span il picco resta
+ * O(span * S). Lo stesso span limita il backbone del drafter (A4). */
+#ifndef LLM_DF2_CTX_SPAN_DEFAULT
+#define LLM_DF2_CTX_SPAN_DEFAULT 4096
+#endif
 static int df2_ctx_span(void) {
     int v = 0;
-    if (llm_ai_mlx_opt_get_int("df2_ctx_span", &v) == 0 && v > 0) return v;
-    return 0;
+    if (llm_ai_mlx_opt_get_int("df2_ctx_span", &v) == 0) {
+        if (v < 0) return 0;           /* valore esplicito negativo = disabilita il chunking */
+        if (v > 0) return v;
+    }
+    return LLM_DF2_CTX_SPAN_DEFAULT;
 }
 
 /* Blocco signpost DFlash2 (spostato dal monolite: era l'unico consumatore). */
@@ -380,6 +390,25 @@ static bool df2_capture_batch(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array
                               mlx_array* kc, mlx_array* vc, bool* hasc,
                               const int* caplayers, int ncap,
                               float* capout, int capcap, mlx_array* out_h) {
+    /* SPAN-CHUNK (2026-10-01): se n_tokens supera lo span, spezza il forward in span
+     * consecutivi sulla STESSA cache scratch (kc/vc/hasc persistono, cache_offset avanza).
+     * Evita l'attenzione [H, S, S] sull'intero contesto (OOM a S grande). */
+    if (getenv("DF2_DEBUG"))
+        fprintf(stderr, "[df2-cap] n_tokens=%d cache_offset=%d span=%d\n", n_tokens, cache_offset, df2_ctx_span());
+    {
+        const int span = df2_ctx_span();
+        if (span > 0 && n_tokens > span) {
+            bool all = true;
+            for (int off = 0; off < n_tokens && all; off += span) {
+                int ch = (n_tokens - off > span) ? span : (n_tokens - off);
+                float* co = (capout != NULL) ? capout + (size_t)off * (size_t)ncap * m->cfg.hidden_size : NULL;
+                int cc = (co != NULL) ? (int)((int64_t)ch * ncap * m->cfg.hidden_size) : 0;
+                all = df2_capture_batch(m, kvq_sess, ew, es, eb, ids + off, ch, cache_offset + off,
+                                        kc, vc, hasc, caplayers, ncap, co, cc, out_h);
+            }
+            return all;
+        }
+    }
     mlx_array x = mlx_array_new();
     if (!embed_tokens_batch(m, ew, es, eb, ids, n_tokens, &x)) { mlx_array_free(x); return false; }
     mlx_array h = x;
@@ -395,7 +424,11 @@ static bool df2_capture_batch(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array
     int saved_q4e_len = m->q4e_ctx_len;
     m->aux_cache = kvq_sess->aux_cache;
     m->q4e_ctx_ids = kvq_sess->history;
-    m->q4e_ctx_len = kvq_sess->history_len;
+    /* limite CAUSALE del ctx PLE/ngram: i token elaborati finora (cache_offset + n_tokens),
+     * non l'intera history. Con lo span-chunk ogni span vede solo il proprio prefisso
+     * (evita che i primi span vedano token futuri); senza chunk (offset 0) coincide. */
+    m->q4e_ctx_len = (cache_offset + n_tokens <= kvq_sess->history_len)
+                         ? cache_offset + n_tokens : kvq_sess->history_len;
     mlx_array snaps[8];
     int snaps_n = 0;
     for (int l = 0; ok && l < m->cfg.n_layers; l++) {

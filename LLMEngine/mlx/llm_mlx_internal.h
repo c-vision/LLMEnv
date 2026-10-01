@@ -24,6 +24,14 @@
 #ifndef LLM_SPEC_MAXL
 #define LLM_SPEC_MAXL 256
 #endif
+/* Soglia S per la cattura spec GDN per-posizione (state_seq [B,S,Hv,Dv,Dk]).
+ * Va catturata SOLO per il blocco verify (S = draft+1, piccolo): su S grande
+ * (es. forward di cattura del ctx DFlash2 sull'intero contesto) lo state_seq
+ * misura 4*S*Hv*Dv*Dk byte -> 48*S*... a 71k token = ~223GB (OOM 2026-10-01).
+ * Oltre la soglia si usa il percorso non-capture (stato finale, senza sseq). */
+#ifndef LLM_SPEC_CAP_MAXS
+#define LLM_SPEC_CAP_MAXS 128
+#endif
 typedef struct LlmBonsaiHadamard LlmBonsaiHadamard;  /* fwd: il monolite include il completo */
 
 typedef struct {

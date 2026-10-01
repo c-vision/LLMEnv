@@ -302,7 +302,7 @@ bool qwen3_next_linear_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
     mlx_array y_stack = mlx_array_new();
     bool kernel_done = false;
     if (ok && S >= 1 && !llm_env_isset("LLM_GDN_KERNEL_OFF")) {
-      if (g_spec_capture && S > 1) {
+      if (g_spec_capture && S > 1 && S <= LLM_SPEC_CAP_MAXS) {
         /* S5(b): UN SOLO call del kernel FUSO con l'output `state_seq` (stato dopo OGNI
          * token) -> rollback O(1) senza l'overhead di launch per-token. */
         mlx_array st_n = mlx_array_new(), sseq_arr = mlx_array_new();
