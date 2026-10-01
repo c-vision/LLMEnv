@@ -1127,6 +1127,8 @@ bool final_step_greedy_batch(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
 extern mlx_array g_spec_snap_k[];
 extern mlx_array g_spec_snap_v[];
 extern int g_spec_capture;
+/* Precarica il drafter DFlash2 PRIMA del prefill (evita l'OOM del picco prefill + drafter). */
+void llm_mlx_df2_preload(LlmMlxModel* m);
 bool llm_mlx_logits_f32(mlx_array* out, mlx_array logits, mlx_stream stream);
 bool final_step_constrained(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
                             mlx_array out_w, mlx_array out_s, mlx_array out_b,

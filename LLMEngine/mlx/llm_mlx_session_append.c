@@ -24,6 +24,11 @@ static int llm_ai_mlx_session_append_impl(llm_ai_mlx_session_handle handle, cons
     if (handle == NULL || token_ids == NULL || n_ids <= 0) return -1;
     LlmMlxSession* s = (LlmMlxSession*)handle;
     LlmMlxModel* m = s->model;
+    /* PRECARICA il drafter DFlash2 al PRIMO append (= prima del prefill): il picco del prefill
+     * (array vivi fino al primo forward del decode) include allora il drafter, e il primo forward
+     * dello streaming drena il picco -> evita l'OOM OS a 1M/2M. */
+    if (m->dsv4 == NULL && m->dsv41 == NULL && s->cache_offset == 0 && s->history_len == 0)
+        llm_mlx_df2_preload(m);
     /* Append esterno (nuovo turno/prompt): i token draftati in anticipo e non ancora consumati
      * dallo spec streaming vengono scartati (cache riportata al chunk-start + history troncata). */
     llm_mlx_session_spec_discard(s);

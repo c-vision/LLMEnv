@@ -823,6 +823,7 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
          * n-gram/AR oltre ~82k token finche' il picco prefill non e' gestito. */
         int budget_mb = 8192;
         if (llm_ai_mlx_opt_get_int("df2_ctx_budget_mb", &budget_mb) != 0 || budget_mb < 0) budget_mb = 8192;
+        { const char* e = getenv("LLM_DF2_CTX_BUDGET_MB"); if (e && *e) budget_mb = atoi(e); }
         if (budget_mb > 0) {
             const uint64_t need = (uint64_t)n_prompt * (uint64_t)ncap * (uint64_t)H * (uint64_t)sizeof(float);
             if (need > (uint64_t)budget_mb * 1048576ull) {

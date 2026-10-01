@@ -394,16 +394,24 @@ static llm_ai_mlx_dflash2_handle llm_mlx_df2_for(LlmMlxModel* m) {
         if (!llm_mlx_df2_autodetect(m, path, sizeof(path))) return NULL;
     }
     g_df2_target = m;
-    /* LARGE-CONTEXT (2026-10-01): il prefill di contesti molto lunghi lascia un picco di buffer
-     * (a 388k token ~106GB attivi) che, sommato al drafter, fa OOM OS. Forziamo il rilascio del
-     * picco (cache -> OS) prima di caricare il drafter. */
-    mlx_clear_cache();
-    mlx_synchronize(m->stream);
+    /* LARGE-CONTEXT (2026-10-01): il prefill di contesti lunghi lascia un picco di buffer IN-FLIGHT
+     * (a 257k ~80GB attivi, che scendono a ~38GB solo al primo EVAL del decode: la coda GPU si
+     * drena). Il drafter veniva caricato PRIMA di quel drain -> picco+drafter = OOM OS. Forziamo il
+     * drain (synchronize = attende la coda) e il ritorno dei buffer liberati all'OS (clear_cache),
+     * ripetuto, PRIMA di caricare il drafter. */
+    for (int _i = 0; _i < 4; _i++) { mlx_synchronize(m->stream); mlx_clear_cache(); }
     g_df2_handle = llm_ai_mlx_dflash2_create((llm_ai_mlx_model_handle)m, path);
     if (getenv("LLM_SPEC_DEBUG"))
         fprintf(stderr, "df2_for: path=%s handle=%p\n", path, (void*)g_df2_handle);
     return g_df2_handle;
 }
+
+/* PRECARICA il drafter DFlash2 PRIMA del prefill (2026-10-01): il prefill di contesti lunghi
+ * lascia un picco di array VIVI (~80GB a 257k) che viene DRAINATO solo dal PRIMO FORWARD del
+ * decode (sync/clear non bastano). Se il drafter viene caricato DOPO il prefill, il picco + il
+ * drafter -> OOM OS. Caricandolo PRIMA, il picco del prefill lo include (80+4 < limite) e il
+ * primo forward dello streaming lo drena -> 1M/2M entrano. */
+void llm_mlx_df2_preload(LlmMlxModel* m) { if (m) (void)llm_mlx_df2_for(m); }
 
 int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_tokens,
                                  int32_t eos_token_id, int32_t* out_ids) {
