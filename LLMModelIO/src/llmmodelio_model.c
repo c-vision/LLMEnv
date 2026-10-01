@@ -2456,6 +2456,25 @@ static int llmmodelio_model_ir_mobj(const char* path) {
     fprintf(LOUT, "  {region=expert_workset, policy=residency, lifecycle=demote/evict LRU}\n");
     return 0;
 }
+/* EPLAN (§4.6): assegnazione esperti->rank (round-robin) + conteggio per rank. Report-only. */
+static int llmmodelio_model_ir_eplan(const char* path, int world) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR EPLAN: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    long nexp = -1;
+    for (int i = 0; i < nkv; i++) if (strstr(kv[i].key, "expert_count")) nexp = (long)kv[i].u32;
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    if (world <= 0) world = 1;
+    if (nexp <= 0) { fprintf(LOUT, "# LLM TENSOR EPLAN '%s': n/d experts\\n", path); return 0; }
+    fprintf(LOUT, "# LLM TENSOR EPLAN '%s' experts=%ld world=%d\n", path, nexp, world);
+    int* cnt = (int*)calloc((size_t)world, sizeof(int));
+    for (long e = 0; e < nexp; e++) cnt[e % world]++;
+    for (int r = 0; r < world; r++) fprintf(LOUT, "  rank %d: %d esperti\n", r, cnt[r]);
+    free(cnt);
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2488,6 +2507,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
     if (strcasecmp(s, "GPU") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR GPU: atteso <path>\n"); return -1; }
         return llmmodelio_model_ir_gpu(dir);
+    }
+    if (strcasecmp(s, "EPLAN") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR EPLAN: atteso <path>[, <world>]\n"); return -1; }
+        return llmmodelio_model_ir_eplan(dir, *tn ? atoi(tn) : 1);
     }
     if (strcasecmp(s, "MOBJ") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR MOBJ: atteso <path>\n"); return -1; }
