@@ -434,8 +434,7 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
          * side-channel di forward_tokens_batch_multi_cap). Finche' il rollback non include
          * l'aux, il percorso self-speculative si disattiva per questi modelli. */
         const bool hybrid_recurrent = (m->cfg.model_type != NULL &&
-                                       strcmp(m->cfg.model_type, "kimi_linear") == 0) ||
-                                      (m->cfg.is_linear_layer != NULL);
+                                       strcmp(m->cfg.model_type, "kimi_linear") == 0);
         if (ord >= 2 && !hybrid_recurrent) {
             llm_mlx_sampling_t smn = llm_mlx_session_sampling(s);
             if (!smn.active || smn.temperature <= 0.0f) {

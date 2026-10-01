@@ -885,6 +885,11 @@ static int spec_build_draft(LlmMlxSession* s, int32_t* draft, int max_draft) {
         }
     }
     if (nd < 2) nd = spec_lookup_suffix(s, draft, max_draft);
+    if (getenv("LLM_SPEC_DEBUG")) {
+        fprintf(stderr, "spec_draft: nd=%d built=%d hist=%d pending=%d d0=%d d1=%d\n",
+                nd, (int)s->ngram_built, s->history_len, (int)s->pending_next_id,
+                nd > 0 ? (int)draft[0] : -99, nd > 1 ? (int)draft[1] : -99);
+    }
     return nd;
 }
 
