@@ -2246,6 +2246,30 @@ static int llmmodelio_model_ir_compile(const char* path, const char* out_path) {
     fprintf(LOUT, "LLM TENSOR COMPILE '%s' -> '%s' (arch=%s layers=%d capacity=%ld)\n", path, out_path, g_arch_ok?g_arch.arch:"-", maxl+1, cap);
     return 0;
 }
+/* GPU (§4.7 SIMT, report-only): divergenza/uniformita' del routing MoE + kernel specialization +
+ * GPUCostModel. Analisi statica dal modello/arch (nessun GPU backend qui). */
+static int llmmodelio_model_ir_gpu(const char* path) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR GPU: solo GGUF (per ora)\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    unsigned long long wb = 0; long nexp = -1, nact = -1, nl = -1;
+    for (uint64_t i = 0; i < fi.n_tensors; i++) { uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d]; uint64_t b = 0; if (llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b) == 0) wb += b; }
+    for (int i = 0; i < nkv; i++) { const char* k = kv[i].key; long v = (long)kv[i].u32;
+        if (strstr(k, "expert_count")) nexp = v; else if (strstr(k, "expert_used_count")) nact = v; else if (strstr(k, "block_count")) nl = v; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    const char* atn = g_arch_ok ? llmdesc_struct_type(&g_arch,"attention") : NULL;
+    double div = (nexp > 0 && nact > 0) ? (double)nact / (double)nexp : -1.0;  /* activated/routed = "spread" */
+    fprintf(LOUT, "# LLM TENSOR GPU '%s' arch=%s\n", path, g_arch_ok?g_arch.arch:"-");
+    fprintf(LOUT, "  kernel_specialization: attention=%s moe=%s matmul=affine_qmm norm=rmsnorm\n",
+            atn?atn:"gqa", (nexp>0)?"moe_sorted_gather":"-");
+    if (div >= 0) fprintf(LOUT, "  routing: experts=%ld activated=%ld spread=%.3f -> %s\n", nexp, nact, div,
+                          div < 0.1 ? "ALTA divergenza (batch MoE: sort/group->compact->GEMM->scatter)" : "bassa divergenza");
+    else fprintf(LOUT, "  routing: n/d (expert_count/used_count assenti)\n");
+    fprintf(LOUT, "  gpu_cost_model: layers=%ld weights=%llu bytes (%.2f GiB)\n", nl, wb, (double)wb/(1024.0*1024.0*1024.0));
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2258,6 +2282,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "GPU") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR GPU: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_gpu(dir);
     }
     if (strcasecmp(s, "COMPILE") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR COMPILE: atteso <path>, <out.gmbllm>\n"); return -1; }
