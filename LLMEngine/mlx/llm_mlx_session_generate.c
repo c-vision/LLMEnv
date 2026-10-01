@@ -479,11 +479,18 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
                  * genera in anticipo un chunk e lo bufferizza. Usato SOLO se la tabella n-gram
                  * predice (>=2 token): altrimenti si usa il path principale, perche' il fallback
                  * AR sincrono di generate_ngram e' piu' lento dell'async sui modelli I/O-bound. */
-                if (s->spec_buf_pos < s->spec_buf_len || llm_mlx_session_spec_can(s)) {
+                /* (B) NON ricalcolare spec_can all'ingresso: la prima iterazione del loop riusa il
+                 * risultato (prima era chiamata 2 volte -> 2 build del draft per ingresso). */
+                const bool buf_has = (s->spec_buf_pos < s->spec_buf_len);
+                const bool can0 = buf_has ? false : llm_mlx_session_spec_can(s);
+                if (buf_has || can0) {
                     int cnt = 0;
+                    bool first_iter = true;
                     while (cnt < max_new_tokens) {
                         if (s->spec_buf_pos >= s->spec_buf_len) {
-                        if (!llm_mlx_session_spec_can(s)) break;  /* n-gram non predice */
+                        const bool can_now = first_iter ? can0 : llm_mlx_session_spec_can(s);
+                        first_iter = false;
+                        if (!can_now) break;  /* n-gram non predice */
                         int w = llm_mlx_spec_adaptive_width(s, 16);   /* larghezza adattiva (Gufo) */
                         int chunk = w + 2; if (chunk < 2) chunk = 2; if (chunk > 60) chunk = 60;
                         llm_mlx_session_spec_begin(s);
