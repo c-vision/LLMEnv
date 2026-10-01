@@ -16,6 +16,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <sys/stat.h>   /* auto-detect draft DFlash2 (stat) */
 
 static int g_async_decode_state = -1;
 static bool llm_mlx_async_decode_enabled(void) {
@@ -359,12 +360,40 @@ int llm_ai_mlx_model_flops(llm_ai_mlx_model_handle handle, int seq_len);
  * generate col target coerente; riusato -> il ctx del draft persiste tra le chiamate (streaming). */
 static llm_ai_mlx_dflash2_handle g_df2_handle = NULL;
 static LlmMlxModel* g_df2_target = NULL;
+/* AUTO-DETECT del draft DFlash2: sibling "<dir>/<stem-senza-quant>-DFlash2" del modello target.
+ * Es. /…/Qwen3.8-27B-8bit -> /…/Qwen3.8-27B-DFlash2. Cosi' la spec DFlash2 si attiva senza passare
+ * `dflash_model` a mano (il default del registro e' vuoto perche' il draft e' model-specific).
+ * Ritorna 1 e scrive `out` se trovato. */
+static int llm_mlx_df2_autodetect(LlmMlxModel* m, char* out, int cap) {
+    if (m == NULL || m->model_dir[0] == '\0') return 0;
+    const char* slash = strrchr(m->model_dir, '/');
+    if (slash == NULL || slash == m->model_dir) return 0;
+    static const char* quants[] = { "-8bit", "-6bit", "-4bit", "-2bit", "-Q8", "-Q6", "-Q4",
+                                    "-mxfp4", "-MLX-8Bit", "-MLX-4Bit", "-8Bit", "-4Bit" };
+    char stem[512];
+    snprintf(stem, sizeof stem, "%s", slash + 1);
+    for (size_t i = 0; i < sizeof(quants) / sizeof(quants[0]); i++) {
+        const size_t ql = strlen(quants[i]), sl = strlen(stem);
+        if (sl > ql && strcmp(stem + sl - ql, quants[i]) == 0) { stem[sl - ql] = '\0'; break; }
+    }
+    char cand[1024];
+    snprintf(cand, sizeof cand, "%.*s/%s-DFlash2", (int)(slash - m->model_dir), m->model_dir, stem);
+    struct stat st;
+    if (stat(cand, &st) == 0 && S_ISDIR(st.st_mode)) { snprintf(out, (size_t)cap, "%s", cand); return 1; }
+    return 0;
+}
+
 static llm_ai_mlx_dflash2_handle llm_mlx_df2_for(LlmMlxModel* m) {
     if (g_df2_target == m) return g_df2_handle;   /* gia' tentato per questo target */
     char path[1024];
-    if (llm_ai_mlx_opt_get_str("dflash_model", path, sizeof(path)) != 0 || path[0] == 0) return NULL;
+    if (llm_ai_mlx_opt_get_str("dflash_model", path, sizeof(path)) != 0 || path[0] == 0) {
+        /* opt vuota: prova l'auto-detect del sibling <stem>-DFlash2 accanto al modello. */
+        if (!llm_mlx_df2_autodetect(m, path, sizeof(path))) return NULL;
+    }
     g_df2_target = m;
     g_df2_handle = llm_ai_mlx_dflash2_create((llm_ai_mlx_model_handle)m, path);
+    if (getenv("LLM_SPEC_DEBUG"))
+        fprintf(stderr, "df2_for: path=%s handle=%p\n", path, (void*)g_df2_handle);
     return g_df2_handle;
 }
 

@@ -59,6 +59,7 @@ struct Profile {
     std::unordered_map<std::string, long long> astype_src;
     std::unordered_map<std::string, long long> sig_src;
     std::unordered_map<std::string, long long> sq_src;
+    std::unordered_map<std::string, long long> reshape_src;
     long long total = 0;
     long long bytes_total = 0;
     long long bytes_in_total = 0;
@@ -144,13 +145,14 @@ long long walk(const mlx::core::array* root, StepSeen& seen, long long& bytes_ou
         shp += ") x";
         shp += std::to_string((int)mlx::core::size_of(a->dtype()));
         const std::string name(a->primitive().name());
-        if (name == "AsType" || name == "Sigmoid" || name == "Squeeze") {
+        if (name == "AsType" || name == "Sigmoid" || name == "Squeeze" || name == "Reshape") {
             const std::vector<mlx::core::array>& ai = a->inputs();
             std::string src = ai.empty() ? std::string("(none)")
                           : (ai[0].has_primitive() ? std::string(ai[0].primitive().name())
                                                    : std::string("leaf"));
             if (name == "AsType") d.astype_src[src + " ->" + shp] += 1;
             else if (name == "Squeeze") d.sq_src[src + " ->" + shp] += 1;
+            else if (name == "Reshape") d.reshape_src[src + " ->" + shp] += 1;
             else                  d.sig_src[src + " ->" + shp] += 1;
         }
         Fam& f = d.hist[name];
@@ -419,6 +421,22 @@ void llm_mlx_dp_report(const char* tag, int steps, int layers, double seconds, i
             fprintf(stderr, "LLM_DISPATCH[%s]:   %-52s %6lld  %6.1f/token\n",
                     tag ? tag : "", av[i].first.c_str(), av[i].second,
                     (double)av[i].second / (double)steps);
+        }
+    }
+    /* Reshape: sorgente (input) -> forma. Ogni Reshape e' un dispatch in piu' (mlx lo fa spesso
+     * inline): trovare le forme evitabili e' riduzione diretta dei nodi/token. */
+    if (!d.reshape_src.empty()) {
+        std::vector<std::pair<std::string, long long>> rv(d.reshape_src.begin(), d.reshape_src.end());
+        for (size_t i = 0; i < rv.size(); i++) {
+            size_t best = i;
+            for (size_t j = i + 1; j < rv.size(); j++) if (rv[j].second > rv[best].second) best = j;
+            if (best != i) std::swap(rv[i], rv[best]);
+        }
+        fprintf(stderr, "LLM_DISPATCH[%s]:   -- Reshape per SORGENTE (%zu) --\n", tag ? tag : "", rv.size());
+        for (size_t i = 0; i < rv.size() && i < 16; i++) {
+            fprintf(stderr, "LLM_DISPATCH[%s]:   %-52s %6lld  %6.1f/token\n",
+                    tag ? tag : "", rv[i].first.c_str(), rv[i].second,
+                    (double)rv[i].second / (double)steps);
         }
     }
     if (!d.sig_src.empty()) {
