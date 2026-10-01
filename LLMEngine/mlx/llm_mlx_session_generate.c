@@ -394,6 +394,11 @@ static llm_ai_mlx_dflash2_handle llm_mlx_df2_for(LlmMlxModel* m) {
         if (!llm_mlx_df2_autodetect(m, path, sizeof(path))) return NULL;
     }
     g_df2_target = m;
+    /* LARGE-CONTEXT (2026-10-01): il prefill di contesti molto lunghi lascia un picco di buffer
+     * (a 388k token ~106GB attivi) che, sommato al drafter, fa OOM OS. Forziamo il rilascio del
+     * picco (cache -> OS) prima di caricare il drafter. */
+    mlx_clear_cache();
+    mlx_synchronize(m->stream);
     g_df2_handle = llm_ai_mlx_dflash2_create((llm_ai_mlx_model_handle)m, path);
     if (getenv("LLM_SPEC_DEBUG"))
         fprintf(stderr, "df2_for: path=%s handle=%p\n", path, (void*)g_df2_handle);
