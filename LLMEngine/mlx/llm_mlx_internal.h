@@ -720,7 +720,7 @@ struct LlmMlxModel {
     long kvdisk_restores;        /* statistiche: prefissi ripristinati da disco */
     int  kvckpt_block;           /* §G-ter: blocco (token) dei checkpoint per il rewind (0 = OFF) */
     /* P4 MEMORY PLAN: budget deterministico + admission. */
-    uint64_t p4_budget_bytes, p4_weights_bytes, p4_kv_per_token, p4_state_bytes;
+    uint64_t p4_budget_bytes, p4_weights_bytes, p4_kv_per_token, p4_kv_per_token_q, p4_state_bytes;
     uint64_t gguf_mmap_bytes;   /* dimensione mmap dei pesi (pesi zero-copy, non contati da MLX) */
     /* P4: registro delle sessioni ATTIVE (conto MULTI-sessione del budget). */
     struct LlmMlxSession* p4_sessions[64];
@@ -801,6 +801,7 @@ typedef struct DFlash2Runtime {
 /* --- dominio P4 (llm_mlx_p4.c) --- */
 uint64_t llm_p4_sysctl_u64(const char* name);
 uint64_t llm_p4_kv_per_token(const ModelConfig* c);
+uint64_t llm_p4_kv_per_token_int8(const ModelConfig* c);
 uint64_t llm_p4_kv_state(const ModelConfig* c);
 void     llm_p4_plan_init(LlmMlxModel* m);
 uint64_t llm_p4_kv_needed(LlmMlxModel* m, int offset, int n);

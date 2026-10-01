@@ -22,6 +22,19 @@ uint64_t llm_p4_kv_per_token(const ModelConfig* c) {
     }
     return tot;
 }
+/* KV/token in int8 (pool Splash): match di llm_kvq_pool_bytes_per_token
+ * (= 2*kv_heads*head_dim*1 byte per K+V + 2*kv_heads*sizeof(float) di scale). ~meta' dell'f16. */
+uint64_t llm_p4_kv_per_token_int8(const ModelConfig* c) {
+    if (!c) return 0;
+    const uint64_t per = 2ull * (uint64_t)c->n_kv_heads * (uint64_t)c->head_dim * 1ull
+                       + 2ull * (uint64_t)c->n_kv_heads * (uint64_t)sizeof(float);
+    uint64_t tot = 0;
+    for (int l = 0; l < c->n_layers; l++) {
+        if (c->is_linear_layer && c->is_linear_layer[l]) continue;
+        tot += per;
+    }
+    return tot;
+}
 uint64_t llm_p4_kv_state(const ModelConfig* c) {
     if (!c || !c->is_linear_layer) return 0;
     const uint64_t hv = (uint64_t)(c->linear_num_value_heads > 0 ? c->linear_num_value_heads : c->n_kv_heads);
@@ -64,6 +77,7 @@ void llm_p4_plan_init(LlmMlxModel* m) {
     const uint64_t used = m->p4_weights_bytes + reserve;
     m->p4_budget_bytes = (limit > used) ? (limit - used) : 0;
     m->p4_kv_per_token = llm_p4_kv_per_token(&m->cfg);
+    m->p4_kv_per_token_q = llm_p4_kv_per_token_int8(&m->cfg);
     m->p4_state_bytes = llm_p4_kv_state(&m->cfg);
     m->p4_enforce = (limit > 0);   /* senza un limite noto non si rifiuta nulla */
     /* Kill-switch diagnostico (F3 qwen4_exp 2026-09-25): su modelli il cui footprint
@@ -80,7 +94,16 @@ void llm_p4_plan_init(LlmMlxModel* m) {
 }
 uint64_t llm_p4_kv_needed(LlmMlxModel* m, int offset, int n) {
     if (m == NULL || m->p4_kv_per_token == 0) return 0;
-    return (uint64_t)(offset + n) * m->p4_kv_per_token + m->p4_state_bytes;
+    const uint64_t tot = (uint64_t)(offset + n);
+    uint64_t per = m->p4_kv_per_token;
+    /* KV-quant int8 (esplicita o auto sopra soglia): il KV/token scende a ~meta'.
+     * Senza questo l'admission rifiuta 1M/2M col budget f16 anche se l'int8 li farebbe entrare. */
+    const ModelConfig* c = &m->cfg;
+    int trig = c->kv_quantize_auto_trigger > 0 ? c->kv_quantize_auto_trigger : 8192;
+    if (m->p4_kv_per_token_q > 0 &&
+        (c->kv_quantize || (c->kv_quantize_auto && (int)tot > trig)))
+        per = m->p4_kv_per_token_q;
+    return tot * per + m->p4_state_bytes;
 }
 /* P4: KV+stato di TUTTE le sessioni attive registrate (il conto multi-sessione). */
 uint64_t llm_p4_used_sessions(LlmMlxModel* m, const struct LlmMlxSession* exclude) {
