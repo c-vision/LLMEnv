@@ -210,15 +210,24 @@ int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out
         char path[4096]; snprintf(path, sizeof path, "%s/%s.llmarch", dirs[i], slug);
         if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
     }
-    /* ABI/ canonica del repo: risali dal cwd cercando <dir>/ABI/<slug>.llmarch (poi <dir>/arch/). */
+    /* ABI/ canonica (anche FRATELLO LLMEnv/ABI via llmdesc_abi_dir; .llmarch O .gmbarch). */
+    char abi[2048];
+    if (llmdesc_abi_dir(abi, sizeof abi)) {
+        char path[4096];
+        snprintf(path, sizeof path, "%s/%s.llmarch", abi, slug);
+        if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
+        snprintf(path, sizeof path, "%s/%s.gmbarch", abi, slug);
+        if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
+    }
+    /* <dir>/arch/ risalendo dagli antenati della cwd (.llmarch O .gmbarch). */
     char cwd[2048];
     if (getcwd(cwd, sizeof cwd) != NULL) {
         char dir[2048]; snprintf(dir, sizeof dir, "%s", cwd);
         for (int up = 0; up < 12 && dir[0]; ++up) {
             char path[4096];
-            snprintf(path, sizeof path, "%s/ABI/%s.llmarch", dir, slug);
-            if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
             snprintf(path, sizeof path, "%s/arch/%s.llmarch", dir, slug);
+            if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
+            snprintf(path, sizeof path, "%s/arch/%s.gmbarch", dir, slug);
             if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
             char* sl = strrchr(dir, '/');
             if (sl == NULL) break;
