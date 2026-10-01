@@ -43,7 +43,14 @@ int llm_mlx_tq_mem_opt(void) { return g_tq_mem_opt; }
  * di due gather_qmm separati, split del risultato in due meta' lungo l'ultimo asse. */
 static int g_moe_gateup_fuse_state = -1;
 static bool llm_mlx_moe_gateup_fuse_enabled(void) {
-    if (g_moe_gateup_fuse_state < 0) g_moe_gateup_fuse_state = (llm_ai_mlx_opt_env("LLMENGINE_MOE_GATEUP_FUSE") != NULL) ? 1 : 0;
+    if (g_moe_gateup_fuse_state < 0) {
+        /* DEFAULT ON (2026-10-01). Misura deterministica glm4_moe: 3554 -> 3509 nodi/token
+         * (-45, -1.3%) con output BIT-IDENTICO; la reference (rapidMLX) misura +7% decode.
+         * Fallback automatico se i pesi gate+up fusi non esistono o in streaming esperti.
+         * Opt-out: LLMENGINE_MOE_GATEUP_FUSE=0. */
+        const char* e = llm_ai_mlx_opt_env("LLMENGINE_MOE_GATEUP_FUSE");
+        g_moe_gateup_fuse_state = (e != NULL && e[0] == '0') ? 0 : 1;
+    }
     return g_moe_gateup_fuse_state == 1;
 }
 
