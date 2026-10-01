@@ -2302,6 +2302,56 @@ static int llmmodelio_model_ir_profile(const char* path, int budget_gb) {
             (!fits && cat[2]) ? " — esperti candidate al demote/streaming" : "");
     return 0;
 }
+/* DIST (§4.6, tensor-parallel planner) + CED (§4.8, computation elimination) — report-only. */
+static int llmmodelio_model_ir_dist(const char* path, int world) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR DIST: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    if (world <= 0) world = 1;
+    unsigned long long expb = 0, attnb = 0, otherb = 0; long nexp = -1, nh = -1, nkvh = -1;
+    for (uint64_t i = 0; i < fi.n_tensors; i++) {
+        const char* r = g_arch_ok ? llmdesc_role(&g_arch, fi.tensors[i].name) : "OTHER";
+        uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d];
+        uint64_t b = 0; llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b);
+        if (strcmp(r,"ROUTED_EXPERT")==0) expb += b; else if (strncmp(r,"ATTN",4)==0) attnb += b; else otherb += b;
+    }
+    for (int i=0;i<nkv;i++){ const char* k=kv[i].key; long v=(long)kv[i].u32;
+        if(strstr(k,"expert_count"))nexp=v; else if(strstr(k,"attention.head_count_kv"))nkvh=v; else if(strstr(k,"attention.head_count"))nh=v; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    fprintf(LOUT, "# LLM TENSOR DIST '%s' world_size=%d\n", path, world);
+    fprintf(LOUT, "  expert-parallel (EP): experts=%ld -> %ld/rank (byte/rank=%.2f GiB)\n", nexp>0?nexp:0, nexp>0?nexp/world:0, (double)expb/(double)world/(1024.0*1024.0*1024.0));
+    fprintf(LOUT, "  tensor-parallel (TP): attn heads=%ld kv=%ld -> %ld/%ld head/rank (byte/rank=%.2f GiB)\n", nh, nkvh, (nh>0?nh/world:0), (nkvh>0?nkvh/world:0), (double)attnb/(double)world/(1024.0*1024.0*1024.0));
+    fprintf(LOUT, "  replicated (other): %.2f GiB\n  nota: EP=esperti, TP=teste/KV; all-reduce su residual (TP).\n", (double)otherb/(1024.0*1024.0*1024.0));
+    return 0;
+}
+static int llmmodelio_model_ir_ced(const char* path) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR CED: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    /* eliminazione model-aware (report-only): tensori ALL-ZERO (candidati elimina) — lettura campionata */
+    FILE* f = fopen(path, "rb");
+    int allzero = 0, checked = 0;
+    for (uint64_t i = 0; i < fi.n_tensors && f; i++) {
+        uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d];
+        uint64_t b = 0; if (llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b) != 0 || b == 0) continue;
+        if (b > (1u<<20)) continue;   /* campiona solo tensori <1MB (piccoli): niente scan dei giganti */
+        unsigned char* buf = (unsigned char*)malloc((size_t)b);
+        if (!buf) continue;
+        if (fseek(f, (long)(fi.data_start + fi.tensors[i].offset), SEEK_SET) == 0 && fread(buf, 1, (size_t)b, f) == (size_t)b) {
+            checked++; int z = 1; for (uint64_t k = 0; k < b; k++) if (buf[k]) { z = 0; break; }
+            if (z) { allzero++; if (allzero <= 8) fprintf(LOUT, "  ALL-ZERO (candidato ELIMINA): %s\n", fi.tensors[i].name); }
+        }
+        free(buf);
+    }
+    if (f) fclose(f);
+    fprintf(LOUT, "# LLM TENSOR CED '%s' arch=%s: tensori campionati(piccoli)=%d all-zero=%d\n", path, g_arch_ok?g_arch.arch:"-", checked, allzero);
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2314,6 +2364,14 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "DIST") == 0 || strcasecmp(s, "DISTRIBUTION") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR DIST: atteso <path>[, <world>]\n"); return -1; }
+        return llmmodelio_model_ir_dist(dir, *tn ? atoi(tn) : 1);
+    }
+    if (strcasecmp(s, "CED") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR CED: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_ced(dir);
     }
     if (strcasecmp(s, "PROFILE") == 0 || strcasecmp(s, "RESIDENCY") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR PROFILE: atteso <path>[, <budget_gb>]\n"); return -1; }
