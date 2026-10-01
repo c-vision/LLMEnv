@@ -1994,6 +1994,38 @@ static int llmmodelio_model_ir_check(const char* path) {
     fprintf(LOUT, "# LLM TENSOR CHECK '%s' arch=%s tensori=%d OTHER=%d -> %s\n", path, g_arch_ok ? g_arch.arch : "-", tot, other, other ? "INVALID" : "OK");
     return other ? -1 : 0;
 }
+/* INFO: riepilogo del modello (arch, tensori, layer, kv, byte, modality) — GGUF o dir MLX. */
+static int llmmodelio_model_ir_info(const char* path) {
+    size_t ln = strlen(path);
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) {
+        if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+        LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+        if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+        int maxl = -1; unsigned long long totb = 0;
+        for (uint64_t i = 0; i < fi.n_tensors; i++) {
+            int L = model_layer_of(fi.tensors[i].name); if (L > maxl) maxl = L;
+            uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d];
+            uint64_t b = 0; if (llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b) == 0) totb += b;
+        }
+        fprintf(LOUT, "LLM TENSOR INFO '%s': format=GGUF arch=%s tensori=%llu kv=%d layers=%d modality=%s tensor_bytes=%llu\n",
+                path, g_arch_ok ? g_arch.arch : "-", (unsigned long long)fi.n_tensors, nkv, maxl + 1,
+                g_arch_ok ? llmdesc_modality(&g_arch) : "-", totb);
+        llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+        return 0;
+    }
+    if (llmmodelio_arch_resolve(path) != 0) return -1;
+    char idx[2048]; snprintf(idx, sizeof idx, "%s/model.safetensors.index.json", path);
+    FILE* f = fopen(idx, "rb"); if (f == NULL) { fprintf(LOUT, "LLM TENSOR INFO '%s': format=MLX arch=%s (index assente) modality=%s\n", path, g_arch.arch, llmdesc_modality(&g_arch)); return 0; }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char* j = (char*)malloc((size_t)n + 1); if (!j || fread(j, 1, (size_t)n, f) != (size_t)n) { free(j); fclose(f); return -1; } j[n] = 0; fclose(f);
+    char* wm = strstr(j, "\"weight_map\""); char* p = wm ? strchr(wm, ':') : NULL; int nt = 0, maxl = -1;
+    while (p && (p = strchr(p, '"')) != NULL) { char* q = strchr(p + 1, '"'); if (!q) break; if (q[1] != ':') { p = q + 1; continue; }
+        size_t L = (size_t)(q - p - 1); char nm[512]; if (L > 511) L = 511; memcpy(nm, p + 1, L); nm[L] = 0;
+        nt++; int lyr = model_layer_of(nm); if (lyr > maxl) maxl = lyr; p = q + 1; }
+    free(j);
+    fprintf(LOUT, "LLM TENSOR INFO '%s': format=MLX arch=%s tensori=%d layers=%d modality=%s\n", path, g_arch.arch, nt, maxl + 1, llmdesc_modality(&g_arch));
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2006,6 +2038,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "INFO") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR INFO: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_info(dir);
     }
     if (strcasecmp(s, "LAYERS") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR LAYERS: atteso <path>\n"); return -1; }
