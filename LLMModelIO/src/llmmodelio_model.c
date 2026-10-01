@@ -1937,6 +1937,63 @@ static int llmmodelio_model_ir_print(const char* path) {
     free(j);
     return 0;
 }
+static int model_layer_of(const char* name) {
+    const char* p = strstr(name, "blk.");    if (p) return atoi(p + 4);
+    p = strstr(name, "layers.");             if (p) return atoi(p + 7);
+    p = strstr(name, "mtp.");                if (p) return atoi(p + 4);
+    return -1;
+}
+/* LAYERS: indici di layer presenti + n. tensori per layer (GGUF o dir MLX). */
+static int llmmodelio_model_ir_layers(const char* path) {
+    int cnt[1024]; memset(cnt, 0, sizeof cnt); int maxl = -1, glob = 0;
+    size_t ln = strlen(path);
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) {
+        if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+        LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+        if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+        for (uint64_t i = 0; i < fi.n_tensors; i++) { int L = model_layer_of(fi.tensors[i].name); if (L < 0) { glob++; continue; } if (L < 1024) cnt[L]++; if (L > maxl) maxl = L; }
+        llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    } else {
+        if (llmmodelio_arch_resolve(path) != 0) return -1;
+        char idx[2048]; snprintf(idx, sizeof idx, "%s/model.safetensors.index.json", path);
+        FILE* f = fopen(idx, "rb"); if (f == NULL) return -1;
+        fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+        char* j = (char*)malloc((size_t)n + 1); if (!j || fread(j, 1, (size_t)n, f) != (size_t)n) { free(j); fclose(f); return -1; } j[n] = 0; fclose(f);
+        char* wm = strstr(j, "\"weight_map\""); char* p = wm ? strchr(wm, ':') : NULL;
+        while (p && (p = strchr(p, '"')) != NULL) { char* q = strchr(p + 1, '"'); if (!q) break; if (q[1] != ':') { p = q + 1; continue; }
+            size_t L = (size_t)(q - p - 1); char nm[512]; if (L > 511) L = 511; memcpy(nm, p + 1, L); nm[L] = 0;
+            int lyr = model_layer_of(nm); if (lyr < 0) glob++; else { if (lyr < 1024) cnt[lyr]++; if (lyr > maxl) maxl = lyr; } p = q + 1; }
+        free(j);
+    }
+    fprintf(LOUT, "# LLM TENSOR LAYERS '%s' arch=%s layers=0..%d globals=%d\n", path, g_arch_ok ? g_arch.arch : "-", maxl, glob);
+    for (int i = 0; i <= maxl && i < 1024; i++) if (cnt[i] > 0) fprintf(LOUT, "layer %d: %d tensori\n", i, cnt[i]);
+    return 0;
+}
+/* CHECK (spec-vs-modello): ogni tensore ha un ruolo noto? Ritorna -1 se l'arch non e' risolta o
+ * se restano tensori OTHER (errore esplicito). */
+static int llmmodelio_model_ir_check(const char* path) {
+    size_t ln = strlen(path); int tot = 0, other = 0;
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) {
+        if (llmmodelio_arch_resolve_gguf(path) != 0) { fprintf(LOUT, "LLM TENSOR CHECK: arch non risolta per '%s'\n", path); return -1; }
+        LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+        if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+        for (uint64_t i = 0; i < fi.n_tensors; i++) { tot++; const char* r = llmdesc_role(&g_arch, fi.tensors[i].name); if (strcmp(r, "OTHER") == 0) { other++; if (other <= 8) fprintf(LOUT, "  OTHER: %s\n", fi.tensors[i].name); } }
+        llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    } else {
+        if (llmmodelio_arch_resolve(path) != 0) { fprintf(LOUT, "LLM TENSOR CHECK: arch non risolta per '%s'\n", path); return -1; }
+        char idx[2048]; snprintf(idx, sizeof idx, "%s/model.safetensors.index.json", path);
+        FILE* f = fopen(idx, "rb"); if (f == NULL) return -1;
+        fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+        char* j = (char*)malloc((size_t)n + 1); if (!j || fread(j, 1, (size_t)n, f) != (size_t)n) { free(j); fclose(f); return -1; } j[n] = 0; fclose(f);
+        char* wm = strstr(j, "\"weight_map\""); char* p = wm ? strchr(wm, ':') : NULL;
+        while (p && (p = strchr(p, '"')) != NULL) { char* q = strchr(p + 1, '"'); if (!q) break; if (q[1] != ':') { p = q + 1; continue; }
+            size_t L = (size_t)(q - p - 1); char nm[512]; if (L > 511) L = 511; memcpy(nm, p + 1, L); nm[L] = 0;
+            tot++; const char* r = llmdesc_role(&g_arch, nm); if (strcmp(r, "OTHER") == 0) { other++; if (other <= 8) fprintf(LOUT, "  OTHER: %s\n", nm); } p = q + 1; }
+        free(j);
+    }
+    fprintf(LOUT, "# LLM TENSOR CHECK '%s' arch=%s tensori=%d OTHER=%d -> %s\n", path, g_arch_ok ? g_arch.arch : "-", tot, other, other ? "INVALID" : "OK");
+    return other ? -1 : 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -1949,6 +2006,14 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "LAYERS") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR LAYERS: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_layers(dir);
+    }
+    if (strcasecmp(s, "CHECK") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR CHECK: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_check(dir);
     }
     if (strcasecmp(s, "IR") == 0 || strcasecmp(s, "MAP") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR IR: atteso <path mod?>\n"); return -1; }
