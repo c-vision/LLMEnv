@@ -548,6 +548,13 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
                     n_prev, anchor, K, accepted, (accepted<K)?1:0, n_prev+1);
         }
     }
+    if (ok && getenv("DF2_GREEDY")) {
+        fprintf(stderr, "[df2greedy] anchor=%d K=%d acc=%d\n  greedy[:]=", anchor, K, accepted);
+        for (int i = 0; i <= K && i < 10; i++) fprintf(stderr, " %d", greedy[i]);
+        fprintf(stderr, "\n  drafts[:]=");
+        for (int i = 0; i < K && i < 10; i++) fprintf(stderr, " %d", d[i]);
+        fprintf(stderr, "\n");
+    }
     int keep = n_prev + 1 + accepted;
     if (g_df2_time_on()) g_df2_n_rounds++;
     if (ok && accepted < K) {
