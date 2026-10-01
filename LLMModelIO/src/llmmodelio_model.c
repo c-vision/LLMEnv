@@ -2026,6 +2026,57 @@ static int llmmodelio_model_ir_info(const char* path) {
     fprintf(LOUT, "LLM TENSOR INFO '%s': format=MLX arch=%s tensori=%d layers=%d modality=%s\n", path, g_arch.arch, nt, maxl + 1, llmdesc_modality(&g_arch));
     return 0;
 }
+/* GRAPH (I1, report-only): struttura del modello per layer (attention/moe/ffn/norm) dall arch. */
+static int llmmodelio_model_ir_graph(const char* path) {
+    int F[1024]; memset(F, 0, sizeof F); int maxl = -1;
+    /* bit: 1=attn 2=moe 4=ffn_dense 8=norm 16=embed/out */
+    size_t ln = strlen(path);
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) {
+        if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+        LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+        if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+        for (uint64_t i = 0; i < fi.n_tensors; i++) {
+            const char* r = g_arch_ok ? llmdesc_role(&g_arch, fi.tensors[i].name) : "OTHER";
+            int L = model_layer_of(fi.tensors[i].name); if (L < 0) L = 0; if (L > maxl) maxl = L; if (L > 1023) continue;
+            if (strncmp(r, "ATTN", 4) == 0) F[L] |= 1;
+            else if (strcmp(r,"ROUTED_EXPERT")==0||strcmp(r,"SHARED_EXPERT")==0||strcmp(r,"ROUTER")==0||strstr(fi.tensors[i].name,"exps")) F[L] |= 2;
+            else if (strcmp(r,"FFN")==0||strcmp(r,"FFN_GATE")==0||strcmp(r,"FFN_UP")==0||strcmp(r,"FFN_DOWN")==0) F[L] |= 4;
+            else if (strstr(r,"NORM")) F[L] |= 8;
+            else if (strcmp(r,"EMBEDDING")==0||strcmp(r,"OUTPUT")==0) F[L] |= 16;
+        }
+        llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    } else {
+        if (llmmodelio_arch_resolve(path) != 0) return -1;
+        char idx[2048]; snprintf(idx, sizeof idx, "%s/model.safetensors.index.json", path);
+        FILE* f = fopen(idx, "rb"); if (f == NULL) return -1;
+        fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+        char* j = (char*)malloc((size_t)n + 1); if (!j || fread(j, 1, (size_t)n, f) != (size_t)n) { free(j); fclose(f); return -1; } j[n] = 0; fclose(f);
+        char* wm = strstr(j, "\"weight_map\""); char* p = wm ? strchr(wm, ':') : NULL;
+        while (p && (p = strchr(p, '"')) != NULL) { char* q = strchr(p + 1, '"'); if (!q) break; if (q[1] != ':') { p = q + 1; continue; }
+            size_t L2 = (size_t)(q - p - 1); char nm[512]; if (L2 > 511) L2 = 511; memcpy(nm, p + 1, L2); nm[L2] = 0;
+            const char* r = llmdesc_role(&g_arch, nm); int L = model_layer_of(nm); if (L < 0) L = 0; if (L > maxl) maxl = L; if (L > 1023) { p = q + 1; continue; }
+            if (strncmp(r, "ATTN", 4) == 0) F[L] |= 1;
+            else if (strcmp(r,"ROUTED_EXPERT")==0||strcmp(r,"SHARED_EXPERT")==0||strcmp(r,"ROUTER")==0||strstr(nm,"exps")) F[L] |= 2;
+            else if (strcmp(r,"FFN")==0||strcmp(r,"FFN_GATE")==0||strcmp(r,"FFN_UP")==0||strcmp(r,"FFN_DOWN")==0) F[L] |= 4;
+            else if (strstr(r,"NORM")) F[L] |= 8; else if (strcmp(r,"EMBEDDING")==0||strcmp(r,"OUTPUT")==0) F[L] |= 16;
+            p = q + 1; }
+        free(j);
+    }
+    const char* atn = g_arch_ok ? llmdesc_struct_type(&g_arch,"attention") : NULL;
+    const char* moe = g_arch_ok ? llmdesc_struct_type(&g_arch,"moe") : NULL;
+    fprintf(LOUT, "# LLM TENSOR GRAPH '%s' arch=%s attention=%s moe=%s layers=0..%d\n", path, g_arch_ok?g_arch.arch:"-", atn?atn:"-", moe?moe:"-", maxl);
+    for (int L = 0; L <= maxl && L < 1024; L++) {
+        if (!F[L]) continue;
+        fprintf(LOUT, "layer %d:", L);
+        if (F[L]&1) fprintf(LOUT, " attention%s", atn?atn:"");
+        if (F[L]&2) fprintf(LOUT, " moe%s", moe?moe:"");
+        if (F[L]&4) fprintf(LOUT, " ffn");
+        if (F[L]&8) fprintf(LOUT, " norm");
+        if (F[L]&16) fprintf(LOUT, " embed/out");
+        fprintf(LOUT, "\n");
+    }
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2038,6 +2089,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "GRAPH") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR GRAPH: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_graph(dir);
     }
     if (strcasecmp(s, "INFO") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR INFO: atteso <path>\n"); return -1; }
