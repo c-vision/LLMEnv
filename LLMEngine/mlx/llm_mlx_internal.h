@@ -275,6 +275,11 @@ typedef struct LlmMlxSession {
     NGramTable ngram;
     bool ngram_built;
     int ngram_order;
+    /* Cascade: tabella a ordine BASSO di fallback (il primario a ordine alto spesso non predice;
+     * il basso predice di piu'. Il gate `d[0]==pending` di spec_can filtra i falsi positivi). */
+    NGramTable ngram_lo;
+    bool ngram_lo_built;
+    int ngram_lo_order;
     /* ── Speculative streaming (spec_ngram, §8.4) ──────────────────────────────
      * Il consumer streaming (FastLLM CLI/server) chiama generate(max_new_tokens=1) per
      * token: lo spec self-speculativo (draft n-gram verificato con UN forward batch) non

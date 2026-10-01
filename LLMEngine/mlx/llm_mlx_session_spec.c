@@ -884,6 +884,21 @@ static int spec_build_draft(LlmMlxSession* s, int32_t* draft, int max_draft) {
             free(ctx);
         }
     }
+    /* Cascade: se l'ordine primario non predice (nd<2), prova la tabella a ordine basso. */
+    if (nd < 2 && s->ngram_lo_built && s->ngram_lo.buckets != NULL) {
+        nd = 0;
+        int32_t* ctxlo = (int32_t*)malloc((s->history_len + (size_t)max_draft + 1) * sizeof(int32_t));
+        if (ctxlo != NULL) {
+            const int ctx_len = s->history_len;
+            for (int i = 0; i < ctx_len; i++) ctxlo[i] = s->history[i];
+            for (int i = 0; i < max_draft; i++) {
+                int32_t d = llm_mlx_ngram_predict(&s->ngram_lo, ctxlo, ctx_len + i);
+                if (d < 0) break;
+                draft[i] = d; ctxlo[ctx_len + i] = d; nd++;
+            }
+            free(ctxlo);
+        }
+    }
     if (nd < 2) nd = spec_lookup_suffix(s, draft, max_draft);
     if (getenv("LLM_SPEC_DEBUG")) {
         fprintf(stderr, "spec_draft: nd=%d built=%d hist=%d pending=%d d0=%d d1=%d\n",

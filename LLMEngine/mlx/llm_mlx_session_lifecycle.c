@@ -476,6 +476,7 @@ void llm_mlx_session_destroy(LlmMlxSession* s) {
     free(s->kvq_v_len); free(s->kvq_v_w); free(s->kvq_v_sc); free(s->kvq_v_bi);
     mlx_array_free(s->pending_h);
     llm_mlx_ngram_free(&s->ngram);
+    if (s->ngram_lo_built) { llm_mlx_ngram_free(&s->ngram_lo); s->ngram_lo_built = false; }
     free(s->history);
     if (s->compiled_decode_valid) mlx_closure_free(s->compiled_decode);
     /* B7: libera il pool int8 paged della sessione (registry in llm_mlx_layer_forward.c). */
@@ -531,6 +532,7 @@ int llm_ai_mlx_session_reset(llm_ai_mlx_session_handle handle) {
     llm_mlx_ngram_free(&s->ngram);
     s->ngram = llm_mlx_ngram_new(3, 1024);
     s->ngram_order = 3;
+    if (s->ngram_lo_built) { llm_mlx_ngram_free(&s->ngram_lo); s->ngram_lo_built = false; }
     s->ngram_built = false;
     s->pinned_tokens = 0;
     s->parked = false;

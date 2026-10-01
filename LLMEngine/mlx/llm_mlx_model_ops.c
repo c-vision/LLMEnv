@@ -314,6 +314,15 @@ int llm_ai_mlx_session_build_ngram(llm_ai_mlx_session_handle handle, int order) 
     s->ngram_order = order;
     llm_mlx_ngram_add(&s->ngram, s->history, s->history_len, NULL);
     s->ngram_built = true;
+    /* Cascade: tabella di fallback a ordine basso (2) se il primario e' >= 4. Piu' predizioni
+     * sul testo ripetitivo/strutturato senza cambiare il primary. */
+    if (s->ngram_lo_built) { llm_mlx_ngram_free(&s->ngram_lo); s->ngram_lo_built = false; }
+    if (order >= 4) {
+        s->ngram_lo = llm_mlx_ngram_new(2, nb);
+        s->ngram_lo_order = 2;
+        llm_mlx_ngram_add(&s->ngram_lo, s->history, s->history_len, NULL);
+        s->ngram_lo_built = true;
+    }
     return 0;
 }
 
