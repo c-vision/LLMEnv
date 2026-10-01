@@ -2377,6 +2377,25 @@ static int llmmodelio_model_ir_schedule(const char* path, int seqlen) {
     else fprintf(LOUT, "  max_batch: n/d (metadati KV assenti)\n");
     return 0;
 }
+/* LOADPLAN (§4.9): legge e VALIDA un artefatto .gmbllm (JSON) — artifact=gmbllm, version, arch,
+ * layers. 0 ok, -1 invalido/assente. */
+static const char* lj_v(const char* j, const char* key);
+static void lj_s(const char* p, char* out, size_t cap);
+
+static int llmmodelio_model_ir_loadplan(const char* path) {
+    FILE* f = fopen(path, "rb"); if (f == NULL) { fprintf(stderr, "LLM TENSOR LOADPLAN: file assente '%s'\\n", path); return -1; }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    if (n <= 0 || n > (1 << 20)) { fclose(f); return -1; }
+    char* j = (char*)malloc((size_t)n + 1); if (!j || fread(j, 1, (size_t)n, f) != (size_t)n) { free(j); fclose(f); return -1; } j[n] = 0; fclose(f);
+    char art[32] = "", arch[96] = ""; int ver = -1;
+    lj_s(lj_v(j, "artifact"), art, sizeof art); lj_s(lj_v(j, "arch"), arch, sizeof arch);
+    { const char* v = lj_v(j, "version"); if (v) ver = atoi(v); }
+    free(j);
+    if (strcmp(art, "gmbllm") != 0) { fprintf(stderr, "LLM TENSOR LOADPLAN: non e' un artefatto gmbllm\\n"); return -1; }
+    if (ver != 1) { fprintf(stderr, "LLM TENSOR LOADPLAN: versione %d non supportata\\n", ver); return -1; }
+    fprintf(LOUT, "LLM TENSOR LOADPLAN '%s': artifact=gmbllm version=%d arch=%s -> VALIDO\n", path, ver, arch);
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2409,6 +2428,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
     if (strcasecmp(s, "GPU") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR GPU: atteso <path>\n"); return -1; }
         return llmmodelio_model_ir_gpu(dir);
+    }
+    if (strcasecmp(s, "LOADPLAN") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR LOADPLAN: atteso <file.gmbllm>\n"); return -1; }
+        return llmmodelio_model_ir_loadplan(dir);
     }
     if (strcasecmp(s, "COMPILE") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR COMPILE: atteso <path>, <out.gmbllm>\n"); return -1; }
