@@ -50,6 +50,7 @@ add_library(llmengine_moe STATIC
     src/llmengine_moe_provider.c
     src/llmengine_moe_qwen3.c
     src/llmengine_moe_diverge.c
+    src/llmengine_moe_diverge_metal.mm
     src/llmengine_moe_qwen3_forward.c
 )
 target_include_directories(llmengine_moe PUBLIC include)
