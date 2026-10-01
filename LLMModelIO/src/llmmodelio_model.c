@@ -2820,7 +2820,7 @@ int llmmodelio_model_convert(const char* src, const char* dst, const char* fmt)
             tm.merges = llmtoken_export_merges(th, &nmg); tm.n_merges = (int)nmg;
             tm.model  = llmtoken_gguf_model(th);
         }
-        int rc = llmcodec_conv_mlx_to_gguf_arch_ex(s, d, ap, 1 /*F16: EMIT fedele; la compressione e' un passo QUANT separato*/, 32, 4, th ? &tm : NULL);
+        int rc = llmcodec_conv_mlx_to_gguf_arch_ex(s, d, ap, LLMCODEC_GGML_T_MXFP4 /*default: affine compat*/, 32, 4, th ? &tm : NULL);
         if (th) llmtoken_free(th);   /* vive fino a qui: gli array sono "borrowed" */
         return rc;
     }
