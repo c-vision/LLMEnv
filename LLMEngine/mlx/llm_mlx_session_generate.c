@@ -73,6 +73,7 @@ static bool llm_ai_mlx_session_generate_async_greedy(LlmMlxSession* s, LlmMlxMod
     struct timespec dp_t0, dp_t1, dp_b0 = {0, 0}, dp_b1 = {0, 0}, dp_b2 = {0, 0}, dp_b3 = {0, 0};
     if (dp) {
         llm_mlx_dp_reset();
+        llm_mlx_dp_set_moe(m->cfg.n_experts, m->cfg.top_k);
         clock_gettime(CLOCK_MONOTONIC, &dp_t0);
     }
     /* LLM_ASYNC_TIME: timer PROPRI (non il profiler che cammina il grafo) per separare le fasi
@@ -551,7 +552,7 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
      * PLE/qwen4). Radici = h (ultimo layer) + le KV cache di tutti i layer. */
     const bool dp_dec = llm_mlx_dp_enabled();
     double dp_build_s = 0.0, dp_eval_s = 0.0;
-    if (dp_dec) llm_mlx_dp_reset();
+    if (dp_dec) { llm_mlx_dp_reset(); llm_mlx_dp_set_moe(m->cfg.n_experts, m->cfg.top_k); }
     for (int step = 0; ok && step < max_new_tokens; step++) {
         if (eos_token_id >= 0 && current_id == eos_token_id) break;
         struct timespec dpt0, dpt1, dpt2;

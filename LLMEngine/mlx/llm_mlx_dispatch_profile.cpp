@@ -88,6 +88,10 @@ Profile& p() {
     return inst;
 }
 
+/* MoE: config del modello per correggere `MB_in` dei GatherQMM (default 0 = nessun MoE / non noto). */
+static int g_dp_n_experts = 0;
+static int g_dp_top_k = 0;
+
 /* DFS iterativa da una radice: conta i nodi con primitiva NUOVI per questo passo e li
  * accumula nell'istogramma. Iterativa per scelta: il grafo di un passo di decode e' profondo
  * ~(n_layer × nodi-per-layer) e una ricorsione su un modello 96-layer supererebbe lo stack di
@@ -146,13 +150,43 @@ long long walk(const mlx::core::array* root, StepSeen& seen, long long& bytes_ou
          * reale del nodo. Una primitiva e' UN dispatch (dedup sopra), quindi ogni input e'
          * contato una volta per passo -> `bytes_in/steps` = EFFECTIVE_WEIGHT_BW per token. */
         long long nbi = 0;
-        for (const mlx::core::array& in : a->inputs()) {
+        const std::vector<mlx::core::array>& ains = a->inputs();
+        /* MoE: un nodo `GatherQMM`/`GatherMM` LEGGE logicamente l'INTERO banco esperti (l'input con
+         * piu' byte), ma in memoria tocca solo gli esperti ATTIVI. Il routing e' runtime, quindi la
+         * frazione si prende dal config (`n_experts`/`top_k`, via llm_mlx_dp_set_moe): senza di esso
+         * `MB_in` dei MoE resta un limite superiore (es. glm4_moe ~57 GB/token, GB/s_letto >> ceiling). */
+        const bool is_gather = (name == "GatherQMM" || name == "GatherMM");
+        double gather_frac = 1.0;
+        size_t gather_bank = (size_t)-1;
+        if (is_gather && !ains.empty()) {
+            long long best = -1;
+            for (size_t j = 0; j < ains.size(); j++) {
+                const long long nb = (long long)ains[j].nbytes();
+                if (nb > best) { best = nb; gather_bank = j; }
+            }
+            if (g_dp_n_experts > 0 && g_dp_top_k > 0) {
+                gather_frac = (double)g_dp_top_k / (double)g_dp_n_experts;
+                if (gather_frac > 1.0) gather_frac = 1.0;
+            }
+        }
+        for (size_t ii = 0; ii < ains.size(); ii++) {
+            const mlx::core::array& in = ains[ii];
             /* Ogni array LETTO una volta per passo (in mlx i pesi NON sono leaf: hanno una
              * primitiva, quindi il dedup e' per `id()` su TUTTI gli input, non solo le foglie).
              * Cosi' `bytes_in` = l'insieme di lettura unico del passo = pesi + KV (+ le
              * attivazioni condivise una volta) = numeratore di EFFECTIVE_WEIGHT_BW. */
             if (!seen.leaf.insert(in.id()).second) continue;
-            nbi += (long long)in.nbytes();
+            bool is_bank = false;
+            if (is_gather) {
+                if (g_dp_n_experts > 0) {
+                    const mlx::core::Shape& ish = in.shape();
+                    is_bank = (ish.size() >= 1 && (long long)ish[0] == (long long)g_dp_n_experts);
+                } else {
+                    is_bank = (ii == gather_bank);
+                }
+            }
+            const double scale = is_bank ? gather_frac : 1.0;
+            nbi += (long long)((double)in.nbytes() * scale);
         }
         f.bytes_in += nbi; g.bytes_in += nbi; d.bytes_in_total += nbi;
         /* Non si spingono i siblings: in mlx::core::array::make_arrays tutti gli output di
@@ -174,6 +208,11 @@ bool llm_mlx_dp_enabled(void) {
         d.on = (getenv("LLM_DISPATCH") != nullptr);
     }
     return d.on;
+}
+
+void llm_mlx_dp_set_moe(int n_experts, int top_k) {
+    g_dp_n_experts = (n_experts > 0) ? n_experts : 0;
+    g_dp_top_k = (top_k > 0) ? top_k : 0;
 }
 
 void llm_mlx_dp_reset(void) {

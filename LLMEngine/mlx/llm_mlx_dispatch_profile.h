@@ -78,6 +78,10 @@ bool llm_mlx_dp_enabled(void);
 /* Azzera il set "gia' visti" e l'istogramma. Va chiamato all'inizio della generazione. */
 void llm_mlx_dp_reset(void);
 
+/* MoE: per correggere `MB_in` dei nodi `GatherQMM` (che leggono l'intero banco esperti) si passa
+ * il numero di esperti totali e quanti ne attiva il routing (`config.json`). 0 = nessun MoE. */
+void llm_mlx_dp_set_moe(int n_experts, int top_k);
+
 /* Cammina le radici e conta i nodi con primitive NON gia' visti, accumulandoli nell'istogramma
  * per tipo di primitiva. Da chiamare a grafo del passo COSTRUITO ma PRIMA del dispatch (vedi la
  * REGOLA OPERATIVA sopra: dopo l'eval le radici non sono piu' camminabili). */
