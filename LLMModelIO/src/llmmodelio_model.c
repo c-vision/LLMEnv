@@ -2396,6 +2396,43 @@ static int llmmodelio_model_ir_loadplan(const char* path) {
     fprintf(LOUT, "LLM TENSOR LOADPLAN '%s': artifact=gmbllm version=%d arch=%s -> VALIDO\n", path, ver, arch);
     return 0;
 }
+/* STATE (I7) + GRAPH EXPORT (§4.9) — report-only. */
+static int llmmodelio_model_ir_state(const char* path) {
+    size_t ln = strlen(path);
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) { if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0; }
+    else { if (llmmodelio_arch_resolve(path) != 0) return -1; }
+    if (!g_arch_ok) { fprintf(LOUT, "LLM TENSOR STATE: arch non risolta\\n"); return -1; }
+    int mtp = g_arch.mm_mtp || 0;
+    fprintf(LOUT, "# LLM TENSOR STATE '%s' arch=%s\n  phase: prefill+decode (I7)\n  state=%s modality=%s speculation=%s kv.dtype=%s\n",
+            path, g_arch.arch, g_arch.runtime_state[0]?g_arch.runtime_state:"(none)", llmdesc_modality(&g_arch),
+            mtp?(g_arch.mm_dspark?"DSPARK(MTP)":"MTP"):"NONE", g_arch.runtime_kv_dtype[0]?g_arch.runtime_kv_dtype:"-");
+    return 0;
+}
+static int llmmodelio_model_ir_gexport(const char* path, const char* out) {
+    if (!out || !*out) { fprintf(stderr, "LLM TENSOR GEXPORT: atteso <path>, <out.dot>\\n"); return -1; }
+    int F[1024]; memset(F, 0, sizeof F); int maxl = -1; size_t ln = strlen(path);
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) {
+        if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+        LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+        if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+        for (uint64_t i = 0; i < fi.n_tensors; i++) { const char* r = g_arch_ok ? llmdesc_role(&g_arch, fi.tensors[i].name) : "OTHER";
+            int L = model_layer_of(fi.tensors[i].name); if (L < 0) L = 0; if (L > maxl) maxl = L; if (L > 1023) continue;
+            if (strncmp(r,"ATTN",4)==0) F[L]|=1; else if (strstr(r,"EXPERT")||strcmp(r,"ROUTER")==0||strstr(fi.tensors[i].name,"exps")) F[L]|=2; else if (strncmp(r,"FFN",3)==0) F[L]|=4; else if (strstr(r,"NORM")) F[L]|=8; }
+        llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    } else { if (llmmodelio_arch_resolve(path) != 0) return -1; }
+    FILE* o = fopen(out, "w"); if (!o) return -1;
+    fprintf(o, "digraph model { rankdir=LR; node [shape=box];\n");
+    for (int L = 0; L <= maxl && L < 1024; L++) { if (!F[L]) continue;
+        fprintf(o, "  L%d[shape=record,label=\"layer %d\"];\n", L, L);
+        if (F[L]&1) fprintf(o, "  L%d -> A%d[label=\"attn\"]; A%d[label=\"attention\"];\n", L, L, L);
+        if (F[L]&4) fprintf(o, "  L%d -> F%d[label=\"ffn\"]; F%d[label=\"ffn\"];\n", L, L, L);
+        if (F[L]&2) fprintf(o, "  L%d -> M%d[label=\"moe\"]; M%d[label=\"moe\"];\n", L, L, L);
+        if (L+1 <= maxl && F[L+1]) fprintf(o, "  L%d -> L%d;\n", L, L+1);
+    }
+    fprintf(o, "}\n"); fclose(o);
+    fprintf(LOUT, "LLM TENSOR GEXPORT '%s' -> '%s' (DOT, layers=%d)\n", path, out, maxl+1);
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2428,6 +2465,14 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
     if (strcasecmp(s, "GPU") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR GPU: atteso <path>\n"); return -1; }
         return llmmodelio_model_ir_gpu(dir);
+    }
+    if (strcasecmp(s, "STATE") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR STATE: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_state(dir);
+    }
+    if (strcasecmp(s, "GEXPORT") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR GEXPORT: atteso <path>, <out.dot>\n"); return -1; }
+        return llmmodelio_model_ir_gexport(dir, tn);
     }
     if (strcasecmp(s, "LOADPLAN") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR LOADPLAN: atteso <file.gmbllm>\n"); return -1; }
