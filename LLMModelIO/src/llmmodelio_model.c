@@ -2843,6 +2843,46 @@ static int llmmodelio_model_ir_mplan(const char* path, double budget_gb) {
     fprintf(LOUT, "# DATA-MOVEMENT PLAN: PREFETCH expert-group BEFORE MOE_LAYER[N] (router) | RESIDENT KV FOR DECODE | WIRE weights-at-load | EVICT on_pressure | UNWIRE after_block\n");
     return 0;
 }
+/* LLAMA OPTIMIZER — EXPERT_RESIDENCY_POLICY model-aware + router->prefetch (report-only).
+ * Inferisce n_esperti dal tensore esperti + top-k dal meta; deriva la policy per-layer dal budget. */
+static int llmmodelio_model_ir_expolicy(const char* path, double budget_gb) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR EXPOLICY: solo GGUF\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    long nexp = -1, topk = -1; double expert_b = 0; int layers_exp = 0;
+    for (int i = 0; i < nkv; i++) { const char* k = kv[i].key;
+        if (strstr(k, "expert_used_count") || strstr(k, "expert_used")) topk = (long)kv[i].u32;
+        else if (strstr(k, "expert_count") && !strstr(k, "used") && !strstr(k, "group") && !strstr(k, "shared")) nexp = (long)kv[i].u32;
+    }
+    for (uint64_t i = 0; i < fi.n_tensors; i++) {
+        const char* r = llmo_role_of(fi.tensors[i].name);
+        if (strncmp(r, "experts", 7) != 0 && strncmp(r, "shared", 6) != 0) continue;
+        uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d];
+        uint64_t b = 0; if (llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b) == 0) expert_b += (double)b;
+        /* n_esperti = prima dimensione del tensore esperti raggruppato (switch_mlp/ffn_*_exps) */
+        if (nexp < 0 && strstr(fi.tensors[i].name, "gate_proj") && fi.tensors[i].ndim >= 1) nexp = (long)fi.tensors[i].dims[0];
+        if (strstr(fi.tensors[i].name, "switch_mlp") || strstr(fi.tensors[i].name, "exps")) layers_exp++;
+    }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    if (topk <= 0) topk = 8;   /* fallback tipico */
+    fprintf(LOUT, "# LLM TENSOR EXPOLICY '%s' experts=%ld top_k=%ld expert_bytes=%.1f MiB (LLAMA OPTIMIZER)\n",
+            path, nexp, topk, expert_b/(1024.0*1024.0));
+    if (budget_gb > 0) {
+        double bud = budget_gb*1024.0*1024.0*1024.0;
+        const char* pol = (expert_b <= bud) ? "STATIC (tutti resident)" : "LRU+RECENCY (working-set)";
+        double frac = expert_b > 0 ? (bud < expert_b ? bud/expert_b : 1.0) : 1.0;
+        fprintf(LOUT, "# budget=%.1f GiB -> policy=%s (residente %.1f%%)\n", budget_gb, pol, frac*100.0);
+    } else {
+        fprintf(LOUT, "# policy suggerite: STATIC (fit) | LRU | LFU | RECENCY | PREDICTIVE (router-led)\n");
+    }
+    fprintf(LOUT, "# router->PREFETCH: ad ogni MOE_LAYER[N], il router attiva top_k=%ld esperti -> PREFETCH di QUEI %ld\n", topk, topk);
+    fprintf(LOUT, "  BEFORE MOE_LAYER[N]  (N_BLOCKS_AHEAD=1, dal router della layer N-1 o dalla stessa)\n");
+    fprintf(LOUT, "  EVICTION=WHEN_PRESSURE, LIFETIME=BLOCK (working-set per blocco), transfer_cost=stream_on_miss\n");
+    fprintf(LOUT, "  ENGRAM/IDX: i tensori condivisi (shared_experts) restano RESIDENT (lifetime=model)\n");
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2882,6 +2922,7 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
     if (strcasecmp(s, "IRLEVELS") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR IRLEVELS: atteso <path>\n");return -1;} return llmmodelio_model_ir_irlevels(dir); }
     if (strcasecmp(s, "QUANTIR") == 0 || strcasecmp(s, "QUANT_IR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR QUANTIR: atteso <path>\n");return -1;} return llmmodelio_model_ir_quantir(dir); }
     if (strcasecmp(s, "OBUDGET") == 0 || strcasecmp(s, "QUALITYLEVEL") == 0 || strcasecmp(s, "OBUDGETIR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR OBUDGET: atteso <path>[, <O0..O4>]\n");return -1;} return llmmodelio_model_ir_obudget(dir, tn); }
+    if (strcasecmp(s, "EXPOLICY") == 0 || strcasecmp(s, "EXPERTPOLICY") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR EXPOLICY: atteso <path>[, <budget_gb>]\n");return -1;} return llmmodelio_model_ir_expolicy(dir, *tn ? atof(tn) : 0.0); }
     if (strcasecmp(s, "MPLAN") == 0 || strcasecmp(s, "MEMORYPLAN") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR MPLAN: atteso <path>[, <budget_gb>]\n");return -1;} return llmmodelio_model_ir_mplan(dir, *tn ? atof(tn) : 0.0); }
     if (strcasecmp(s, "MEMPLAN") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR MEMPLAN: atteso <path>\n");return -1;} return llmmodelio_model_ir_memplan(dir); }
     if (strcasecmp(s, "KVPLAN") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR KVPLAN: atteso <path>\n");return -1;} return llmmodelio_model_ir_kvplan(dir); }
