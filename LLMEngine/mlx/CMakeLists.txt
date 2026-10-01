@@ -295,6 +295,9 @@ add_library(llm_ai_mlx SHARED
     # API e' comunque esposta extern "C" (llm_mlx_fused_rope_append.h), quindi
     # llmengine_mlx.c resta C puro. Adaptato da mlxcel (Apache-2.0).
     llm_mlx_fused_rope_append.cpp
+    # Kernel Metal fuso "residual + RMSNorm" (y = x + w*rmsnorm(r)): toglie 1 nodo/layer.
+    # C++ per mlx_fast_metal_kernel; ABI C (llm_mlx_fused_residual_rms.h).
+    llm_mlx_fused_residual_rms.cpp
     # Kernel Metal custom per il decode SDPA a head_dim che fora il fused MLX (gemma4 hd=512).
     # C++ perche' usa mlx_fast_metal_kernel (API C++ di mlx via mlx-c); ABI esportata C
     # (llm_mlx_flash_decode_kernel.h) cosi' llmengine_mlx.c resta C puro.

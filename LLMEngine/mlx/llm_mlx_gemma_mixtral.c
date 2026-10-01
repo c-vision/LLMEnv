@@ -9,6 +9,7 @@
 #include "llm_mlx_flash_decode_kernel.h"
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
 #include "llm_mlx_fused_rope_append.h"
+#include "llm_mlx_fused_residual_rms.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -501,10 +502,39 @@ bool gemma4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
     tname_gemma4(layer_idx, "post_attention_layernorm.weight", namebuf, sizeof(namebuf));
     ok = ok && multishard_get(&m->weights, namebuf, &ln2_w);
     CHK(ok, "post_attention_layernorm lookup");
+    /* FUSIONE residual+RMSNorm (opt-in LLM_FUSE_RESIDUAL_RMS): y = x + w*rmsnorm(attn_out) in UN
+     * dispatch al posto di {RMSNorm -> Add}. VERIFY calcola entrambi, stampa il max_abs_diff e usa
+     * l'originale. Fallback silenzioso se la geometria non e' supportata. */
     mlx_array attn_normed = mlx_array_new();
-    if (ok) { ok = rms_norm_cfg(&attn_normed, attn_out, ln2_w, m->cfg.rms_norm_eps, m->stream); CHK(ok, "post_attention_layernorm"); }
-
-    if (ok) { ok = mlx_add(out_h, x, attn_normed, m->stream) == 0; CHK(ok, "residual add (attn)"); }
+    bool rr_fused = false;
+    if (ok && (llm_mlx_fused_residual_rms_enabled() || llm_mlx_fused_residual_rms_verify_enabled()) &&
+        mlx_array_ndim(x) == 3 && mlx_array_ndim(attn_out) == 3) {
+        mlx_array yr = mlx_array_new();
+        if (llm_mlx_fused_residual_rms(&yr, x, attn_out, ln2_w, m->cfg.rms_norm_eps, m->stream)) {
+            if (llm_mlx_fused_residual_rms_verify_enabled()) {
+                mlx_array ref = mlx_array_new();
+                bool okr = rms_norm_cfg(&attn_normed, attn_out, ln2_w, m->cfg.rms_norm_eps, m->stream);
+                if (okr) okr = mlx_add(&ref, x, attn_normed, m->stream) == 0;
+                double dr = okr ? llm_mlx_max_abs_diff(yr, ref, (size_t)mlx_array_size(yr), m->stream) : -1.0;
+                static int rr_once = 0;
+                if (!rr_once || dr < 0 || dr > 1e-2) {
+                    rr_once = 1;
+                    fprintf(stderr, "[fuse-residual-rms-verify] layer=%d diff=%.6g%s\n",
+                            layer_idx, dr, (dr < 0 || dr > 1e-2) ? "  <-- MISMATCH" : "");
+                }
+                mlx_array_free(ref);
+                ok = ok && okr;
+            } else {
+                ok = mlx_array_set(out_h, yr) == 0;
+                rr_fused = true;
+            }
+        }
+        mlx_array_free(yr);
+    }
+    if (ok && !rr_fused) {
+        if (ok) { ok = rms_norm_cfg(&attn_normed, attn_out, ln2_w, m->cfg.rms_norm_eps, m->stream); CHK(ok, "post_attention_layernorm"); }
+        if (ok) { ok = mlx_add(out_h, x, attn_normed, m->stream) == 0; CHK(ok, "residual add (attn)"); }
+    }
 
     mlx_array all[] = {
         ln_w, normed, qw, qs, qb, q0, q_heads, qn_w, q_normed,

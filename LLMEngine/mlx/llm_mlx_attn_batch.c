@@ -5,6 +5,7 @@
 #include "llmengine_mlx.h"
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
+#include "llm_mlx_fused_residual_rms.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
 #include "llm_mlx_gdn_gate_kernel.h"
@@ -409,8 +410,32 @@ static bool gemma4_attention_block_batch(LlmMlxModel* m, int layer_idx, LlmMlxSe
     tname_gemma4(layer_idx, "post_attention_layernorm.weight", ln2b, sizeof(ln2b));
     if (ok) ok = multishard_get(&m->weights, ln2b, &ln2_w);
     mlx_array attn_normed = mlx_array_new();
-    if (ok) ok = rms_norm_cfg(&attn_normed, attn_out, ln2_w, m->cfg.rms_norm_eps, st);
-    if (ok) ok = mlx_add(out_h, x, attn_normed, st) == 0;
+    /* FUSIONE residual+RMSNorm (opt-in LLM_FUSE_RESIDUAL_RMS): y = x + w*rmsnorm(attn_out) in UN
+     * dispatch al posto di {RMSNorm -> Add}. Fallback silenzioso all'originale. */
+    bool rr_fused = false;
+    if (ok && (llm_mlx_fused_residual_rms_enabled() || llm_mlx_fused_residual_rms_verify_enabled()) &&
+        mlx_array_ndim(x) == 3 && mlx_array_ndim(attn_out) == 3) {
+        mlx_array yr = mlx_array_new();
+        if (llm_mlx_fused_residual_rms(&yr, x, attn_out, ln2_w, m->cfg.rms_norm_eps, st)) {
+            if (llm_mlx_fused_residual_rms_verify_enabled()) {
+                mlx_array ref = mlx_array_new();
+                bool okr = rms_norm_cfg(&attn_normed, attn_out, ln2_w, m->cfg.rms_norm_eps, st);
+                if (okr) okr = mlx_add(&ref, x, attn_normed, st) == 0;
+                double dr = okr ? llm_mlx_max_abs_diff(yr, ref, (size_t)mlx_array_size(yr), st) : -1.0;
+                if (dr < 0 || dr > 1e-2)
+                    fprintf(stderr, "[fuse-residual-rms-verify] layer=%d diff=%.6g  <-- MISMATCH\n", layer_idx, dr);
+                mlx_array_free(ref);
+            } else {
+                ok = mlx_array_set(out_h, yr) == 0;
+                rr_fused = true;
+            }
+        }
+        mlx_array_free(yr);
+    }
+    if (ok && !rr_fused) {
+        if (ok) ok = rms_norm_cfg(&attn_normed, attn_out, ln2_w, m->cfg.rms_norm_eps, st);
+        if (ok) ok = mlx_add(out_h, x, attn_normed, st) == 0;
+    }
 
     mlx_array all[] = { ln_w, qw, qs, qb, kw, ks, kb, vw, vs, vb, ow, os, ob, qn_w, kn_w,
                         normed, q0, k0, v0, q_heads, k_heads, v_heads, q_normed, k_normed, v_normed,
