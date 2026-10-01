@@ -245,8 +245,8 @@ void llm_mlx_dp_reset(void) {
     d.total = 0;
     d.bytes_total = 0;
     d.bytes_in_total = 0;
-    g_dp_spec_tok = 0;
-    g_dp_spec_pass = 0;
+    /* NB: i contatori spec NON si azzerano qui (il generate_ngram annidato richiama il reset e
+     * cancellerebbe l'amortizzazione accumulata): li azzera il report dopo averli stampati. */
     d.build_sec = 0;
     d.eval_sec = 0;
     d.last_new = 0;
