@@ -2077,6 +2077,32 @@ static int llmmodelio_model_ir_graph(const char* path) {
     }
     return 0;
 }
+/* MEMORY IR (I2, report-only): byte per categoria (embed/attn/experts/router/ffn/norm/output/other). */
+static int llmmodelio_model_ir_memory(const char* path) {
+    unsigned long long cat[8] = {0}; /* 0 embed 1 attn 2 experts 3 router 4 ffn 5 norm 6 output 7 other */
+    const char* cn[8] = {"embedding","attention","experts","router","ffn_dense","norm","output","other"};
+    size_t ln = strlen(path); int n = 0;
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) {
+        if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+        LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+        if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+        for (uint64_t i = 0; i < fi.n_tensors; i++) {
+            const char* r = g_arch_ok ? llmdesc_role(&g_arch, fi.tensors[i].name) : "OTHER";
+            uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d];
+            uint64_t b = 0; llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b);
+            int c = 7;
+            if (strcmp(r,"EMBEDDING")==0) c=0; else if (strncmp(r,"ATTN",4)==0) c=1;
+            else if (strcmp(r,"ROUTED_EXPERT")==0||strcmp(r,"SHARED_EXPERT")==0) c=2; else if (strcmp(r,"ROUTER")==0) c=3;
+            else if (strncmp(r,"FFN",3)==0) c=4; else if (strstr(r,"NORM")) c=5; else if (strcmp(r,"OUTPUT")==0) c=6;
+            cat[c] += b; n++;
+        }
+        llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    } else { fprintf(LOUT, "LLM TENSOR MEMORY: solo GGUF (per ora) — '%s'\n", path); return -1; }
+    unsigned long long tot = 0; for (int c = 0; c < 8; c++) tot += cat[c];
+    fprintf(LOUT, "# LLM TENSOR MEMORY '%s' tensori=%d total_bytes=%llu (%.2f GiB)\n", path, n, tot, (double)tot/(1024.0*1024.0*1024.0));
+    for (int c = 0; c < 8; c++) if (cat[c]) fprintf(LOUT, "  %-10s %llu bytes (%.1f%%)\n", cn[c], cat[c], tot ? 100.0*(double)cat[c]/(double)tot : 0.0);
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2089,6 +2115,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "MEMORY") == 0 || strcasecmp(s, "COST") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR MEMORY: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_memory(dir);
     }
     if (strcasecmp(s, "GRAPH") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR GRAPH: atteso <path>\n"); return -1; }
