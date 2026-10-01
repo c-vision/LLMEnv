@@ -2701,6 +2701,35 @@ static int llmmodelio_model_ir_policyir(const char* path) {
     fprintf(LOUT, "  DEFAULT fmt=(dal modello)  PRIORITY=roles-first-match\n");
     return 0;
 }
+/* I7 — fasi PREFILL | PREFILL_KV | DECODE: geometria, KV, classe di op, roofline (§4.5). */
+static int llmmodelio_model_ir_phase(const char* path, long seq) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR PHASE: solo GGUF\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    long bc = -1, hkv = -1, hd = -1, kl = -1, vl = -1, en = -1;
+    for (int i = 0; i < nkv; i++) { const char* k = kv[i].key; long v = (long)kv[i].u32;
+        if (strstr(k,"attention.head_count_kv")) hkv=v; else if (strstr(k,"attention.head_count")) hd=v;
+        else if (strstr(k,"attention.key_length")) kl=v; else if (strstr(k,"attention.value_length")) vl=v;
+        else if (strstr(k,"block_count")) bc=v; else if (strstr(k,"embedding_length")) en=v; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    if (seq <= 0) seq = 512;
+    long kd = kl>0?kl:((en>0&&hd>0)?en/hd:-1); long vd = vl>0?vl:kd;
+    double kvpt = (bc>0&&hkv>0&&kd>0&&vd>0) ? (double)bc*(double)hkv*(double)(kd+vd)*2.0 : -1.0;
+    fprintf(LOUT, "# LLM TENSOR PHASE '%s' arch=%s seq=%ld (I7: PREFILL | PREFILL_KV | DECODE)\n",
+            path, g_arch_ok?g_arch.arch:"-", seq);
+    fprintf(LOUT, "# fase\ttokens\tbatch\tkv_step(B)\tkv_total(B)\top\troofline\n");
+    double kv_pre = kvpt>0 ? kvpt*(double)seq : -1.0;
+    fprintf(LOUT, "PREFILL\t%ld\t%ld\t%.0f\t%.0f\t%s\tcompute-bound (GEMM, AI alto)\n",
+            seq, seq, kvpt, kv_pre, "matmul(batched)");
+    fprintf(LOUT, "PREFILL_KV\t%ld\t%ld\t%.0f\t%.0f\t%s\tKV scritta durante prefill, riusata in decode\n",
+            0, 0, kvpt, kv_pre, "kv_write");
+    fprintf(LOUT, "DECODE\t1\t1\t%.0f\t%.0f\t%s\tmemory-bound (GEMV, AI basso; KV riuso, no recompute)\n",
+            kvpt, kvpt, "matvec+attn");
+    fprintf(LOUT, "# note: prefill domina il compute, decode domina la banda (KV). kv/token=%.1f B, kv@seq=%.0f B\n", kvpt, kv_pre);
+    return 0;
+}
 static int llmmodelio_model_ir_irlevels(const char* path) {
     size_t ln = strlen(path);
     if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR IRLEVELS: solo GGUF\\n"); return -1; }
@@ -2743,6 +2772,7 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         return llmmodelio_model_ir_gpu(dir);
     }
     if (strcasecmp(s, "POLICYIR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR POLICYIR: atteso <path>\n");return -1;} return llmmodelio_model_ir_policyir(dir); }
+    if (strcasecmp(s, "PHASE") == 0 || strcasecmp(s, "PREFILL") == 0 || strcasecmp(s, "PREFILL_KV") == 0 || strcasecmp(s, "DECODE") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR PHASE: atteso <path>[, <seqlen>]\n");return -1;} return llmmodelio_model_ir_phase(dir, *tn ? atol(tn) : 0); }
     if (strcasecmp(s, "IRLEVELS") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR IRLEVELS: atteso <path>\n");return -1;} return llmmodelio_model_ir_irlevels(dir); }
     if (strcasecmp(s, "QUANTIR") == 0 || strcasecmp(s, "QUANT_IR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR QUANTIR: atteso <path>\n");return -1;} return llmmodelio_model_ir_quantir(dir); }
     if (strcasecmp(s, "OBUDGET") == 0 || strcasecmp(s, "QUALITYLEVEL") == 0 || strcasecmp(s, "OBUDGETIR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR OBUDGET: atteso <path>[, <O0..O4>]\n");return -1;} return llmmodelio_model_ir_obudget(dir, tn); }
