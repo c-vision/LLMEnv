@@ -147,11 +147,7 @@ int main(void) {
     /* (a7) IQ2_XXS / IQ2_XS encode->decode */
     { float x[256]; unsigned s=11; for(int i=0;i<256;i++){ s=s*1103515245u+12345u; x[i]=(float)((s>>8)&0xFFFF)/32768.0f-1.0f; }
       float y[256];
-      { uint8_t q[66]; memset(q,0,66); llmcodec_iq2_xxs_quantize(x,256,q,NULL,0,256);
-        CHECK(llmcodec_ggml_dequant_row(LLMCODEC_GGML_T_IQ2_XXS, q, y, 256)==0, "iq2_xxs dec");
-        double md=0; for(int i=0;i<256;i++) md=fmax(md,fabs((double)y[i]-x[i]));
-        printf("[iq2] IQ2_XXS maxerr=%.4e (== ggml 0.56)\n", md);
-        CHECK(md < 2.0e0, "iq2_xxs round-trip"); }
+      /* iq2_xxs encode: PUL (rimosso da LLMEnv) */
       { uint8_t q[110]; memset(q,0,110); llmcodec_iq3_s_quantize(x,256,q,NULL,0,256);
         CHECK(llmcodec_ggml_dequant_row(LLMCODEC_GGML_T_IQ3_S, q, y, 256)==0, "iq3_s dec");
         double md=0; for(int i=0;i<256;i++) md=fmax(md,fabs((double)y[i]-x[i]));

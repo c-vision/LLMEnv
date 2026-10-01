@@ -24,7 +24,7 @@ add_library(llmcodec STATIC
 
 # PLUGIN CODEC (dylib): le IMPLEMENTAZIONI vivono QUI, mai nel core.
 add_library(llmcodec_ggml SHARED
-    src/llmcodec_ggml_quants.c src/llmcodec_ggml_iq_grids.c src/llmcodec_iq2_xxs.c
+    src/llmcodec_ggml_quants.c src/llmcodec_ggml_iq_grids.c src/llmcodec_make_qp.c
     plugins/ggml/codec_ggml.c)
 add_library(llmcodec_mlx_affine SHARED src/llmcodec_moe_quant.c plugins/mlx_affine/codec_mlx_affine.c)
 add_library(llmcodec_fp8 SHARED src/llmcodec_fp8_fp4.c plugins/fp8/codec_fp8.c)
