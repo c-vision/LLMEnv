@@ -49,6 +49,7 @@ add_library(llmengine_moe STATIC
     src/llmengine_moe_prof.c
     src/llmengine_moe_provider.c
     src/llmengine_moe_qwen3.c
+    src/llmengine_moe_diverge.c
     src/llmengine_moe_qwen3_forward.c
 )
 target_include_directories(llmengine_moe PUBLIC include)
@@ -242,3 +243,5 @@ add_test(NAME moe_mla COMMAND test_moe_mla)
 add_test(NAME moe_quant COMMAND test_moe_quant)
 add_test(NAME quant_alloc COMMAND test_quant_alloc)
 set_target_properties(llmengine_moe PROPERTIES INSTALL_RPATH "@loader_path")
+
+add_executable(test_moe_diverge tests/test_moe_diverge.c src/llmengine_moe_diverge.c)
