@@ -483,7 +483,12 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
                  * risultato (prima era chiamata 2 volte -> 2 build del draft per ingresso). */
                 const bool buf_has = (s->spec_buf_pos < s->spec_buf_len);
                 const bool can0 = buf_has ? false : llm_mlx_session_spec_can(s);
-                if (buf_has || can0) {
+                /* L1 — AUTO-DISABLE (stile Lightning-mlx/Gufo, deterministico): se l'acceptance
+                 * OSSERVATA e' bassa la spec costa piu' di quanto rende -> si torna al path AR
+                 * principale. Soglia: EWMA dei token accettati per passata < 1.5 con >= 8 campioni
+                 * (evita di spegnere per un singolo passo sfortunato). Latch di sessione. */
+                const bool spec_profitable = (s->spec_drafts < 8) || (s->spec_acc_ewma >= 1.5f);
+                if ((buf_has || can0) && spec_profitable) {
                     int cnt = 0;
                     bool first_iter = true;
                     while (cnt < max_new_tokens) {
