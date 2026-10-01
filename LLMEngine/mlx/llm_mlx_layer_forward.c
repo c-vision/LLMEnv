@@ -520,6 +520,17 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
             if (ps_hook) { psctx.m = m; psctx.s = kvq_sess; psctx.layer = layer_idx;
                            llm_pagesel_hook.fn = llm_pagesel_sdpa_dispatch; llm_pagesel_hook.ctx = &psctx; }
             ok = m->arch->attn(m, layer_idx, cache_offset, n_tokens, x, k_cache, v_cache, has_cache, &h);
+            /* SONDA deterministica (A): identita' dei BUFFER (mlx_array={void*ctx}) di input/output
+             * del layer. Serve a vedere l'aliasing tra stato (KV/aux) e intermedi quando si aggiunge
+             * un nodo di lettura (cattura snap): se un leaf condivide il buffer con lo stato, la
+             * donation in-place diventa copia e il forward diverge. Zero costo se l'env e' assente. */
+            if (getenv("LLM_LAYER_CTX")) {
+                fprintf(stderr, "[layerctx] L=%d x=%p h=%p kc=%p vc=%p has=%d n=%d\n",
+                        layer_idx, x.ctx, h.ctx,
+                        (k_cache && k_cache->ctx) ? k_cache->ctx : NULL,
+                        (v_cache && v_cache->ctx) ? v_cache->ctx : NULL,
+                        (int)has_cache, n_tokens);
+            }
             if (ps_hook) { llm_pagesel_hook.fn = NULL; llm_pagesel_hook.ctx = NULL; }
             if (ps_upd && ok) llm_pagesel_update(m, kvq_sess, layer_idx, *k_cache);
             if (kvq_read_used) { llm_kvq_hook.fn = NULL; llm_kvq_hook.ctx = NULL; }
