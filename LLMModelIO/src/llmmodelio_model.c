@@ -2545,6 +2545,28 @@ static int llmmodelio_model_ir_view(const char* path) {
     llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
     return 0;
 }
+/* POLICYIR (§4.3 policy definibile) + IRLEVELS (§4.2 L0-L5) — report-only. */
+static int llmmodelio_model_ir_policyir(const char* path) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR POLICYIR: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    if (!g_arch_ok) { fprintf(stderr, "LLM TENSOR POLICYIR: arch non risolta\\n"); return -1; }
+    fprintf(LOUT, "# LLM TENSOR POLICYIR '%s' arch=%s (Policy definibile — regole dichiarative)\n", path, g_arch.arch);
+    fprintf(LOUT, "  WHEN role=%s THEN fmt=%s (quant); recipe=%s boost_fmt=%s\n",
+            "ROUTED_EXPERT", llmdesc_fmt(&g_arch, "ROUTED_EXPERT") ? llmdesc_fmt(&g_arch, "ROUTED_EXPERT") : "-", g_arch.recipe, g_arch.boost_fmt);
+    for (int i = 0; i < g_arch.n_quant; i++)
+        fprintf(LOUT, "  WHEN role=%s THEN fmt=%s\n", g_arch.quant[i].role, g_arch.quant[i].fmt);
+    fprintf(LOUT, "  DEFAULT fmt=(dal modello)  PRIORITY=roles-first-match\n");
+    return 0;
+}
+static int llmmodelio_model_ir_irlevels(const char* path) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR IRLEVELS: solo GGUF\\n"); return -1; }
+    fprintf(LOUT, "# LLM TENSOR IRLEVELS '%s' (gerarchia IR L0-L5)\n", path);
+    fprintf(LOUT, "  L0 source (HF/MLX/safetensors) | L1 container (GGUF) <-- questo | L2 Model IR (ruoli) | L3 primitive (attn/moe) | L4 execution | L5 lowering(MLX/Metal/C)\n");
+    fprintf(LOUT, "  fasi: PREFILL | PREFILL_KV | DECODE\n");
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2578,6 +2600,8 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         if (!*dir) { fprintf(stderr, "LLM TENSOR GPU: atteso <path>\n"); return -1; }
         return llmmodelio_model_ir_gpu(dir);
     }
+    if (strcasecmp(s, "POLICYIR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR POLICYIR: atteso <path>\n");return -1;} return llmmodelio_model_ir_policyir(dir); }
+    if (strcasecmp(s, "IRLEVELS") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR IRLEVELS: atteso <path>\n");return -1;} return llmmodelio_model_ir_irlevels(dir); }
     if (strcasecmp(s, "QUANTIR") == 0 || strcasecmp(s, "QUANT_IR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR QUANTIR: atteso <path>\n");return -1;} return llmmodelio_model_ir_quantir(dir); }
     if (strcasecmp(s, "MEMPLAN") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR MEMPLAN: atteso <path>\n");return -1;} return llmmodelio_model_ir_memplan(dir); }
     if (strcasecmp(s, "KVPLAN") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR KVPLAN: atteso <path>\n");return -1;} return llmmodelio_model_ir_kvplan(dir); }
