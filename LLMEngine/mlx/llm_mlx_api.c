@@ -683,13 +683,20 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
     while (emitted < max_tokens) {
         if (anchor == eos_token) break;   /* eos NON emesso (come session_generate) */
         out_ids[emitted++] = anchor;
-        if (emitted >= max_tokens) break;
+        /* NB (fix 2026-10-01): il verify gira SEMPRE, anche se il chunk e' pieno: serve a
+         * calcolare `next_anchor` (= il pending per la chiamata successiva). Il vecchio break
+         * anticipato lasciava pending=anchor (gia' emesso) -> il token veniva RI-EMESSO al round
+         * successivo (bug misurato "shifting shifting" a cavallo dei chunk da 16). I draft oltre
+         * il tetto non vengono emessi (loop sotto). */
 
         int32_t drafts[8];
         LLM_DF2_SP_BEGIN(prop);
         int K = llm_ai_mlx_dflash2_propose(handle, anchor, ctx_r, ctx_n, drafts, 8);
         LLM_DF2_SP_END(prop);
         if (K <= 0) break;
+        /* I draft oltre il tetto del chunk non vanno emessi (altrimenti la loro KV resta in cache
+         * e `cache_offset` scavalca i token non emessi -> salto). K puo' diventare 0: in tal caso
+         * il verify gira lo stesso con N=1 (draft vuoti) solo per ottenere `next_anchor`. */
         if (K > max_tokens - emitted) K = max_tokens - emitted;
 
         int64_t vctx_cap = (int64_t)(K + 1) * ncap * H;
@@ -707,13 +714,15 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
                     g_df2_t_arg * 1e3, g_df2_t_roll * 1e3, g_df2_t_prop * 1e3, g_df2_t_bb * 1e3, g_df2_t_sel * 1e3, g_df2_t_wget * 1e3, g_df2_t_argp * 1e3);
 
         bool stop_eos = false;
+        int emit_n = 0;
         for (int i = 0; i < accepted && emitted < max_tokens; i++) {
             if (drafts[i] == eos_token) { stop_eos = true; break; }   /* eos non emesso */
             out_ids[emitted++] = drafts[i];
+            emit_n++;
         }
         free(ctx_r);
         ctx_r = vctx;
-        ctx_n = accepted + 1;
+        ctx_n = emit_n + 1;   /* il ctx deve riflettere i token EFFETTIVAMENTE emessi */
         anchor = next_anchor;
         if (stop_eos) break;
         if (emitted >= max_tokens) break;
