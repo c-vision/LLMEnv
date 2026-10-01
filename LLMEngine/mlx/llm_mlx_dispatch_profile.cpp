@@ -36,6 +36,10 @@ struct Fam {
      * (8 KB) dal cast di un peso (14 MB), che e' la domanda a cui il solo conteggio di nodi
      * non risponde. */
     long long bytes = 0;
+    /* somma dei `nbytes()` degli INPUT (pesi + KV + attivazioni LETTI): e' il numeratore di
+     * EFFECTIVE_WEIGHT_BW, il traffico REALE. Complementare a `bytes` (gli output scritti):
+     * per le op in-place (SliceUpdate KV) `bytes` sovrastima, `bytes_in` no. */
+    long long bytes_in = 0;
     /* Il PIU' GROSSO output visto per questa famiglia, con la sua forma: e' cio' che risponde
      * "quale operando e'" senza doverlo indovinare dal conteggio. */
     long long max_bytes = 0;
@@ -57,6 +61,7 @@ struct Profile {
     std::unordered_map<std::string, long long> sq_src;
     long long total = 0;
     long long bytes_total = 0;
+    long long bytes_in_total = 0;
     long long last_new = 0;
     /* attribuzione del tempo di passo: CPU per buildare il grafo vs dispatch+lettura del token */
     double build_sec = 0;
@@ -136,6 +141,20 @@ long long walk(const mlx::core::array* root, StepSeen& seen, long long& bytes_ou
         g.nodes += 1;
         g.bytes += nb;
         if (nb > g.max_bytes) { g.max_bytes = nb; g.max_shape = shp; }
+        /* BYTE LETTI = somma degli `nbytes()` degli input (pesi+KV+attivazioni): per un
+         * QuantizedMatmul e' ~il peso quantizzato + le scale + l'attivazione, cioe' il traffico
+         * reale del nodo. Una primitiva e' UN dispatch (dedup sopra), quindi ogni input e'
+         * contato una volta per passo -> `bytes_in/steps` = EFFECTIVE_WEIGHT_BW per token. */
+        long long nbi = 0;
+        for (const mlx::core::array& in : a->inputs()) {
+            /* Ogni array LETTO una volta per passo (in mlx i pesi NON sono leaf: hanno una
+             * primitiva, quindi il dedup e' per `id()` su TUTTI gli input, non solo le foglie).
+             * Cosi' `bytes_in` = l'insieme di lettura unico del passo = pesi + KV (+ le
+             * attivazioni condivise una volta) = numeratore di EFFECTIVE_WEIGHT_BW. */
+            if (!seen.leaf.insert(in.id()).second) continue;
+            nbi += (long long)in.nbytes();
+        }
+        f.bytes_in += nbi; g.bytes_in += nbi; d.bytes_in_total += nbi;
         /* Non si spingono i siblings: in mlx::core::array::make_arrays tutti gli output di
          * una primitiva condividono STESSO vettore di input, e la dedup e' per primitiva. */
         const std::vector<mlx::core::array>& ins = a->inputs();
@@ -223,8 +242,14 @@ void llm_mlx_dp_report(const char* tag, int steps, int layers, double seconds, i
         fprintf(stderr, " nodi/layer=%.1f", per_token / (double)layers);
     }
     fprintf(stderr, " MB/token=%.2f", (double)d.bytes_total / (double)steps / 1048576.0);
+    fprintf(stderr, " MB_in/token=%.2f", (double)d.bytes_in_total / (double)steps / 1048576.0);
     if (seconds > 0.0 && total > 0) {
         fprintf(stderr, " ns/nodo=%.0f", seconds * 1e9 / (double)total);
+    }
+    if (seconds > 0.0 && d.bytes_in_total > 0) {
+        /* EFFECTIVE_WEIGHT_BW: byte LETTI (pesi+KV+attivazioni) / secondo. E' il numero che il
+         * roofline confronta (~540 GB/s raggiungibili su M5 Max). */
+        fprintf(stderr, " GB/s_letto=%.1f", (double)d.bytes_in_total / 1e9 / seconds);
     }
     if (seconds > 0.0 && d.bytes_total > 0) {
         /* banda DOMANDATA dai soli output: GB/s = MB_totali / secondi. Non e' la banda del
@@ -267,10 +292,11 @@ void llm_mlx_dp_report(const char* tag, int steps, int layers, double seconds, i
     size_t lim = (size_t)top_k < rows.size() ? (size_t)top_k : rows.size();
     top_by(rows, lim, false);
     for (size_t i = 0; i < lim; i++) {
-        fprintf(stderr, "LLM_DISPATCH[%s]:   %-24s %8lld  %6.1f/token  %9.2f MB/token  max %.2f MB %s\n",
+        fprintf(stderr, "LLM_DISPATCH[%s]:   %-24s %8lld  %6.1f/token  %9.2f MBout %9.2f MBin/token  max %.2f MB %s\n",
                 tag ? tag : "", rows[i].first.c_str(), rows[i].second.nodes,
                 (double)rows[i].second.nodes / (double)steps,
                 (double)rows[i].second.bytes / (double)steps / 1048576.0,
+                (double)rows[i].second.bytes_in / (double)steps / 1048576.0,
                 (double)rows[i].second.max_bytes / 1048576.0,
                 rows[i].second.max_shape.c_str());
     }
