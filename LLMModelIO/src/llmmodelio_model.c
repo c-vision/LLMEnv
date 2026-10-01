@@ -2352,6 +2352,31 @@ static int llmmodelio_model_ir_ced(const char* path) {
     llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
     return 0;
 }
+/* SCHEDULE (§4.6, continuous batching plan) — report-only: max batch da budget KV. */
+static int llmmodelio_model_ir_schedule(const char* path, int seqlen) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR SCHEDULE: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    unsigned long long wb = 0;
+    for (uint64_t i = 0; i < fi.n_tensors; i++) { uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d]; uint64_t b = 0; if (llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b) == 0) wb += b; }
+    long bc=-1,hkv=-1,hd=-1,kl=-1,vl=-1,en=-1;
+    for (int i=0;i<nkv;i++){ const char* k=kv[i].key; long v=(long)kv[i].u32;
+        if(strstr(k,"attention.head_count_kv"))hkv=v; else if(strstr(k,"attention.head_count"))hd=v;
+        else if(strstr(k,"attention.key_length"))kl=v; else if(strstr(k,"attention.value_length"))vl=v;
+        else if(strstr(k,"block_count"))bc=v; else if(strstr(k,"embedding_length"))en=v; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    double kvpt=-1.0; if(bc>0&&hkv>0){ long kd=kl>0?kl:((en>0&&hd>0)?en/hd:-1); long vd=vl>0?vl:kd; if(kd>0&&vd>0) kvpt=(double)bc*(double)hkv*(double)(kd+vd)*2.0; }
+    if (seqlen <= 0) seqlen = 2048;
+    double budget = 96.0*1024.0*1024.0*1024.0 - 2048.0*1024.0*1024.0 - (double)wb;
+    long maxbatch = (kvpt>0 && budget>0) ? (long)(budget / (kvpt*(double)seqlen)) : -1;
+    fprintf(LOUT, "# LLM TENSOR SCHEDULE '%s' seqlen=%d weights=%.2f GiB\n", path, seqlen, (double)wb/(1024.0*1024.0*1024.0));
+    if (kvpt>0) fprintf(LOUT, "  kv/seq=%d bytes (%.2f MiB)  max_batch(kv_bound)=%ld  -> CONTINUOUS BATCHING (paged KV, prefill/decode mixed)\n",
+                        (int)(kvpt*seqlen), kvpt*(double)seqlen/(1024.0*1024.0), maxbatch);
+    else fprintf(LOUT, "  max_batch: n/d (metadati KV assenti)\n");
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2364,6 +2389,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "SCHEDULE") == 0 || strcasecmp(s, "BATCH") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR SCHEDULE: atteso <path>[, <seqlen>]\n"); return -1; }
+        return llmmodelio_model_ir_schedule(dir, *tn ? atoi(tn) : 0);
     }
     if (strcasecmp(s, "DIST") == 0 || strcasecmp(s, "DISTRIBUTION") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR DIST: atteso <path>[, <world>]\n"); return -1; }
