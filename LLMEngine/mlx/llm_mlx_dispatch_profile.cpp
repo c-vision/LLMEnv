@@ -392,6 +392,24 @@ void llm_mlx_dp_report(const char* tag, int steps, int layers, double seconds, i
                 (double)rows[i].second.max_bytes / 1048576.0,
                 rows[i].second.max_shape.c_str());
     }
+    {
+        /* RIPARTIZIONE pesi vs altro (L5 Lightning: weight_bytes vs KV/activation): i byte LETTI
+         * dai nodi che leggono PESI (Matmul/QuantizedMatmul/GatherQMM/GatherMM) vs il resto
+         * (KV, attivazioni, layout). Deterministico. Dice se il decode e' weight-bound o no. */
+        long long w_nodes = 0, o_nodes = 0, w_bin = 0, o_bin = 0;
+        for (const auto& kv : d.hist) {
+            const std::string& nm = kv.first;
+            const bool is_w = (nm == "QuantizedMatmul" || nm == "Matmul" ||
+                               nm == "GatherQMM" || nm == "GatherMM" ||
+                               nm == "GatherQuantizedMatmul" || nm == "Dequantize");
+            if (is_w) { w_nodes += kv.second.nodes; w_bin += kv.second.bytes_in; }
+            else      { o_nodes += kv.second.nodes; o_bin += kv.second.bytes_in; }
+        }
+        fprintf(stderr, "LLM_DISPATCH[%s]:   -- PESI vs ALTRO -- pesi: %.1f nodi/tok, %.2f MBin/tok | altro: %.1f nodi/tok, %.2f MBin/tok\n",
+                tag ? tag : "",
+                (double)w_nodes / (double)steps, (double)w_bin / (double)steps / 1048576.0,
+                (double)o_nodes / (double)steps, (double)o_bin / (double)steps / 1048576.0);
+    }
 
     /* TOP PER VOLUME: le forme con il byte-count maggiore. E' la lista che trova i bug, perche'
      * 1519 nodi non dicono nulla e "336 x AsType (8,6144,256) = 16 GB/token" dice tutto. */
