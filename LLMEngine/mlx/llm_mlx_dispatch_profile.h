@@ -115,4 +115,46 @@ void llm_mlx_dp_report(const char* tag, int steps, int layers, double seconds, i
 }
 #endif
 
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * TOOLKIT DI PROFILING DETERMINISTICO (2026-10-01) — "numeri certi senza lanciare il timing".
+ *
+ * REGOLA: i tok/s sotto carico NON sono interpretabili. Tutti i numeri spendibili sono
+ * DETERMINISTICI (conteggi/byte calcolati a build-time, non dipendono dal carico macchina).
+ *
+ * 1) LLM_DISPATCH=1  [questo modulo, G0]
+ *    - per-famiglia: nodi/token, MB/token (OUTPUT bytes), MB_in/token (BYTE LETTI, dedup per passo),
+ *      usfloor = floor roofline per famiglia (byte_letti/BW_ceil);
+ *    - riga sintesi: nodi/token, MB/token, MB_in/token, ns/nodo (tempo), GB/s_letto,
+ *      GB/s_scritto, floor_us/tok@BW, meas_us/tok, overhead%;
+ *    - per-famiglia extra: "Reshape per SORGENTE" (chi genera la churn di layout),
+ *      "AsType/Squeeze/Sigmoid per SORGENTE";
+ *    - spec: spec_tok/pass (token accettati per passata) e floor_us/tokREAL = floor/PASSATA / tok-pass
+ *      = velocita' REALE per token (l'amortizzazione dei pesi della speculazione).
+ *    - override banda roofline: LLM_DISPATCH_BW (default 540 GB/s);
+ *    - MoE: llm_mlx_dp_set_moe(n_experts, top_k) corregge MB_in del GatherQMM (banco esperti);
+ *    - llm_mlx_dp_stage(build_sec, eval_sec): separa CPU (build grafo) da GPU (eval);
+ *    - llm_mlx_dp_memory(tag): stato allocatore Metal (attivi/cache/picco/limite).
+ *
+ * 2) SONDE gated (zero costo se l'env e' assente), per diagnosi puntuali:
+ *    - LLM_SPEC_DEBUG            log del ramo spec (ngram_branch/mtp_branch/df2_branch, got=N) e
+ *                                del draft (spec_draft: nd/built/hist/pending/d0/d1).
+ *    - LLM_LAYER_CTX             identita' BUFFER (mlx_array.ctx) di x/h/k_cache/v_cache per layer
+ *                                (caccia all'aliasing tra stato e intermedi). Posto: layer_forward.
+ *    - DF2_STATS / DF2_VDBG / DF2_GREEDY   DFlash2: accettazione cumulativa; per-round accepted;
+ *                                dump greedy[]/drafts[]/acc (trova il round che diverge).
+ *    - DF2_DUMP_CTX / LLM_DUMP_H dump binari (ctx del draft / hidden) per confronti offline.
+ *    - LLM_KVQ_MEMDBG            memoria del pool KV-quant.
+ *    - LLM_ASYNC_TIME / LLM_SPEC_TIME   tempi di fase (solo per correlazione, NON numeri certi).
+ *    - GEN_IDS (wrapper FastLLM, src/engine/fmlx_engine_gen.c)   dump degli ID token emessi,
+ *                                per confrontare due path (spec vs AR) ID-per-ID.
+ *
+ * 3) SONDA nel CORE mlx (richiede rebuild di mlx-c/mlx):
+ *    - MLX_DONATE_DBG            in mlx/array.h:is_donatable(): log (id, hasprim, use_counts) quando
+ *                                una donation ripiega su copia. Serve a see l'aliasing dei leaf.
+ *      NB: la copia e' semanticamente corretta → la donation NON spiega le divergenze di valore.
+ *
+ * USO CANONICO per una regressione: 1 misura → confrontare i numeri DETERMINISTICI (nodi/token,
+ * MB_in/token, spec_tok/pass, floor) PRIMA e DOPO la modifica. Mai giudicare dal tok/s.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════ */
+
 #endif /* LLM_MLX_DISPATCH_PROFILE_H */
