@@ -1,5 +1,5 @@
 /* llm_dsv41_stream_e2e_test.c — E2E DS4.1: motore materializzato (safetensors) vs STREAMING (GGUF).
- * Build: tools/dsv41_stream_e2e_test.sh (tiny: gen_dsv41_st_ref.py --no-probes + llmmodelio_model_quantize). */
+ * Build: tools/dsv41_stream_e2e_test.sh (tiny: gen_dsv41_st_ref.py --no-probes + gmbllm model_quantize). */
 #include <stdio.h>
 #include <string.h>
 #include <mlx/c/mlx.h>
