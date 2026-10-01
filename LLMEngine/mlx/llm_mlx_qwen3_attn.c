@@ -6,7 +6,6 @@
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
-#include "llm_mlx_lora.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,11 +82,8 @@ bool qwen3_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, 
     bool packed = ok && ac && llm_mlx_qkv_apply(&ac->packed_qkv, normed, &q, &k, &v,
         gsz, bts, m->cfg.quant_mode, m->stream, quantized_linear_cfg);
     if (ok && !packed) { ok = quantized_linear_cfg(&q, normed, qw, qs, qb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "q_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&q, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok && !packed) { ok = quantized_linear_cfg(&k, normed, kw, ks, kb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "k_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "k_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&k, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok && !packed) { ok = quantized_linear_cfg(&v, normed, vw, vs, vb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "v_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "v_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&v, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     /* QK-norm: caricata PRIMA della reshape per distinguere la variante.
      * - qwen3/qwen3_moe: peso = head_dim -> norm per-head DOPO la reshape (canonica).
@@ -380,7 +376,6 @@ bool qwen3_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, 
     }
     mlx_array attn_out = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&attn_out, attn_flat, ow, os, ob, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "o_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "o_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&attn_out, attn_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     if (ok) { ok = mlx_add(out_h, x, attn_out, m->stream) == 0; CHK(ok, "residual add (attn)"); }
 
@@ -453,11 +448,8 @@ bool qwen3_next_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset,
 
     mlx_array q = mlx_array_new(), k = mlx_array_new(), v = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&q, normed, qw, qs, qb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "q_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&q, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok) { ok = quantized_linear_cfg(&k, normed, kw, ks, kb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "k_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "k_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&k, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok) { ok = quantized_linear_cfg(&v, normed, vw, vs, vb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "v_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "v_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&v, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     /* Output gate: q_proj = [B,L, n_heads*head_dim*2]. Il reference Qwen3NextAttention fa
      *   q_proj_output.reshape(B,L,num_heads,-1)  # [B,L,nh, head_dim*2]
@@ -629,7 +621,6 @@ bool qwen3_next_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset,
     if (ok) ok = llm_bonsai_rotate(&attn_gated, m, layer_idx, "self_attn.o_proj.weight", false);
     mlx_array attn_out = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&attn_out, attn_gated, ow, os, ob, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "o_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "o_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&attn_out, attn_gated, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok) { ok = mlx_add(out_h, x, attn_out, m->stream) == 0; CHK(ok, "residual add (attn)"); }
 
     mlx_array all[] = {
