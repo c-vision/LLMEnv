@@ -2571,6 +2571,89 @@ static int llmmodelio_model_ir_quantir(const char* path) {
     llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
     return 0;
 }
+/* QUALITY BUDGET O0..O4 (§4.5 I6): mappa il livello a un budget bit/peso e verifica il piano per ruolo. */
+static double llmo_bits(const char* f) {
+    if (!f) return 0;
+    if (strstr(f, "f32")) return 32; if (strstr(f, "f16") || strstr(f, "bf16")) return 16;
+    if (strstr(f, "q8")) return 8.5; if (strstr(f, "q6")) return 6.6; if (strstr(f, "q5")) return 5.6;
+    if (strstr(f, "mxfp4") || strstr(f, "q4") || strstr(f, "iq4")) return 4.5;
+    if (strstr(f, "q3")) return 3.4; if (strstr(f, "q2")) return 2.6; if (strstr(f, "iq2")) return 2.1;
+    return 4.5;
+}
+/* Riconosce i ruoli da nomi GGUF (blk.N.attn_q, ffn_gate_exps...) E HF/MLX (model.layers.N.self_attn.q_proj...). */
+static const char* llmo_role_of(const char* nm) {
+    if (!nm) return "other";
+    /* HF/MLX (piu' specifici per primi) */
+    if (strstr(nm, "switch_mlp")) {
+        if (strstr(nm, "gate_proj")) return "experts.gate";
+        if (strstr(nm, "up_proj"))   return "experts.up";
+        if (strstr(nm, "down_proj")) return "experts.down";
+        return "experts";
+    }
+    if (strstr(nm, "shared_experts")) {
+        if (strstr(nm, "gate_proj")) return "shared.gate";
+        if (strstr(nm, "up_proj"))   return "shared.up";
+        if (strstr(nm, "down_proj")) return "shared.down";
+        return "shared";
+    }
+    if (strstr(nm, "self_attn.q_proj") || strstr(nm, "attn_q")) return "attn.q";
+    if (strstr(nm, "self_attn.k_proj") || strstr(nm, "attn_k")) return "attn.k";
+    if (strstr(nm, "self_attn.v_proj") || strstr(nm, "attn_v")) return "attn.v";
+    if (strstr(nm, "kv_a_proj") || strstr(nm, "kv_b_proj")) return "attn.kv";
+    if (strstr(nm, "self_attn.o_proj") || strstr(nm, "attn_output") || strstr(nm, "attn_out")) return "attn.o";
+    if (strstr(nm, "mlp.gate.weight") || strstr(nm, "ffn_gate_inp")) return "ffn.router";
+    if (strstr(nm, "ffn_gate") || strstr(nm, "gate_proj")) return "ffn.gate";
+    if (strstr(nm, "ffn_up") || strstr(nm, "up_proj")) return "ffn.up";
+    if (strstr(nm, "ffn_down") || strstr(nm, "down_proj")) return "ffn.down";
+    if (strstr(nm, "token_embd") || strstr(nm, "embed_tokens")) return "embed";
+    if (strstr(nm, "lm_head") || strstr(nm, "output")) return "output";
+    if (strstr(nm, "norm") || strstr(nm, "layernorm")) return "norm";
+    return "other";
+}
+static int llmmodelio_model_ir_obudget(const char* path, const char* level) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR OBUDGET: solo GGUF\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    int lv = 2; if (level && (level[0] == 'O' || level[0] == 'o')) lv = atoi(level + 1);
+    if (lv < 0) lv = 0; if (lv > 4) lv = 4;
+    static const double tgt[5] = {16.0, 8.5, 4.5, 2.6, 2.1};
+    static const char* nm[5] = {"O0 (f16, qualita' massima)", "O1 (q8)", "O2 (q4/mxfp4)", "O3 (q3/q2)", "O4 (iq2, massima compressione)"};
+    double budget = tgt[lv];
+    fprintf(LOUT, "# LLM TENSOR OBUDGET '%s' arch=%s qualita'=%s -> budget=%.1f bit/peso\n# role\tfmt\tbits\tverdetto\n",
+            path, g_arch_ok?g_arch.arch:"-", nm[lv], budget);
+    int over = 0, roles = 0, fallback = (g_arch.n_quant == 0);
+    if (!fallback) {
+        for (int i = 0; i < g_arch.n_quant; i++) {
+            const char* f = g_arch.quant[i].fmt; double b = llmo_bits(f);
+            const char* v = (b <= budget) ? "OK" : "OVER"; if (b > budget) over++;
+            fprintf(LOUT, "%s\t%s\t%.1f\t%s\n", g_arch.quant[i].role, f, b, v); roles++;
+        }
+    } else {
+        /* fallback: deriva i ruoli dai NOMI tensore + bits/peso dal tipo ggml reale. */
+        const char* order[16] = {"embed","attn.q","attn.k","attn.v","attn.kv","attn.o","ffn.router","ffn.gate","ffn.up","ffn.down","experts.gate","experts.up","experts.down","shared.down","output","other"};
+        double rb[16] = {0}; unsigned long long rbytes[16] = {0}, rnum[16] = {0}; int rt[16]; for (int i=0;i<16;i++) rt[i]=-1;
+        for (uint64_t i = 0; i < fi.n_tensors; i++) {
+            const char* r = llmo_role_of(fi.tensors[i].name);
+            int idx = 15; for (int j=0;j<15;j++) if (strcmp(order[j], r)==0) { idx=j; break; }
+            uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d];
+            uint64_t bb = 0; if (llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &bb) == 0) { rbytes[idx]+=bb; rnum[idx]+=numel; }
+            if (rt[idx] < 0) rt[idx] = fi.tensors[i].ggml_type;
+        }
+        for (int j = 0; j < 15; j++) {
+            if (rnum[j] == 0) continue;
+            rb[j] = (double)(rbytes[j]*8)/(double)rnum[j];
+            char tn[64]; if (llmcodec_ggml_type_name(rt[j], tn, sizeof tn) != 0) snprintf(tn, sizeof tn, "type%d", rt[j]);
+            const char* v = (rb[j] <= budget) ? "OK" : "OVER"; if (rb[j] > budget) over++;
+            fprintf(LOUT, "%s\t%s\t%.2f\t%s\n", order[j], tn, rb[j], v); roles++;
+        }
+    }
+    fprintf(LOUT, "# TOTALE ruoli=%d over_budget=%d fonte=%s -> %s\n", roles, over, fallback ? "tensori(fallback)" : "arch",
+            over == 0 ? "ACCEPT (piano entro il budget)" : "REJECT-FLAG (ruoli sopra il budget)");
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    return 0;
+}
 static int llmmodelio_model_ir_memplan(const char* path) {
     size_t ln = strlen(path);
     if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR MEMPLAN: solo GGUF\\n"); return -1; }
@@ -2662,6 +2745,7 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
     if (strcasecmp(s, "POLICYIR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR POLICYIR: atteso <path>\n");return -1;} return llmmodelio_model_ir_policyir(dir); }
     if (strcasecmp(s, "IRLEVELS") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR IRLEVELS: atteso <path>\n");return -1;} return llmmodelio_model_ir_irlevels(dir); }
     if (strcasecmp(s, "QUANTIR") == 0 || strcasecmp(s, "QUANT_IR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR QUANTIR: atteso <path>\n");return -1;} return llmmodelio_model_ir_quantir(dir); }
+    if (strcasecmp(s, "OBUDGET") == 0 || strcasecmp(s, "QUALITYLEVEL") == 0 || strcasecmp(s, "OBUDGETIR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR OBUDGET: atteso <path>[, <O0..O4>]\n");return -1;} return llmmodelio_model_ir_obudget(dir, tn); }
     if (strcasecmp(s, "MEMPLAN") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR MEMPLAN: atteso <path>\n");return -1;} return llmmodelio_model_ir_memplan(dir); }
     if (strcasecmp(s, "KVPLAN") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR KVPLAN: atteso <path>\n");return -1;} return llmmodelio_model_ir_kvplan(dir); }
     if (strcasecmp(s, "VIEW") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR VIEW: atteso <path>\n");return -1;} return llmmodelio_model_ir_view(dir); }
