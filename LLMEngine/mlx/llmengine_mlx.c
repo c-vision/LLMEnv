@@ -38,6 +38,7 @@
 #include "llm_mlx_kvdisk.h"     /* §G: tier SSD dei blocchi KV (offload prefissi; opzione di registro `kvdisk`) */
 #include "llm_mlx_kvdisk_io.h"  /* §G: serializzazione MLX <-> blob KV */
 #include "llm_mlx_kernel.h"   /* runtime kernel replacement (roadmap 8.11 fase 3) */
+#include "llm_mlx_lora.h"     /* adapter LoRA (roadmap 8.11 fase 4) */
 #include "llm_mlx_rewrite.h"  /* model rewrite (roadmap 8.11 fase 5) */
 #include "llm_mlx_merge.h"    /* model merging (roadmap 8.11 fase 6) */
 #include "llm_mlx_radix.h"    /* radix-trie prefix cache (fix coding contesto lungo) */

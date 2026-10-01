@@ -597,6 +597,7 @@ typedef struct { mlx_array x, w; int gs; float eps; mlx_stream s; } llm_cb_zc_ct
 
 typedef struct { mlx_array h, w, gate; int use_silu; float eps; mlx_stream s; } llm_cb_sg_ctx;
 
+typedef struct { mlx_array x, A, B; float scale; mlx_stream s; } llm_cb_lo_ctx;
 
 typedef struct { mlx_array q, k; float scale; mlx_stream s; } llm_cb_l2_ctx;
 
@@ -737,6 +738,16 @@ struct LlmMlxModel {
     int ps_min;                  /* token minimi per attivare (LLM_PAGESEL_MIN, default 1024) */
     int ps_cap;                  /* capacita' pagine per layer (LLM_PAGESEL_CAP, default 512) */
     int ps_verify;               /* LLM_PAGESEL_VERIFY=1: confronta con l'attenzione piena */
+    /* LoRA (fase 4): moduli per (layer, proj) con mlx_array A/B. Array fisso. */
+    int lora_n;
+    int lora_cap;          /* R4.1: capacita' DINAMICA (cresce a richiesta; >16 moduli) */
+    mlx_array* lora_A;
+    mlx_array* lora_B;
+    int* lora_layer;
+    char (*lora_proj)[32];
+    float* lora_scale;
+    int* lora_expert;      /* MoE: indice esperto (default -1 = proiezione normale) */
+    bool lora_enabled;
     uint64_t lru_clock;   /* contatore monotono per eviction LRU dei prefissi */
     int prefix_max;       /* limite prefissi salvati (eviction LRU oltre; default 16) */
     ImatrixState im;      /* imatrix collector (attivo solo via API dedicata) */
@@ -829,6 +840,7 @@ int llm_session_ckpt_write_k(LlmMlxModel* m, LlmMlxSession* s, int pos, const in
 int llm_session_unpark(LlmMlxModel* m, LlmMlxSession* s);
 void session_history_append(LlmMlxSession* s, const int32_t* tok, int n);
 llm_mlx_sampling_t llm_mlx_session_sampling(const LlmMlxSession* s);
+int llm_mlx_model_lora_get(LlmMlxModel* m, int layer, const char* proj);
 /* --- CORE: definiti nel monolite, usati dal dominio DFlash2 --- */
 void llm_mlx_quant_derive(mlx_array w, mlx_array scales, int fb_group, int fb_bits, const char* fb_mode, int* out_group, int* out_bits, char* out_mode, size_t mode_cap);
 bool multishard_get(const MultiShardWeights* mw, const char* name, mlx_array* out);

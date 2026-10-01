@@ -5,6 +5,7 @@
 #include "llmengine_mlx.h"
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
+#include "llm_mlx_lora.h"
 #include "llm_mlx_swiglu_kernel.h"
 #include "llm_mlx_router_kernel.h"
 #include "llm_mlx_moe_fused_kernel.h"
@@ -46,6 +47,7 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
     }
     mlx_array gates = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&gates, normed2, gate_w, gate_s, gate_b, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "router matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "mlp.gate"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&gates, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     mlx_array gates_sm = mlx_array_new();
     /* bfloat16 refactor: mlx_lm calcola i logit del router in bfloat16 (input bf16). Il softmax
      * precise in float32 sui logit float32 amplifica la differenza di selezione esperti vs la
@@ -125,6 +127,10 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
         const int x1_shape[4] = {n_tokens, 1, 1, m->cfg.hidden_size};
         ok = mlx_reshape(&x1, normed2, x1_shape, 4, m->stream) == 0;
     }
+    bool has_moe_down_lora = false;
+    for (int li = 0; li < m->lora_n && !has_moe_down_lora; li++)
+        if (m->lora_layer[li] == layer_idx && m->lora_proj[li] && strcmp(m->lora_proj[li], "moe_down") == 0 && m->lora_expert[li] >= 0)
+            has_moe_down_lora = true;
     /* Leva f16-attivazione mxfp4 pura (LLM_MXFP4_ACT_F16, default OFF; vedi helper in testa):
      * casta la lhs delle gather ESPERTI a f16 quando i pesi sono mxfp4 4/g32 E l'attivazione
      * arriva fp32 (want_bf16 falso -> rms_norm non riduce). Copre il percorso fp32 di
@@ -138,7 +144,7 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
          || (strcmp(eu_mode, "mxfp4") == 0 && eu_bits == 4 && eu_group == 32));
     const bool mxfp4_dn = mxfp4_f32act
         && strcmp(ed_mode, "mxfp4") == 0 && ed_bits == 4 && ed_group == 32;
-    bool do_sort = ok && ((int64_t)n_tokens * (int64_t)m->cfg.top_k) >= 64 && !false;
+    bool do_sort = ok && ((int64_t)n_tokens * (int64_t)m->cfg.top_k) >= 64 && !has_moe_down_lora;
     mlx_array gate_out = mlx_array_new(), up_out = mlx_array_new();
     mlx_array sig = mlx_array_new(), silu = mlx_array_new(), act = mlx_array_new();
     mlx_array down_out = mlx_array_new();
@@ -263,7 +269,7 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
     /* STREAM-AWARE: nessuna guardia per-modello. Il kernel fuso riceve i tensori giusti in
      * entrambe le modalità (completi se OFF, stacked degli esperti attivi se ON) tramite
      * `llm_mlx_moe_fused_stream_aware`. */
-    if (ok && n_tokens == 1 && !false && llm_mlx_fuse_moe_decode_enabled()
+    if (ok && n_tokens == 1 && !has_moe_down_lora && llm_mlx_fuse_moe_decode_enabled()
         && strcmp(eg_mode, "affine") == 0 && strcmp(eu_mode, "affine") == 0 && strcmp(ed_mode, "affine") == 0
         && eg_bits == eu_bits && eg_group == eu_group
         && (eg_bits == 4 || eg_bits == 8) && (ed_bits == 4 || ed_bits == 8)) {
@@ -384,6 +390,35 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
         else ok = false;
         mlx_array_free(d3);
     }
+    /* LoRA per-esperto MoE (fase 4): per ogni modulo su (layer, "moe_down", expert=j),
+     * aggiunge contrib = act @ A_j @ B_j * scale SOLO alle posizioni dove l'esperto j e'
+     * nel top-k (mask da top_inds_host). Adapter per-esperto del down_proj degli esperti.
+     * moe_fused_done implica has_moe_down_lora==false (condizione di eleggibilita' sopra),
+     * quindi questo loop non trova mai moduli quando il kernel fuso e' stato usato. */
+    if (ok && !moe_fused_done) {
+        for (int li = 0; li < m->lora_n; li++) {
+            if (m->lora_layer[li] != layer_idx || strcmp(m->lora_proj[li], "moe_down") != 0 || m->lora_expert[li] < 0) continue;
+            int ej = m->lora_expert[li];
+            mlx_array contrib = mlx_array_new();
+            bool okc = llm_mlx_lora_apply_mlx(&contrib, act, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream);
+            if (!okc) { mlx_array_free(contrib); ok = false; break; }
+            /* mask su device: top_inds == ej -> [1,T,K] -> [T,K,1,1] */
+            mlx_array ej_a = mlx_array_new_data(&ej, (const int[]){1}, 1, MLX_INT32);
+            mlx_array eqv = mlx_array_new(), mf = mlx_array_new(), mask = mlx_array_new();
+            bool okw = false;
+            if (ok) okw = mlx_equal(&eqv, top_inds, ej_a, m->stream) == 0;
+            if (okw) okw = mlx_astype(&mf, eqv, MLX_FLOAT32, m->stream) == 0;
+            if (okw) { int mk[4] = {n_tokens, m->cfg.top_k, 1, 1}; okw = mlx_reshape(&mask, mf, mk, 4, m->stream) == 0; }
+            mlx_array zero = mlx_array_new_float32(0.0f);
+            mlx_array masked = mlx_array_new();
+            if (okw) okw = mlx_where(&masked, mask, contrib, zero, m->stream) == 0;
+            if (okw) okw = mlx_add(&down_out, down_out, masked, m->stream) == 0;
+            mlx_array_free(contrib); mlx_array_free(ej_a); mlx_array_free(eqv); mlx_array_free(mf);
+            mlx_array_free(mask); mlx_array_free(zero); mlx_array_free(masked);
+            if (!okw) { ok = false; break; }
+        }
+    }
+
     /* score (probs) gia' calcolato piu' sopra, prima del tentativo di kernel fuso -- non
      * ricalcolarlo qui. */
     if (ok && !moe_fused_done) {
@@ -431,16 +466,20 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
      * 35B-A3B: la condivisione qui COSTA ~4% (SE -8% vs NO_SE -4.4%): l'MLP shared e' piccolo,
      * la prim multi-uscita costa piu' della Stage A risparmiata. Tenuta NON condivisa. */
     if (ok) { ok = quantized_linear_cfg(&se_gate, normed2, se_w, se_s, se_b, gsz, bts, m->cfg.quant_mode, m->stream); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "shared_expert_gate_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&se_gate, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok) { ok = quantized_linear_cfg(&se_up, normed2, su_w, su_s, su_b, gsz, bts, m->cfg.quant_mode, m->stream); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "shared_expert_up_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&se_up, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     mlx_array se_sig = mlx_array_new(), se_silu = mlx_array_new(), se_act = mlx_array_new();
     if (ok) { ok = mlx_sigmoid(&se_sig, se_gate, m->stream) == 0; }
     if (ok) { ok = mlx_multiply(&se_silu, se_gate, se_sig, m->stream) == 0; }
     if (ok) { ok = mlx_multiply(&se_act, se_silu, se_up, m->stream) == 0; }
     mlx_array se_down = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&se_down, se_act, sd_w, sd_s, sd_b, gsz, bts, m->cfg.quant_mode, m->stream); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "shared_expert_down_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&se_down, se_act, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     /* shared_expert_gate: [B,S,1] -> sigmoid, poi * se_down */
     mlx_array seg = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&seg, normed2, seg_w, seg_s, seg_b, gsz, bts, m->cfg.quant_mode, m->stream); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "shared_expert_gate"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&seg, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     mlx_array seg_sig = mlx_array_new();
     if (ok) { ok = mlx_sigmoid(&seg_sig, seg, m->stream) == 0; }
     mlx_array shared_out = mlx_array_new();
@@ -500,6 +539,7 @@ bool qwen4_exp_moe_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
     ok = ok && multishard_get_triple(&m->weights, namebuf, &gate_w, &gate_s, &gate_b);
     mlx_array gates = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&gates, normed2, gate_w, gate_s, gate_b, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "router matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "mlp.gate"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&gates, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     mlx_array gates_sm = mlx_array_new();
     if (ok && m->cfg.bfloat16_input && mlx_array_dtype(gates) != g_act16) ok = mlx_astype(&gates, gates, g_act16, m->stream) == 0;
     if (ok) { ok = mlx_softmax_axis(&gates_sm, gates, -1, /*precise=*/true, m->stream) == 0; CHK(ok, "router softmax"); }
@@ -651,15 +691,19 @@ bool qwen4_exp_moe_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
      * 35B-A3B: la condivisione qui COSTA ~4% (SE -8% vs NO_SE -4.4%): l'MLP shared e' piccolo,
      * la prim multi-uscita costa piu' della Stage A risparmiata. Tenuta NON condivisa. */
     if (ok) { ok = quantized_linear_cfg(&se_gate, normed2, se_w, se_s, se_b, gsz, bts, m->cfg.quant_mode, m->stream); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "shared_expert_gate_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&se_gate, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok) { ok = quantized_linear_cfg(&se_up, normed2, su_w, su_s, su_b, gsz, bts, m->cfg.quant_mode, m->stream); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "shared_expert_up_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&se_up, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     mlx_array se_sig = mlx_array_new(), se_silu = mlx_array_new(), se_act = mlx_array_new();
     if (ok) { ok = mlx_sigmoid(&se_sig, se_gate, m->stream) == 0; }
     if (ok) { ok = mlx_multiply(&se_silu, se_gate, se_sig, m->stream) == 0; }
     if (ok) { ok = mlx_multiply(&se_act, se_silu, se_up, m->stream) == 0; }
     mlx_array se_down = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&se_down, se_act, sd_w, sd_s, sd_b, gsz, bts, m->cfg.quant_mode, m->stream); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "shared_expert_down_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&se_down, se_act, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     mlx_array seg = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&seg, normed2, seg_w, seg_s, seg_b, gsz, bts, m->cfg.quant_mode, m->stream); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "shared_expert_gate"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&seg, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     mlx_array seg_sig = mlx_array_new();
     if (ok) { ok = mlx_sigmoid(&seg_sig, seg, m->stream) == 0; }
     mlx_array shared_out = mlx_array_new();

@@ -5,6 +5,7 @@
 #include "llmengine_mlx.h"
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
+#include "llm_mlx_lora.h"
 #include "llm_mlx_geglu_kernel.h"
 
 #include <stdio.h>
@@ -153,6 +154,7 @@ bool dense_geglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, m
 
     mlx_array down_out = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&down_out, act, down_w, down_s, down_b, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "down_proj matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "down_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&down_out, act, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     /* post_feedforward_layernorm: applicata al risultato della FFN PRIMA del residuo --
      * a differenza di dense_swiglu_ffn, che non ha questa seconda norma. */

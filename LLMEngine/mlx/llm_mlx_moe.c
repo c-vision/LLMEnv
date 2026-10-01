@@ -344,6 +344,7 @@ bool qwen3_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
     }
     mlx_array gates = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&gates, normed2, gate_w, gate_s, gate_b, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "router matmul"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "mlp.gate"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&gates, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     mlx_array gates_sm = mlx_array_new();
     /* bfloat16 refactor: mlx_lm calcola i logit del router in bfloat16 (input bf16). Il softmax

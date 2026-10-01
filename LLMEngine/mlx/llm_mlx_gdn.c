@@ -25,11 +25,11 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
     if (n_tokens == 1 && llm_mlx_m1_block_enabled() && llm_mlx_compile_enabled() &&
         llm_mlx_compile_qwen35_enabled() && !g_spec_capture &&
         !llm_env_isset("LLM_GDN_KERNEL_OFF") && !llm_env_isset("LLMMETAL_OQ_A8_MINTOK") &&
-        1 &&
-        1 &&
-        1 &&
-        1 &&
-        1) {
+        llm_mlx_model_lora_get(m, layer_idx, "in_proj_qkv") < 0 &&
+        llm_mlx_model_lora_get(m, layer_idx, "in_proj_z") < 0 &&
+        llm_mlx_model_lora_get(m, layer_idx, "in_proj_a") < 0 &&
+        llm_mlx_model_lora_get(m, layer_idx, "in_proj_b") < 0 &&
+        llm_mlx_model_lora_get(m, layer_idx, "out_proj") < 0) {
         if (llm_mlx_gdn_block_compiled(m, layer_idx, x, k_cache, v_cache, has_cache, out_h))
             return true;
         if (getenv("LLM_M1_DBG"))
@@ -125,14 +125,14 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
     if (getenv("LLM_M1_DBG") && n_tokens == 1)
         fprintf(stderr, "[m1dbg] layer=%d ok=%d a8_shared=%d compile=%d q35=%d lora=%d\n", layer_idx, (int)ok,
                 (int)a8_shared_gdn, (int)llm_mlx_compile_enabled(), (int)llm_mlx_compile_qwen35_enabled(),
-                (int)(0));
+                (int)(llm_mlx_model_lora_get(m, layer_idx, "in_proj_qkv") >= 0));
     if (ok && !a8_shared_gdn && n_tokens == 1 && llm_mlx_compile_qwen35_enabled() &&
         m->bonsai_had == NULL &&   /* Ternary-Bonsai: la closure M1 non ruota l'input */
         llm_mlx_compile_enabled() &&
-        1 &&
-        1 &&
-        1 &&
-        1) {
+        llm_mlx_model_lora_get(m, layer_idx, "in_proj_qkv") < 0 &&
+        llm_mlx_model_lora_get(m, layer_idx, "in_proj_z") < 0 &&
+        llm_mlx_model_lora_get(m, layer_idx, "in_proj_a") < 0 &&
+        llm_mlx_model_lora_get(m, layer_idx, "in_proj_b") < 0) {
         gdn_ip_compiled = llm_mlx_gdn_inproj_compiled(layer_idx, h, &qkv, &z, &av, &bv,
             qkv_w, qkv_sc, qkv_b, z_w, z_sc, z_b, a_w, a_sc, a_b, bw, b_sc, b_b, gsz, bts, m->cfg.quant_mode);
         if (!gdn_ip_compiled) {
@@ -151,8 +151,11 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
             }
             mlx_array_free(vf);
         } }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "in_proj_qkv"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&qkv, h, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (ok && !a8_shared_gdn && !gdn_ip_compiled) { ok = quantized_linear_cfg(&z, h_rot, z_w, z_sc, z_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "in_proj_z"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "in_proj_z"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&z, h, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (ok && !a8_shared_gdn && !gdn_ip_compiled) { ok = quantized_linear_cfg(&av, h, a_w, a_sc, a_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "in_proj_a"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "in_proj_a"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&av, h, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (ok && !a8_shared_gdn && !gdn_ip_compiled) { ok = quantized_linear_cfg(&bv, h, bw, b_sc, b_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "in_proj_b"); }
     if (ok && layer_idx == 0 && getenv("LLM_BONSAI_DBG")) {
         mlx_array vf = mlx_array_new();
@@ -168,6 +171,7 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
         }
         mlx_array_free(vf);
     }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "in_proj_b"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&bv, h, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
 
     /* conv1d depthwise su concat([conv_state, qkv]) */
     mlx_array conv_w = mlx_array_new();
@@ -591,6 +595,7 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
             }
             mlx_array_free(vf);
         } }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "out_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&r, gated_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     /* residual: h = x + r (il layer lineare ritorna la somma, come DecoderLayer.__call__). */
     mlx_array h_out=mlx_array_new();
     if (ok) { ok = mlx_add(&h_out, x, r, s) == 0; CHK(ok, "residual add (gdn)"); }
@@ -702,9 +707,13 @@ bool qwen4_linear_gdn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
         }
     }
     if (ok && !a8_shared_gdn) { ok = quantized_linear_cfg(&qkv, h, qkv_w, qkv_sc, qkv_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "in_proj_qkv"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "in_proj_qkv"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&qkv, h, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (ok && !a8_shared_gdn) { ok = quantized_linear_cfg(&z, h, z_w, z_sc, z_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "in_proj_z"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "in_proj_z"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&z, h, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (ok && !a8_shared_gdn) { ok = quantized_linear_cfg(&av, h, a_w, a_sc, a_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "in_proj_a"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "in_proj_a"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&av, h, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (ok && !a8_shared_gdn) { ok = quantized_linear_cfg(&bv, h, bw, b_sc, b_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "in_proj_b"); }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "in_proj_b"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&bv, h, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
 
     /* conv1d depthwise su concat([conv_state, qkv]) */
     mlx_array conv_w = mlx_array_new();
@@ -1030,6 +1039,7 @@ bool qwen4_linear_gdn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
             }
             mlx_array_free(vf);
         } }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "out_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&r, gated_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     mlx_array_set(out_h, r);
 
     mlx_array_free(q_part); mlx_array_free(k_part); mlx_array_free(v_part);

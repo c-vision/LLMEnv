@@ -54,6 +54,7 @@ bool kimi_mla_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
     mlx_array q=mlx_array_new(), q4=mlx_array_new(), qt=mlx_array_new(), q_nope=mlx_array_new(), q_pe=mlx_array_new();
     if (ok) ok = quantized_linear_cfg(&q, normed, qw,qs,qb, gsz,bts, mode, m->stream);
     /* §D R6 (kimi_mla): LoRA su q_proj. */
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&q, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok) { int sh[4]={1,n_tokens,H,qh}; ok = mlx_reshape(&q4, q, sh, 4, m->stream)==0; }
     if (ok) { int perm[4]={0,2,1,3}; ok = mlx_transpose_axes(&qt, q4, perm, 4, m->stream)==0; }
     if (ok) { int _sec[1]={qn}; mlx_vector_array _sp=mlx_vector_array_new();
@@ -64,6 +65,7 @@ bool kimi_mla_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
     mlx_array ckv=mlx_array_new(), ckv3=mlx_array_new(), compressed=mlx_array_new(), kpe3=mlx_array_new(), kpe=mlx_array_new(), kvl4=mlx_array_new();
     if (ok) ok = quantized_linear_cfg(&ckv, normed, aw,as,ab, gsz,bts, mode, m->stream);
     /* §D R6 (kimi_mla): LoRA su kv_a_proj_with_mqa. */
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "kv_a_proj_with_mqa"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&ckv, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok) { int sh[3]={1,n_tokens,kvl+qr}; ok = mlx_reshape(&ckv3, ckv, sh, 3, m->stream)==0; }
     if (ok) { int _sec[1]={kvl}; mlx_vector_array _sp=mlx_vector_array_new();
               ok = mlx_split_sections(&_sp, ckv3, _sec, 1, -1, m->stream)==0 &&
@@ -162,6 +164,7 @@ bool kimi_mla_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
     if (ok) { int sh[3]={1,n_tokens,H*vhd}; ok = mlx_reshape(&attn_flat, attn_bt, sh, 3, m->stream)==0; }
     if (ok) ok = quantized_linear_cfg(&proj, attn_flat, ow,os,ob, gsz,bts, mode, m->stream);
     /* §D R6 (kimi_mla): LoRA su o_proj. */
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "o_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&proj, attn_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok) ok = mlx_add(out_h, x, proj, m->stream)==0;
 
     mlx_array_free(ln);mlx_array_free(qw);mlx_array_free(qs);mlx_array_free(qb);
