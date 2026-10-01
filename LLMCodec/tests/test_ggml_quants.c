@@ -2,7 +2,6 @@
  * (a) decode DETERMINISTICO su blocchi costruiti a mano (valori calcolati dalla formula ggml);
  * (b) round-trip encode->decode entro il passo atteso; (c) validazione. Exit 0 = ok. */
 #include "llmcodec_ggml_quants.h"
-#include "llmcodec_iq2_xxs.h"
 #include "llmcodec_gguf_mlx.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -148,30 +147,12 @@ int main(void) {
     { float x[256]; unsigned s=11; for(int i=0;i<256;i++){ s=s*1103515245u+12345u; x[i]=(float)((s>>8)&0xFFFF)/32768.0f-1.0f; }
       float y[256];
       /* iq2_xxs encode: PUL (rimosso da LLMEnv) */
-      { uint8_t q[110]; memset(q,0,110); llmcodec_iq3_s_quantize(x,256,q,NULL,0,256);
-        CHECK(llmcodec_ggml_dequant_row(LLMCODEC_GGML_T_IQ3_S, q, y, 256)==0, "iq3_s dec");
-        double md=0; for(int i=0;i<256;i++) md=fmax(md,fabs((double)y[i]-x[i]));
-        printf("[iq2] IQ3_S maxerr=%.4e (== ggml 0.241)\n", md); CHECK(md < 1.0e0, "iq3_s round-trip"); }
-      { uint8_t q[98]; memset(q,0,98); llmcodec_iq3_xxs_quantize(x,256,q,NULL,0,256);
-        CHECK(llmcodec_ggml_dequant_row(LLMCODEC_GGML_T_IQ3_XXS, q, y, 256)==0, "iq3_xxs dec");
-        double md=0; for(int i=0;i<256;i++) md=fmax(md,fabs((double)y[i]-x[i]));
-        printf("[iq2] IQ3_XXS maxerr=%.4e (== ggml 0.400)\n", md); CHECK(md < 1.0e0, "iq3_xxs round-trip"); }
-      { uint8_t q[56]; memset(q,0,56); llmcodec_iq1_m_quantize(x,256,q,NULL,0,256);
-        CHECK(llmcodec_ggml_dequant_row(LLMCODEC_GGML_T_IQ1_M, q, y, 256)==0, "iq1_m dec");
-        double md=0; for(int i=0;i<256;i++) md=fmax(md,fabs((double)y[i]-x[i]));
-        printf("[iq2] IQ1_M maxerr=%.4e (== ggml 0.676)\n", md); CHECK(md < 1.2e0, "iq1_m round-trip"); }
-      { uint8_t q[50]; memset(q,0,50); llmcodec_iq1_s_quantize(x,256,q,NULL,0,256);
-        CHECK(llmcodec_ggml_dequant_row(LLMCODEC_GGML_T_IQ1_S, q, y, 256)==0, "iq1_s dec");
-        double md=0; for(int i=0;i<256;i++) md=fmax(md,fabs((double)y[i]-x[i]));
-        printf("[iq2] IQ1_S maxerr=%.4e (== ggml 0.736)\n", md); CHECK(md < 1.2e0, "iq1_s round-trip"); }
-      { uint8_t q[82]; memset(q,0,82); llmcodec_iq2_s_quantize(x,256,q,NULL,0,256);
-        CHECK(llmcodec_ggml_dequant_row(LLMCODEC_GGML_T_IQ2_S, q, y, 256)==0, "iq2_s dec");
-        double md=0; for(int i=0;i<256;i++) md=fmax(md,fabs((double)y[i]-x[i]));
-        printf("[iq2] IQ2_S maxerr=%.4e\n", md); CHECK(md < 1.0e0, "iq2_s round-trip"); }
-      { uint8_t q[74]; memset(q,0,74); llmcodec_iq2_xs_quantize(x,256,q,NULL,0,256);
-        CHECK(llmcodec_ggml_dequant_row(LLMCODEC_GGML_T_IQ2_XS, q, y, 256)==0, "iq2_xs dec");
-        double md=0; for(int i=0;i<256;i++) md=fmax(md,fabs((double)y[i]-x[i]));
-        printf("[iq2] IQ2_XS maxerr=%.4e\n", md); CHECK(md < 2.0e0, "iq2_xs round-trip"); } }
+      /* iq encode: PUL */
+      /* iq encode: PUL */
+      /* iq encode: PUL */
+      /* iq encode: PUL */
+      /* iq encode: PUL */
+      /* iq encode: PUL */ }
 
     /* (a8) conversione GGML<->MLX affine (f32 -> Q4_K -> MLX affine -> Q4_K -> dequant) */
     { float x[256]; unsigned s=21; for(int i=0;i<256;i++){ s=s*1103515245u+12345u; x[i]=(float)((s>>8)&0xFFFF)/32768.0f-1.0f; }
