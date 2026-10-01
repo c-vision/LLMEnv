@@ -183,6 +183,7 @@ void llm_mlx_dp_reset(void) {
     d.by_shape.clear();
     d.total = 0;
     d.bytes_total = 0;
+    d.bytes_in_total = 0;
     d.build_sec = 0;
     d.eval_sec = 0;
     d.last_new = 0;
