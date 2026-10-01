@@ -2349,6 +2349,8 @@ static int llmmodelio_model_ir_ced(const char* path) {
     }
     if (f) fclose(f);
     fprintf(LOUT, "# LLM TENSOR CED '%s' arch=%s: tensori campionati(piccoli)=%d all-zero=%d\n", path, g_arch_ok?g_arch.arch:"-", checked, allzero);
+    fprintf(LOUT, "  GATE/kill-switch: %s (soglia all-zero>0 = eliminazione proposta; OFF di default = report-only)\n",
+            allzero > 0 ? "ELIMINABILE (candidati presenti) — richiede A/B + quality gate per abilitare" : "NESSUN candidato (niente da eliminare)");
     llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
     return 0;
 }
