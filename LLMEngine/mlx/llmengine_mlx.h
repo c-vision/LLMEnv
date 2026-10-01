@@ -510,11 +510,7 @@ int llm_ai_mlx_model_imatrix_write(llm_ai_mlx_model_handle handle, const char* p
  * Jetsam. Ritorna 0 ok / -1. */
 int llm_ai_mlx_memory_stats(size_t* out_cache, size_t* out_active, size_t* out_peak);
 
-/* §D R3.3 — training forward differenziabile (path denso): loss = masked cross-entropy (mean sul
- * batch) di `toks` con target `targets`, con un adapter LoRA su (layer, proj). Se out_dA/out_dB
- * non NULL calcola anche dLoss/dA, dLoss/dB via `mlx_value_and_grad` (autograd MLX, in-graph).
- * A [Ar,Ac] (Ac=rank), B [Br,Bc]. Ritorna 0 ok, -1 errore. */
-/* LoRA model-level (registrazione/abilitazione; usate anche dal training R3.3). */
+/* LoRA model-level (registrazione/abilitazione) — run-side (apply adapter a inference). */
 void llm_ai_mlx_model_lora_clear(llm_ai_mlx_model_handle h);
 int  llm_ai_mlx_model_lora_add(llm_ai_mlx_model_handle h, int layer, const char* proj,
                                int rank, float scale, const float* a, const float* b,
@@ -526,30 +522,8 @@ int  llm_ai_mlx_model_lora_set_enabled(llm_ai_mlx_model_handle h, bool enabled);
 int llm_ai_mlx_model_lora_save(llm_ai_mlx_model_handle h, const char* path);
 int llm_ai_mlx_model_lora_load(llm_ai_mlx_model_handle h, const char* path);
 
-/* §D R5: come sopra ma con MASK (1 = la posizione contribuisce alla loss), per l'SFT (loss solo
- * sulla completion). mask NULL = tutte le posizioni. */
-int llm_ai_mlx_train_lora_loss_grad_mask(llm_ai_mlx_model_handle mh,
-                                         const int32_t* toks, const int32_t* targets, const uint8_t* mask, int T,
-                                         int layer, const char* proj,
-                                         const float* A, int Ar, int Ac,
-                                         const float* B, int Br, int Bc,
-                                         float* out_loss, float* out_dA, float* out_dB);
 
-/* §D R7 — DPO step: loss di preference + gradienti sul LoRA. La reference gira con l'adapter OFF.
- * Ritorna loss DPO + dLoss/dA,dB. 0 ok / -1. */
-int llm_ai_mlx_train_dpo_step(llm_ai_mlx_model_handle mh,
-                              const int32_t* tw, const int32_t* tgw, const uint8_t* mw, int Tw,
-                              const int32_t* tl, const int32_t* tgl, const uint8_t* ml, int Tl,
-                              int layer, const char* proj,
-                              const float* A, int Ar, int Ac, const float* B, int Br, int Bc,
-                              float beta, float* out_loss, float* out_dA, float* out_dB);
 
-int llm_ai_mlx_train_lora_loss_grad(llm_ai_mlx_model_handle mh,
-                                    const int32_t* toks, const int32_t* targets, int T,
-                                    int layer, const char* proj,
-                                    const float* A, int Ar, int Ac,
-                                    const float* B, int Br, int Bc,
-                                    float* out_loss, float* out_dA, float* out_dB);
 
 /* §M/L25 — probe di attribuzione della ritenzione: stampa il bilancio `mlx_array_new*−free`
  * (net costante = nessun leak NOSTRO) + active/peak/cache MLX. Con build `-DLLM_COUNT_ARRAYS=1`
