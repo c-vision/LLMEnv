@@ -234,6 +234,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_mtp.c
     llm_mlx_selftest.c
     llm_mlx_train.c
+    llm_mlx_train_abi.c
     llm_mlx_stats.c
     llm_mlx_rope.c
     llm_mlx_gptoss.c

@@ -20,7 +20,7 @@
 
 /* Forward in-graph + masked CE. sum_mode=false -> MEDIA sui token mascherati (SFT); true ->
  * SOMMA dei CE mascherati (= -sum logp, per DPO). mask NULL = tutte le posizioni. */
-static mlx_array llm_train_ce(LlmMlxModel* m, const int32_t* toks, const int32_t* tgt,
+mlx_array llm_mlx_train_ce_impl(LlmMlxModel* m, const int32_t* toks, const int32_t* tgt,
                               const uint8_t* mask, int T, bool sum_mode, bool* ok_out) {
     OutputTensors t;
     bool ok = load_output_tensors(m, &t);
@@ -98,7 +98,7 @@ static int llm_train_loss_fn(mlx_vector_array* res, const mlx_vector_array input
     mlx_array_set(&c->m->lora_A[c->li], A);
     mlx_array_set(&c->m->lora_B[c->li], B);
     bool ok = true;
-    mlx_array loss = llm_train_ce(c->m, c->toks, c->tgt, c->mask, c->T, /*sum_mode=*/false, &ok);
+    mlx_array loss = llm_mlx_train_ce_impl(c->m, c->toks, c->tgt, c->mask, c->T, /*sum_mode=*/false, &ok);
     if (ok) mlx_vector_array_set_value(res, loss);
     mlx_array_free(loss);
     return ok ? 0 : 1;
@@ -106,7 +106,7 @@ static int llm_train_loss_fn(mlx_vector_array* res, const mlx_vector_array input
 
 /* R3.3: SDPA EAGER differenziabile (matmul+softmax+matmul causale) — sostituisce fast_sdpa
  * (CustomKernel senza VJP) nel forward di training, via llm_train_sdpa_hook. */
-static bool llm_train_sdpa_eager(mlx_array* out, mlx_array q, mlx_array k, mlx_array v,
+bool llm_mlx_train_sdpa_eager_impl(mlx_array* out, mlx_array q, mlx_array k, mlx_array v,
                                  float scale, void* ctx, mlx_stream st) {
     (void)ctx;
     int B = (int)mlx_array_shape(q)[0], nh = (int)mlx_array_shape(q)[1];
@@ -188,7 +188,7 @@ int llm_ai_mlx_train_lora_loss_grad_mask(llm_ai_mlx_model_handle mh,
     int li = llm_mlx_model_lora_get(m, layer, pr);
     if (li < 0) return -1;
     GtCtx ctx = { m, toks, T, targets, li, mask };
-    llm_train_sdpa_hook.fn = llm_train_sdpa_eager; llm_train_sdpa_hook.ctx = NULL;  /* R3.3 */
+    llm_train_sdpa_hook.fn = llm_mlx_train_sdpa_eager_impl; llm_train_sdpa_hook.ctx = NULL;  /* R3.3 */
     mlx_closure cl = mlx_closure_new_func_payload(llm_train_loss_fn, &ctx, NULL);
     int sA[2] = { Ar, Ac }, sB[2] = { Br, Bc };
     mlx_array Aa = mlx_array_new_data(A, sA, 2, MLX_FLOAT32);
@@ -269,11 +269,11 @@ static int llm_dpo_loss_fn(mlx_vector_array* res, const mlx_vector_array input, 
     mlx_array_set(&m->lora_B[c->li], B);
 
     bool ok = true;
-    mlx_array ce_w = llm_train_ce(m, c->tw, c->tgw, c->mw, c->Tw, /*sum_mode=*/true, &ok);
-    mlx_array ce_l = ok ? llm_train_ce(m, c->tl, c->tgl, c->ml, c->Tl, true, &ok) : mlx_array_new();
+    mlx_array ce_w = llm_mlx_train_ce_impl(m, c->tw, c->tgw, c->mw, c->Tw, /*sum_mode=*/true, &ok);
+    mlx_array ce_l = ok ? llm_mlx_train_ce_impl(m, c->tl, c->tgl, c->ml, c->Tl, true, &ok) : mlx_array_new();
     m->lora_enabled = false;          /* REFERENCE: adapter OFF (costante, fuori dal grafo) */
-    mlx_array rc_w = ok ? llm_train_ce(m, c->tw, c->tgw, c->mw, c->Tw, true, &ok) : mlx_array_new();
-    mlx_array rc_l = ok ? llm_train_ce(m, c->tl, c->tgl, c->ml, c->Tl, true, &ok) : mlx_array_new();
+    mlx_array rc_w = ok ? llm_mlx_train_ce_impl(m, c->tw, c->tgw, c->mw, c->Tw, true, &ok) : mlx_array_new();
+    mlx_array rc_l = ok ? llm_mlx_train_ce_impl(m, c->tl, c->tgl, c->ml, c->Tl, true, &ok) : mlx_array_new();
     m->lora_enabled = true;
     if (!ok) { m->lora_enabled = true; mlx_array_free(ce_w); mlx_array_free(ce_l); mlx_array_free(rc_w); mlx_array_free(rc_l); return 1; }
 
@@ -315,7 +315,7 @@ int llm_ai_mlx_train_dpo_step(llm_ai_mlx_model_handle mh,
     int li = llm_mlx_model_lora_get(m, layer, pr);
     if (li < 0) return -1;
     GdpoCtx ctx = { m, tw, tgw, tl, tgl, mw, ml, Tw, Tl, li, beta };
-    llm_train_sdpa_hook.fn = llm_train_sdpa_eager; llm_train_sdpa_hook.ctx = NULL;
+    llm_train_sdpa_hook.fn = llm_mlx_train_sdpa_eager_impl; llm_train_sdpa_hook.ctx = NULL;
     mlx_closure cl = mlx_closure_new_func_payload(llm_dpo_loss_fn, &ctx, NULL);
     int sA[2] = { Ar, Ac }, sB[2] = { Br, Bc };
     mlx_array Aa = mlx_array_new_data(A, sA, 2, MLX_FLOAT32);
