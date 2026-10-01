@@ -1974,7 +1974,7 @@ static int llmmodelio_model_ir_layers(const char* path) {
 static int llmmodelio_model_ir_check(const char* path) {
     size_t ln = strlen(path); int tot = 0, other = 0;
     if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) {
-        if (llmmodelio_arch_resolve_gguf(path) != 0) { fprintf(LOUT, "LLM TENSOR CHECK: arch non risolta per '%s'\n", path); return -1; }
+        if (llmmodelio_arch_resolve_gguf(path) != 0) return -1;
         LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
         if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
         for (uint64_t i = 0; i < fi.n_tensors; i++) { tot++; const char* r = llmdesc_role(&g_arch, fi.tensors[i].name); if (strcmp(r, "OTHER") == 0) { other++; if (other <= 8) fprintf(LOUT, "  OTHER: %s\n", fi.tensors[i].name); } }
