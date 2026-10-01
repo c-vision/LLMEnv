@@ -509,10 +509,33 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
         ok = forward_tokens_batch_multi_cap(m, sess1, ks1, 1, ids, offs1,
                                             t.embed_w, t.embed_s, t.embed_b,
                                             caplayers, ncap, cap, (int)capneed, &h);
+    } else if (getenv("LLM_DF2_FWD_HTB")) {
+        /* ESPERIMENTO: greedy col forward "normale" forward_tokens_batch (quello della n-gram,
+         * senza snap di cattura ctx). Ipotesi: la cattura degli snap perturba il forward GDN
+         * (il drafter propone il token giusto ma il verify no). Qui il ctx resta vuoto -> il
+         * propose non propone; serve solo a isolare il GREEDY e confrontarlo con l'AR. */
+        ok = forward_tokens_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
+                                  s->k_cache, s->v_cache, s->has_cache, &h);
     } else {
-        ok = df2_capture_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
-                               s->k_cache, s->v_cache, s->has_cache,
-                               caplayers, ncap, cap, (int)capneed, &h);
+        /* FIX (2026-10-01): il GREEDY si calcola col forward "normale" `forward_tokens_batch`
+         * (quello della n-gram, corretto sui GDN). La cattura degli snap di ctx perturba il
+         * forward ricorrente GDN (verificato con dump token-id: col capture il greedy diverge
+         * dall'AR, senza capture e' bit-identico). Poi si RIPRISTINA il checkpoint e si rifa'
+         * la cattura SOLO per il ctx del drafter (il suo h non serve). */
+        ok = forward_tokens_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
+                                  s->k_cache, s->v_cache, s->has_cache, &h);
+        if (ok && caplayers != NULL) {
+            for (int l = 0; l < NL; l++) {
+                llm_mlx_cache_rollback(&s->k_cache[l], ck[l], m->stream);
+                llm_mlx_cache_rollback(&s->v_cache[l], cv[l], m->stream);
+                if (ca != NULL && has_aux[l]) llm_mlx_cache_rollback(&s->aux_cache[l], ca[l], m->stream);
+            }
+            mlx_array hd = mlx_array_new();
+            ok = df2_capture_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
+                                   s->k_cache, s->v_cache, s->has_cache,
+                                   caplayers, ncap, cap, (int)capneed, &hd);
+            mlx_array_free(hd);
+        }
     }
     if (g_df2_time_on()) { g_df2_t_fwd += g_df2_now() - _t0; _t0 = g_df2_now(); }
     mlx_array normed = mlx_array_new(), logits = mlx_array_new(), am = mlx_array_new();
