@@ -2155,6 +2155,52 @@ static int llmmodelio_model_ir_kv(const char* path) {
             g_arch.runtime_activation_dtype[0] ? g_arch.runtime_activation_dtype : "-");
     return 0;
 }
+/* EXECPLAN (GMB_AI_PLAN serializzabile, §4.5): piano esecutivo del modello in JSON (report-only). */
+static int llmmodelio_model_ir_execplan(const char* path, const char* out_path) {
+    if (!out_path || !*out_path) { fprintf(stderr, "LLM TENSOR EXECPLAN: atteso <path>, <out>\\n"); return -1; }
+    size_t ln = strlen(path); int F[1024]; memset(F, 0, sizeof F); int maxl = -1;
+    unsigned long long wb = 0; int nten = 0; long bc = -1, hkv = -1, hd = -1, kl = -1, vl = -1, en = -1;
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) {
+        if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+        LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+        if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+        for (uint64_t i = 0; i < fi.n_tensors; i++) {
+            const char* r = g_arch_ok ? llmdesc_role(&g_arch, fi.tensors[i].name) : "OTHER";
+            uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d];
+            uint64_t b = 0; if (llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b) == 0) wb += b;
+            int L = model_layer_of(fi.tensors[i].name); if (L < 0) L = 0; if (L > maxl) maxl = L; if (L > 1023) { nten++; continue; }
+            if (strncmp(r,"ATTN",4)==0) F[L]|=1; else if (strcmp(r,"ROUTED_EXPERT")==0||strcmp(r,"SHARED_EXPERT")==0||strcmp(r,"ROUTER")==0||strstr(fi.tensors[i].name,"exps")) F[L]|=2;
+            else if (strncmp(r,"FFN",3)==0) F[L]|=4; else if (strstr(r,"NORM")) F[L]|=8; nten++;
+        }
+        for (int i = 0; i < nkv; i++) { const char* k = kv[i].key; long v = (long)kv[i].u32;
+            if (strstr(k,"attention.head_count_kv")) hkv=v; else if (strstr(k,"attention.head_count")) hd=v;
+            else if (strstr(k,"attention.key_length")) kl=v; else if (strstr(k,"attention.value_length")) vl=v;
+            else if (strstr(k,"block_count")) bc=v; else if (strstr(k,"embedding_length")) en=v; }
+        llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    } else { fprintf(stderr, "LLM TENSOR EXECPLAN: solo GGUF (per ora)\\n"); return -1; }
+    double kvpt = -1.0;
+    if (bc > 0 && hkv > 0) { long kd = kl>0?kl:((en>0&&hd>0)?en/hd:-1); long vd = vl>0?vl:kd; if (kd>0&&vd>0) kvpt = (double)bc*(double)hkv*(double)(kd+vd)*2.0; }
+    const char* atn = g_arch_ok ? llmdesc_struct_type(&g_arch,"attention") : NULL;
+    const char* moe = g_arch_ok ? llmdesc_struct_type(&g_arch,"moe") : NULL;
+    FILE* o = fopen(out_path, "w"); if (o == NULL) return -1;
+    fprintf(o, "{\n  \"format\": \"GGUF\",\n  \"arch\": \"%s\",\n  \"tensors\": %d,\n  \"layers\": %d,\n", g_arch_ok?g_arch.arch:"-", nten, maxl+1);
+    fprintf(o, "  \"attention\": \"%s\",\n  \"moe\": \"%s\",\n  \"modality\": \"%s\",\n", atn?atn:"-", moe?moe:"-", g_arch_ok?llmdesc_modality(&g_arch):"-");
+    int mtp = g_arch_ok ? (g_arch.mm_mtp || 0) : 0;
+    fprintf(o, "  \"speculation\": \"%s\",\n", mtp ? (g_arch.mm_dspark?"DSPARK(MTP)":"MTP") : "NONE");
+    fprintf(o, "  \"memory\": { \"weights_bytes\": %llu, \"kv_per_token_bytes\": ", wb);
+    if (kvpt >= 0) fprintf(o, "%.0f", kvpt); else fprintf(o, "null");
+    fprintf(o, " },\n");
+    fprintf(o, "  \"layer_ops\": [\n");
+    int first = 1;
+    for (int L = 0; L <= maxl && L < 1024; L++) { if (!F[L]) continue;
+        fprintf(o, "%s    { \"layer\": %d, \"ops\": [", first?"":",\n", L);
+        int f1 = 1; if (F[L]&1){fprintf(o,"%s\"attention\"",f1?"":" ,");f1=0;} if (F[L]&4){fprintf(o,"%s\"ffn\"",f1?"":" ,");f1=0;} if (F[L]&2){fprintf(o,"%s\"moe\"",f1?"":" ,");f1=0;} if (F[L]&8){fprintf(o,"%s\"norm\"",f1?"":" ,");f1=0;}
+        fprintf(o, "] }"); first = 0; }
+    fprintf(o, "\n  ]\n}\n");
+    fclose(o);
+    fprintf(LOUT, "LLM TENSOR EXECPLAN '%s' -> '%s' (arch=%s layers=%d weights=%llu, kv/token=%.0f)\n", path, out_path, g_arch_ok?g_arch.arch:"-", maxl+1, wb, kvpt);
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2167,6 +2213,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "EXECPLAN") == 0 || strcasecmp(s, "PLAN") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR EXECPLAN: atteso <path>, <out>\n"); return -1; }
+        return llmmodelio_model_ir_execplan(dir, tn);
     }
     if (strcasecmp(s, "KV") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR KV: atteso <path>\n"); return -1; }
