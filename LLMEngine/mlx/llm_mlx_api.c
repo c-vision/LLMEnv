@@ -467,9 +467,17 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
      * GDN resta quello del forward batch (K+1 token) e il decode successivo drifta dal greedy
      * (misurato: divergenza a 93/143). Si salva/ripristina per layer come k/v. */
     double _t0 = g_df2_time_on() ? g_df2_now() : 0.0;
+    /* FIX (2026-10-01): stato ricorrente GDN in s->aux_cache. Vuoto = ctx NULL (mlx_array_={ctx}),
+     * quindi mai usare ndim/size (lanciano). Solo le righe NON vuote si checkpoíntano. */
+    mlx_array* ca = (s->aux_cache != NULL) ? (mlx_array*)malloc((size_t)NL * sizeof(mlx_array)) : NULL;
+    bool* has_aux = (ca != NULL) ? (bool*)calloc((size_t)NL, sizeof(bool)) : NULL;
     for (int l = 0; l < NL; l++) { ck[l] = mlx_array_new(); cv[l] = mlx_array_new();
         llm_mlx_cache_checkpoint(&ck[l], s->k_cache[l], m->stream);
-        llm_mlx_cache_checkpoint(&cv[l], s->v_cache[l], m->stream); }
+        llm_mlx_cache_checkpoint(&cv[l], s->v_cache[l], m->stream);
+        if (ca != NULL) { ca[l] = mlx_array_new();
+            if (s->aux_cache[l].ctx != NULL) {
+                llm_mlx_cache_checkpoint(&ca[l], s->aux_cache[l], m->stream); has_aux[l] = true;
+            } } }
     if (g_df2_time_on()) { g_df2_t_ckpt += g_df2_now() - _t0; _t0 = g_df2_now(); }
 
     int64_t capneed = (int64_t)N * ncap * m->cfg.hidden_size;
@@ -549,6 +557,7 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
         for (int l = 0; l < NL; l++) {
             llm_mlx_cache_rollback(&s->k_cache[l], ck[l], m->stream);
             llm_mlx_cache_rollback(&s->v_cache[l], cv[l], m->stream);
+            if (ca != NULL && has_aux[l]) llm_mlx_cache_rollback(&s->aux_cache[l], ca[l], m->stream);
         }
         int P = accepted + 1;   /* [anchor] + accettati */
         mlx_array ph = mlx_array_new();
@@ -586,8 +595,8 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
     if (ok && out_next != NULL && greedy != NULL) *out_next = greedy[accepted];
     free_output_tensors(&t);
     free(ids); free(cap); free(greedy);
-    for (int l = 0; l < NL; l++) { mlx_array_free(ck[l]); mlx_array_free(cv[l]); }
-    free(ck); free(cv);
+    for (int l = 0; l < NL; l++) { mlx_array_free(ck[l]); mlx_array_free(cv[l]); if (ca != NULL) mlx_array_free(ca[l]); }
+    free(ck); free(cv); free(ca); free(has_aux);
     return ok ? accepted : -1;
 }
 
