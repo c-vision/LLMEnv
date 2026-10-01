@@ -286,6 +286,19 @@ int llmcodec_mlx_to_gguf_ex(const char* mlx_dir, const char* out_path, int ggml_
                     if (obuf) { cerr=0; for (int e=0; !cerr && e<E; ++e) { size_t ol=0,al=0;
                         if (gc->encode(f32 + (size_t)e*rows*cols, rows, cols, tt, 0,0, obuf+(size_t)e*slab_nb, (size_t)slab_nb, &ol, NULL,0,&al)!=0) cerr=1; } }
                 }
+                /* FALLBACK (ripristino migrazione): se il tipo richiesto non e' codificabile per
+                 * QUESTA shape (i K-quant esigono cols multiplo di 256; 1D/piccoli no) ripiega su F16
+                 * -- il GGUF ammette un tipo per-tensore. Senza, tensori validi vengono scartati e
+                 * l'errore appare come "dtype non mappato" (es. switch_mlp.down_proj cols=1408, o il
+                 * layer denso down_proj cols=10944). */
+                if (cerr) {
+                    free(obuf); obuf = NULL; tt = LLMCODEC_GGML_T_F16;
+                    if (gc && gc->sizes(tt,0,0,rows,cols,&slab_nb,&aux_nb)==0) {
+                        obuf = (uint8_t*)malloc((size_t)slab_nb*(size_t)E);
+                        if (obuf) { cerr=0; for (int e=0; !cerr && e<E; ++e) { size_t ol=0,al=0;
+                            if (gc->encode(f32 + (size_t)e*rows*cols, rows, cols, tt, 0,0, obuf+(size_t)e*slab_nb, (size_t)slab_nb, &ol, NULL,0,&al)!=0) cerr=1; } }
+                    }
+                }
                 free(f32);
                 if (!cerr && stack && E == 1) {
                     int e = src_expert_of(t->name);
