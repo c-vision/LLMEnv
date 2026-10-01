@@ -510,7 +510,13 @@ bool llm_mlx_kv_f16_gptoss_enabled(void) {
  * Fallback silenzioso su ANY condizione non soddisfatta: mai un errore bloccante. */
 static int g_fuse_rope_state = -1;
 bool llm_mlx_fuse_rope_enabled(void) {
-    if (g_fuse_rope_state < 0) g_fuse_rope_state = (llm_ai_mlx_opt_env("LLM_FUSE_ROPE") != NULL) ? 1 : 0;
+    if (g_fuse_rope_state < 0) {
+        /* DEFAULT ON (2026-10-01). Misura deterministica decode llama-1B: 364 -> 300 nodi/token
+         * (-64, -17.6%) a `MB_in` invariato (pura riduzione di launch); `LLM_FUSE_ROPE_VERIFY`
+         * max_abs_diff q=k=v=0 (bit-exact). Opt-out: LLM_FUSE_ROPE=0. */
+        const char* e = llm_ai_mlx_opt_env("LLM_FUSE_ROPE");
+        g_fuse_rope_state = (e != NULL && e[0] == '0') ? 0 : 1;
+    }
     return g_fuse_rope_state == 1;
 }
 static int g_fuse_rope_verify_state = -1;
