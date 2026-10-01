@@ -2501,8 +2501,8 @@ static int llmmodelio_model_ir_context(const char* path) {
 /* QUALITY (I6, gate NLL/perplexity): carica il modello col motore MLX (dlopen, dipendenza
  * debole), tokenizza (llmtoken), punteggia token-per-token con logprob_of -> NLL/perplexity.
  * Nessun link statico MLX (una sola istanza; i backend C restano snelli). */
-int llmmodelio_model_quality(const char* model_dir, const char* prompt, const char* out_path) {
-    if (model_dir == NULL || prompt == NULL || out_path == NULL) return -1;
+static int llm_quality_nll(const char* model_dir, const char* prompt, double* nll_mean, double* ppl, int* tokens);
+static int llm_quality_nll(const char* model_dir, const char* prompt, double* out_nll_mean, double* out_ppl, int* out_tokens) {
     void* h = dlopen("libgmb_ai_mlx.dylib", RTLD_NOW | RTLD_LOCAL);
     if (h == NULL) h = dlopen("libllm_ai_mlx.dylib", RTLD_NOW | RTLD_LOCAL);
     if (h == NULL) { fprintf(stderr, "LLM QUALITY: engine MLX non caricabile (libgmb_ai_mlx)\n"); return -1; }
@@ -2530,11 +2530,29 @@ int llmmodelio_model_quality(const char* model_dir, const char* prompt, const ch
     }
     double nll_mean = cnt > 0 ? nll / (double)cnt : -1.0;
     double ppl = nll_mean >= 0 ? exp(nll_mean) : -1.0;
-    FILE* o = fopen(out_path, "w");
-    if (o != NULL) { fprintf(o, "model=%s tokens=%d scored=%d nll=%.6f ppl=%.6f\n", model_dir, n, cnt, nll, ppl); fclose(o); }
-    fprintf(LOUT, "LLM QUALITY '%s': tokens=%d scored=%d nll_mean=%.4f ppl=%.4f\n", model_dir, n, cnt, nll_mean, ppl);
     if (DS) DS(s); if (FM) FM(m); llmtoken_free(th);
+    if (out_nll_mean) *out_nll_mean = nll_mean; if (out_ppl) *out_ppl = ppl; if (out_tokens) *out_tokens = n;
     return cnt > 0 ? 0 : -1;
+}
+/* Wrapper: NLL del modello; se ref_model dato -> GATE (REJECT-FLAG se ppl peggiore > 2%). */
+int llmmodelio_model_quality(const char* model_dir, const char* prompt, const char* out_path, const char* ref_model) {
+    if (model_dir == NULL || prompt == NULL || out_path == NULL) return -1;
+    double nll = -1, ppl = -1; int tok = 0;
+    if (llm_quality_nll(model_dir, prompt, &nll, &ppl, &tok) != 0) return -1;
+    FILE* o = fopen(out_path, "w");   /* non fatale: il valore NLL resta valido anche senza report */
+    if (ref_model != NULL && *ref_model != '\0') {
+        double rn = -1, rp = -1; int rt = 0;
+        if (llm_quality_nll(ref_model, prompt, &rn, &rp, &rt) != 0) { fclose(o); return -1; }
+        const char* verdict = (rp <= 0) ? "ACCEPT" : (ppl <= rp * 1.02 ? "ACCEPT" : "REJECT-FLAG");
+        if (o != NULL) fprintf(o, "model=%s tokens=%d nll_mean=%.6f ppl=%.6f\nref=%s ppl=%.6f\nGATE: %s (ppl %s rif..)\n",
+                model_dir, tok, nll, ppl, ref_model, rp, verdict, ppl <= rp ? "<=" : ">");
+        fprintf(LOUT, "LLM QUALITY '%s' ppl=%.4f vs ref '%s' ppl=%.4f -> GATE %s\n", model_dir, ppl, ref_model, rp, verdict);
+    } else {
+        if (o != NULL) fprintf(o, "model=%s tokens=%d nll_mean=%.6f ppl=%.6f\n", model_dir, tok, nll, ppl);
+        fprintf(LOUT, "LLM QUALITY '%s': tokens=%d nll_mean=%.4f ppl=%.4f\n", model_dir, tok, nll, ppl);
+    }
+    if (o != NULL) fclose(o);
+    return 0;
 }
 int llmmodelio_model_compile(const char* path, const char* out_path) { return llmmodelio_model_ir_compile(path, out_path); }
 
