@@ -2433,6 +2433,29 @@ static int llmmodelio_model_ir_gexport(const char* path, const char* out) {
     fprintf(LOUT, "LLM TENSOR GEXPORT '%s' -> '%s' (DOT, layers=%d)\n", path, out, maxl+1);
     return 0;
 }
+/* MOBJ (M10, MEMORY OBJECT IR): oggetti di memoria per regione (weights/kv/activation) con
+ * device, lifetime, transfer_cost. Report-only. */
+static int llmmodelio_model_ir_mobj(const char* path) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR MOBJ: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    unsigned long long wb = 0;
+    for (uint64_t i = 0; i < fi.n_tensors; i++) { uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d]; uint64_t b = 0; if (llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b) == 0) wb += b; }
+    long hkv = -1, kd = -1, vd = -1, en = -1, hd = -1, nl = -1;
+    for (int i = 0; i < nkv; i++) { const char* k = kv[i].key; long v = (long)kv[i].u32;
+        if (strstr(k,"head_count_kv")) hkv=v; else if (strstr(k,"key_length")) kd=v; else if (strstr(k,"value_length")) vd=v;
+        else if (strstr(k,"embedding_length")) en=v; else if (strstr(k,"head_count")) hd=v; else if (strstr(k,"block_count")) nl=v; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    double kvpt=-1; if(nl>0&&hkv>0){ long kd2=kd>0?kd:((en>0&&hd>0)?en/hd:-1); long vd2=vd>0?vd:kd2; if(kd2>0&&vd2>0) kvpt=(double)nl*hkv*(kd2+vd2)*2.0; }
+    fprintf(LOUT, "# LLM TENSOR MOBJ '%s' (M10 memory objects)\n", path);
+    fprintf(LOUT, "  {region=weights,  bytes=%llu, device=gpu, lifetime=model, transfer_cost=one-time(mmap)}\n", wb);
+    if (kvpt>=0) fprintf(LOUT, "  {region=kv,        bytes_per_token=%.0f, device=gpu, lifetime=session, transfer_cost=0}\n", kvpt);
+    fprintf(LOUT, "  {region=activation, device=gpu, lifetime=step, transfer_cost=0}\n");
+    fprintf(LOUT, "  {region=expert_workset, policy=residency, lifecycle=demote/evict LRU}\n");
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2465,6 +2488,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
     if (strcasecmp(s, "GPU") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR GPU: atteso <path>\n"); return -1; }
         return llmmodelio_model_ir_gpu(dir);
+    }
+    if (strcasecmp(s, "MOBJ") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR MOBJ: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_mobj(dir);
     }
     if (strcasecmp(s, "STATE") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR STATE: atteso <path>\n"); return -1; }
