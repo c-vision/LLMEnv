@@ -375,6 +375,21 @@ static void push_piece(sds** arr, size_t* len, size_t* cap, sds v) {
     (*arr)[(*len)++] = v;
 }
 
+/* Validatore UTF-8 O(n): se il buffer e' valido si puo' usare PCRE2_NO_UTF_CHECK (pcre2_match
+ * altrimenti rivalida l'intero subject ad ogni chiamata -> O(n^2) sul pre-tokenizer). */
+static int llmtoken_utf8_valid(const unsigned char* p, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned char c = p[i];
+        if (c < 0x80) { i++; continue; }
+        int len = (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : (c >= 0xC2) ? 2 : 0;
+        if (len == 0 || i + (size_t)len > n) return 0;
+        for (int j = 1; j < len; j++) if ((p[i + (size_t)j] & 0xC0) != 0x80) return 0;
+        i += (size_t)len;
+    }
+    return 1;
+}
+
 /* pretokenize: split via il pattern regex Unicode-aware del pre-tokenizer
  * (PCRE2, comportamento "Isolated": i pezzi sono le porzioni matchate
  * stesse). Scrive i pezzi (sds posseduti dal chiamante) in *out_pieces,
@@ -410,8 +425,12 @@ static int pretokenize(const LlmTokenizer* t, const char* text, size_t text_len,
         for (size_t i = 0; i < cur_len; i++) {
             const char* buf = cur[i]; size_t len = sdslen(cur[i]);
             PCRE2_SIZE offset = 0;
+            /* PERFORMANCE (2026-10-01): senza PCRE2_NO_UTF_CHECK, pcre2_match rivalida l'UTF-8
+             * di TUTTO il subject a OGNI match; con l'offset che avanza e' O(len^2) (a 15MB=2.5M
+             * token: >64 min CPU). Validiamo l'UTF-8 UNA volta (O(len)) e poi saltiamo il check. */
+            const int mopts = llmtoken_utf8_valid((const unsigned char*)buf, len) ? PCRE2_NO_UTF_CHECK : 0;
             while (offset < len) {
-                int rc = pcre2_match(t->pre_re[k], (PCRE2_SPTR)buf, len, offset, 0, md, NULL);
+                int rc = pcre2_match(t->pre_re[k], (PCRE2_SPTR)buf, len, offset, mopts, md, NULL);
                 if (rc < 0) break;
                 PCRE2_SIZE* ov = pcre2_get_ovector_pointer(md);
                 PCRE2_SIZE ms = ov[0], me = ov[1];
