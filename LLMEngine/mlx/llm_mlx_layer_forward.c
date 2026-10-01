@@ -9,7 +9,6 @@
 #include "llm_mlx_lora.h"
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
 #include "llm_mlx_kvq_splash.h"   /* KV-quant port da Splash (store/dequant) */
-#include "llm_mlx_splash_attn.h"  /* read paged int8 (kernel splash_attn) - A/B kv_read */
 #include "llm_mlx_kvq_pool.h"     /* page pool int8 (storage primario cold) */
 #include "llm_mlx_flash_decode_kernel.h"
 #include "llm_mlx_fused_rope_append.h"
@@ -89,27 +88,13 @@ static bool llm_kvq_sdpa_hook_dispatch(mlx_array* out, mlx_array q, mlx_array k,
     if (c->nc <= 0 || c->kw.ctx == NULL) return false;
     if (mlx_array_ndim(q) != 4 || mlx_array_ndim(k) != 4 || mlx_array_ndim(v) != 4) return false;
     int nh = mlx_array_shape(q)[1], lq = mlx_array_shape(q)[2], hd = mlx_array_shape(q)[3];
-    /* A/B (residuo Splash): kernel di read Splash (port incoai/splash) dietro `kv_read=splash`.
-     * Il pool ha K [nkv,cap,hd] (token-major) e V [nkv,cap,hd] (token-major); il kernel Splash
-     * vuole V DIMENSION-MAJOR [nkv,hd,cap] -> transpose qui (O(cap), percorso cold). Le scale sono
-     * una f32 per (token,kv-head) [nkv,cap,1] (Sym/bias=0). Default `dequant` = invariato. */
-    {   char kr[16];
-        if (llm_ai_mlx_opt_get_str("kv_read", kr, (int)sizeof kr) == 0 && strcmp(kr, "splash") == 0 &&
-            lq == 1 && c->vw.ctx != NULL && c->ks.ctx != NULL && c->vs.ctx != NULL) {
-            int nkv = (int)mlx_array_shape(c->kw)[0], cap = (int)mlx_array_shape(c->kw)[1];
-            mlx_array q2 = mlx_array_new(), vT = mlx_array_new(), ks2 = mlx_array_new(), vs2 = mlx_array_new();
-            int qsh[2] = {nh, hd}, ax[3] = {0, 2, 1}, ssh[2] = {nkv, cap};
-            bool ok = mlx_reshape(&q2, q, qsh, 2, s) == 0 &&
-                      mlx_transpose_axes(&vT, c->vw, ax, 3, s) == 0 &&
-                      mlx_reshape(&ks2, c->ks, ssh, 2, s) == 0 &&
-                      mlx_reshape(&vs2, c->vs, ssh, 2, s) == 0;
-            mlx_array o2 = mlx_array_new();
-            if (ok) ok = llm_splash_attn_run(&o2, q2, c->kw, vT, ks2, vs2, c->nc, cap, scale, s) == 0;
-            if (ok) { int osh[4] = {1, nh, 1, hd}; ok = mlx_reshape(out, o2, osh, 4, s) == 0; }
-            mlx_array_free(q2); mlx_array_free(vT); mlx_array_free(ks2); mlx_array_free(vs2); mlx_array_free(o2);
-            return ok;
-        }
-    }
+    /* (B) Splash P0 — DECISIONE 2026-10-01: il port `splash_attn` (kernel JIT, V dim-major, solo-pool,
+     * tronca a 256 token) NON e' production: la parity gate e' fallita (broadcast (1,8,512,64) vs
+     * (1,8,1335,64); non fonde la finestra recente fp16). Il kernel AOT `llm_mlx_kvq_sdpa_decode`
+     * (dequant-on-read, online-softmax, scala folded, modalita' Sym Splash, split-K) e' la soluzione
+     * COMPLETA -> resta la produzione. Il port non e' piu' cablato qui (resta solo come riferimento/
+     * selftest in `llm_mlx_cb.c`). Vedi `Todo/(open) - Splash-Port-...` e `Kernel-Metal-Da-Portare`
+     * se si decidera' di completarlo (fondere recente + tiling >256). */
     int nkv = mlx_array_shape(k)[1], nr = mlx_array_shape(k)[2];
     if (lq != 1 || hd % 64 != 0) return false;
     if (mlx_array_dtype(q) != mlx_array_dtype(k) || mlx_array_dtype(q) != mlx_array_dtype(v)) return false;
