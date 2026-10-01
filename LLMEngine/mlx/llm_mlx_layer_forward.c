@@ -345,7 +345,13 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
                       (m->cfg.head_dim % 32 == 0) && m->cfg.n_kv_heads > 0 &&
                       (m->cfg.n_heads % m->cfg.n_kv_heads == 0) &&
                       (m->cfg.is_sliding_layer == NULL);
-        if (compat && cache_offset + n_tokens > m->cfg.kv_quantize_auto_trigger) {
+        /* PREFILL-DEFER (2026-10-01, OPZIONALE): nel prefill (n_tokens>1) la KV-quant usa il
+         * dequant-read che RICOSTRUISCE la KV fp16 full (+ pool int8) -> picco ~80GB@257k. Con
+         * LLM_KVQ_DEFER_PREFILL=1 si differisce l'int8 al decode (n_tokens==1): prefill fp16 ->
+         * picco ~meta' (65.6GB@257k) MA prefill ~5x piu' lento (2327s vs 486s). Utile solo a
+         * contesto estremo (1M/2M) per far entrare il DFlash2. Default = comportamento veloce. */
+        bool defer_ok = (llm_ai_mlx_opt_env("LLM_KVQ_DEFER_PREFILL") == NULL) || (n_tokens == 1);
+        if (compat && defer_ok && cache_offset + n_tokens > m->cfg.kv_quantize_auto_trigger) {
             m->cfg.kv_quantize = true;
             m->cfg.kv_quantize_bits = 8;
             m->cfg.kv_quantize_threshold = 2048;
