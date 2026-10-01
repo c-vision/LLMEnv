@@ -2497,6 +2497,54 @@ static int llmmodelio_model_ir_context(const char* path) {
 }
 int llmmodelio_model_compile(const char* path, const char* out_path) { return llmmodelio_model_ir_compile(path, out_path); }
 
+/* QUANTIR (I11) + MEMPLAN + KVPLAN + VIEW — report-only (§4.4/§4.5/§4.6/§4.9). */
+static int llmmodelio_model_ir_quantir(const char* path) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR QUANTIR: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    fprintf(LOUT, "# LLM TENSOR QUANTIR '%s' arch=%s (I11: precisione per OP)\n# role\tweights\tactivation\taccum\toutput\n", path, g_arch_ok?g_arch.arch:"-");
+    for (int i = 0; i < g_arch.n_quant; i++) {
+        const char* f = g_arch.quant[i].fmt;
+        fprintf(LOUT, "%s\tweights=%s\tactivation=f16\taccum=f32\toutput=%s\n", g_arch.quant[i].role, f, f);
+    }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    return 0;
+}
+static int llmmodelio_model_ir_memplan(const char* path) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR MEMPLAN: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    unsigned long long wb = 0; for (uint64_t i = 0; i < fi.n_tensors; i++) { uint64_t numel = 1; for (int d = 0; d < fi.tensors[i].ndim; d++) numel *= fi.tensors[i].dims[d]; uint64_t b = 0; if (llmcodec_ggml_type_bytes(fi.tensors[i].ggml_type, numel, &b) == 0) wb += b; }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    fprintf(LOUT, "# LLM TENSOR MEMPLAN '%s' (STATIC MEMORY PLAN / arena)\n", path);
+    fprintf(LOUT, "  arena[0] weights  size=%llu B (region=model, lifetime=process, align=page)\n", wb);
+    fprintf(LOUT, "  arena[1] kv       size=kv/token*ctx (region=session, lifetime=session)\n");
+    fprintf(LOUT, "  arena[2] scratch  size=O(max_act) (region=step, lifetime=step, riuso)\n");
+    return 0;
+}
+static int llmmodelio_model_ir_kvplan(const char* path) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR KVPLAN: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    fprintf(LOUT, "# LLM TENSOR KVPLAN '%s' (§4.6 KV IR)\n  PAGE (block fisso) | MAP (block<->asse) | UNMAP (evict) | PREFETCH (router->kv) | EVICT (LRU) | SHARE (prefix-cache)\n", path);
+    fprintf(LOUT, "  mode=FULL|PAGED|ROTATING|DISK_BACKED  kv.dtype=%s\n", (g_arch_ok && g_arch.runtime_kv_dtype[0]) ? g_arch.runtime_kv_dtype : "-");
+    return 0;
+}
+static int llmmodelio_model_ir_view(const char* path) {
+    size_t ln = strlen(path);
+    if (!(ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0)) { fprintf(stderr, "LLM TENSOR VIEW: solo GGUF\\n"); return -1; }
+    if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0;
+    LlmCodecGgufFileInfo fi; LlmCodecGgufMetaKVOwned* kv = NULL; int nkv = 0;
+    if (llmcodec_gguf_read_meta(path, &kv, &nkv, &fi) != 0) return -1;
+    fprintf(LOUT, "# LLM TENSOR VIEW '%s' (VIEW/LAYOUT IR) — primi 8 tensori\n", path);
+    for (uint64_t i = 0; i < fi.n_tensors && i < 8; i++) { LlmCodecGgufTensorInfo* t = &fi.tensors[i]; char ds[96]; size_t o=0; ds[0]=0; for (int d=0; d<t->ndim; d++) o+=(size_t)snprintf(ds+o,sizeof ds-o,"%s%llu",d?"x":"",(unsigned long long)t->dims[d]); fprintf(LOUT, "  %s: layout=contiguous dims=%s view=zero-copy(mmap)\n", t->name, ds); }
+    llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2530,6 +2578,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         if (!*dir) { fprintf(stderr, "LLM TENSOR GPU: atteso <path>\n"); return -1; }
         return llmmodelio_model_ir_gpu(dir);
     }
+    if (strcasecmp(s, "QUANTIR") == 0 || strcasecmp(s, "QUANT_IR") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR QUANTIR: atteso <path>\n");return -1;} return llmmodelio_model_ir_quantir(dir); }
+    if (strcasecmp(s, "MEMPLAN") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR MEMPLAN: atteso <path>\n");return -1;} return llmmodelio_model_ir_memplan(dir); }
+    if (strcasecmp(s, "KVPLAN") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR KVPLAN: atteso <path>\n");return -1;} return llmmodelio_model_ir_kvplan(dir); }
+    if (strcasecmp(s, "VIEW") == 0) { if(!*dir){fprintf(stderr,"LLM TENSOR VIEW: atteso <path>\n");return -1;} return llmmodelio_model_ir_view(dir); }
     if (strcasecmp(s, "CONTEXT") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR CONTEXT: atteso <path>\n"); return -1; }
         return llmmodelio_model_ir_context(dir);
