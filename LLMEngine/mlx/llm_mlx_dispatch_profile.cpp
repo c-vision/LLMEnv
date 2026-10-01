@@ -92,6 +92,18 @@ Profile& p() {
 static int g_dp_n_experts = 0;
 static int g_dp_top_k = 0;
 
+/* Banda DRAM di riferimento per il ROOFLINE (GB/s). I byte letti sono DETERMINISTICI (walk a
+ * build-time), quindi `bytes_in/BW` = il floor di tempo per-token di ogni funzione, INDIPENDENTE
+ * dal carico della macchina: e' la parte "senza lanciare il modello". Override: LLM_DISPATCH_BW. */
+static double dp_ceiling_gbs(void) {
+    static double v = -1.0;
+    if (v < 0.0) {
+        const char* e = getenv("LLM_DISPATCH_BW");
+        v = (e != nullptr && atof(e) > 0.0) ? atof(e) : 540.0;
+    }
+    return v;
+}
+
 /* DFS iterativa da una radice: conta i nodi con primitiva NUOVI per questo passo e li
  * accumula nell'istogramma. Iterativa per scelta: il grafo di un passo di decode e' profondo
  * ~(n_layer × nodi-per-layer) e una ricorsione su un modello 96-layer supererebbe lo stack di
@@ -298,6 +310,20 @@ void llm_mlx_dp_report(const char* tag, int steps, int layers, double seconds, i
          * un conteggio di nodi in una quantita' di traffico confrontabile col roofline. */
         fprintf(stderr, " GB/s_scritto=%.1f", (double)d.bytes_total / 1e9 / seconds);
     }
+    {
+        /* ROOFLINE (macchina-indipendente): floor di tempo per-token = byte-LETTI / BW_ceil.
+         * E' il minimo che la memoria impone a questo passo; `meas - floor` = overhead (launch,
+         * gap di banda). Vale anche a macchina carica perche' i byte non dipendono dal carico. */
+        const double bw = dp_ceiling_gbs();
+        const double floor_us = ((double)d.bytes_in_total / 1e9 / bw) / (double)steps * 1e6;
+        fprintf(stderr, " floor_us/tok=%.0f@%.0fGBs", floor_us, bw);
+        if (seconds > 0.0) {
+            const double meas_us = seconds / (double)steps * 1e6;
+            const double overhead = meas_us - floor_us;
+            fprintf(stderr, " meas_us/tok=%.0f overhead=%.0f%%",
+                    meas_us, 100.0 * overhead / (meas_us > 1e-9 ? meas_us : 1.0));
+        }
+    }
     fprintf(stderr, "\n");
     fprintf(stderr, "LLM_DISPATCH[%s]:   diag nodi_ultimo_passo=%lld min/passo=%lld max/passo=%lld\n",
             tag ? tag : "", d.last_new, d.step_min, d.step_max);
@@ -331,12 +357,17 @@ void llm_mlx_dp_report(const char* tag, int steps, int layers, double seconds, i
     for (const auto& kv : d.hist) rows.push_back(kv);
     size_t lim = (size_t)top_k < rows.size() ? (size_t)top_k : rows.size();
     top_by(rows, lim, false);
+    const double rep_bw = dp_ceiling_gbs();
     for (size_t i = 0; i < lim; i++) {
-        fprintf(stderr, "LLM_DISPATCH[%s]:   %-24s %8lld  %6.1f/token  %9.2f MBout %9.2f MBin/token  max %.2f MB %s\n",
+        /* `us_floor` = floor roofline della famiglia (byte-LETTI / BW_ceil, per token):
+         * macchina-indipendente, dice quanto la memoria IMPONE a quella famiglia. */
+        const double us_floor = (double)rows[i].second.bytes_in / (double)steps / 1e9 / rep_bw * 1e6;
+        fprintf(stderr, "LLM_DISPATCH[%s]:   %-24s %8lld  %6.1f/token  %9.2f MBout %9.2f MBin/token %7.1f usfloor  max %.2f MB %s\n",
                 tag ? tag : "", rows[i].first.c_str(), rows[i].second.nodes,
                 (double)rows[i].second.nodes / (double)steps,
                 (double)rows[i].second.bytes / (double)steps / 1048576.0,
                 (double)rows[i].second.bytes_in / (double)steps / 1048576.0,
+                us_floor,
                 (double)rows[i].second.max_bytes / 1048576.0,
                 rows[i].second.max_shape.c_str());
     }
