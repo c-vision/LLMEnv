@@ -2131,6 +2131,19 @@ static int llmmodelio_model_ir_cost(const char* path, int ctx) {
     llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, nkv);
     return 0;
 }
+/* SPECULATION IR (I9, report-only): modalita' dichiarata dall ABI (mtp/dspark) + ruoli MTP. */
+static int llmmodelio_model_ir_spec(const char* path) {
+    size_t ln = strlen(path);
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) { if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0; }
+    else { if (llmmodelio_arch_resolve(path) != 0) return -1; }
+    if (!g_arch_ok) { fprintf(LOUT, "LLM TENSOR SPEC: arch non risolta per '%s'\n", path); return -1; }
+    int has_mtp = g_arch.mm_mtp || 0;
+    for (int i = 0; i < g_arch.n_roles && !has_mtp; i++) if (strcmp(g_arch.roles[i].role, "MTP") == 0) has_mtp = 1;
+    const char* mode = has_mtp ? (g_arch.mm_dspark ? "DSPARK(MTP)" : "MTP") : "NONE";
+    fprintf(LOUT, "# LLM TENSOR SPEC '%s' arch=%s speculation=%s mtp=%d dspark=%d n_mtp_roles=%d\n",
+            path, g_arch.arch, mode, g_arch.mm_mtp, g_arch.mm_dspark, (int)0);
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2143,6 +2156,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "SPEC") == 0 || strcasecmp(s, "SPECULATION") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR SPEC: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_spec(dir);
     }
     if (strcasecmp(s, "COST") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR COST: atteso <path>[, <ctx>]\n"); return -1; }
