@@ -387,8 +387,14 @@ static llm_ai_mlx_dflash2_handle llm_mlx_df2_for(LlmMlxModel* m) {
     if (g_df2_target == m) return g_df2_handle;   /* gia' tentato per questo target */
     char path[1024];
     if (llm_ai_mlx_opt_get_str("dflash_model", path, sizeof(path)) != 0 || path[0] == 0) {
-        /* opt vuota: prova l'auto-detect del sibling <stem>-DFlash2 accanto al modello. */
-        if (!llm_mlx_df2_autodetect(m, path, sizeof(path))) return NULL;
+        /* opt vuota: prova l'auto-detect del sibling <stem>-DFlash2 accanto al modello.
+         * ESCLUSI i target ibridi/GDN: su di essi il verify DFlash2 DIVERGE dal greedy (misurato
+         * su qwen3_5/qwen38: "shifting shifting" col batch, output corrotto col seq) -> auto-detect
+         * solo per target densi, finche' lo stato ricorrente non e' gestito nel capture/verify. */
+        const bool hybrid = (m->cfg.model_type != NULL &&
+                             strcmp(m->cfg.model_type, "kimi_linear") == 0) ||
+                            (m->cfg.is_linear_layer != NULL);
+        if (hybrid || !llm_mlx_df2_autodetect(m, path, sizeof(path))) return NULL;
     }
     g_df2_target = m;
     g_df2_handle = llm_ai_mlx_dflash2_create((llm_ai_mlx_model_handle)m, path);
@@ -419,7 +425,9 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
                 if (s->spec_buf_pos >= s->spec_buf_len) {
                     llm_mlx_session_spec_begin(s);   /* checkpoint per lo scarto su append esterno */
                     int got = llm_ai_mlx_session_generate_mtp(handle, 16, eos_token_id, s->spec_buf);
+                    if (getenv("LLM_SPEC_DEBUG")) fprintf(stderr, "mtp_branch: got=%d\n", got);
                     if (got <= 0) break;
+                    if (got > 0) llm_mlx_dp_spec_add(got);
                     s->spec_buf_len = got; s->spec_buf_pos = 0;
                 }
                 int32_t tok = s->spec_buf[s->spec_buf_pos++];
@@ -440,7 +448,9 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
                     if (s->spec_buf_pos >= s->spec_buf_len) {
                         llm_mlx_session_spec_begin(s);
                         int got = llm_ai_mlx_dflash2_generate(dfh, handle, eos_token_id, 16, s->spec_buf);
+                        if (getenv("LLM_SPEC_DEBUG")) fprintf(stderr, "df2_branch: got=%d\n", got);
                         if (got <= 0) break;
+                        if (got > 0) llm_mlx_dp_spec_add(got);
                         s->spec_buf_len = got; s->spec_buf_pos = 0;
                     }
                     int32_t tok = s->spec_buf[s->spec_buf_pos++];
