@@ -38,7 +38,8 @@ static FILE* g_llm_out = NULL;
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
-#include <sys/stat.h>   /* mkdir (checkpoint store) */   /* getcwd (arch-resolution da file .gguf) */
+#include <sys/stat.h>
+#include <dlfcn.h>   /* LLM QUALITY: engine MLX via dlopen (dipendenza debole) */   /* mkdir (checkpoint store) */   /* getcwd (arch-resolution da file .gguf) */
 
 static uint64_t llm_numel(const uint64_t* dims, int ndim) {
     uint64_t numel = 1; for (int d = 0; d < ndim; d++) numel *= dims[d]; return numel;
@@ -2496,6 +2497,44 @@ static int llmmodelio_model_ir_context(const char* path) {
     fprintf(LOUT, "# LLM TENSOR CONTEXT '%s' arch=%s\n  kv/token=%.0f bytes  max_tokens(kv_bound)=%ld\n", path, g_arch_ok?g_arch.arch:"-", kvpt, maxtok);
     fprintf(LOUT, "  policy: TRIM (drop oldest prefix) | GC (evict prefix-cache) | PAGED (kv pages)\n");
     return 0;
+}
+/* QUALITY (I6, gate NLL/perplexity): carica il modello col motore MLX (dlopen, dipendenza
+ * debole), tokenizza (llmtoken), punteggia token-per-token con logprob_of -> NLL/perplexity.
+ * Nessun link statico MLX (una sola istanza; i backend C restano snelli). */
+int llmmodelio_model_quality(const char* model_dir, const char* prompt, const char* out_path) {
+    if (model_dir == NULL || prompt == NULL || out_path == NULL) return -1;
+    void* h = dlopen("libgmb_ai_mlx.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (h == NULL) h = dlopen("libllm_ai_mlx.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (h == NULL) { fprintf(stderr, "LLM QUALITY: engine MLX non caricabile (libgmb_ai_mlx)\n"); return -1; }
+    typedef void* (*load_fn)(const char*); typedef void* (*sess_fn)(void*);
+    typedef int (*app_fn)(void*, const int32_t*, int); typedef int (*lp_fn)(void*, int32_t, float*);
+    typedef void (*free_fn)(void*); typedef void (*dsess_fn)(void*);
+    load_fn L = (load_fn)dlsym(h, "llm_ai_mlx_load_model");
+    sess_fn C = (sess_fn)dlsym(h, "llm_ai_mlx_create_session");
+    app_fn  A = (app_fn)dlsym(h, "llm_ai_mlx_session_append");
+    lp_fn   LP = (lp_fn)dlsym(h, "llm_ai_mlx_session_logprob_of");
+    free_fn FM = (free_fn)dlsym(h, "llm_ai_mlx_free_model");
+    dsess_fn DS = (dsess_fn)dlsym(h, "llm_ai_mlx_destroy_session");
+    if (L == NULL || C == NULL || A == NULL || LP == NULL) { fprintf(stderr, "LLM QUALITY: simboli engine assenti\n"); return -1; }
+    char tp[1300]; snprintf(tp, sizeof tp, "%s/tokenizer.json", model_dir);
+    llmtoken_handle th = llmtoken_load(tp); if (th == NULL) { fprintf(stderr, "LLM QUALITY: tokenizer.json assente\n"); return -1; }
+    int32_t ids[2048]; int n = llmtoken_encode(th, prompt, ids, 2048);
+    if (n <= 1) { llmtoken_free(th); fprintf(stderr, "LLM QUALITY: prompt troppo corto\n"); return -1; }
+    void* m = L(model_dir); if (m == NULL) { llmtoken_free(th); fprintf(stderr, "LLM QUALITY: load modello fallito\n"); return -1; }
+    void* s = C(m); if (s == NULL) { if (FM) FM(m); llmtoken_free(th); return -1; }
+    double nll = 0.0; int cnt = 0;
+    for (int k = 0; k + 1 < n; k++) {
+        if (A(s, &ids[k], 1) != 0) break;
+        float lp = 0.0f; if (LP(s, ids[k + 1], &lp) != 0) break;
+        nll += -(double)lp; cnt++;
+    }
+    double nll_mean = cnt > 0 ? nll / (double)cnt : -1.0;
+    double ppl = nll_mean >= 0 ? exp(nll_mean) : -1.0;
+    FILE* o = fopen(out_path, "w");
+    if (o != NULL) { fprintf(o, "model=%s tokens=%d scored=%d nll=%.6f ppl=%.6f\n", model_dir, n, cnt, nll, ppl); fclose(o); }
+    fprintf(LOUT, "LLM QUALITY '%s': tokens=%d scored=%d nll_mean=%.4f ppl=%.4f\n", model_dir, n, cnt, nll_mean, ppl);
+    if (DS) DS(s); if (FM) FM(m); llmtoken_free(th);
+    return cnt > 0 ? 0 : -1;
 }
 int llmmodelio_model_compile(const char* path, const char* out_path) { return llmmodelio_model_ir_compile(path, out_path); }
 

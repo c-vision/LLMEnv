@@ -55,6 +55,7 @@ int llmmodelio_model_quantize(const char* in_path, const char* out_path);
 int llmmodelio_model_ablate(const char* in_path, const char* out_path, const char* pattern);
 int llmmodelio_model_validate(const char* path, const char* out_path);
 int llmmodelio_model_compile(const char* path, const char* out_path);
+int llmmodelio_model_quality(const char* model_dir, const char* prompt, const char* out_path);
 int llmmodelio_model_diff(const char* a_path, const char* b_path, const char* out_path);
 int llmmodelio_model_checkpoint(const char* src, const char* store_dir, const char* name);
 int llmmodelio_model_rollback(const char* store_dir, const char* name, const char* dst);
