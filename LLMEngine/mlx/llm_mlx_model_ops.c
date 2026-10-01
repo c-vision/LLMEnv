@@ -4,7 +4,6 @@
  * ============================================================================ */
 #include "llmengine_mlx.h"
 #include "llm_mlx_internal.h"
-#include "llm_mlx_lora.h"
 #include "llm_mlx_rewrite.h"
 #include "llm_mlx_merge.h"
 #include "llm_mlx_kernel.h"
@@ -57,44 +56,7 @@ int llm_ai_mlx_kernel_smoketest(void) {
     return 0;
 }
 
-/* Adapter LoRA smoketest (fase 4): verifica matematica LoRA + registry/hot-swap. */
-int llm_ai_mlx_lora_smoketest(void) {
-    LlmLoraAdapter a; memset(&a, 0, sizeof(a)); snprintf(a.name, LLM_LORA_NAME, "coding");
-    a.n_modules = 1;
-    a.modules[0].in_dim = 2; a.modules[0].out_dim = 2; a.modules[0].rank = 2; a.modules[0].scale = 0.5f;
-    float A[4] = {1,0, 0,1}; float B[4] = {1,0, 0,1};
-    a.modules[0].A = A; a.modules[0].B = B;
-    LlmLoraAdapter a2; memset(&a2, 0, sizeof(a2)); snprintf(a2.name, LLM_LORA_NAME, "sql");
-    a2.n_modules = 1; a2.modules[0].in_dim = 2; a2.modules[0].out_dim = 2; a2.modules[0].rank = 2; a2.modules[0].scale = 2.0f;
-    a2.modules[0].A = A; a2.modules[0].B = B;
-    LlmLoraRegistry r; llm_lora_registry_init(&r);
-    if (!llm_lora_register(&r, "coding", &a)) return -1;
-    if (!llm_lora_register(&r, "sql", &a2)) return -1;
-    float x[2] = {1,2}, out[2] = {0,0};
-    llm_lora_apply_row(&r.adapters[0].modules[0], x, out);
-    if (out[0] < 0.49 || out[0] > 0.51 || out[1] < 0.99 || out[1] > 1.01) return -1;
-    if (!llm_lora_enable(&r, "coding") || r.active != 0) return -1;
-    if (!llm_lora_enable(&r, "sql") || r.active != 1 || r.adapters[0].enabled) return -1; /* hot-swap */
-    llm_lora_disable(&r);
-    if (r.active != -1) return -1;
-    return 0;
-}
 
-/* Adapter LoRA merge smoketest (fase 4): somma ponderata dei contributi di 2 adapter. */
-int llm_ai_mlx_lora_merge_smoketest(void) {
-    /* due moduli identici A=B=I, scale 0.5; merge con pesi 1.0 e 1.0 -> contrib = x */
-    float A[4] = {1,0, 0,1}; float B[4] = {1,0, 0,1};
-    LlmLoraModule m0; memset(&m0,0,sizeof(m0)); m0.in_dim=2; m0.out_dim=2; m0.rank=2; m0.scale=0.5f; m0.A=A; m0.B=B;
-    LlmLoraModule m1; memset(&m1,0,sizeof(m1)); m1.in_dim=2; m1.out_dim=2; m1.rank=2; m1.scale=0.5f; m1.A=A; m1.B=B;
-    LlmLoraModule mods[2] = {m0, m1};
-    float w[2] = {1.0f, 1.0f};
-    float x[2] = {1,2}, out[2] = {0,0};
-    int n = llm_lora_merge_contrib(mods, w, 2, x, out);
-    if (n != 2) return -1;
-    /* 0.5*x + 0.5*x = x -> [1,2] */
-    if (out[0] < 0.99 || out[0] > 1.01 || out[1] < 1.99 || out[1] > 2.01) return -1;
-    return 0;
-}
 
 int llm_ai_mlx_rewrite_smoketest(void) {
     LlmkxRewritePlan p; llm_rewrite_plan_init(&p);

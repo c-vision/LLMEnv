@@ -7,7 +7,6 @@
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
-#include "llm_mlx_lora.h"
 #include "llm_mlx_moe_fused_kernel.h"
 #include "llm_mlx_swiglu_gptoss_kernel.h"
 
@@ -75,9 +74,6 @@ bool gpt_oss_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
     if (ok) { ok = quantized_linear_cfg(&k0, normed, kw, ks, kb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "k_proj matmul"); }
     if (ok) { ok = quantized_linear_cfg(&v0, normed, vw, vs, vb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "v_proj matmul"); }
     /* §D R6 (multi-arch): LoRA su q/k/v_proj. */
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&q0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "k_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&k0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "v_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&v0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     mlx_array q = mlx_array_new(), k = mlx_array_new(), v = mlx_array_new();
     if (ok) {
         mlx_array qb = mlx_array_new(), kb = mlx_array_new(), vb = mlx_array_new();

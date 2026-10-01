@@ -1518,27 +1518,6 @@ static bool llm_mlx_cache_trim(mlx_array* out, mlx_array cache, int keep, mlx_st
  * A [in,rank], B [rank,out], x [..,in] (ultimo asse = in). xA = x@A, xAB=xA@B,
  * contrib = xAB*scale, out = out + contrib (out e x stessa batch dim). Pura.
  */
-static bool llm_mlx_lora_apply_mlx(mlx_array* out, mlx_array x, mlx_array A, mlx_array B,
-                                   float scale, mlx_stream stream)
-{
-    mlx_array xa = mlx_array_new();
-    if (mlx_matmul(&xa, x, A, stream) != 0) { mlx_array_free(xa); return false; }
-    mlx_array xab = mlx_array_new();
-    if (mlx_matmul(&xab, xa, B, stream) != 0) { mlx_array_free(xa); mlx_array_free(xab); return false; }
-    mlx_array sc = mlx_array_new_float32(scale);
-    mlx_array scaled = mlx_array_new();
-    bool ok = mlx_multiply(&scaled, xab, sc, stream) == 0;
-    if (ok) {
-        /* Accumula sull'output esistente, oppure (output vuoto, es. contrib per-esperto
-         * MoE) imposta il risultato fresco -- mlx_add su un array vuoto fallirebbe
-         * ('expected a non-empty mlx_array', bug reale del per-esperto mai colpito
-         * finche' non ha girato su un MoE). */
-        if (out->ctx == NULL) mlx_array_set(out, scaled);
-        else ok = mlx_add(out, *out, scaled, stream) == 0;
-    }
-    mlx_array_free(xa); mlx_array_free(xab); mlx_array_free(sc); mlx_array_free(scaled);
-    return ok;
-}
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * RMLX10 Fase A (2026-09-03, vedi vault Todo/(open) - RMLX10-handoff): KV-cache

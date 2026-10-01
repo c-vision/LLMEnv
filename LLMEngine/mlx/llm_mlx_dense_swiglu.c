@@ -6,7 +6,6 @@
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
-#include "llm_mlx_lora.h"
 #include "llm_mlx_swiglu_kernel.h"
 #include <cJSON.h>
 #include "llm_mlx_bonsai_hadamard.h"
@@ -284,9 +283,7 @@ bool dense_swiglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
         }
     }
     if (ok && !a8_shared_gu) { ok = quantized_linear_cfg(&gate_out, normed2, gate_w, gate_s, gate_b, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "gate_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "gate_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&gate_out, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok && !a8_shared_gu) { ok = quantized_linear_cfg(&up_out, normed2, up_w, up_s, up_b, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "up_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "up_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&up_out, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     /* swiglu(gate, up) = silu(gate) * up = (gate * sigmoid(gate)) * up --
      * stessa formula/ordine di operazioni della FFN MoE sopra, e verificata
@@ -372,7 +369,6 @@ bool dense_swiglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
     if (ok) ok = llm_bonsai_rotate(&act, m, layer_idx, "mlp.down_proj.weight", false);
     mlx_array down_out = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&down_out, act, down_w, down_s, down_b, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "down_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "down_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&down_out, act, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     if (ok) { ok = mlx_add(out, h, down_out, m->stream) == 0; CHK(ok, "final residual add"); }
 

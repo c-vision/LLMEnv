@@ -84,20 +84,6 @@ static int mlx_generate_batch(LlmEngineLlmSession* sess, int n, int max_new, int
     return llm_ai_mlx_session_generate_batch((llm_ai_mlx_session_handle*)sess, n, max_new, eos, out);
 }
 
-/* TRAIN/LoRA (CAP_LORA): adapter su (layer, proj) + cattura hidden. Oggi solo MLX. */
-static void mlx_lora_clear(LlmEngineLlmModel m) { llm_ai_mlx_model_lora_clear((llm_ai_mlx_model_handle)m); }
-static int mlx_lora_add(LlmEngineLlmModel m, int layer, const char* proj, int rank, float scale,
-                        const float* a, const float* b, int in_dim, int out_dim) {
-    return llm_ai_mlx_model_lora_add((llm_ai_mlx_model_handle)m, layer, proj, rank, scale, a, b, in_dim, out_dim);
-}
-static int mlx_lora_set_enabled(LlmEngineLlmModel m, int enabled) {
-    return llm_ai_mlx_model_lora_set_enabled((llm_ai_mlx_model_handle)m, enabled != 0);
-}
-static int mlx_lora_save(LlmEngineLlmModel m, const char* path) { return llm_ai_mlx_model_lora_save((llm_ai_mlx_model_handle)m, path); }
-static int mlx_lora_load(LlmEngineLlmModel m, const char* path) { return llm_ai_mlx_model_lora_load((llm_ai_mlx_model_handle)m, path); }
-static int mlx_capture_hidden(LlmEngineLlmSession s, const int32_t* ids, int n, float* out, int cap) {
-    return llm_ai_mlx_session_capture_hidden((llm_ai_mlx_session_handle)s, ids, n, out, cap);
-}
 
 /* CAP_KV_MAX: imposta la capienza della KV-cache (contesto) a runtime, per qualunque modello. */
 static int mlx_kv_set_max(LlmEngineLlmModel m, int n) {
@@ -125,8 +111,6 @@ static const LlmEngineLlmEngine LLM_MLX_ENGINE = {
     .kv_set_max = mlx_kv_set_max,
     .emb_dim = mlx_embed_dim, .embed_text = NULL,
     .vision_load = NULL, .vision_read_image = NULL, .vision_read_audio = NULL, .vision_unload = NULL,
-    .lora_clear = mlx_lora_clear, .lora_add = mlx_lora_add, .lora_set_enabled = mlx_lora_set_enabled,
-    .lora_save = mlx_lora_save, .lora_load = mlx_lora_load, .capture_hidden = mlx_capture_hidden,
     .free_str = mlx_free_str,
     /* ABI v2 (in coda): logprobs + constrained. */
     .token_logprob = mlx_token_logprob,

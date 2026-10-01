@@ -468,23 +468,6 @@ static bool llm_cb_l2_raw(mlx_array* o, void* c) {
     return ok;
 }
 
-static bool llm_cb_lo_llm(mlx_array* o, void* c) {
-    llm_cb_lo_ctx* p = (llm_cb_lo_ctx*)c;
-    mlx_array r = mlx_array_new();
-    bool ok = llm_mlx_lora_apply_mlx(&r, p->x, p->A, p->B, p->scale, p->s);
-    if (ok) mlx_array_set(o, r);
-    mlx_array_free(r);
-    return ok;
-}
-static bool llm_cb_lo_raw(mlx_array* o, void* c) {
-    llm_cb_lo_ctx* p = (llm_cb_lo_ctx*)c;
-    mlx_array xa = mlx_array_new(), xab = mlx_array_new(), sc = mlx_array_new_float32(p->scale), scaled = mlx_array_new();
-    bool ok = mlx_matmul(&xa, p->x, p->A, p->s) == 0 && mlx_matmul(&xab, xa, p->B, p->s) == 0 &&
-              mlx_multiply(&scaled, xab, sc, p->s) == 0;
-    if (ok) mlx_array_set(o, scaled);
-    mlx_array_free(xa); mlx_array_free(xab); mlx_array_free(sc); mlx_array_free(scaled);
-    return ok;
-}
 
 /* ---- Op `layer`: blocco denso completo (Llama-like) — GATE "mai indietro".
  * Due varianti IDENTICHE per struttura e pesi:
@@ -1015,16 +998,6 @@ int llm_ai_mlx_core_bench(const char* op, int iters, char* out, size_t cap) {
         c.k = llm_cb_rand_arr((int[]){1, 32, 1, 128}, 4, MLX_BFLOAT16, s);
         llm_cb_report(out, cap, "qk_l2norm", "[1,32,1,128]bf16", iters, llm_cb_l2_raw, llm_cb_l2_llm, &c, s);
         mlx_array_free(c.q); mlx_array_free(c.k);
-        done++;
-    }
-    if (all || strcmp(op, "lora_apply") == 0) {
-        llm_cb_lo_ctx c; c.scale = 0.5f; c.s = s;
-        c.x = llm_cb_rand_arr((int[]){1, 2880}, 2, MLX_BFLOAT16, s);
-        c.A = llm_cb_rand_arr((int[]){2880, 16}, 2, MLX_BFLOAT16, s);
-        c.B = llm_cb_rand_arr((int[]){16, 2880}, 2, MLX_BFLOAT16, s);
-        llm_cb_report(out, cap, "lora_apply", "[1,2880]xA[2880,16]xB[16,2880]", iters,
-                      llm_cb_lo_raw, llm_cb_lo_llm, &c, s);
-        mlx_array_free(c.x); mlx_array_free(c.A); mlx_array_free(c.B);
         done++;
     }
 
