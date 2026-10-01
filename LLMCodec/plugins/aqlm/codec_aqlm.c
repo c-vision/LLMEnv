@@ -54,6 +54,6 @@ static int a_decode(const void* in,size_t il,int fmt,int p0,int p1,size_t rows,s
         }
     }
     return 0; }
-static int a_encode(const float* in,size_t rows,size_t cols,int fmt,int p0,int p1,void* out,size_t oc,size_t* ol,void* aux,size_t ac,size_t* al){ (void)in;(void)rows;(void)cols;(void)fmt;(void)p0;(void)p1;(void)out;(void)oc;(void)ol;(void)aux;(void)ac;(void)al; return -1; }
-static const LlmCodec C = { "aqlm", LLMCODEC_CODEC_ABI_VERSION, LLMCODEC_CODEC_AUX_SCALE, a_dt, a_shape, a_ssh, a_sizes, a_decode, a_encode };
+static int a_enc_disabled(const float* in,size_t rows,size_t cols,int fmt,int p0,int p1,void* out,size_t oc,size_t* ol,void* aux,size_t ac,size_t* al){ (void)in;(void)rows;(void)cols;(void)fmt;(void)p0;(void)p1;(void)out;(void)oc;(void)ol;(void)aux;(void)ac;(void)al; return -1; }
+static const LlmCodec C = { "aqlm", LLMCODEC_CODEC_ABI_VERSION, LLMCODEC_CODEC_AUX_SCALE, a_dt, a_shape, a_ssh, a_sizes, a_decode, a_enc_disabled };
 const LlmCodec* llmcodec_describe(void){ return &C; }

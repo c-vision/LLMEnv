@@ -20,9 +20,9 @@ static int a_decode(const void* in, size_t in_len, int fmt, int p0, int p1, size
     llmcodec_moe_affine_dequantize((const uint32_t*)in, sc, bs, (uint32_t)rows, (uint32_t)cols, group, bits, 1, out);
     return 0;
 }
-static int a_encode(const float* in, size_t rows, size_t cols, int fmt, int p0, int p1, void* out, size_t oc, size_t* ol, void* aux, size_t ac, size_t* al){ (void)in;(void)rows;(void)cols;(void)fmt;(void)p0;(void)p1;(void)out;(void)oc;(void)ol;(void)aux;(void)ac;(void)al; return -1; }
+static int a_enc_disabled(const float* in, size_t rows, size_t cols, int fmt, int p0, int p1, void* out, size_t oc, size_t* ol, void* aux, size_t ac, size_t* al){ (void)in;(void)rows;(void)cols;(void)fmt;(void)p0;(void)p1;(void)out;(void)oc;(void)ol;(void)aux;(void)ac;(void)al; return -1; }
 static const char* a_dt(int which,int fmt){ (void)fmt; return which==0 ? "U32" : "F16"; }
 static int a_shp(int fmt,int p0,int p1,size_t d0,size_t d1,size_t* r,size_t* c){(void)fmt;int bits=p1?p1:4;*r=d0;*c=(bits?d1*32/(size_t)bits:d1);return 0;}
 static int a_ssh(int w,int fmt,int p0,int p1,size_t r,size_t c,size_t* d0,size_t* d1){(void)fmt;int bits=p1?p1:4,grp=p0?p0:32; if(w==0){*d0=r;*d1=c*(size_t)bits/32;}else{*d0=r;*d1=c/(size_t)grp;} return 0;}
-static const LlmCodec C = { "mlx_affine", LLMCODEC_CODEC_ABI_VERSION, LLMCODEC_CODEC_AUX_SCALES_BIASES, a_dt, a_shp, a_ssh, a_sizes, a_decode, a_encode };
+static const LlmCodec C = { "mlx_affine", LLMCODEC_CODEC_ABI_VERSION, LLMCODEC_CODEC_AUX_SCALES_BIASES, a_dt, a_shp, a_ssh, a_sizes, a_decode, a_enc_disabled };
 const LlmCodec* llmcodec_describe(void) { return &C; }
