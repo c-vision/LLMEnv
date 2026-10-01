@@ -2144,6 +2144,17 @@ static int llmmodelio_model_ir_spec(const char* path) {
             path, g_arch.arch, mode, g_arch.mm_mtp, g_arch.mm_dspark, (int)0);
     return 0;
 }
+/* KV IR (report-only, §4.6): formato/dtype KV dichiarati dall ABI (runtime.kv.dtype/state). */
+static int llmmodelio_model_ir_kv(const char* path) {
+    size_t ln = strlen(path);
+    if (ln > 5 && strcasecmp(path + ln - 5, ".gguf") == 0) { if (llmmodelio_arch_resolve_gguf(path) != 0) g_arch_ok = 0; }
+    else { if (llmmodelio_arch_resolve(path) != 0) return -1; }
+    if (!g_arch_ok) { fprintf(LOUT, "LLM TENSOR KV: arch non risolta per '%s'\n", path); return -1; }
+    fprintf(LOUT, "# LLM TENSOR KV '%s' arch=%s kv.dtype=%s state=%s activation.dtype=%s\n", path, g_arch.arch,
+            g_arch.runtime_kv_dtype[0] ? g_arch.runtime_kv_dtype : "-", g_arch.runtime_state[0] ? g_arch.runtime_state : "-",
+            g_arch.runtime_activation_dtype[0] ? g_arch.runtime_activation_dtype : "-");
+    return 0;
+}
 int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
 {
     const char* s = sub ? sub : "";
@@ -2156,6 +2167,10 @@ int llmmodelio_tensor_cmd(const char* sub, const char* a, const char* b)
         const char* fmt = llmdesc_fmt(&g_arch, role);
         fprintf(LOUT, "LLM TENSOR '%s': %s -> ruolo=%s formato=%s\n", tn, g_arch.arch, role, fmt ? fmt : "-");
         return 0;
+    }
+    if (strcasecmp(s, "KV") == 0) {
+        if (!*dir) { fprintf(stderr, "LLM TENSOR KV: atteso <path>\n"); return -1; }
+        return llmmodelio_model_ir_kv(dir);
     }
     if (strcasecmp(s, "SPEC") == 0 || strcasecmp(s, "SPECULATION") == 0) {
         if (!*dir) { fprintf(stderr, "LLM TENSOR SPEC: atteso <path>\n"); return -1; }
