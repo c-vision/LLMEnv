@@ -396,10 +396,14 @@ static bool df2_attn_layer(DFlash2Runtime* rt, int layer_idx, int cur,
         df2_dump(kp_r, "l0_kprope", st);
     }
 
-    /* append ctx keys/values alla cache per layer (positions [cur, cur+S)) */
+    /* append ctx keys/values alla cache per layer (positions [cur, cur+S)).
+     * NB: la prima iniezione NON e' per forza cur==0 (con la cattura-durante-prefill ctx_pos e'
+     * gia' assoluto) -> si testa la cache VUOTA, non cur==0 (altrimenti concat con array vuoto). */
+    mlx_array kc0 = rt->ctx[rt->cur_ctx].kcache[layer_idx];
+    const bool cache_empty = (kc0.ctx == NULL) || (mlx_array_size(kc0) == 0);
     mlx_array cache_full = mlx_array_new();
     if (ok) {
-        if (cur == 0) {
+        if (cache_empty) {
             ok = mlx_array_set(&cache_full, kc_r) == 0;
         } else {
             mlx_vector_array kv = mlx_vector_array_new();
@@ -411,7 +415,7 @@ static bool df2_attn_layer(DFlash2Runtime* rt, int layer_idx, int cur,
     }
     mlx_array cachev_full = mlx_array_new();
     if (ok) {
-        if (cur == 0) {
+        if (cache_empty) {
             ok = mlx_array_set(&cachev_full, vc_t) == 0;
         } else {
             mlx_vector_array vv = mlx_vector_array_new();
