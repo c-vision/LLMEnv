@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
         mlx_vector_array_free(kv);
         mlx_array_set(&cache, ncache);
         mlx_array_free(ncache); mlx_array_free(span);
+        if (getenv("DF2_EVAL")) mlx_array_eval(cache);   /* eval per-span (async): collassa la catena concat */
         int S = (i + 1) * sc;
         for (int l = 0; l < nl; l++) {              /* 5 layer: la SDPA su cache+block */
             int qsh[4] = {1, nh, L, hd}, ksh[4] = {1, nkv, S + L, hd};
@@ -47,8 +48,8 @@ int main(int argc, char** argv) {
             mlx_array_free(q); mlx_array_free(kk); mlx_array_free(vv);
             mlx_array_free(out); mlx_array_free(nm); mlx_array_free(ns);
         }
-        if ((i % 10) == 0 || i == nspan - 1)
-            printf("[accum] span %d/%d ok S=%d\n", i + 1, nspan, S);
+        if ((i % 10) == 0 || i == nspan - 1) { size_t act = 0; mlx_get_active_memory(&act);
+            printf("[accum] span %d/%d S=%d active=%.2fGB%s\n", i + 1, nspan, S, act/1e9, getenv("DF2_EVAL")?" (eval)":""); }
     }
     printf("[accum] completato OK (nspan=%d S=%d)\n", nspan, nspan * sc);
     return 0;

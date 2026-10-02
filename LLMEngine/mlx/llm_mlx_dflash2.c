@@ -289,6 +289,23 @@ static bool df2_embed_batch(DFlash2Runtime* rt, const int32_t* token_ids, int n,
  * layer (rt->kcache/vcache). Ritorna l'output di o_proj [1,L,H] (PRE residual).
  * Reference DFlashAttention.__call__.
  * ============================================================================ */
+/* ORACOLO (2026-10-01): dump su file di shape+dtype+raw dei tensori d'ingresso alla SDPA del
+ * drafter, per riprodurre OFFLINE il crash (encoder Metal NULL a ~253k) senza rilanciare l'LLM.
+ * Attivo con DF2_ORACLE=<dir>. Sovrascrive: l'ultimo dump prima del crash = il propose round-1. */
+static void df2_oracle_dump(const char* name, mlx_array a, mlx_stream s) {
+    if (mlx_array_eval(a) != 0) { fprintf(stderr, "[oracle] eval %s FAIL\n", name); return; }
+    char p[1024]; snprintf(p, sizeof p, "%s/%s.bin", getenv("DF2_ORACLE"), name);
+    FILE* f = fopen(p, "wb"); if (!f) { fprintf(stderr, "[oracle] open %s FAIL\n", p); return; }
+    int nd = mlx_array_ndim(a); const int* sh = mlx_array_shape(a);
+    int32_t hdr[12] = {0}; hdr[0] = nd; for (int i = 0; i < nd && i < 8; i++) hdr[1 + i] = (int32_t)sh[i];
+    int dt = (int)mlx_array_dtype(a); hdr[9] = dt;
+    long long n = (long long)mlx_array_size(a);
+    fwrite(hdr, 4, 10, f); fwrite(&n, 8, 1, f);
+    if (dt == MLX_BFLOAT16 || dt == MLX_FLOAT16) { const uint16_t* u = mlx_array_data_uint16(a); if (u) fwrite(u, 2, (size_t)n, f); }
+    else if (dt == MLX_FLOAT32) { const float* g = mlx_array_data_float32(a); if (g) fwrite(g, 4, (size_t)n, f); }
+    fclose(f);
+    fprintf(stderr, "[oracle] %s ndim=%d size=%lld dtype=%d -> %s\n", name, nd, n, dt, p);
+}
 static bool df2_attn_layer(DFlash2Runtime* rt, int layer_idx, int cur,
                            int L, int S, mlx_array x, mlx_array x_ctx,
                            mlx_array* out_o) {
@@ -406,6 +423,12 @@ static bool df2_attn_layer(DFlash2Runtime* rt, int layer_idx, int cur,
     }
     if (ok) ok = mlx_array_set(&rt->ctx[rt->cur_ctx].kcache[layer_idx], cache_full) == 0;
     if (ok) ok = mlx_array_set(&rt->ctx[rt->cur_ctx].vcache[layer_idx], cachev_full) == 0;
+    /* ANTI-ACCUMULO (2026-10-01): il concat della cache-ctx e' LAZY -> a ogni span il nuovo
+     * array trattiene il vecchio (catena O(n^2)): a 253k lo streaming supera i 50GB (misurato,
+     * watchdog). Un eval ASINCRONO per span materializza il concat e libera il vecchio backing
+     * (non blocca la CPU, a differenza di synchronize). */
+    if (ok) { mlx_array_eval(rt->ctx[rt->cur_ctx].kcache[layer_idx]);
+              mlx_array_eval(rt->ctx[rt->cur_ctx].vcache[layer_idx]); }
 
     mlx_array keys_all = mlx_array_new(), vals_all = mlx_array_new();
     if (ok) {
@@ -424,6 +447,14 @@ static bool df2_attn_layer(DFlash2Runtime* rt, int layer_idx, int cur,
     }
     CHK_DF2(ok, "concat keys/values");
 
+    /* ORACOLO: dump degli ingressi alla SDPA a ctx grande (crash point). Overwrite -> l'ultimo
+     * e' il propose round-1 (il crash). Attivo con DF2_ORACLE=<dir>. */
+    if (ok && layer_idx == 0 && getenv("DF2_ORACLE") && mlx_array_ndim(keys_all) == 4 &&
+        (int)mlx_array_shape(keys_all)[2] > 250000) {
+        df2_oracle_dump("q_r", q_r, st);
+        df2_oracle_dump("keys", keys_all, st);
+        df2_oracle_dump("vals", vals_all, st);
+    }
     /* SDPA NON causale (mask_mode=""): denoisa tutto il blocco in parallelo */
     mlx_array attn = mlx_array_new();
     if (ok) {
