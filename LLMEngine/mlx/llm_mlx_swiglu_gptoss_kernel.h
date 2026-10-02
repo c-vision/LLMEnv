@@ -42,7 +42,10 @@ static const char llm_swiglu_gptoss_kernel_src[] =
     "    InT cu = (InT)max(min((float)u, 7.0f), -7.0f);\n"      /* clip(up,-7,7) */
     "    InT alpha = (InT)1.702f;\n"
     "    InT ag = (InT)((float)cg * (float)alpha);\n"
-    "    InT s  = (InT)(1.0f / (1.0f + exp(-(float)ag)));\n"    /* sigmoid */
+    /* sigmoid con la formula Sigmoid di MLX in InT: 0 scarti vs `swiglu` compilato di mlx-lm gpt_oss
+     * (16M valori, 3 scale); la vecchia `1/(1+exp(-x))` in float scartava 13-20% degli elementi. */
+    "    InT sy = 1 / (1 + metal::exp(metal::abs(ag)));\n"
+    "    InT s  = (ag < 0) ? sy : 1 - sy;\n"
     "    InT sg = (InT)((float)s * (float)cg);\n"
     "    InT u1 = (InT)((float)cu + 1.0f);\n"
     "    act[gid] = (InT)((float)sg * (float)u1);\n"

@@ -482,6 +482,9 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
 
         if (m->prefix_max > 0 && m->n_prefixes >= m->prefix_max) llm_prefix_evict_lru(m);
         idx = m->n_prefixes++;
+        /* slot nuova: la memoria da realloc NON e' azzerata -> il ramo "libera il vecchio contenuto"
+         * sotto leggerebbe n_layers/k_cache spazzatura (SIGSEGV a n_layers>0 && k_cache==NULL). */
+        memset(&m->prefixes[idx], 0, sizeof(SavedPrefix));
 
     }
 

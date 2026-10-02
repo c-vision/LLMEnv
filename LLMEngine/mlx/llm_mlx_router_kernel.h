@@ -38,7 +38,10 @@ static const char llm_router_kernel_src[] =
     "    threadgroup float sc[256];\n"
     "    threadgroup float orig[256];\n"
     "    float g = float(gates[tgid * (uint)E + tid]);\n"
-    "    float o = 1.0f / (1.0f + exp(-g));\n"            /* sigmoid */
+    /* sigmoid bit-esatto con mx.sigmoid f32 (MLX: y=1/(1+precise::exp|x|); x<0?y:1-y). La vecchia
+     * `1/(1+exp(-g))` scartava 1 ulp f32 sul ~45% dei valori (misura model-free su 16M). */
+    "    float ey = 1.0f / (1.0f + metal::precise::exp(metal::abs(g)));\n"
+    "    float o = (g < 0.0f) ? ey : 1.0f - ey;\n"
     "    orig[tid] = o;\n"
     "    sc[tid] = o + float(escb[tid]);\n"
     "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
