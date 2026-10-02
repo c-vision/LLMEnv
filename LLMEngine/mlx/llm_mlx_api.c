@@ -1018,8 +1018,11 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
 
         int32_t drafts[8];
         LLM_DF2_SP_BEGIN(prop);
-        int dall = (stat_rounds == 0) ? 8 : 4;   /* golden: round0 K=7, round1+ K=3 */
-        { int kv=0; if (llm_ai_mlx_opt_get_int("df2_k",&kv)==0 && kv>=1 && kv<=8) dall=kv+1; }  /* A/B: forza K (0=adattivo) */
+        /* K=7 SEMPRE (2026-10-03): come MLTF/Splash (`DRAFT_PROPOSAL_TOKENS=7`, verify M=8).
+         * Il troncamento adattivo golden (block 4 -> K=3 ai round 1+) era peggiore in token/ciclo
+         * (max 3 proposte): con acceptance ~54% il K=7 da' ~4,8 token/ciclo vs ~2,6. */
+        int dall = 8;
+        { int kv=0; if (llm_ai_mlx_opt_get_int("df2_k",&kv)==0 && kv>=1 && kv<=8) dall=kv+1; }  /* A/B: forza K */
         int K = llm_ai_mlx_dflash2_propose(handle, anchor, ctx_r, ctx_n, drafts, dall);
         LLM_DF2_SP_END(prop);
         if (K <= 0) break;
