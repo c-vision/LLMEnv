@@ -189,7 +189,11 @@ static int df2_propose_impl(DFlash2Runtime* rt,
     LlmMlxModel* d = rt->draft;
     const ModelConfig* c = &d->cfg;
     mlx_stream st = d->stream;
-    const int L = c->dflash_block_size;
+    int L = c->dflash_block_size;
+    /* TRUNCAMENTO K ADATTIVO (tracker speed-gap §5; reference: block_size=4 -> K=3 dal round2):
+     * il loop df2 propone/verifica SEMPRE K=block_size-1 -> oltre K=3 il compute speculativo e'
+     * sprecato a parita' di gettato. `df2_k` (opt) forza un K piu' piccolo per misurare. */
+    { int kv = 0; if (llm_ai_mlx_opt_get_int("df2_k", &kv) == 0 && kv >= 1 && kv < L) L = kv + 1; }
     const int K = L - 1;                 /* draft token per blocco */
     const int ctx_dim = c->dflash_n_ctx_layers * c->hidden_size;
     if (max_out < K) return -1;
