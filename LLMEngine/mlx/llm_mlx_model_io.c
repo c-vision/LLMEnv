@@ -676,7 +676,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * W8A8 ma la combo con bf16-mode OFF (guard in llm_mlx_oq_a8_active_for). Con bf16 ON la
      * qualita' e' identica a MLX (score 256 pos: W8A8 89,8% vs MLX 90,6%) -> il W8A8 resta
      * attivo di default sui qwen3 come deciso il 2026-09-18. */
-    if (strcmp(m->cfg.model_type, "qwen3") == 0 && llm_ai_mlx_opt_env("LLMMETAL_OQ_A8") == NULL) {
+    if ((strcmp(m->cfg.model_type, "qwen3") == 0 || strcmp(m->cfg.model_type, "qwen3_5") == 0) && llm_ai_mlx_opt_env("LLMMETAL_OQ_A8") == NULL) {
         setenv("LLMMETAL_OQ_A8", "1", 0);
         fprintf(stderr, "[auto-policy] qwen3 -> LLMMETAL_OQ_A8=1 (misurato +16-28% prefill N>=1024; "
                         "su llama sarebbe -2/-6x)\n");
