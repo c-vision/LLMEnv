@@ -581,6 +581,11 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
          * forward ricorrente GDN (verificato con dump token-id: col capture il greedy diverge
          * dall'AR, senza capture e' bit-identico). Poi si RIPRISTINA il checkpoint e si rifa'
          * la cattura SOLO per il ctx del drafter (il suo h non serve). */
+        /* NB (2026-10-01): tentata la rimozione del 2-forward facendo la cattura ctx DENTRO il
+         * forward A (hook per-layer, LLM_DF2_1FWD): PERTURBA il greedy (la cattura altera la
+         * donation della KV GDN) -> output diverge dall'AR (verificato: sky13 vs sky3294). Rimosso.
+         * Resta il 2-forward: greedy pulito (A) + cattura su cache scratch (B). La rimozione vera
+         * richiede il fix della donation GDN (parità norm/SiLU, D11). */
         ok = forward_tokens_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
                                   s->k_cache, s->v_cache, s->has_cache, &h);
         if (ok && caplayers != NULL) {
