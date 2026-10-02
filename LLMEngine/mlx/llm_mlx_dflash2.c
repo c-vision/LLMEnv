@@ -36,7 +36,22 @@
 static bool df2_linear(mlx_array* res, mlx_array x, mlx_array w, mlx_stream stream) {
     mlx_array wt = mlx_array_new();
     bool ok = mlx_transpose(&wt, w, stream) == 0;
-    if (ok) ok = mlx_matmul(res, x, wt, stream) == 0;
+    /* Il flusso del draft e' FP32 (ctx fp32 -> residuo fp32). fp32 @ bf16 PROMUOVE il peso: ogni
+     * matmul ricasta W (es. 178 MB -> 356 MB) a fp32 e gira un GEMM fp32 (misurato 2,6 ms per
+     * proiezione FFN contro 0,5 ms in bf16: il backbone costava ~60 ms/round su ~25 ideali).
+     * Fast path (default): x -> bf16, GEMM bf16 (accumulo fp32 interno), risultato riportato a
+     * fp32 cosi' i dtype a valle restano identici. Parita' bit con l'oracolo fp32: LLM_DF2_FP32_LINEAR=1. */
+    static int s_fast = -1;
+    if (s_fast < 0) s_fast = (llm_ai_mlx_opt_env("LLM_DF2_FP32_LINEAR") != NULL) ? 0 : 1;
+    if (ok && s_fast == 1 && mlx_array_dtype(x) == MLX_FLOAT32 && mlx_array_dtype(w) == MLX_BFLOAT16) {
+        mlx_array xb = mlx_array_new(), yb = mlx_array_new();
+        ok = mlx_astype(&xb, x, MLX_BFLOAT16, stream) == 0 &&
+             mlx_matmul(&yb, xb, wt, stream) == 0 &&
+             mlx_astype(res, yb, MLX_FLOAT32, stream) == 0;
+        mlx_array_free(xb); mlx_array_free(yb);
+    } else if (ok) {
+        ok = mlx_matmul(res, x, wt, stream) == 0;
+    }
     mlx_array_free(wt);
     return ok;
 }
