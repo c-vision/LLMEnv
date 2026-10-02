@@ -548,18 +548,20 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
         }
         mlx_array_free(vf);
     }
-    /* D11 (2026-10-01): il reference mlx-lm fa la gated norm in FP32
-     * (`Qwen3NextRMSNormGated` -> `_precise_swiglu`: silu(gate.astype(f32))*x.astype(f32) -> cast).
-     * TENTATO: da solo PERO' ROMPE la parita' DFlash2==AR ("sky13" vs "sky3294"): la cattura del
-     * ctx (B) perturba la ricorrenza e la gated-norm fp32 lo rende visibile. => il D11 va fatto
-     * INSIEME al fix della donation/cattura (piu' profondo). Per ora resta la versione bf16
-     * (parita' interna OK): vedi Todo/(open) - D11-GDN-Norm-SiLU. */
-    mlx_array z_sig=mlx_array_new();
-    mlx_array silu_z=mlx_array_new();
+    /* D11 (2026-10-02): gated norm in FP32 come il reference mlx-lm `_precise_swiglu`
+     * (`Qwen3NextRMSNormGated`): `(silu(gate.astype(f32)) * x.astype(f32)).astype(h.dtype)`.
+     * Il precedente "rompe la parita'" era il BUG del 2-forward (B su stato post-A), NON l'fp32:
+     * ora che e' risolto (a5592a9) questo fix e' verificabile. */
+    mlx_array z32=mlx_array_new(), yn32=mlx_array_new();
+    if (ok) { ok = mlx_astype(&z32, z4, MLX_FLOAT32, s) == 0; }
+    if (ok) { ok = mlx_astype(&yn32, y_norm, MLX_FLOAT32, s) == 0; }
+    mlx_array z32_sig=mlx_array_new(), silu32=mlx_array_new(), g32=mlx_array_new();
+    if (ok) { ok = mlx_sigmoid(&z32_sig, z32, s) == 0; }
+    if (ok) { ok = mlx_multiply(&silu32, z32, z32_sig, s) == 0; CHK(ok, "silu(z) fp32"); }
+    if (ok) { ok = mlx_multiply(&g32, yn32, silu32, s) == 0; CHK(ok, "RMSNormGated fp32"); }
     mlx_array gated=mlx_array_new();
-    if (ok) { ok = mlx_sigmoid(&z_sig, z4, s) == 0; }
-    if (ok) { ok = mlx_multiply(&silu_z, z4, z_sig, s) == 0; CHK(ok, "silu(z)"); }
-    if (ok) { ok = mlx_multiply(&gated, y_norm, silu_z, s) == 0; CHK(ok, "RMSNormGated"); }
+    if (ok) { ok = mlx_astype(&gated, g32, mlx_array_dtype(y_stack), s) == 0; CHK(ok, "gated -> h.dtype"); }
+    mlx_array_free(z32); mlx_array_free(yn32); mlx_array_free(z32_sig); mlx_array_free(silu32); mlx_array_free(g32);
     /* out_proj: [B,S,value_dim] -> [B,S,hidden_size] */
     int flat_shape[3] = { B, S, value_dim };
     mlx_array gated_flat=mlx_array_new();
@@ -616,7 +618,7 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
     mlx_array_free(q_rep); mlx_array_free(k_rep);
     mlx_array_free(conv_state); mlx_array_free(state); mlx_vector_array_free(ys); mlx_array_free(y_stack);
     mlx_array_free(norm_w); mlx_array_free(z4); mlx_array_free(y_norm);
-    mlx_array_free(z_sig); mlx_array_free(silu_z); mlx_array_free(gated); mlx_array_free(gated_flat);
+    mlx_array_free(gated); mlx_array_free(gated_flat);
     mlx_array_free(out_w); mlx_array_free(out_sc); mlx_array_free(out_b); mlx_array_free(r);
     mlx_array_free(inv2); mlx_array_free(inv1); mlx_array_free(one_arr);
     mlx_vector_array_free(kv_split);
