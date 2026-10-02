@@ -932,32 +932,10 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
     const int n_prompt = s->cache_offset;
     if (n_prompt <= 0) return -1;
 
-    /* LARGE-CONTEXT GATE (2026-10-01): la cattura ctx del prompt tiene n_prompt*ncap*H*4 byte
-     * in fp32 (a 257k token = 26GB host) + la KV scratch del target -> a contesto grande supera
-     * la RAM (OOM OS a 1M). Oltre il budget si rinuncia al DFlash2 per questa sessione: il
-     * chiamante fa FALLBACK alla spec n-gram / decode AR (percorso verificato a 257k, 38.6GB).
-     * 0 = nessun limite (forza). Override: opzione di registro `df2_ctx_budget_mb`. */
-    {
-        /* Il ctx del prompt e' iniettato per SPAN (streaming interleaved, df2_stream_prompt_ctx):
-         * picco host ~1 span (~420MB) invece di 26-37GB. Resta pero' il PICCO PREFLILL (a 257k
-         * ~80GB attivi, non ancora rilasciato) + drafter + KV scratch -> 1M/2M fanno ancora OOM.
-         * Quindi si mantiene un gate (default 8192MB sull'ampiezza del ctx) che fa FALLBACK a
-         * n-gram/AR oltre ~82k token finche' il picco prefill non e' gestito. */
-        int budget_mb = 8192;
-        if (llm_ai_mlx_opt_get_int("df2_ctx_budget_mb", &budget_mb) != 0 || budget_mb < 0) budget_mb = 8192;
-        { const char* e = getenv("LLM_DF2_CTX_BUDGET_MB"); if (e && *e) budget_mb = atoi(e); }
-        if (budget_mb > 0) {
-            const uint64_t need = (uint64_t)n_prompt * (uint64_t)ncap * (uint64_t)H * (uint64_t)sizeof(float);
-            if (need > (uint64_t)budget_mb * 1048576ull) {
-                static int warned = 0;
-                if (!warned++) fprintf(stderr, "[df2] ctx prompt troppo grande (%.1fGB > budget %.1fGB): "
-                                "DFlash2 OFF per questa sessione -> fallback n-gram/AR. Alza "
-                                "df2_ctx_budget_mb (0=forza) per tentare comunque.\n",
-                                need / 1073741824.0, budget_mb / 1024.0);
-                return -1;
-            }
-        }
-    }
+    /* NB (2026-10-01): il vecchio gate "ctx troppo grande -> DFlash2 OFF" e' stato RIMOSSO da qui.
+     * Ora il DFlash2 cattura il ctx DURANTE il prefill (bounded, ~210MB) -> la memoria a 1M/2M e'
+     * ~33GB -> il gate non serve piu'. Resta solo a guardia del FALLBACK streaming (ctx full-ctx
+     * in host) piu' sotto. */
 
     /* A1 — CONTESTO PERSISTENTE. Se questa e' la CONTINUAZIONE della stessa sessione (nessun
      * token appeso dal chiamante: cache_offset invariato dall'ultima chiamata), riusiamo il ctx
@@ -988,9 +966,24 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
         if (llm_mlx_df2_pf_take(&tail, &tail_n)) {
             fprintf(stderr, "[df2] ctx dal prefill (n=%d, no streaming)\n", tail_n);
             rt->ctx[rt->cur_ctx].ctx_pos = n_prompt - tail_n;   /* RoPE assoluta del ctx */
-        } else if (!df2_stream_prompt_ctx(rt, m, s, s->pending_next_id, caplayers, ncap, n_prompt, &tail, &tail_n)) {
-            fprintf(stderr, "dflash_generate: streaming ctx fallito\n");
-            return -1;
+        } else {
+            /* FALLBACK streaming (cattura durante il prefill non disponibile): qui il ctx full
+             * (n_prompt*ncap*H*4 fp32) e' pesante -> gate sul contesto (default 8192MB). */
+            int budget_mb = 8192;
+            if (llm_ai_mlx_opt_get_int("df2_ctx_budget_mb", &budget_mb) != 0 || budget_mb < 0) budget_mb = 8192;
+            { const char* e = getenv("LLM_DF2_CTX_BUDGET_MB"); if (e && *e) budget_mb = atoi(e); }
+            const uint64_t need = (uint64_t)n_prompt * (uint64_t)ncap * (uint64_t)H * (uint64_t)sizeof(float);
+            if (budget_mb > 0 && need > (uint64_t)budget_mb * 1048576ull) {
+                static int warned = 0;
+                if (!warned++) fprintf(stderr, "[df2] fallback streaming: ctx %.1fGB > budget %.1fGB -> "
+                                "DFlash2 OFF (n-gram/AR). Alza df2_ctx_budget_mb (0=forza).\n",
+                                need / 1073741824.0, budget_mb / 1024.0);
+                return -1;
+            }
+            if (!df2_stream_prompt_ctx(rt, m, s, s->pending_next_id, caplayers, ncap, n_prompt, &tail, &tail_n)) {
+                fprintf(stderr, "dflash_generate: streaming ctx fallito\n");
+                return -1;
+            }
         }
         pctx = tail; ctx_n0 = tail_n;   /* solo l'ULTIMO span -> il propose round-1 inietta quello */
         /* DRAIN dopo lo streaming (2026-10-01): i molti command buffer committati dai 60+ span
