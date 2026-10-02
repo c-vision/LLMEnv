@@ -421,6 +421,24 @@ static bool df2_attn_layer(DFlash2Runtime* rt, int layer_idx, int cur,
             mlx_vector_array_free(vv);
         }
     }
+    /* WINDOW (2026-10-01): il drafter DFlash2 e' sliding_window=2048 -> l'attenzione sul ctx va
+     * limitata alla FINESTRA, non all'intero ctx (~253k). Tronca la cache-ctx all'ultima W PRIMA
+     * di costruire keys_all: memoria bounded + SDPA piccola (l'attenzione sull'intero ctx era
+     * O(n^2) e a 1M causava timeout/kill GPU). La RoPE dei key resta assoluta (cur). */
+    if (ok && c->sliding_window > 0 && mlx_array_ndim(cache_full) == 4) {
+        const int Wwin = c->sliding_window;
+        int nk = (int)mlx_array_shape(cache_full)[2];
+        if (nk > Wwin) {
+            int nkvw = (int)mlx_array_shape(cache_full)[1], hdw = (int)mlx_array_shape(cache_full)[3];
+            int a0[4] = {0,0,nk-Wwin,0}, a1[4] = {1,nkvw,nk,hdw}, as[4] = {1,1,1,1};
+            mlx_array kt=mlx_array_new(), ktc=mlx_array_new(), vt=mlx_array_new(), vtc=mlx_array_new();
+            if (mlx_slice(&kt, cache_full, a0,4,a1,4,as,4,st)==0 && mlx_contiguous(&ktc, kt, false, st)==0)
+                mlx_array_set(&cache_full, ktc);
+            if (mlx_array_ndim(cachev_full)==4 && mlx_slice(&vt, cachev_full, a0,4,a1,4,as,4,st)==0 &&
+                mlx_contiguous(&vtc, vt, false, st)==0) mlx_array_set(&cachev_full, vtc);
+            mlx_array_free(kt); mlx_array_free(ktc); mlx_array_free(vt); mlx_array_free(vtc);
+        }
+    }
     if (ok) ok = mlx_array_set(&rt->ctx[rt->cur_ctx].kcache[layer_idx], cache_full) == 0;
     if (ok) ok = mlx_array_set(&rt->ctx[rt->cur_ctx].vcache[layer_idx], cachev_full) == 0;
     /* ANTI-ACCUMULO (2026-10-01): il concat della cache-ctx e' LAZY -> a ogni span il nuovo
