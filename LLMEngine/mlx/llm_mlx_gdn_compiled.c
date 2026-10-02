@@ -8,6 +8,7 @@
 #include "llm_mlx_ops.h"
 #include "llm_mlx_gdn_gate_kernel.h"
 #include "llm_mlx_gdn_kernel.h"
+#include "llm_mlx_swiglu_kernel.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -170,7 +171,7 @@ static int gdn_block_fn(mlx_vector_array* out, const mlx_vector_array in, void* 
     mlx_array z4 = mlx_array_new(), y_norm = mlx_array_new(), z_sig = mlx_array_new();
     mlx_array silu_z = mlx_array_new(), gated = mlx_array_new(), gated_flat = mlx_array_new();
     mlx_array r = mlx_array_new(), out_h = mlx_array_new();
-    mlx_array one_arr = llm_mlx_act_scalar(1.0f);
+    mlx_array zero_arr = llm_mlx_act_scalar(0.0f);
     mlx_array inv2 = llm_mlx_act_scalar((float)(p->inv_scale * p->inv_scale));
     mlx_array inv1 = llm_mlx_act_scalar((float)p->inv_scale);
     mlx_vector_array kv_split = mlx_vector_array_new();
@@ -191,8 +192,7 @@ static int gdn_block_fn(mlx_vector_array* out, const mlx_vector_array in, void* 
     if (ok) { int c_stride[1] = {1}, c_pl[1] = {0}, c_ph[1] = {0}, c_kd[1] = {1}, c_id[1] = {1};
               ok = mlx_conv_general(&conv_out, conv_input, p->conv_w, c_stride, 1, c_pl, 1, c_ph, 1,
                                     c_kd, 1, c_id, 1, /*groups=*/conv_dim, /*flip=*/false, st) == 0; }
-    if (ok) ok = mlx_sigmoid(&sig, conv_out, st) == 0;
-    if (ok) ok = mlx_multiply(&silu, conv_out, sig, st) == 0;
+    if (ok) ok = llm_mlx_silu_parity(&silu, &sig, conv_out, st) == 0;
 
     if (ok) { int secs[2] = { key_dim, 2 * key_dim };
               ok = mlx_split_sections(&kv_split, silu, secs, 2, /*axis=*/-1, st) == 0; }
@@ -214,9 +214,7 @@ static int gdn_block_fn(mlx_vector_array* out, const mlx_vector_array in, void* 
     if (ok && !gate_fused) {
         if (ok) ok = mlx_sigmoid(&beta, bv, st) == 0;
         if (ok) ok = mlx_add(&a_plus_dt, av, p->dt_bias, st) == 0;
-        if (ok) ok = mlx_exp(&sp_exp, a_plus_dt, st) == 0;
-        if (ok) ok = mlx_add(&sp_1p, sp_exp, one_arr, st) == 0;
-        if (ok) ok = mlx_log(&sp_log, sp_1p, st) == 0;
+        if (ok) ok = mlx_logaddexp(&sp_log, a_plus_dt, zero_arr, st) == 0;  /* nn.softplus = logaddexp(x,0) */
         if (ok) ok = mlx_multiply(&neg_exp, p->eAlog, sp_log, st) == 0;
         if (ok) ok = mlx_negative(&neg_g, neg_exp, st) == 0;
         if (ok) ok = mlx_exp(&g, neg_g, st) == 0;
@@ -270,7 +268,7 @@ static int gdn_block_fn(mlx_vector_array* out, const mlx_vector_array in, void* 
     mlx_array_free(z4); mlx_array_free(y_norm); mlx_array_free(z_sig);
     mlx_array_free(silu_z); mlx_array_free(gated); mlx_array_free(gated_flat);
     mlx_array_free(r); mlx_array_free(out_h);
-    mlx_array_free(one_arr); mlx_array_free(inv2); mlx_array_free(inv1);
+    mlx_array_free(zero_arr); mlx_array_free(inv2); mlx_array_free(inv1);
     mlx_stream_free(st);
     return rc;
 }

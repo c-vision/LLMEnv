@@ -193,6 +193,134 @@ static int llm_mlx_gdn_kernel_build(int block_t, int gvec, int sseq) {
     return 0;
 }
 
+
+/* ---- KERNEL "PARITY": stessa decomposizione numerica di mlx_lm/models/gated_delta.py ----
+ * 32 lane (= UN simdgroup) per riga dv, ogni lane possiede n_per_t = Dk/32 elementi CONTIGUI dello
+ * stato (registri fp32); le somme kv_mem/out sono sequenziali fp32 per lane e poi `simd_sum`.
+ * E' l'UNICO ordine di sommazione che riproduce bit-per-bit mlx-lm: il kernel "blocked" sotto (8
+ * segment-thread x 16 elementi, albero simd_shuffle_down) somma in un ordine diverso e scarta
+ * ~1e-7 in fp32 -> flip dell'arrotondamento bf16 -> divergenza che cresce layer dopo layer
+ * (misurato qwen3_5 27B: con questo kernel tutti i 64 layer sono a max|diff| = 0 vs mlx-lm).
+ * Supporta l'export di `state_seq` (cattura speculativa DFlash2). Non supporta g vettoriale (GVEC).
+ * grid=(32,Dv,B*Hv), threadgroup=(32,4,1). Opt-out: LLM_GDN_BLOCKED=1 (kernel blocked). */
+static const char llm_gdn_parity_src[] =
+    "\n"
+    "    auto n = thread_position_in_grid.z;\n"
+    "    auto b_idx = n / Hv;\n"
+    "    auto hv_idx = n % Hv;\n"
+    "    auto hk_idx = hv_idx / (Hv / Hk);\n"
+    "    constexpr int n_per_t = Dk / 32;\n"
+    "    auto q_ = q + b_idx * T * Hk * Dk + hk_idx * Dk;\n"
+    "    auto k_ = k + b_idx * T * Hk * Dk + hk_idx * Dk;\n"
+    "    auto v_ = v + b_idx * T * Hv * Dv + hv_idx * Dv;\n"
+    "    y += b_idx * T * Hv * Dv + hv_idx * Dv;\n"
+    "    auto dk_idx = thread_position_in_threadgroup.x;\n"
+    "    auto dv_idx = thread_position_in_grid.y;\n"
+    "    auto i_state = state_in + (n * Dv + dv_idx) * Dk;\n"
+    "    auto o_state = state_out + (n * Dv + dv_idx) * Dk;\n"
+    "    float state[n_per_t];\n"
+    "    for (int i = 0; i < n_per_t; ++i) {\n"
+    "        state[i] = static_cast<float>(i_state[n_per_t * dk_idx + i]);\n"
+    "    }\n"
+    "    auto g_ = g + b_idx * T * Hv;\n"
+    "    auto beta_ = beta + b_idx * T * Hv;\n"
+    "    for (int t = 0; t < T; ++t) {\n"
+    "        float kv_mem = 0.0f;\n"
+    "        for (int i = 0; i < n_per_t; ++i) {\n"
+    "            auto s_idx = n_per_t * dk_idx + i;\n"
+    "            state[i] = state[i] * g_[hv_idx];\n"
+    "            kv_mem += state[i] * k_[s_idx];\n"
+    "        }\n"
+    "        kv_mem = simd_sum(kv_mem);\n"
+    "        auto delta = (v_[dv_idx] - kv_mem) * beta_[hv_idx];\n"
+    "        float out = 0.0f;\n"
+    "        for (int i = 0; i < n_per_t; ++i) {\n"
+    "            auto s_idx = n_per_t * dk_idx + i;\n"
+    "            state[i] = state[i] + k_[s_idx] * delta;\n"
+    "            out += state[i] * q_[s_idx];\n"
+    "        }\n"
+    "        out = simd_sum(out);\n"
+    "        if (thread_index_in_simdgroup == 0) { y[dv_idx] = static_cast<InT>(out); }\n"
+    "        if (SSEQ) {\n"
+    "            device float* ss = state_seq + (((size_t)(b_idx * T + t) * Hv + hv_idx) * Dv + dv_idx) * Dk + n_per_t * dk_idx;\n"
+    "            for (int i = 0; i < n_per_t; ++i) ss[i] = state[i];\n"
+    "        }\n"
+    "        q_ += Hk * Dk; k_ += Hk * Dk; v_ += Hv * Dv; y += Hv * Dv; g_ += Hv; beta_ += Hv;\n"
+    "    }\n"
+    "    for (int i = 0; i < n_per_t; ++i) {\n"
+    "        o_state[n_per_t * dk_idx + i] = state[i];\n"
+    "    }\n"
+;
+
+static mlx_fast_metal_kernel llm_gdn_parity_kern[2];
+static bool llm_gdn_parity_built[2] = {false, false};
+
+static int llm_mlx_gdn_parity_build(int sseq) {
+    if (llm_gdn_parity_built[sseq & 1]) return 0;
+    char* src = (char*)malloc(strlen(llm_gdn_parity_src) + 48);
+    snprintf(src, strlen(llm_gdn_parity_src) + 48, "constexpr int SSEQ = %d;\n%s", sseq ? 1 : 0, llm_gdn_parity_src);
+    const char* in_names[] = {"q","k","v","g","beta","state_in","T"};
+    const char* out_names[] = {"y","state_out","state_seq"};
+    mlx_vector_string iv = mlx_vector_string_new(), ov = mlx_vector_string_new();
+    for (int i = 0; i < 7; i++) mlx_vector_string_append_value(iv, in_names[i]);
+    for (int i = 0; i < 3; i++) mlx_vector_string_append_value(ov, out_names[i]);
+    char name[48]; snprintf(name, sizeof(name), "llm_gdn_parity_s%d", sseq ? 1 : 0);
+    llm_gdn_parity_kern[sseq & 1] = mlx_fast_metal_kernel_new(name, iv, ov, src, llm_gdn_kernel_header,
+                                                              /*ensure_row_contiguous=*/true, /*atomic_outputs=*/false);
+    mlx_vector_string_free(iv); mlx_vector_string_free(ov);
+    free(src);
+    llm_gdn_parity_built[sseq & 1] = true;
+    return 0;
+}
+
+static int llm_mlx_gdn_prefill_parity(mlx_array* y_out, mlx_array* state_out, mlx_array* state_seq_out,
+                                      mlx_array q, mlx_array k, mlx_array v,
+                                      mlx_array g, mlx_array beta, mlx_array state, mlx_stream stream) {
+    const int sseq = (state_seq_out != NULL) ? 1 : 0;
+    mlx_dtype dq = mlx_array_dtype(q);
+    const int* qs = mlx_array_shape(q); const int* vs = mlx_array_shape(v);
+    if (mlx_array_ndim(q) != 4) return -1;
+    int B = qs[0], T = qs[1], Hk = qs[2], Dk = qs[3], Hv = vs[2], Dv = vs[3];
+    if (Dk % 32 != 0 || Dv % 4 != 0 || Hk <= 0 || Hv < Hk || Hv % Hk != 0) return -1;
+    if (mlx_array_dtype(k) != dq || mlx_array_dtype(v) != dq) return -1;
+    if (llm_mlx_gdn_parity_build(sseq) != 0) return -1;
+    mlx_array Tarr = mlx_array_new_data(&T, NULL, 0, MLX_INT32);
+    mlx_vector_array inputs = mlx_vector_array_new();
+    mlx_vector_array_append_value(inputs, q); mlx_vector_array_append_value(inputs, k);
+    mlx_vector_array_append_value(inputs, v); mlx_vector_array_append_value(inputs, g);
+    mlx_vector_array_append_value(inputs, beta); mlx_vector_array_append_value(inputs, state);
+    mlx_vector_array_append_value(inputs, Tarr);
+    mlx_fast_metal_kernel_config cfg = mlx_fast_metal_kernel_config_new();
+    mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, "InT", dq);
+    mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "Dk", Dk);
+    mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "Dv", Dv);
+    mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "Hk", Hk);
+    mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "Hv", Hv);
+    int yshape[4] = {B, T, Hv, Dv}; int sshape[4] = {B, Hv, Dv, Dk};
+    mlx_fast_metal_kernel_config_add_output_arg(cfg, yshape, 4, dq);
+    mlx_fast_metal_kernel_config_add_output_arg(cfg, sshape, 4, MLX_FLOAT32);
+    if (sseq) { int q5[5] = {B, T, Hv, Dv, Dk}; mlx_fast_metal_kernel_config_add_output_arg(cfg, q5, 5, MLX_FLOAT32); }
+    else      { int d1[1] = {1};               mlx_fast_metal_kernel_config_add_output_arg(cfg, d1, 1, MLX_FLOAT32); }
+    mlx_fast_metal_kernel_config_set_grid(cfg, 32, Dv, B * Hv);
+    mlx_fast_metal_kernel_config_set_thread_group(cfg, 32, 4, 1);
+    mlx_vector_array outputs = mlx_vector_array_new();
+    int rc = mlx_fast_metal_kernel_apply(&outputs, llm_gdn_parity_kern[sseq & 1], inputs, cfg, stream);
+    if (rc == 0 && mlx_vector_array_size(outputs) == 3) {
+        mlx_array y0 = mlx_array_new(), s0 = mlx_array_new(), q0 = mlx_array_new();
+        int g0 = mlx_vector_array_get(&y0, outputs, 0);
+        int g1 = mlx_vector_array_get(&s0, outputs, 1);
+        int g2 = mlx_vector_array_get(&q0, outputs, 2);
+        if (g0 == 0 && g1 == 0 && (!sseq || g2 == 0)) {
+            mlx_array_set(y_out, y0); mlx_array_set(state_out, s0);
+            if (sseq) mlx_array_set(state_seq_out, q0);
+        } else rc = -1;
+        mlx_array_free(y0); mlx_array_free(s0); mlx_array_free(q0);
+    } else rc = -1;
+    mlx_fast_metal_kernel_config_free(cfg); mlx_vector_array_free(inputs);
+    mlx_vector_array_free(outputs); mlx_array_free(Tarr);
+    return rc == 0 ? 0 : -1;
+}
+
 /* Prefill GDN fuso: calcola y e lo stato finale in un solo kernel Metal.
  * state_seq_out (opzionale): se NON-NULL, il kernel esporta anche lo stato dopo OGNI
  * token in [B,T,Hv,Dv,Dk] fp32 (cattura speculativa -> rollback O(1) senza re-forward).
@@ -203,6 +331,10 @@ static int llm_mlx_gdn_prefill_sseq(mlx_array* y_out, mlx_array* state_out, mlx_
                                int T, int g_vector, mlx_stream stream) {
     if (!y_out || !state_out) return -1;
     const int sseq = (state_seq_out != NULL) ? 1 : 0;
+    /* Default: kernel "parity" (ordine di sommazione di mlx-lm, bit-esatto); LLM_GDN_BLOCKED=1 -> blocked. */
+    if (!g_vector && getenv("LLM_GDN_BLOCKED") == NULL &&
+        llm_mlx_gdn_prefill_parity(y_out, state_out, state_seq_out, q, k, v, g, beta, state, stream) == 0)
+        return 0;
     mlx_dtype dq = mlx_array_dtype(q);
     const int* qs = mlx_array_shape(q);
     const int* vs = mlx_array_shape(v);

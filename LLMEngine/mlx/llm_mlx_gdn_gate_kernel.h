@@ -3,7 +3,7 @@
  * Sostituisce la catena elementwise (9 nodi MLX, 8 op di grafo + le letture dei pesi):
  *     beta = sigmoid(b)
  *     a_plus_dt = a + dt_bias
- *     sp = log(1 + exp(a_plus_dt))            (softplus)
+ *     sp = logaddexp(a_plus_dt, 0)            (softplus, un solo arrotondamento)
  *     g = exp(-exp(A_log) * sp)
  * con UN solo dispatch Metal (`mlx_fast_metal_kernel`, stesso meccanismo del kernel GDN fuso
  * e di llm_mlx_swiglu_metal).
@@ -42,13 +42,22 @@ static const char llm_gdn_gate_src[] =
     "     * Sigmoid e' `y = 1/(1+exp(|x|)); x<0 ? y : 1-y` con metal::exp (NON precise).\n"
     "     * Qui si replica la stessa aritmetica in T, non in float. */\n"
     "    /* Struttura dei TIPI della catena di riferimento MLX (verificata a runtime):\n"
-    "     *   a (bf16) + dt_bias (bf16) -> bf16;  exp/log/add in bf16 (precise);\n"
+    "     *   a (bf16) + dt_bias (bf16) -> bf16;  softplus = logaddexp(x,0) in bf16 (1 round);\n"
     "     *   eAlog (f32) * sp_log (bf16) -> f32;  negate/exp in f32.\n"
     "     *   beta = sigmoid(b) in bf16 con la formula esatta di MLX. */\n"
     "    InT x = a[i] + dt[hv];\n"
-    "    InT e = metal::precise::exp(x);\n"
-    "    InT p = e + InT(1.0f);\n"
-    "    InT l = metal::precise::log(p);\n"
+    "    /* softplus = logaddexp(x, 0) a UN arrotondamento (come nn.softplus di mlx-lm e\n"
+    "     * LogAddExp di binary_ops.h): max + log1p(exp(min-max)), con log1p di utils.h. */\n"
+    "    InT mx = metal::max(x, InT(0.0f));\n"
+    "    InT mn = metal::min(x, InT(0.0f));\n"
+    "    InT l;\n"
+    "    if (metal::isnan(x)) { l = x; }\n"
+    "    else {\n"
+    "        InT ex = metal::exp(mn - mx);\n"
+    "        float xp1 = 1.0f + float(ex);\n"
+    "        InT l1p = (xp1 == 1.0f) ? ex : InT(ex * (metal::log(xp1) / (xp1 - 1.0f)));\n"
+    "        l = mx + l1p;\n"
+    "    }\n"
     "    float m = alog[hv] * float(l);\n"
     "    g[i] = metal::precise::exp(-m);\n"
     "    InT bv = b[i];\n"

@@ -8,6 +8,7 @@
 #include "llm_mlx_ops.h"
 #include "llm_mlx_gdn_gate_kernel.h"
 #include "llm_mlx_gdn_kernel.h"
+#include "llm_mlx_swiglu_kernel.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -229,9 +230,8 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
     }
     /* silu(conv_out) */
     mlx_array sig = mlx_array_new();
-    if (ok) { ok = mlx_sigmoid(&sig, conv_out, s) == 0; }
     mlx_array silu = mlx_array_new();
-    if (ok) { ok = mlx_multiply(&silu, conv_out, sig, s) == 0; CHK(ok, "silu"); }
+    if (ok) { ok = llm_mlx_silu_parity(&silu, &sig, conv_out, s) == 0; CHK(ok, "silu"); }
 
     /* split in q,k,v per dim (mlx_split_sections: [0,key), [key,2key), [2key,conv)) lungo
      * l'ULTIMO asse (conv_dim), come il riferimento verificato (mx.split(..., -1)). */
@@ -301,6 +301,7 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
     mlx_array eAlog=mlx_array_new();
     mlx_array a_plus_dt=mlx_array_new();
     mlx_array sp_exp=mlx_array_new();
+    mlx_array zero_arr=llm_mlx_act_scalar(0.0f);
     mlx_array one_arr=llm_mlx_act_scalar(1.0f);
     mlx_array sp_1p=mlx_array_new();
     mlx_array sp_log=mlx_array_new();
@@ -322,11 +323,10 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
     }
     if (ok && !gate_fused) {
         if (ok) { ok = mlx_sigmoid(&beta, bv, s) == 0; CHK(ok, "beta sigmoid"); }
-        /* softplus(a+dt_bias) = log(1+exp(a+dt_bias)); a: [B,S,Hv], dt_bias: [Hv] -> broadcast */
+        /* softplus(a+dt_bias) = logaddexp(a+dt_bias, 0); a: [B,S,Hv], dt_bias: [Hv] -> broadcast */
         if (ok) { ok = mlx_add(&a_plus_dt, av, dt_bias, s) == 0; CHK(ok, "a+dt_bias"); }
-        if (ok) { ok = mlx_exp(&sp_exp, a_plus_dt, s) == 0; CHK(ok, "softplus exp"); }
-        if (ok) { ok = mlx_add(&sp_1p, sp_exp, one_arr, s) == 0; CHK(ok, "softplus 1+"); }
-        if (ok) { ok = mlx_log(&sp_log, sp_1p, s) == 0; CHK(ok, "softplus log"); }
+        /* nn.softplus di mlx-lm = logaddexp(x, 0): UN solo arrotondamento bf16 (non exp/+1/log a 3 passi) */
+        if (ok) { ok = mlx_logaddexp(&sp_log, a_plus_dt, zero_arr, s) == 0; CHK(ok, "softplus logaddexp"); }
         if (ok) { ok = mlx_multiply(&neg_exp, eAlog, sp_log, s) == 0; CHK(ok, "exp(A_log)*softplus"); }
         if (ok) { ok = mlx_negative(&neg_g, neg_exp, s) == 0; CHK(ok, "negate exp(A_log)*softplus"); }
         if (ok) { ok = mlx_exp(&g, neg_g, s) == 0; CHK(ok, "g = exp(-...)"); }
@@ -350,8 +350,7 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
         mlx_array gr=mlx_array_new(), br=mlx_array_new();
         mlx_array apd=mlx_array_new(), spe=mlx_array_new(), sp1=mlx_array_new(), spl=mlx_array_new();
         mlx_array ne=mlx_array_new(), ng2=mlx_array_new();
-        bool vok = mlx_add(&apd, av, dt_bias, s) == 0 && mlx_exp(&spe, apd, s) == 0 &&
-                   mlx_add(&sp1, spe, one_arr, s) == 0 && mlx_log(&spl, sp1, s) == 0 &&
+        bool vok = mlx_add(&apd, av, dt_bias, s) == 0 && mlx_logaddexp(&spl, apd, zero_arr, s) == 0 &&
                    mlx_multiply(&ne, eAlog, spl, s) == 0 && mlx_negative(&ng2, ne, s) == 0 &&
                    mlx_exp(&gr, ng2, s) == 0 && mlx_sigmoid(&br, bv, s) == 0;
         double dg = -1.0, db = -1.0;
@@ -620,7 +619,7 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
     mlx_array_free(norm_w); mlx_array_free(z4); mlx_array_free(y_norm);
     mlx_array_free(gated); mlx_array_free(gated_flat);
     mlx_array_free(out_w); mlx_array_free(out_sc); mlx_array_free(out_b); mlx_array_free(r);
-    mlx_array_free(inv2); mlx_array_free(inv1); mlx_array_free(one_arr);
+    mlx_array_free(inv2); mlx_array_free(inv1); mlx_array_free(one_arr); mlx_array_free(zero_arr);
     mlx_vector_array_free(kv_split);
     /* FIX LEAK (2026-09-02): questi handle non erano mai liberati -> ogni forward GDN
      * (prefill o decode) tratteneva le attivazioni (h, qkv, z, av, bv, conv_input,
@@ -778,9 +777,8 @@ bool qwen4_linear_gdn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
     }
     /* silu(conv_out) */
     mlx_array sig = mlx_array_new();
-    if (ok) { ok = mlx_sigmoid(&sig, conv_out, s) == 0; }
     mlx_array silu = mlx_array_new();
-    if (ok) { ok = mlx_multiply(&silu, conv_out, sig, s) == 0; CHK(ok, "silu"); }
+    if (ok) { ok = llm_mlx_silu_parity(&silu, &sig, conv_out, s) == 0; CHK(ok, "silu"); }
 
     /* split in q,k,v per dim (mlx_split_sections: [0,key), [key,2key), [2key,conv)) lungo
      * l'ULTIMO asse (conv_dim), come il riferimento verificato (mx.split(..., -1)). */
@@ -849,16 +847,12 @@ bool qwen4_linear_gdn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
     CHK(ok, "A_log/dt_bias lookup");
     mlx_array beta=mlx_array_new();
     if (ok) { ok = mlx_sigmoid(&beta, bv, s) == 0; CHK(ok, "beta sigmoid"); }
-    /* softplus(a+dt_bias) = log(1+exp(a+dt_bias)); a: [B,S,Hv], dt_bias: [Hv] -> broadcast */
+    /* softplus(a+dt_bias) = logaddexp(a+dt_bias, 0); a: [B,S,Hv], dt_bias: [Hv] -> broadcast */
     mlx_array a_plus_dt=mlx_array_new();
     if (ok) { ok = mlx_add(&a_plus_dt, av, dt_bias, s) == 0; CHK(ok, "a+dt_bias"); }
-    mlx_array sp_exp=mlx_array_new();
-    if (ok) { ok = mlx_exp(&sp_exp, a_plus_dt, s) == 0; CHK(ok, "softplus exp"); }
-    mlx_array one_arr=llm_mlx_act_scalar(1.0f);
-    mlx_array sp_1p=mlx_array_new();
-    if (ok) { ok = mlx_add(&sp_1p, sp_exp, one_arr, s) == 0; CHK(ok, "softplus 1+"); }
+    mlx_array zero_arr=llm_mlx_act_scalar(0.0f);
     mlx_array sp_log=mlx_array_new();
-    if (ok) { ok = mlx_log(&sp_log, sp_1p, s) == 0; CHK(ok, "softplus log"); }
+    if (ok) { ok = mlx_logaddexp(&sp_log, a_plus_dt, zero_arr, s) == 0; CHK(ok, "softplus logaddexp"); }
     mlx_array eAlog=mlx_array_new();
         mlx_array* _ae = llm_mlx_gdn_alog_exp(m, layer_idx);
         if (_ae != NULL) { ok = ok && mlx_array_set(&eAlog, *_ae) == 0; CHK(ok, "exp A_log cache"); }
@@ -1053,13 +1047,13 @@ bool qwen4_linear_gdn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
     mlx_array_free(q4); mlx_array_free(k4); mlx_array_free(v4);
     mlx_array_free(q_ss); mlx_array_free(k_ss); mlx_array_free(q_s); mlx_array_free(k_s);
     mlx_array_free(A_log); mlx_array_free(dt_bias); mlx_array_free(beta);
-    mlx_array_free(a_plus_dt); mlx_array_free(sp_exp); mlx_array_free(sp_1p); mlx_array_free(sp_log);
+    mlx_array_free(a_plus_dt); mlx_array_free(sp_log);
     mlx_array_free(eAlog); mlx_array_free(neg_exp); mlx_array_free(g);
     mlx_array_free(q_rep); mlx_array_free(k_rep);
     mlx_array_free(conv_state); mlx_array_free(state); mlx_vector_array_free(ys); mlx_array_free(y_stack);
     mlx_array_free(norm_w); mlx_array_free(z4); mlx_array_free(gated); mlx_array_free(gated_flat);
     mlx_array_free(out_w); mlx_array_free(out_sc); mlx_array_free(out_b); mlx_array_free(r);
-    mlx_array_free(inv1); mlx_array_free(one_arr);
+    mlx_array_free(inv1); mlx_array_free(zero_arr);
     mlx_vector_array_free(kv_split);
     /* FIX LEAK (2026-09-02): questi handle non erano mai liberati -> ogni forward GDN
      * (prefill o decode) tratteneva le attivazioni (h, qkv, z, av, bv, conv_input,
