@@ -42,6 +42,7 @@ bool llm_mlx_fuse_geglu_enabled(void) {
  * passaggio da mlx_compile/closure). Un dispatch invece di 9, thread-per-elemento. */
 static int g_fuse_geglu_metal_state = -1;
 bool llm_mlx_fuse_geglu_metal_enabled(void) {
+    if (g_llm_mlx_train_composable) return false;   /* training: no kernel Metal (no vjp) */
     if (g_fuse_geglu_metal_state < 0) g_fuse_geglu_metal_state = (llm_ai_mlx_opt_env("LLMMETAL_FUSE_GEGLU_METAL") != NULL) ? 1 : 0;
     return g_fuse_geglu_metal_state == 1;
 }

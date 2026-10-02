@@ -23,7 +23,9 @@
  * l'area geglu. Default OFF: comportamento identico a oggi finche' non si promuove a misura
  * vinta + IDS greedy parita'. */
 static int g_fuse_swiglu_metal_state = -1;
+extern int g_llm_mlx_train_composable;   /* training: forward composabile (no kernel custom) */
 bool llm_mlx_fuse_swiglu_metal_enabled(void) {
+    if (g_llm_mlx_train_composable) return false;   /* niente kernel Metal in training (no vjp) */
     /* DEFAULT ON (2026-09-13): il kernel Metal fuso sostituisce le 3 op eager (Sigmoid+2x
      * Multiply). Misurato Llama-1B decode: 476,5 -> 446 nodi/token (~= mlx_lm 441 -> l'intero
      * gap di 8 op) e +2,4% tok/s (424,3 -> 434,6); Qwen3.6-27B +1%. IDS greedy IDENTICI a
@@ -45,6 +47,7 @@ bool llm_mlx_fuse_swiglu_metal_enabled(void) {
  * di qualunque promozione. */
 static int g_fuse_swiglu_compile_state = -1;
 static bool llm_mlx_fuse_swiglu_compile_enabled(void) {
+    if (g_llm_mlx_train_composable) return false;   /* training: swiglu eager composabile */
     if (g_fuse_swiglu_compile_state < 0) g_fuse_swiglu_compile_state = (llm_ai_mlx_opt_env("LLM_FUSE_SWIGLU_COMPILE") != NULL) ? 1 : 0;
     return g_fuse_swiglu_compile_state == 1;
 }

@@ -15,13 +15,18 @@
 #include <string.h>
 
 int g_llm_mlx_train_eager_sdpa = 0;   /* 0 = SDPA fused (default); 1 = eager/composabile */
+/* 1 = modalità TRAINING: il forward deve essere COMPOSABILE (nessun kernel Metal custom, che
+ * non ha vjp). Letto dalle ENABLE dei kernel fusi (es. swiglu Metal) per forzare il fallback
+ * alle op MLX native differenziabili. Impostato da setup()/set_eager_sdpa(). */
+int g_llm_mlx_train_composable = 0;
 
 int llm_ai_mlx_train_setup(llm_ai_mlx_model_handle mh) {
     LlmMlxModel* m = (LlmMlxModel*)mh;
     if (!m) return -1;
     /* Nulla da preparare: il motore è già grafo-MLX; abilitiamo la LoRA (le A/B sono settate
-     * da set_lora_mlx). */
+     * da set_lora_mlx). Attiviamo la modalità composabile (training differenziabile). */
     m->lora_enabled = true;
+    g_llm_mlx_train_composable = 1;
     return 0;
 }
 
@@ -67,7 +72,7 @@ int llm_ai_mlx_train_set_lora_mlx(llm_ai_mlx_model_handle mh, int layer, const c
     return 0;
 }
 
-void llm_ai_mlx_train_set_eager_sdpa(int on) { g_llm_mlx_train_eager_sdpa = on ? 1 : 0; }
+void llm_ai_mlx_train_set_eager_sdpa(int on) { g_llm_mlx_train_eager_sdpa = on ? 1 : 0; g_llm_mlx_train_composable = on ? 1 : 0; }
 
 mlx_stream llm_ai_mlx_train_stream(llm_ai_mlx_model_handle mh) {
     LlmMlxModel* m = (LlmMlxModel*)mh;
@@ -107,10 +112,12 @@ mlx_array llm_ai_mlx_train_forward_ce(llm_ai_mlx_model_handle mh,
         if (good && m->cfg.final_logit_softcap > 0.0f)
             good = llm_mlx_logit_softcap(&capped, logits, m->cfg.final_logit_softcap, m->stream);
         else if (good) good = mlx_array_set(&capped, logits) == 0;
-        /* log_softmax = log(softmax(logits)) sull'ultimo asse; poi gather dei target. */
-        mlx_array p = mlx_array_new(), logp = mlx_array_new();
-        if (good) good = mlx_softmax_axis(&p, capped, -1, /*precise=*/false, m->stream) == 0;
-        if (good) good = mlx_log(&logp, p, m->stream) == 0;
+        /* log_softmax STABILE = x - logsumexp(x) sull'ultimo asse (poi gather dei target).
+         * NB: NON `log(softmax(x))` — la vjp di 1/p con p~0 su vocab grande (128k) produce
+         * inf/NaN nei gradienti (misurato: A/B tutti NaN). logsumexp ha vjp stabile. */
+        mlx_array lse = mlx_array_new(), logp = mlx_array_new();
+        if (good) good = mlx_logsumexp_axis(&lse, capped, -1, /*keepdims=*/true, m->stream) == 0;
+        if (good) good = mlx_subtract(&logp, capped, lse, m->stream) == 0;
         /* target [1,T] -> [1,T,1] */
         mlx_array tv = mlx_array_new(), te = mlx_array_new();
         if (good) {
@@ -154,7 +161,7 @@ mlx_array llm_ai_mlx_train_forward_ce(llm_ai_mlx_model_handle mh,
         }
         if (good && ok) *ok = true;
         mlx_array_free(summed); mlx_array_free(h); mlx_array_free(normed); mlx_array_free(logits);
-        mlx_array_free(capped); mlx_array_free(p); mlx_array_free(logp);
+        mlx_array_free(capped); mlx_array_free(lse); mlx_array_free(logp);
         mlx_array_free(tv); mlx_array_free(te); mlx_array_free(g); mlx_array_free(nll);
     } else {
         mlx_array_free(h);

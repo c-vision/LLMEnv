@@ -907,6 +907,11 @@ int llm_mlx_imatrix_write(LlmMlxModel* m, const char* path);
 /* Definito in llm_mlx_stats.c, usato dal monolite (session_append/generate). */
 int llm_mlx_active_guard(LlmMlxModel* m);
 
+/* --- TRAINING: modalità forward COMPOSABILE (def. in llm_mlx_train.c) ---
+ * 1 = il forward non usa kernel Metal custom (che non hanno vjp): le funzioni *_enabled()
+ * dei kernel fusi ritornano false e si usa il path MLX nativo differenziabile. */
+extern int g_llm_mlx_train_composable;
+
 /* --- dominio attivazioni compilate (llm_mlx_activation.c) --- */
 bool llm_mlx_fuse_geglu_enabled(void);
 bool llm_mlx_fuse_geglu_metal_enabled(void);

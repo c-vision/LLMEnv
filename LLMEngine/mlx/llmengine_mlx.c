@@ -510,6 +510,7 @@ bool llm_mlx_kv_f16_gptoss_enabled(void) {
  * Fallback silenzioso su ANY condizione non soddisfatta: mai un errore bloccante. */
 static int g_fuse_rope_state = -1;
 bool llm_mlx_fuse_rope_enabled(void) {
+    if (g_llm_mlx_train_composable) return false;   /* training: no kernel Metal (no vjp) */
     if (g_fuse_rope_state < 0) {
         /* DEFAULT ON (2026-10-01). Misura deterministica decode llama-1B: 364 -> 300 nodi/token
          * (-64, -17.6%) a `MB_in` invariato (pura riduzione di launch); `LLM_FUSE_ROPE_VERIFY`
@@ -536,6 +537,7 @@ bool llm_mlx_fuse_rope_verify_enabled(void) {
  * velocita'), zero rischio. Fallback silenzioso su ANY condizione non soddisfatta. */
 static int g_flash_decode_state = -1;
 bool llm_mlx_flash_decode_enabled(void) {
+    if (g_llm_mlx_train_composable) return false;   /* training: no kernel Metal (no vjp) */
     if (g_flash_decode_state < 0) g_flash_decode_state = (llm_ai_mlx_opt_env("LLM_GEMMA_FLASH_DECODE") != NULL) ? 1 : 0;
     return g_flash_decode_state == 1;
 }
@@ -548,6 +550,7 @@ bool llm_mlx_flash_decode_verify_enabled(void) {
  * sul kernel custom: evita la materializzazione [Lq,Lk] della naive MLX (§44.1). Default OFF. */
 static int g_flash_prefill_state = -1;
 bool llm_mlx_flash_prefill_enabled(void) {
+    if (g_llm_mlx_train_composable) return false;   /* training: no kernel Metal (no vjp) */
     /* OPT-IN (LLM_GEMMA_FLASH_PREFILL=1). Era stato promosso a default ON il 2026-09-16 su
      * misure fatte col vecchio llm_prefill_bench (che appende piu' volte nella STESSA sessione:
      * primo tocco dei pesi + contesto crescente -> misura CONTAMINATA). Con

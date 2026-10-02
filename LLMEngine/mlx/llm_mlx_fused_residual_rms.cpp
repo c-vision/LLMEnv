@@ -92,6 +92,8 @@ int g_verify_state = -1;
 }  // namespace
 
 extern "C" bool llm_mlx_fused_residual_rms_enabled(void) {
+    extern int g_llm_mlx_train_composable;
+    if (g_llm_mlx_train_composable) return false;   /* training: no kernel Metal (no vjp) */
     if (g_enable_state < 0) {
         const char* e = getenv("LLM_FUSE_RESIDUAL_RMS");
         g_enable_state = (e != nullptr && e[0] == '0') ? 0 : (e != nullptr ? 1 : 0);
