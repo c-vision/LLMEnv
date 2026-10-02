@@ -476,6 +476,18 @@ static bool df2_capture_batch(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array
     return ok;
 }
 
+/* Hook per-layer del verify DFlash2: cattura h (fp32 lazy) dei layer-ctx DURANTE il forward A. */
+static struct { int on, n, layers[8]; mlx_array snap[8]; mlx_stream st; } g_df2_vcap = {0};
+static void df2_vcap_hook(int layer, mlx_array h, int n_tokens, int cache_offset) {
+    (void)n_tokens; (void)cache_offset;
+    if (!g_df2_vcap.on) return;
+    for (int c = 0; c < g_df2_vcap.n; c++) if (g_df2_vcap.layers[c] == layer) {
+        mlx_array s32 = mlx_array_new();
+        if (mlx_astype(&s32, h, MLX_FLOAT32, g_df2_vcap.st) == 0) { g_df2_vcap.snap[c] = s32; } else mlx_array_free(s32);
+        return;
+    }
+}
+
 /* verify DFlash2: forward batch [anchor]+draft sul target con capture, greedy per
  * posizione, walk reference, commit/rollback della KV. ctx_out (fp32) riceve le feature
  * delle posizioni confermate (anchor+accepted). out_next = greedy[accepted]. */
@@ -576,48 +588,37 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
         ok = forward_tokens_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
                                   s->k_cache, s->v_cache, s->has_cache, &h);
     } else {
-        /* FIX (2026-10-01): il GREEDY si calcola col forward "normale" `forward_tokens_batch`
-         * (quello della n-gram, corretto sui GDN). La cattura degli snap di ctx perturba il
-         * forward ricorrente GDN (verificato con dump token-id: col capture il greedy diverge
-         * dall'AR, senza capture e' bit-identico). Poi si RIPRISTINA il checkpoint e si rifa'
-         * la cattura SOLO per il ctx del drafter (il suo h non serve). */
-        /* NB (2026-10-01): tentata la rimozione del 2-forward facendo la cattura ctx DENTRO il
-         * forward A (hook per-layer, LLM_DF2_1FWD): PERTURBA il greedy (la cattura altera la
-         * donation della KV GDN) -> output diverge dall'AR (verificato: sky13 vs sky3294). Rimosso.
-         * Resta il 2-forward: greedy pulito (A) + cattura su cache scratch (B). La rimozione vera
-         * richiede il fix della donation GDN (parità norm/SiLU, D11). */
+        /* 1 SOLO FORWARD (2026-10-02): il greedy e il ctx del drafter escono dallo STESSO forward
+         * `forward_tokens_batch`; il ctx si cattura DURANTE il forward (hook per-layer sull'hidden,
+         * astype fp32 lazy). Il vecchio secondo forward "B" girava sullo stato di sessione POST-A
+         * (GDN gia' avanzato di K+1 token, KV gia' appesa) -> ctx SBAGLIATO (max|A-B| fino a 123 sul
+         * layer 61; B da checkpoint pre-A == A a meno di 1-2 ulp bf16) -> drafter alimentato male,
+         * acceptance ~0. NON c'era alcun aliasing/donation: la cattura non perturba il greedy.
+         * Nota parita': il verify processa K+1 token in batch, l'AR 1 per volta; la riduzione bf16
+         * dipende dalla forma del batch, quindi su un quasi-pareggio dei logit (es. margine 0.125 = 1
+         * ulp bf16 a logit ~25: 13 vs 3294) l'argmax puo' differire dall'AR. E' atteso, non un bug:
+         * il contratto e' il determinismo a config fissa, non l'identita' con l'AR. */
+        const bool want_cap = caplayers != NULL && ncap > 0 && ncap <= 8;
+        void (*saved_hook)(int, mlx_array, int, int) = g_df2_pf_hook;
+        int saved_active = g_df2_pf_active;
+        if (want_cap) {
+            g_df2_vcap.on = 1; g_df2_vcap.n = ncap; g_df2_vcap.st = m->stream;
+            for (int c = 0; c < ncap; c++) { g_df2_vcap.layers[c] = caplayers[c]; g_df2_vcap.snap[c] = mlx_array_new(); }
+            g_df2_pf_hook = df2_vcap_hook; g_df2_pf_active = 1;
+        }
         ok = forward_tokens_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
                                   s->k_cache, s->v_cache, s->has_cache, &h);
-        if (ok && caplayers != NULL) {
-            /* ctx su CACHE SCRATCH (copia REALE via mlx_copy): la cattura (astype/eval + update
-             * KV in-place) non deve toccare lo stato di sessione. La KV di sessione resta quella
-             * di forward_tokens_batch; l'aux di sessione e' sostituito dalla copia solo durante
-             * la cattura (df2_capture_batch fa m->aux_cache = kvq_sess->aux_cache). */
-            mlx_array* sk = (mlx_array*)malloc((size_t)NL * sizeof(mlx_array));
-            mlx_array* sv = (mlx_array*)malloc((size_t)NL * sizeof(mlx_array));
-            mlx_array* sa = (s->aux_cache != NULL) ? (mlx_array*)malloc((size_t)NL * sizeof(mlx_array)) : NULL;
-            bool* shasc = (bool*)calloc((size_t)NL, sizeof(bool));
-            if (sk == NULL || sv == NULL || shasc == NULL) ok = false;
-            for (int l = 0; ok && l < NL; l++) {
-                sk[l] = mlx_array_new(); sv[l] = mlx_array_new();
-                if (mlx_copy(&sk[l], s->k_cache[l], m->stream) != 0) ok = false;
-                if (ok && mlx_copy(&sv[l], s->v_cache[l], m->stream) != 0) ok = false;
-                shasc[l] = s->has_cache[l];
-                if (sa != NULL) { sa[l] = mlx_array_new();
-                    if (s->aux_cache[l].ctx != NULL && mlx_copy(&sa[l], s->aux_cache[l], m->stream) != 0) ok = false; }
+        if (want_cap) { g_df2_pf_active = saved_active; g_df2_pf_hook = saved_hook; g_df2_vcap.on = 0; }
+        if (want_cap) {
+            const size_t HH = (size_t)m->cfg.hidden_size;
+            for (int c = 0; ok && c < ncap; c++) {
+                if (g_df2_vcap.snap[c].ctx == NULL || mlx_array_eval(g_df2_vcap.snap[c]) != 0) { ok = false; break; }
+                const float* dd = mlx_array_data_float32(g_df2_vcap.snap[c]);
+                if (!dd) { ok = false; break; }
+                for (int pp = 0; pp < N; pp++)
+                    memcpy(cap + ((size_t)pp * ncap + c) * HH, dd + (size_t)pp * HH, HH * sizeof(float));
             }
-            mlx_array* saved_aux = s->aux_cache;
-            if (ok) s->aux_cache = sa;
-            mlx_array hd = mlx_array_new();
-            if (ok) ok = df2_capture_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
-                                           sk, sv, shasc, caplayers, ncap, cap, (int)capneed, &hd);
-            s->aux_cache = saved_aux;
-            mlx_array_free(hd);
-            for (int l = 0; l < NL; l++) {
-                mlx_array_free(sk[l]); mlx_array_free(sv[l]);
-                if (sa != NULL) mlx_array_free(sa[l]);
-            }
-            free(sk); free(sv); free(sa); free(shasc);
+            for (int c = 0; c < ncap; c++) if (g_df2_vcap.snap[c].ctx != NULL) mlx_array_free(g_df2_vcap.snap[c]);
         }
     }
     if (g_df2_time_on()) { g_df2_t_fwd += g_df2_now() - _t0; _t0 = g_df2_now(); }
