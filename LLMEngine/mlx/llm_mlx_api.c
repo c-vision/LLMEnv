@@ -714,6 +714,121 @@ static void df2_retain_ctx(DFlash2Runtime* rt, float* ctx, int n) {
     rt->retained_ctx = ctx; rt->retained_n = n;
 }
 
+/* CATTURA ctx DFlash2 DURANTE IL PREFILL (2026-10-01): invece di rifare il forward del target
+ * nello streaming, si cattura l'hidden dei layer-selezionati mentre il prefill gia' li calcola
+ * (hook in forward_tokens_batch). Si tiene solo l'ULTIMA finestra W (sliding_window) per capture:
+ * memoria ~W*ncap*H*4 (~210MB a W=2048, ncap=5). Il generate usa `result` (niente re-forward). */
+#define DF2_PF_MAXC 8
+static struct {
+    int active, ncap, W, H;
+    int caplayers[DF2_PF_MAXC];
+    mlx_array buf[DF2_PF_MAXC];   /* [n, H] rolling (ultime W posizioni) */
+    mlx_stream stream;
+    mlx_array result;             /* [1, W, ncap*H] costruito dalla fine del prefill */
+    int seen;
+} g_df2_pf = {0};
+
+static void df2_pf_hook_fn(int layer, mlx_array h, int n_tokens, int cache_offset) {
+    (void)cache_offset;
+    if (!g_df2_pf.active || n_tokens <= 0) return;
+    int c = -1;
+    for (int i = 0; i < g_df2_pf.ncap; i++) if (g_df2_pf.caplayers[i] == layer) { c = i; break; }
+    if (c < 0) return;
+    mlx_array hs = mlx_array_new();
+    if (mlx_reshape(&hs, h, ((const int[2]){n_tokens, g_df2_pf.H}), 2, g_df2_pf.stream) != 0) { mlx_array_free(hs); return; }
+    mlx_array nb = mlx_array_new();
+    bool ok = true;
+    if (g_df2_pf.buf[c].ctx != NULL && mlx_array_size(g_df2_pf.buf[c]) > 0) {
+        mlx_vector_array v = mlx_vector_array_new();
+        mlx_vector_array_append_value(v, g_df2_pf.buf[c]);
+        mlx_vector_array_append_value(v, hs);
+        ok = mlx_concatenate_axis(&nb, v, 0, g_df2_pf.stream) == 0;
+        mlx_vector_array_free(v);
+    } else { ok = mlx_array_set(&nb, hs) == 0; }
+    mlx_array_free(hs);
+    if (!ok) { mlx_array_free(nb); return; }
+    int n = (int)mlx_array_shape(nb)[0];
+    if (n > g_df2_pf.W) {   /* tieni le ultime W */
+        int a0[2] = {n - g_df2_pf.W, 0}, a1[2] = {n, g_df2_pf.H}, as[2] = {1,1};
+        mlx_array s = mlx_array_new(), sc = mlx_array_new();
+        if (mlx_slice(&s, nb, a0,2,a1,2,as,2, g_df2_pf.stream) == 0 &&
+            mlx_contiguous(&sc, s, false, g_df2_pf.stream) == 0) mlx_array_set(&nb, sc);
+        mlx_array_free(s); mlx_array_free(sc);
+    }
+    mlx_array_eval(nb);
+    if (g_df2_pf.buf[c].ctx == NULL) g_df2_pf.buf[c] = mlx_array_new();
+    mlx_array_set(&g_df2_pf.buf[c], nb);
+    mlx_array_free(nb);
+}
+
+/* Arma la cattura (chiamata dal preload PRIMA del prefill). Ritorna true se attiva. */
+bool llm_mlx_df2_pf_arm(DFlash2Runtime* rt, LlmMlxModel* m) {
+    if (!rt || !rt->draft || !m) return false;
+    int ncap = rt->draft->cfg.dflash_n_ctx_layers;
+    if (ncap <= 0 || ncap > DF2_PF_MAXC) return false;
+    g_df2_pf.active = 0; g_df2_pf.ncap = ncap; g_df2_pf.H = m->cfg.hidden_size;
+    g_df2_pf.W = (rt->draft->cfg.sliding_window > 0) ? rt->draft->cfg.sliding_window : 2048;
+    g_df2_pf.stream = m->stream; g_df2_pf.seen = 0;
+    if (g_df2_pf.result.ctx != NULL) { mlx_array_free(g_df2_pf.result); g_df2_pf.result = mlx_array_new(); }
+    for (int i = 0; i < ncap; i++) {
+        g_df2_pf.caplayers[i] = rt->draft->cfg.dflash_ctx_layers[i];
+        if (g_df2_pf.buf[i].ctx != NULL) mlx_array_free(g_df2_pf.buf[i]);
+        g_df2_pf.buf[i] = mlx_array_new();
+    }
+    g_df2_pf_hook = df2_pf_hook_fn; g_df2_pf_active = 1; g_df2_pf.active = 1;
+    return true;
+}
+void llm_mlx_df2_pf_disarm(void) { g_df2_pf.active = 0; g_df2_pf_active = 0; }
+
+/* Ritira il ctx catturato nel prefill: [n, ncap*H] fp32 in buffer host (malloc). false se assente. */
+bool llm_mlx_df2_pf_take(float** out, int* out_n) {
+    *out = NULL; *out_n = 0;
+    if (g_df2_pf.ncap <= 0 || g_df2_pf.H <= 0) return false;
+    int mn = -1;
+    for (int c = 0; c < g_df2_pf.ncap; c++) {
+        if (g_df2_pf.buf[c].ctx == NULL || mlx_array_ndim(g_df2_pf.buf[c]) != 2) return false;
+        int n = (int)mlx_array_shape(g_df2_pf.buf[c])[0];
+        if (n <= 0) return false;
+        if (mn < 0 || n < mn) mn = n;
+    }
+    if (mn <= 0) return false;
+    mlx_array parts[DF2_PF_MAXC];
+    for (int c = 0; c < g_df2_pf.ncap; c++) {
+        int n = (int)mlx_array_shape(g_df2_pf.buf[c])[0];
+        parts[c] = mlx_array_new();
+        if (n == mn) { mlx_array_set(&parts[c], g_df2_pf.buf[c]); }
+        else {
+            int a0[2] = {n-mn,0}, a1[2] = {n,g_df2_pf.H}, as[2] = {1,1};
+            mlx_array s = mlx_array_new();
+            if (mlx_slice(&s, g_df2_pf.buf[c], a0,2,a1,2,as,2, g_df2_pf.stream) == 0) mlx_array_set(&parts[c], s);
+            mlx_array_free(s);
+        }
+    }
+    mlx_array cat = mlx_array_new();
+    mlx_vector_array v = mlx_vector_array_new();
+    for (int c = 0; c < g_df2_pf.ncap; c++) mlx_vector_array_append_value(v, parts[c]);
+    bool ok = mlx_concatenate_axis(&cat, v, 1, g_df2_pf.stream) == 0;
+    mlx_vector_array_free(v);
+    for (int c = 0; c < g_df2_pf.ncap; c++) mlx_array_free(parts[c]);
+    if (!ok) { mlx_array_free(cat); return false; }
+    mlx_array f32 = mlx_array_new();
+    ok = (mlx_array_dtype(cat) == MLX_FLOAT32) ? (mlx_array_set(&f32, cat) == 0)
+                                               : (mlx_astype(&f32, cat, MLX_FLOAT32, g_df2_pf.stream) == 0);
+    mlx_array_free(cat);
+    if (ok) ok = mlx_array_eval(f32) == 0;
+    const int dim = g_df2_pf.ncap * g_df2_pf.H;
+    float* host = NULL;
+    if (ok) {
+        host = (float*)malloc((size_t)mn * (size_t)dim * sizeof(float));
+        if (host != NULL) memcpy(host, mlx_array_data_float32(f32), (size_t)mn * (size_t)dim * sizeof(float));
+        else ok = false;
+    }
+    mlx_array_free(f32);
+    if (!ok) { free(host); return false; }
+    *out = host; *out_n = mn;
+    return true;
+}
+
 /* STREAMING INTERLEAVED (2026-10-01): inietta il ctx del prompt nel draft PER SPAN —
  * cattura uno span alla volta su cache scratch e lo libera subito — invece di catturare
  * l'intero ctx in un buffer host (n_prompt*ncap*H*4: 26GB a 257k, 37GB a 2M). Cosi' il picco
@@ -866,8 +981,14 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
          * niente re-iniezione). Il prefill puo' lasciare un picco transitorio: clear prima. */
         mlx_clear_cache();
         llm_ai_mlx_dflash2_reset(handle);   /* nuova sequenza: ring del draft pulito */
+        llm_mlx_df2_pf_disarm();            /* il prefill e' finito: stop cattura */
         float* tail = NULL; int tail_n = 0;
-        if (!df2_stream_prompt_ctx(rt, m, s, s->pending_next_id, caplayers, ncap, n_prompt, &tail, &tail_n)) {
+        /* CATTURA-DURANTE-PREFILL: se il ctx e' stato catturato durante il prefill, lo si usa
+         * (NIENTE re-forward). Altrimenti lo streaming interleaved (fallback). */
+        if (llm_mlx_df2_pf_take(&tail, &tail_n)) {
+            fprintf(stderr, "[df2] ctx dal prefill (n=%d, no streaming)\n", tail_n);
+            rt->ctx[rt->cur_ctx].ctx_pos = n_prompt - tail_n;   /* RoPE assoluta del ctx */
+        } else if (!df2_stream_prompt_ctx(rt, m, s, s->pending_next_id, caplayers, ncap, n_prompt, &tail, &tail_n)) {
             fprintf(stderr, "dflash_generate: streaming ctx fallito\n");
             return -1;
         }

@@ -1129,6 +1129,12 @@ extern mlx_array g_spec_snap_v[];
 extern int g_spec_capture;
 /* Precarica il drafter DFlash2 PRIMA del prefill (evita l'OOM del picco prefill + drafter). */
 void llm_mlx_df2_preload(LlmMlxModel* m);
+/* HOOK cattura-DFlash2-durante-prefill (in forward_tokens_batch): armato da llm_mlx_df2_preload. */
+extern int g_df2_pf_active;
+extern void (*g_df2_pf_hook)(int layer, mlx_array h, int n_tokens, int cache_offset);
+bool llm_mlx_df2_pf_arm(DFlash2Runtime* rt, LlmMlxModel* m);
+void llm_mlx_df2_pf_disarm(void);
+bool llm_mlx_df2_pf_take(float** out, int* out_n);
 bool llm_mlx_logits_f32(mlx_array* out, mlx_array logits, mlx_stream stream);
 bool final_step_constrained(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
                             mlx_array out_w, mlx_array out_s, mlx_array out_b,

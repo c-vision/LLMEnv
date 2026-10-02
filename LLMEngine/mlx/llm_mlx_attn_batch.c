@@ -10,6 +10,10 @@
 #include "llm_mlx_ops.h"
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
 #include "llm_mlx_gdn_gate_kernel.h"
+
+/* HOOK DFlash2 per il prefill (2026-10-01): definizioni uniche. Attivo solo se armato. */
+int g_df2_pf_active = 0;
+void (*g_df2_pf_hook)(int layer, mlx_array h, int n_tokens, int cache_offset) = NULL;
 #include "llm_mlx_gdn_kernel.h"
 
 #include <stdio.h>
@@ -1021,6 +1025,9 @@ bool forward_tokens_batch(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array emb
         has_cache[layer] = true;
         mlx_array_free(h);
         h = layer_out;
+        /* HOOK DFlash2 (2026-10-01): cattura l'hidden dei layer-selezionati DURANTE il prefill
+         * (evita il re-forward del ctx nello streaming). Attivo solo se armato (g_df2_pf_active). */
+        if (step_ok && g_df2_pf_active && g_df2_pf_hook) g_df2_pf_hook(layer, h, n_tokens, cache_offset);
         if (step_ok && g_layerh_run != NULL && getenv("LLM_GDN_AB"))
             fprintf(stderr, "[layerh] run=%s L=%d sum=%.6g\n", g_layerh_run, layer, llm_mlx_checksum_f32(h, m->stream));
         if (step_ok && layer <= 1 && getenv("LLM_BONSAI_DBG")) {

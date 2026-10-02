@@ -411,7 +411,12 @@ static llm_ai_mlx_dflash2_handle llm_mlx_df2_for(LlmMlxModel* m) {
  * decode (sync/clear non bastano). Se il drafter viene caricato DOPO il prefill, il picco + il
  * drafter -> OOM OS. Caricandolo PRIMA, il picco del prefill lo include (80+4 < limite) e il
  * primo forward dello streaming lo drena -> 1M/2M entrano. */
-void llm_mlx_df2_preload(LlmMlxModel* m) { if (m) (void)llm_mlx_df2_for(m); }
+void llm_mlx_df2_preload(LlmMlxModel* m) {
+    if (!m) return;
+    llm_ai_mlx_dflash2_handle h = llm_mlx_df2_for(m);
+    /* Arma la CATTURA ctx durante il prefill (evita il re-forward nello streaming). */
+    if (h != NULL) (void)llm_mlx_df2_pf_arm((DFlash2Runtime*)h, m);
+}
 
 int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_tokens,
                                  int32_t eos_token_id, int32_t* out_ids) {
