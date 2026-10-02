@@ -1,26 +1,32 @@
 --- a/mlx/backend/metal/quantized.cpp
 +++ b/mlx/backend/metal/quantized.cpp
-@@ -11,6 +11,7 @@
- #include "mlx/fast_primitives.h"
- #include "mlx/primitives.h"
- #include "mlx/utils.h"
-+#include <cstdlib>
- 
- namespace mlx::core {
- 
-@@ -297,6 +298,15 @@
- 
+@@ -298,6 +298,18 @@
  // affine qmv_wide only beats qmv on gen-15+; fp benefits on every gen.
++// GMBasic patch (2026-10-03): qmv_wide (M>=2) NON bit-identico al qmv -> sul batch rompe la
++// bit-parity di gpt-oss. Controllo via API (NO env): mlx::core::set_qmv_wide(v), v=-1 default(arch),
++// 0 off, 1 on. L'engine lo imposta dal registro opzioni (`qmv_wide`).
++int g_qmv_wide_opt = -1;
++void set_qmv_wide(int v) { g_qmv_wide_opt = v; }
++int get_qmv_wide() { return g_qmv_wide_opt; }
  inline bool use_qmv_wide(const std::string& mode, metal::Device& d) {
-+  // LLMEnv patch (2026-09-12, patches/mlx_disable_qmv_wide.patch): il kernel
-+  // qmv_wide (usato per M>=2) NON e' bit-identico al qmv (M==1) -- riduzione a
-+  // shuffle-ladder su k_lanes=8 invece del simd_sum su 32. Sul decode batch
-+  // (n_sess>=2) questo fa divergere di ~1 ulp la matmul quantizzata e rompe la
-+  // bit-parity batch-vs-sequenziale di gpt-oss (bf16). Il costo del passthrough
-+  // a qmv e' nel rumore. DEFAULT OFF; opt-in con MLX_QMV_WIDE_OPT per A/B.
-+  if (std::getenv("MLX_QMV_WIDE_OPT") == nullptr) {
-+    return false;
-+  }
++  const int o = g_qmv_wide_opt;
++  if (o == 0) return false;
    return mode != "affine" || d.get_architecture_gen() >= 15;
  }
- 
+--- a/mlx/memory.h
++++ b/mlx/memory.h
+@@
+ MLX_API void dump_retained();
++MLX_API void set_qmv_wide(int v);
+--- a/mlx/c/memory.cpp  (mlx-c)
++++ b/mlx/c/memory.cpp
+@@
++extern "C" int mlx_set_qmv_wide(int v) {
++  try { mlx::core::set_qmv_wide(v); } catch (std::exception& e) { mlx_error(e.what()); return 1; }
++  return 0;
++}
+--- a/mlx/c/memory.h  (mlx-c)
++++ b/mlx/c/memory.h
+@@
+ int mlx_dump_retained(void);
++int mlx_set_qmv_wide(int v);
