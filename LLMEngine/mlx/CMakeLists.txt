@@ -227,6 +227,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_p4.c
     llm_mlx_cb.c
     llm_mlx_lora.c
+    llm_mlx_train.c
     llm_mlx_prefix.c
     llm_mlx_dflash2.c
     llm_mlx_kvcompress.c
