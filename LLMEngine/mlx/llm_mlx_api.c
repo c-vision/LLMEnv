@@ -767,8 +767,15 @@ static bool df2_stream_prompt_ctx(DFlash2Runtime* rt, LlmMlxModel* m, LlmMlxSess
                 mlx_array_free(h2);
                 df2_mode_leave_draft(rt, sv_all, sv_act);
                 if (ok) rt->ctx[rt->cur_ctx].ctx_pos += ch;
+                mlx_array_free(xc);
+                /* DRAIN per-span (2026-10-01): senza, i ~60 span lasciano la coda Metal carica
+                 * (command buffer/descriptor accumulati, grafi concat lazily impilati) -> al
+                 * propose l'encoder diventa NULL (SIGSEGV a 253k). Un synchronize per span
+                 * spegne la coda e libera gli intermedi. */
+                if (ok) mlx_synchronize(m->stream);
+            } else {
+                mlx_array_free(xc);
             }
-            mlx_array_free(xc);
         }
         free(buf);
         if (getenv("DF2_CTXDBG"))
