@@ -24,7 +24,9 @@
 #endif
 
 #if LLM_COUNT_ARRAYS
-static long g_arr_new_ct = 0, g_arr_free_ct = 0, g_arr_ne_free = 0;
+/* Contatori GLOBALI (definiti in llm_mlx_stats.c): tutte le TU incrementano lo STESSO contatore,
+ * altrimenti il probe in stats.c leggerebbe i propri (sempre 0). */
+extern long g_arr_new_ct, g_arr_free_ct, g_arr_ne_free;
 /* Tutte le funzioni di CREAZIONE usate vanno contate, altrimenti il net e' falsato (i free
  * contati senza le new corrispondenti lo mandano negativo). */
 static mlx_array llm_counted_new(void) { g_arr_new_ct++; return mlx_array_new(); }
@@ -33,16 +35,15 @@ static mlx_array llm_counted_new_f32(float v) { g_arr_new_ct++; return mlx_array
 static mlx_array llm_counted_new_float(float v) { g_arr_new_ct++; return mlx_array_new_float(v); }
 static mlx_array llm_counted_new_int(int v) { g_arr_new_ct++; return mlx_array_new_int(v); }
 static void llm_counted_free(mlx_array a) { g_arr_free_ct++; if (a.ctx != NULL) g_arr_ne_free++; mlx_array_free(a); }
-#define mlx_array_new() llm_counted_new()
-#define mlx_array_new_data(d, sh, n, t) llm_counted_new_data((d), (sh), (n), (t))
-#define mlx_array_new_float32(v) llm_counted_new_f32(v)
-#define mlx_array_new_float(v) llm_counted_new_float(v)
-#define mlx_array_new_int(v) llm_counted_new_int(v)
-#define mlx_array_free(a) llm_counted_free(a)
-static void llm_mlx_array_balance(const char* tag) {
-    fprintf(stderr, "[ARRAYS] %s new=%ld free=%ld net=%ld (free_nonempty=%ld)\n", tag,
-            g_arr_new_ct, g_arr_free_ct, g_arr_new_ct - g_arr_free_ct, g_arr_ne_free);
-}
+/* Variadiche: i call-site C usano compound literal `(const int[]){a,b}` la cui virgola interna
+ * spezzerebbe un macro a N argomenti fissi ("too many arguments", 2 siti dsv41). */
+#define mlx_array_new(...) llm_counted_new(__VA_ARGS__)
+#define mlx_array_new_data(...) llm_counted_new_data(__VA_ARGS__)
+#define mlx_array_new_float32(...) llm_counted_new_f32(__VA_ARGS__)
+#define mlx_array_new_float(...) llm_counted_new_float(__VA_ARGS__)
+#define mlx_array_new_int(...) llm_counted_new_int(__VA_ARGS__)
+#define mlx_array_free(...) llm_counted_free(__VA_ARGS__)
+void llm_mlx_array_balance(const char* tag);   /* definita in llm_mlx_stats.c */
 #else
 #define llm_mlx_array_balance(tag) ((void)0)
 #endif

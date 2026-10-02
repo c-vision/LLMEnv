@@ -3,8 +3,17 @@
  * recommend, imatrix collector pubblico, memory stats/limit e guardia saturazione, FLOPS/memory.
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
+#include "llm_mlx_array_count.h"   /* L25: contatori GLOBALI (prima degli header di progetto) */
 #include "llmengine_mlx.h"
 #include "llm_mlx_internal.h"
+
+#if LLM_COUNT_ARRAYS
+long g_arr_new_ct = 0, g_arr_free_ct = 0, g_arr_ne_free = 0;
+void llm_mlx_array_balance(const char* tag) {
+    fprintf(stderr, "[ARRAYS] %s new=%ld free=%ld net=%ld (free_nonempty=%ld)\n", tag,
+            g_arr_new_ct, g_arr_free_ct, g_arr_new_ct - g_arr_free_ct, g_arr_ne_free);
+}
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>

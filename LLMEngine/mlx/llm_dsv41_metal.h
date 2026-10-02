@@ -894,7 +894,7 @@ static inline bool llm_dsv41_metal_packed_attention(mlx_array* out, mlx_array q,
         mlx_vector_array mouts = mlx_vector_array_new();
         int mrc = mlx_fast_metal_kernel_apply(&mouts, mk, mins, mcfg, s);
         ok = (mrc == 0 && mlx_vector_array_size(mouts) >= 1);
-        if (ok) { mlx_array o0 = mlx_array_new(); if (mlx_vector_array_get(&o0, mouts, 0) != 0) ok = false; else mlx_array_set(out, o0); }
+        if (ok) { mlx_array o0 = mlx_array_new(); if (mlx_vector_array_get(&o0, mouts, 0) != 0) ok = false; else mlx_array_set(out, o0); mlx_array_free(o0); }
         mlx_vector_array_free(mins); mlx_vector_array_free(mouts);
         mlx_fast_metal_kernel_config_free(mcfg); mlx_array_free(mmeta_a);
     }
@@ -1166,7 +1166,7 @@ static inline bool llm_dsv41_metal_pack8(mlx_array* out, mlx_array x, int rows, 
     mlx_vector_array outs = mlx_vector_array_new();
     int rc = mlx_fast_metal_kernel_apply(&outs, k, ins, cfg, s);
     bool ok = (rc == 0 && mlx_vector_array_size(outs) >= 1);
-    if (ok) { mlx_array o0 = mlx_array_new(); if (mlx_vector_array_get(&o0, outs, 0) != 0) ok = false; else mlx_array_set(out, o0); }
+    if (ok) { mlx_array o0 = mlx_array_new(); if (mlx_vector_array_get(&o0, outs, 0) != 0) ok = false; else mlx_array_set(out, o0); mlx_array_free(o0); }
     mlx_vector_array_free(ins); mlx_vector_array_free(outs);
     mlx_fast_metal_kernel_config_free(cfg);
     return ok;
@@ -1191,7 +1191,7 @@ static inline bool llm_dsv41_metal_pack4(mlx_array* out, mlx_array x, int rows, 
     mlx_vector_array outs = mlx_vector_array_new();
     int rc = mlx_fast_metal_kernel_apply(&outs, k, ins, cfg, s);
     bool ok = (rc == 0 && mlx_vector_array_size(outs) >= 1);
-    if (ok) { mlx_array o0 = mlx_array_new(); if (mlx_vector_array_get(&o0, outs, 0) != 0) ok = false; else mlx_array_set(out, o0); }
+    if (ok) { mlx_array o0 = mlx_array_new(); if (mlx_vector_array_get(&o0, outs, 0) != 0) ok = false; else mlx_array_set(out, o0); mlx_array_free(o0); }
     mlx_vector_array_free(ins); mlx_vector_array_free(outs);
     mlx_fast_metal_kernel_config_free(cfg);
     return ok;
