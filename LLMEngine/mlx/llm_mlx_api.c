@@ -189,10 +189,13 @@ static int df2_propose_impl(DFlash2Runtime* rt,
     LlmMlxModel* d = rt->draft;
     const ModelConfig* c = &d->cfg;
     mlx_stream st = d->stream;
-    const int L = c->dflash_block_size;
+    /* K ADATTIVO (golden reference `goldens/dflash2/dflash_goldens.npz`): round 0 -> block_size
+     * (K=7), round 1+ -> block_size=4 (K=3). Il K NON cambia l'output (verify = greedy del target)
+     * ma il compute; il chiamante seleziona il blocco via max_out: L = min(block_size, max_out). */
+    int L = c->dflash_block_size;
+    if (max_out > 0 && max_out < L) L = max_out;
     const int K = L - 1;                 /* draft token per blocco */
     const int ctx_dim = c->dflash_n_ctx_layers * c->hidden_size;
-    if (max_out < K) return -1;
     bool ok = true;
 
     /* ---- block = [anchor] + mask*(L-1) ---- */
@@ -1015,7 +1018,8 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
 
         int32_t drafts[8];
         LLM_DF2_SP_BEGIN(prop);
-        int K = llm_ai_mlx_dflash2_propose(handle, anchor, ctx_r, ctx_n, drafts, 8);
+        int dall = (stat_rounds == 0) ? 8 : 4;   /* golden: round0 K=7, round1+ K=3 */
+        int K = llm_ai_mlx_dflash2_propose(handle, anchor, ctx_r, ctx_n, drafts, dall);
         LLM_DF2_SP_END(prop);
         if (K <= 0) break;
         /* I draft oltre il tetto del chunk non vanno emessi (altrimenti la loro KV resta in cache
