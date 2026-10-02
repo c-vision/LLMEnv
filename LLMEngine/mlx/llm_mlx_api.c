@@ -865,6 +865,10 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
             return -1;
         }
         pctx = tail; ctx_n0 = tail_n;   /* solo l'ULTIMO span -> il propose round-1 inietta quello */
+        /* DRAIN dopo lo streaming (2026-10-01): i molti command buffer committati dai 60+ span
+         * possono lasciare lo stato Metal in errore/in-flight; un synchronize attende la coda e
+         * (se c'e' un errore GPU latente) lo superficie come errore MLX invece di encoder NULL. */
+        mlx_synchronize(m->stream);
     }
 
     int emitted = 0;
