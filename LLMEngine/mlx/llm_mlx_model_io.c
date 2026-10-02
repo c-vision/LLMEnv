@@ -86,6 +86,14 @@ bool read_mlx_meta_file(const char* path, MlxSwapMeta* out) {
 
 
 
+
+/* Auto-policy SENZA env: imposta un default di modello nel REGISTRO (avanzato) se l'utente non
+ * l'ha gia' scelto. Equivale al vecchio setenv(...,overwrite=0) ma resta nel registro (niente env). */
+static void llm_engine_opt_auto(const char* name, const char* value) {
+    if (llm_ai_mlx_opt_is_set(name)) return;
+    (void)llm_ai_mlx_opt_set(name, value);
+}
+
 llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
     if (getenv("LLM_MLX_ERRTRACE")) mlx_set_error_handler(llm_mlx_err_trace_handler, NULL, NULL);
     if (model_dir == NULL) return NULL;
@@ -653,7 +661,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * `setenv(..., overwrite=0)`: non sovrascrive una scelta esplicita dell'utente.
      * Kill-switch: LLM_NO_<LEVA> (il loader salta l'abilitazione). */
     if (strcmp(m->cfg.model_type, "gemma4") == 0 && llm_ai_mlx_opt_env("LLMMETAL_NO_FUSE_GEGLU_METAL") == NULL) {
-        setenv("LLMMETAL_FUSE_GEGLU_METAL", "1", 0);  /* +1,2% decode (unico dense_geglu_ffn) */
+        llm_engine_opt_auto("LLMMETAL_FUSE_GEGLU_METAL", "1");  /* +1,2% decode (unico dense_geglu_ffn) */
         fprintf(stderr, "[auto-policy] gemma4 -> LLMMETAL_FUSE_GEGLU_METAL=1\n");
     }
     /* gemma4: bf16 "matmul" (g_bf16_all, NON bfloat16_input). Il checkpoint e' dtype=bfloat16
@@ -677,12 +685,12 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * qualita' e' identica a MLX (score 256 pos: W8A8 89,8% vs MLX 90,6%) -> il W8A8 resta
      * attivo di default sui qwen3 come deciso il 2026-09-18. */
     if ((strcmp(m->cfg.model_type, "qwen3") == 0 || strcmp(m->cfg.model_type, "qwen3_5") == 0) && llm_ai_mlx_opt_env("LLMMETAL_OQ_A8") == NULL) {
-        setenv("LLMMETAL_OQ_A8", "1", 0);
+        llm_engine_opt_auto("LLMMETAL_OQ_A8", "1");
         fprintf(stderr, "[auto-policy] qwen3 -> LLMMETAL_OQ_A8=1 (misurato +16-28% prefill N>=1024; "
                         "su llama sarebbe -2/-6x)\n");
     }
     if (strcmp(m->cfg.model_type, "qwen3_next") == 0 && llm_ai_mlx_opt_env("LLM_NO_MXFP4_ACT_F16") == NULL) {
-        setenv("LLM_MXFP4_ACT_F16", "1", 0);     /* +7% prefill (misurato neutro su qwen3_5_moe) */
+        llm_engine_opt_auto("LLM_MXFP4_ACT_F16", "1");     /* +7% prefill (misurato neutro su qwen3_5_moe) */
         fprintf(stderr, "[auto-policy] qwen3_next -> LLM_MXFP4_ACT_F16=1\n");
     }
     /* B7 (2026-09-29): opzione di REGISTRO `kvquant` = off|8[:finestra]|auto[:soglia]|16.
