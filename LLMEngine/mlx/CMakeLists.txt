@@ -222,12 +222,21 @@ FetchContent_Declare(
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 FetchContent_MakeAvailable(cjson)
 
+# ABI del forward differenziabile (training PUL). È Apache (infereza), ma è ESPERIMENTALE/
+# separabile: FastLLM e un engine "puro" possono compilare con -DLLM_ENABLE_TRAIN=OFF senza
+# includere llm_mlx_train.c (nessuna dipendenza inversa: chi non lo linka non lo vede).
+option(LLM_ENABLE_TRAIN "Includi l'ABI del forward differenziabile (llm_mlx_train.c)" ON)
+set(LLM_MLX_TRAIN_SRC "")
+if(LLM_ENABLE_TRAIN)
+    set(LLM_MLX_TRAIN_SRC llm_mlx_train.c)
+endif()
+
 add_library(llm_ai_mlx SHARED
     llmengine_mlx.c
     llm_mlx_p4.c
     llm_mlx_cb.c
     llm_mlx_lora.c
-    llm_mlx_train.c
+    ${LLM_MLX_TRAIN_SRC}
     llm_mlx_prefix.c
     llm_mlx_dflash2.c
     llm_mlx_kvcompress.c
