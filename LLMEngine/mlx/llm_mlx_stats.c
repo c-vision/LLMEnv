@@ -248,6 +248,39 @@ int llm_ai_mlx_memory_stats(size_t* out_cache, size_t* out_active, size_t* out_p
 /* §M/L25 — probe di ATTRIBUZIONE della ritenzione: bilancio deterministico
  * `mlx_array_new* − mlx_array_free` (net deve restare COSTANTE a regime) + active/peak MLX.
  * Richiede build con `-DLLM_COUNT_ARRAYS=1` (default 0 = no-op, zero overhead). */
+
+/* B5 self-check: MLX + device + memoria, model-free (nessun modello caricato). Scrive in `out`. */
+int llm_ai_mlx_selfcheck(char* out, int cap) {
+    if (out == NULL || cap < 32) return -1;
+    int n = 0;
+    {
+        mlx_string vs = mlx_string_new();
+        if (vs.ctx != NULL && mlx_version(&vs) == 0) {
+            const char* v = mlx_string_data(vs);
+            n += snprintf(out + n, (size_t)(cap - n), "mlx=%s ", v ? v : "?");
+        }
+        mlx_string_free(vs);
+    }
+    {
+        mlx_device dev = mlx_device_new_type(MLX_GPU, 0);
+        mlx_device_info di = mlx_device_info_new();
+        if (mlx_device_info_get(&di, dev) == 0) {
+            const char* dn = NULL;
+            if (mlx_device_info_get_string(&dn, di, "device_name") == 0 && dn != NULL)
+                n += snprintf(out + n, (size_t)(cap - n), "device=%s ", dn);
+        }
+        mlx_device_info_free(di);
+        mlx_device_free(dev);
+    }
+    {
+        size_t a = 0, p = 0, c = 0;
+        (void)mlx_get_active_memory(&a); (void)mlx_get_peak_memory(&p); (void)mlx_get_cache_memory(&c);
+        n += snprintf(out + n, (size_t)(cap - n), "metal active=%.1fMB peak=%.1fMB cache=%.1fMB",
+                      a / 1048576.0, p / 1048576.0, c / 1048576.0);
+    }
+    return 0;
+}
+
 int llm_ai_mlx_debug_array_balance(const char* tag, long* out_new, long* out_free, long* out_net) {
     size_t a = 0, p = 0, c = 0, rc = 0;
     (void)mlx_get_active_memory(&a); (void)mlx_get_peak_memory(&p); (void)mlx_get_cache_memory(&c);

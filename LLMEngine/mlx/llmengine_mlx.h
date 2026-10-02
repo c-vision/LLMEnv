@@ -509,6 +509,7 @@ int llm_ai_mlx_model_imatrix_write(llm_ai_mlx_model_handle handle, const char* p
  * processi long-lived con molti eval grandi: il limite fa fallire in modo pulito invece del
  * Jetsam. Ritorna 0 ok / -1. */
 int llm_ai_mlx_memory_stats(size_t* out_cache, size_t* out_active, size_t* out_peak);
+int llm_ai_mlx_selfcheck(char* out, int cap);   /* B5: MLX+device+memoria, model-free */
 
 /* LoRA model-level (registrazione/abilitazione) — run-side (apply adapter a inference). */
 void llm_ai_mlx_model_lora_clear(llm_ai_mlx_model_handle h);
