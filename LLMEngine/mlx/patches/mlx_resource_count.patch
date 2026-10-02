@@ -1,0 +1,36 @@
+--- a/mlx/backend/metal/allocator.h
++++ b/mlx/backend/metal/allocator.h
+@@ -34,6 +34,9 @@ class MetalAllocator : public allocator::Allocator {
+   };
+   size_t get_cache_memory() {
+     return buffer_cache_.cache_size();
+   };
++  size_t get_resource_count() {
++    return num_resources_;
++  };
+   size_t set_cache_limit(size_t limit);
+   size_t set_memory_limit(size_t limit);
+   size_t get_memory_limit();
+--- a/mlx/backend/metal/allocator.cpp
++++ b/mlx/backend/metal/allocator.cpp
+@@ -270,6 +270,9 @@ size_t get_cache_memory() {
+   return metal::allocator().get_cache_memory();
+ }
++size_t get_resource_count() {
++  return metal::allocator().get_resource_count();
++}
+ void clear_cache() {
+   return metal::allocator().clear_cache();
+ }
+--- a/mlx/memory.h
++++ b/mlx/memory.h
+@@ -33,6 +33,10 @@ MLX_API size_t get_cache_memory();
+  * to the system allocator.
+  * */
+ MLX_API size_t get_cache_memory();
++
++/* Number of live GPU resource buffers (Metal num_resources_). Diagnostic only. */
++MLX_API size_t get_resource_count();
+ 
+ /* Set the memory limit.
+  * The memory limit is a guideline for the maximum amount of memory to use

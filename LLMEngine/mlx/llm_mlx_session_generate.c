@@ -212,6 +212,7 @@ static bool llm_ai_mlx_session_generate_async_greedy(LlmMlxSession* s, LlmMlxMod
                 if (generated_count < max_new_tokens) {
                     out_ids[generated_count++] = idh;
                     if (llm_da_enabled()) g_da.tokens++;
+        if ((s->cache_offset & 63) == 0) llm_ai_mlx_debug_array_balance("decode", NULL, NULL, NULL);
                     session_history_append(s, &idh, 1);
                     last_id = idh;
                 }
@@ -290,7 +291,7 @@ static bool llm_ai_mlx_session_generate_async_greedy(LlmMlxSession* s, LlmMlxMod
             at_build = at_submit = at_wait = at_rest = 0; at_n = 0;
         }
         if (generated_count >= max_new_tokens) break;
-        if ((step & 63) == 0) llm_mlx_array_balance("decode");
+        if ((step & 63) == 0) { llm_mlx_array_balance("decode"); llm_ai_mlx_debug_array_balance("decode", NULL, NULL, NULL); }
     }
     if (atime && at_n > 0)
         fprintf(stderr, "[ASYNC_TIME] step=%d  build=%.3f submit=%.3f wait=%.3f rest=%.3f ms/token  (tot=%.3f)\n",

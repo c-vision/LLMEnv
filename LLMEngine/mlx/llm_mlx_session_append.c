@@ -301,6 +301,7 @@ static int llm_ai_mlx_session_append_impl(llm_ai_mlx_session_handle handle, cons
      * prefill, o li creano i passi di decode? (llm_mlx_dp_memory e' no-op senza LLM_DISPATCH) */
     llm_mlx_dp_memory("post-prefill");
     llm_mlx_array_balance("post-prefill");
+    llm_ai_mlx_debug_array_balance("post-prefill", NULL, NULL, NULL);
     return ok ? 0 : -1;
 }
 

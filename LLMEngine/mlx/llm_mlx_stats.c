@@ -249,8 +249,9 @@ int llm_ai_mlx_memory_stats(size_t* out_cache, size_t* out_active, size_t* out_p
  * `mlx_array_new* − mlx_array_free` (net deve restare COSTANTE a regime) + active/peak MLX.
  * Richiede build con `-DLLM_COUNT_ARRAYS=1` (default 0 = no-op, zero overhead). */
 int llm_ai_mlx_debug_array_balance(const char* tag, long* out_new, long* out_free, long* out_net) {
-    size_t a = 0, p = 0, c = 0;
+    size_t a = 0, p = 0, c = 0, rc = 0;
     (void)mlx_get_active_memory(&a); (void)mlx_get_peak_memory(&p); (void)mlx_get_cache_memory(&c);
+    (void)mlx_get_resource_count(&rc);   /* L25: buffer GPU live (num_resources_) */
 #if LLM_COUNT_ARRAYS
     llm_mlx_array_balance(tag ? tag : "probe");
     if (out_new) *out_new = g_arr_new_ct;
@@ -262,8 +263,8 @@ int llm_ai_mlx_debug_array_balance(const char* tag, long* out_new, long* out_fre
     if (out_free) *out_free = 0;
     if (out_net) *out_net = 0;
 #endif
-    fprintf(stderr, "[ARRAYS] %s active=%.1f MB peak=%.1f MB cache=%.1f MB\n",
-            tag ? tag : "probe", a / 1048576.0, p / 1048576.0, c / 1048576.0);
+    fprintf(stderr, "[ARRAYS] %s active=%.1f MB peak=%.1f MB cache=%.1f MB buffers=%zu\n",
+            tag ? tag : "probe", a / 1048576.0, p / 1048576.0, c / 1048576.0, rc);
     return 0;
 }
 
