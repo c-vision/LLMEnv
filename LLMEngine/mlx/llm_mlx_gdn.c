@@ -548,7 +548,12 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
         }
         mlx_array_free(vf);
     }
-    /* silu(z) = z * sigmoid(z); gated = y_norm * silu(z) */
+    /* D11 (2026-10-01): il reference mlx-lm fa la gated norm in FP32
+     * (`Qwen3NextRMSNormGated` -> `_precise_swiglu`: silu(gate.astype(f32))*x.astype(f32) -> cast).
+     * TENTATO: da solo PERO' ROMPE la parita' DFlash2==AR ("sky13" vs "sky3294"): la cattura del
+     * ctx (B) perturba la ricorrenza e la gated-norm fp32 lo rende visibile. => il D11 va fatto
+     * INSIEME al fix della donation/cattura (piu' profondo). Per ora resta la versione bf16
+     * (parita' interna OK): vedi Todo/(open) - D11-GDN-Norm-SiLU. */
     mlx_array z_sig=mlx_array_new();
     mlx_array silu_z=mlx_array_new();
     mlx_array gated=mlx_array_new();
