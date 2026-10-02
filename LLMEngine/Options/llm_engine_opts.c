@@ -56,6 +56,7 @@ static Opt g_opts[] = {
     { "dflash_model",     "draft DFlash2 (path) per la speculazione a contesto persistente", T_STR, 0, 0, 0, 0, 0, 0, "", "", 0, "~/ai/Models/Qwen3.8-27B-DFlash2" },
     { "df2_seq_verify",   "DFlash2: verify per-sessione (1 = forza; A/B diagnostico, default batched)", T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0, "1" },
     { "df2_ctx_span",     "DFlash2: righe di ctx del draft per span (prefill chunked; 0 = un solo span)", T_INT, 0, 1024, 0, 0, 0, 0, {0}, NULL, 0, "1024" },
+    { "df2_k",          "DFlash2 A/B: forza K (0=adattivo golden; N=N)", T_INT, 0, 8, 0, 0, 0, 0, {0}, NULL, 0, "0" },
 };
 #define NOPTS ((int)(sizeof g_opts / sizeof g_opts[0]))
 

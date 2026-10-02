@@ -1019,6 +1019,7 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
         int32_t drafts[8];
         LLM_DF2_SP_BEGIN(prop);
         int dall = (stat_rounds == 0) ? 8 : 4;   /* golden: round0 K=7, round1+ K=3 */
+        { int kv=0; if (llm_ai_mlx_opt_get_int("df2_k",&kv)==0 && kv>=1 && kv<=8) dall=kv+1; }  /* A/B: forza K (0=adattivo) */
         int K = llm_ai_mlx_dflash2_propose(handle, anchor, ctx_r, ctx_n, drafts, dall);
         LLM_DF2_SP_END(prop);
         if (K <= 0) break;
