@@ -212,7 +212,7 @@ static bool llm_ai_mlx_session_generate_async_greedy(LlmMlxSession* s, LlmMlxMod
                 if (generated_count < max_new_tokens) {
                     out_ids[generated_count++] = idh;
                     if (llm_da_enabled()) g_da.tokens++;
-        if ((s->cache_offset & 63) == 0) llm_ai_mlx_debug_array_balance("decode", NULL, NULL, NULL);
+        if ((step & 63) == 0) llm_ai_mlx_debug_array_balance("decode", NULL, NULL, NULL);
                     session_history_append(s, &idh, 1);
                     last_id = idh;
                 }
@@ -422,6 +422,7 @@ void llm_mlx_df2_preload(LlmMlxModel* m) {
 int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_tokens,
                                  int32_t eos_token_id, int32_t* out_ids) {
     if (handle == NULL || max_new_tokens <= 0 || out_ids == NULL) return -1;
+    { size_t _rc=0; static int _dc=0; if((mlx_get_resource_count(&_rc)==0) && ((_dc++ & 15)==0)) { fprintf(stderr,"[BUF] gen#%d buffers=%zu\n", _dc, _rc); llm_ai_mlx_debug_array_balance("gen", NULL, NULL, NULL); } }
     LlmMlxSession* s = (LlmMlxSession*)handle;
     if (s->parked) (void)llm_session_unpark(s->model, s); /* §G-ter: restore on-demand PRIMA del check */
     if (!s->has_pending) return -1; /* nothing appended yet -- no predicted continuation to start from */
@@ -627,6 +628,7 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
         if (dp_dec) clock_gettime(CLOCK_MONOTONIC, &dpt0);
         out_ids[generated_count++] = current_id;
         if (llm_da_enabled()) g_da.tokens++;
+        if ((step & 63) == 0) llm_ai_mlx_debug_array_balance("decode-main", NULL, NULL, NULL);
         session_history_append(s, &current_id, 1);
         /* NB: NESSUN break qui. Serve SEMPRE il forward che predice il prossimo pending, anche
          * all'ultimo token: il server chiama generate(s, 1) in un ciclo, e senza il forward il

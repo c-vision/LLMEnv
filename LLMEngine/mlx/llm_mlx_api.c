@@ -1020,7 +1020,10 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
         LLM_DF2_SP_BEGIN(prop);
         int dall = (stat_rounds == 0) ? 8 : 4;   /* golden: round0 K=7, round1+ K=3 */
         { int kv=0; if (llm_ai_mlx_opt_get_int("df2_k",&kv)==0 && kv>=1 && kv<=8) dall=kv+1; }  /* A/B: forza K (0=adattivo) */
-        int K = llm_ai_mlx_dflash2_propose(handle, anchor, ctx_r, ctx_n, drafts, dall);
+        int K = -1;
+        { size_t _b0=0,_b1=0; (void)mlx_get_resource_count(&_b0);
+        K = llm_ai_mlx_dflash2_propose(handle, anchor, ctx_r, ctx_n, drafts, dall);
+        (void)mlx_get_resource_count(&_b1); if(g_df2_time_on()) fprintf(stderr,"[BUFSPLIT] propose d=%ld\n",(long)((long)_b1-(long)_b0)); }
         LLM_DF2_SP_END(prop);
         if (K <= 0) break;
         /* I draft oltre il tetto del chunk non vanno emessi (altrimenti la loro KV resta in cache
@@ -1032,8 +1035,11 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
         float* vctx = (float*)malloc((size_t)vctx_cap * sizeof(float));
         int32_t next_anchor = -1;
         LLM_DF2_SP_BEGIN(ver);
-        int accepted = df2_dflash_verify(s, anchor, drafts, K, caplayers, ncap,
+        int accepted = -1;
+        { size_t _v0=0,_v1=0; (void)mlx_get_resource_count(&_v0);
+        accepted = df2_dflash_verify(s, anchor, drafts, K, caplayers, ncap,
                                          vctx, (int)vctx_cap, &next_anchor);
+        (void)mlx_get_resource_count(&_v1); if(g_df2_time_on()) fprintf(stderr,"[BUFSPLIT] verify d=%ld\n",(long)((long)_v1-(long)_v0)); }
         LLM_DF2_SP_END(ver);
         if (accepted < 0 || next_anchor < 0) { free(vctx); break; }
         stat_rounds++; stat_accepted += accepted; stat_K += K;
