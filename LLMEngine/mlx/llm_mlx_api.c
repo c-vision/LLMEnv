@@ -734,6 +734,12 @@ static bool df2_stream_prompt_ctx(DFlash2Runtime* rt, LlmMlxModel* m, LlmMlxSess
      * esistente. Il buffer restituito e' un solo span (~420MB) invece dell'intero contesto. */
     const int tail = (n_prompt < span) ? n_prompt : span;
     const int inject_upto = n_prompt - tail;
+    /* VELOCITA' (2026-10-01): la finestra del drafter e' sliding_window (2048) -> iniettare gli
+     * span piu' vecchi e' INUTILE (df2_attn_layer li tronca comunque). Si inietta solo dallo span
+     * che tocca l'ultima finestra: la cattura del target resta (serve la KV scratch per l'hidden
+     * corretto), ma l'iniezione del drafter (~5 layer/span su ~60 span) sparisce. */
+    const int Wwin = (rt->draft->cfg.sliding_window > 0) ? rt->draft->cfg.sliding_window : 2048;
+    const int win_start = (n_prompt > Wwin) ? (n_prompt - Wwin) : 0;
     OutputTensors t;
     if (!load_output_tensors(m, &t)) return false;
     const int tnl = m->cfg.n_layers;
@@ -754,12 +760,13 @@ static bool df2_stream_prompt_ctx(DFlash2Runtime* rt, LlmMlxModel* m, LlmMlxSess
         ok = df2_capture_batch(m, s, t.embed_w, t.embed_s, t.embed_b, s->history + off, ch, off,
                                pk, pv, ph, caplayers, ncap, buf, ch * ctx_dim, &phhidden);
         mlx_array_free(phhidden);
-        if (ok) {
+        if (ok && off + ch > win_start) {   /* solo gli span che toccano l'ultima finestra */
             mlx_array ctx_arr = mlx_array_new_data(buf, ((const int[2]){ch, ctx_dim}), 2, MLX_FLOAT32);
             mlx_array xc = mlx_array_new();
             ok = mlx_reshape(&xc, ctx_arr, ((const int[3]){1, ch, ctx_dim}), 3, m->stream) == 0;
             mlx_array_free(ctx_arr);
             if (ok) {
+                rt->ctx[rt->cur_ctx].ctx_pos = off;   /* posizione ASSOLUTA (RoPE dei key) */
                 bool sv_all; mlx_dtype sv_act;
                 df2_mode_enter_draft(rt, &sv_all, &sv_act);
                 mlx_array h2 = mlx_array_new();
