@@ -70,6 +70,7 @@ const char* llmengine_moe_status_str(LlmEngineMoeStatus s) {
         case LLMENGINE_MOE_ERR_ADAPTER:         return "adapter error";
         case LLMENGINE_MOE_ERR_FORMAT:          return "format error";
         case LLMENGINE_MOE_ERR_DEVICE:          return "device not available";
+        case LLMENGINE_MOE_ERR_EXPERT_MISSING:  return "expert missing (unresolvable: output not reliable)";
         default:                          return "unknown status";
     }
 }
@@ -474,6 +475,7 @@ LlmEngineMoeStatus llmengine_moe_stream_stats(const LlmEngineMoeRuntime* rt, Llm
         out->cache_evictions = rt->ext.cache_evictions;
         out->cache_resident_hits = rt->ext.cache_resident_hits;   /* K2 */
         out->resident_bytes = rt->ext.resident_bytes;
+        out->unresolvable_experts = rt->ext.unresolvable_experts;   /* K5 */
     } else if (rt->cache != NULL) {
         LlmEngineMoeCacheStats cs;
         llmengine_moe_cache_stats(rt->cache, &cs);
@@ -495,7 +497,8 @@ LlmEngineMoeStatus llmengine_moe_stream_stats(const LlmEngineMoeRuntime* rt, Llm
 
 void llmengine_moe_set_stream_metrics(LlmEngineMoeRuntime* rt, uint64_t bytes_read, uint64_t hits,
                                 uint64_t misses, uint64_t evictions, uint64_t resident_hits,
-                                uint64_t resident_bytes, uint64_t budget_bytes) {
+                                uint64_t resident_bytes, uint64_t budget_bytes,
+                                uint64_t unresolvable_experts) {
     if (rt == NULL) return;
     memset(&rt->ext, 0, sizeof(rt->ext));
     rt->ext.bytes_read = bytes_read;
@@ -505,6 +508,7 @@ void llmengine_moe_set_stream_metrics(LlmEngineMoeRuntime* rt, uint64_t bytes_re
     rt->ext.cache_resident_hits = resident_hits;   /* K2 */
     rt->ext.resident_bytes = resident_bytes;
     rt->ext.expert_bytes = budget_bytes;   /* budget dello store (per AI.STREAMSTATS) */
+    rt->ext.unresolvable_experts = unresolvable_experts;   /* K5 */
     rt->ext_valid = 1;
 }
 

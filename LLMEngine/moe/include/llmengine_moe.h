@@ -87,6 +87,7 @@ typedef struct {
     uint64_t prefetch_predictions;
     uint64_t prefetch_hits;
     uint64_t prefetch_wasted;
+    uint64_t unresolvable_experts;  /* K5: esperti richiesti ma assenti/corrotti (output non affidabile) */
 } LlmEngineMoeStreamStats;
 
 LlmEngineMoeStatus llmengine_moe_stream_stats(const LlmEngineMoeRuntime* rt, LlmEngineMoeStreamStats* out);
@@ -95,7 +96,8 @@ LlmEngineMoeStatus llmengine_moe_stream_stats(const LlmEngineMoeRuntime* rt, Llm
  * quando rt->cache e' assente. Chiamato dall'adapter a fine forward. */
 void llmengine_moe_set_stream_metrics(LlmEngineMoeRuntime* rt, uint64_t bytes_read, uint64_t hits,
                                 uint64_t misses, uint64_t evictions, uint64_t resident_hits,
-                                uint64_t resident_bytes, uint64_t budget_bytes);
+                                uint64_t resident_bytes, uint64_t budget_bytes,
+                                uint64_t unresolvable_experts);
 
 /* Modalita' di memoria corrente del runtime (SWAP/RESIDENT). */
 LlmEngineMoeLoadMode llmengine_moe_mode(const LlmEngineMoeRuntime* rt);

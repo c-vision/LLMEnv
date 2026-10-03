@@ -51,6 +51,9 @@ typedef struct {
     /* K2: hit su un bundle residente da uno step PRECEDENTE (non caricato in questo step);
      * lo step avanza col route-callback per layer (stesso confine dei ROUTER nel trace). */
     uint64_t resident_hits, step;
+    /* K5: richieste di esperti non risolvibili (indice fuori dal tensor / read fallita):
+     * l'output non e' affidabile → lo store ritorna NULL e il chiamante propaga lo stato. */
+    uint64_t unresolvable;
     /* K1: profiler opzionale (NULL = nessun trace): emette CACHE_HIT/MISS/EVICT dal cache reale. */
     LlmEngineMoeProfiler* prof;
 } GgufStore;
@@ -140,6 +143,14 @@ static inline const uint8_t* llmengine_moe_gguf_store_expert(GgufStore* s, uint3
                                                    const uint8_t** up, const uint8_t** down) {
     if (s == NULL || layer >= s->n_layer) return NULL;
     GgufStoreLayer* L = &s->layers[layer];
+    /* K5: bounds-check PRIMA di calcolare i puntatori (un indice fuori dal tensor darebbe
+     * letture fuori dal file, silenziose). Mai output silenzioso. */
+    if (e >= L->g.n_experts || e >= L->u.n_experts || e >= L->d.n_experts) {
+        s->unresolvable++;
+        if (up) *up = NULL;
+        if (down) *down = NULL;
+        return NULL;
+    }
     const uint8_t* rg = s->base + L->g.off + (uint64_t)e * L->g.nb;
     const uint8_t* ru = s->base + L->u.off + (uint64_t)e * L->u.nb;
     const uint8_t* rd = s->base + L->d.off + (uint64_t)e * L->d.nb;

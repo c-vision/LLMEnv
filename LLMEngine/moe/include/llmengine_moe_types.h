@@ -18,7 +18,10 @@ typedef enum {
     LLMENGINE_MOE_ERR_NOT_IMPLEMENTED = -5,
     LLMENGINE_MOE_ERR_ADAPTER         = -6,
     LLMENGINE_MOE_ERR_FORMAT          = -7,
-    LLMENGINE_MOE_ERR_DEVICE          = -8
+    LLMENGINE_MOE_ERR_DEVICE          = -8,
+    /* K5: l'esperto richiesto dal router non esiste nel container (tensor più corto del
+     * router / bounds): l'output NON è affidabile — stato distinto, mai silenzioso. */
+    LLMENGINE_MOE_ERR_EXPERT_MISSING  = -9
 } LlmEngineMoeStatus;
 
 /* Descrizione leggibile di un codice di stato (mai NULL). */

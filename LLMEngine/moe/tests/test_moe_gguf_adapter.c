@@ -29,7 +29,9 @@ static void w_kv_str(FILE* f, const char* k, const char* v) { w_str(f, k); w_u32
 
 typedef struct { const char* name; uint32_t nd; uint64_t dims[4]; uint32_t type; } TDef;
 
-static void write_tiny_moe_gguf(const char* path, int with_shared) {
+/* K5: variante con metadata/tensor volutamente INCOERENTI (`meta_experts` > esperti stacked) e
+ * router forzato su `high_expert` (>=0): serve al test negativo "esperto non risolvibile". */
+static void write_tiny_moe_gguf_ex(const char* path, int with_shared, uint32_t meta_experts, int high_expert) {
     TDef T[18];
     const TDef base[] = {
         { "token_embd.weight",            2, {4,4,0,0}, LLMENGINE_MOE_GGML_F16 },
@@ -50,6 +52,9 @@ static void write_tiny_moe_gguf(const char* path, int with_shared) {
     };
     uint32_t NT = 0;
     for (uint32_t i = 0; i < (uint32_t)(sizeof(base) / sizeof(base[0])); ++i) T[NT++] = base[i];
+    /* K5: il router ha `meta_experts` righe (coi metadata), i tensor stacked restano a 2. */
+    for (uint32_t i = 0; i < NT; ++i)
+        if (strcmp(T[i].name, "blk.0.ffn_gate_inp.weight") == 0) T[i].dims[1] = meta_experts;
     if (with_shared) {   /* M7.1: shared-expert 2D (n_ff_shexp=3) */
         T[NT++] = (TDef){ "blk.0.ffn_gate_shexp.weight", 2, {4,3,0,0}, LLMENGINE_MOE_GGML_F16 };
         T[NT++] = (TDef){ "blk.0.ffn_up_shexp.weight",   2, {4,3,0,0}, LLMENGINE_MOE_GGML_F16 };
@@ -66,7 +71,7 @@ static void write_tiny_moe_gguf(const char* path, int with_shared) {
     w_kv_u32(f, "qwen3moe.attention.head_count", 1);
     w_kv_u32(f, "qwen3moe.attention.head_count_kv", 1);
     w_kv_u32(f, "qwen3moe.attention.key_length", 4);
-    w_kv_u32(f, "qwen3moe.expert_count", 2);
+    w_kv_u32(f, "qwen3moe.expert_count", meta_experts);
     w_kv_u32(f, "qwen3moe.expert_used_count", 1);
     w_kv_u32(f, "qwen3moe.expert_feed_forward_length", 2);
     w_kv_u32(f, "general.alignment", 32);
@@ -87,6 +92,11 @@ static void write_tiny_moe_gguf(const char* path, int with_shared) {
         for (uint64_t k = 0; k < ne; ++k) {
             float val = 1.0f;
             if (strstr(T[i].name, "ffn_gate_exps")) val = 0.5f * (float)(k + 1);   /* ramp: layout-sensitive */
+            else if (strstr(T[i].name, "ffn_gate_inp")) {   /* K5: riga `high_expert` domina */
+                uint64_t ne0 = T[i].dims[0] ? T[i].dims[0] : 1;
+                uint32_t e = (uint32_t)(k / ne0);
+                val = (high_expert >= 0 && e == (uint32_t)high_expert) ? 100.0f : 1.0f;
+            }
             else if (strstr(T[i].name, "ffn_down_exps")) { static const float pat[8] = {1,0,0,1,1,0,0,1}; val = pat[k % 8]; }
             else if (strstr(T[i].name, "ffn_gate_shexp")) val = 0.25f * (float)(k + 1);   /* ramp: shared applicato */
             if (T[i].type == LLMENGINE_MOE_GGML_F32) fwrite(&val, 4, 1, f);
@@ -94,6 +104,10 @@ static void write_tiny_moe_gguf(const char* path, int with_shared) {
         }
     }
     fclose(f);
+}
+
+static void write_tiny_moe_gguf(const char* path, int with_shared) {
+    write_tiny_moe_gguf_ex(path, with_shared, 2, -1);
 }
 
 int main(void) {
@@ -238,6 +252,30 @@ int main(void) {
 
         llmengine_moe_provider_destroy(p);
         remove(tp);
+    }
+
+    /* ── K5: esperto non risolvibile (router > tensor stacked) → stato DISTINTO, mai silenzioso ── */
+    {
+        char gb[1200]; snprintf(gb, sizeof(gb), "%s/tiny_broken.gguf", dir);
+        write_tiny_moe_gguf_ex(gb, 0, 4, 3);   /* metadata 4 esperti, tensor 2, router forza #3 */
+        LlmEngineMoeProvider* p = llmengine_moe_provider_create();
+        CHECK(p != NULL);
+        LlmEngineMoeRuntimeConfig rc;
+        llmengine_moe_config_defaults(&rc);
+        rc.mode = LLMENGINE_MOE_MODE_SWAP;
+        rc.cache_mb = 1;
+        rc.async_workers = 0;
+        rc.prefetch_topn = 0;
+        CHECK(llmengine_moe_provider_load(p, "bad", gb, &rc) == LLMENGINE_MOE_OK);
+        LlmEngineMoeRuntime* rt = llmengine_moe_provider_get(p, "bad");
+        CHECK(rt != NULL);
+        float in1[1] = { 0.0f }, ob[4];
+        CHECK(llmengine_moe_forward(rt, in1, 1, ob) == LLMENGINE_MOE_ERR_EXPERT_MISSING);
+        LlmEngineMoeStreamStats stb;
+        CHECK(llmengine_moe_stream_stats(rt, &stb) == LLMENGINE_MOE_OK);
+        CHECK(stb.unresolvable_experts >= 1);
+        llmengine_moe_provider_destroy(p);
+        remove(gb);
     }
 
     remove(gp);

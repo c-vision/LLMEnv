@@ -77,10 +77,22 @@ static void lname(char* buf, size_t cap, uint32_t l, const char* suffix) {
     snprintf(buf, cap, "blk.%u.%s", l, suffix);
 }
 
+/* K5: esperti disponibili nel tensor stacked (dims[2]); 0 = tensor non 3D. */
+static uint32_t gguf_tensor_experts(const LlmCodecGgufTensor* t) {
+    return (t != NULL && t->n_dims >= 3) ? (uint32_t)t->dims[2] : 0;
+}
+
 static LlmEngineMoeStatus gguf_expert_cb(void* ectx, uint32_t layer, uint32_t expert, const float* x, float* out) {
     GgufSelf* s = (GgufSelf*)ectx;
     if (layer >= s->cfg.n_layers) return LLMENGINE_MOE_ERR_INVALID;
     if (s->gate[layer] == NULL || s->up[layer] == NULL || s->down[layer] == NULL) return LLMENGINE_MOE_ERR_NOT_IMPLEMENTED;
+    /* K5: il router puo' selezionare un esperto che nel container NON esiste (tensor piu'
+     * corto / corrotto): stato DISTINTO, mai un risultato silenzioso. */
+    uint32_t ne = gguf_tensor_experts(s->gate[layer]);
+    if (ne == 0 || expert >= ne) {
+        if (s->store != NULL) s->store->unresolvable++;
+        return LLMENGINE_MOE_ERR_EXPERT_MISSING;
+    }
     if (s->store != NULL) {   /* stile DS4: byte grezzi da mmap (RESIDENT) o cache LRU (SWAP) */
         const uint8_t *pu, *pd;
         const uint8_t* pg = llmengine_moe_gguf_store_expert(s->store, layer, expert, &pu, &pd);
@@ -100,6 +112,11 @@ static LlmEngineMoeStatus gguf_expert_batch_cb(void* ectx, uint32_t layer, uint3
     GgufSelf* s = (GgufSelf*)ectx;
     if (layer >= s->cfg.n_layers) return LLMENGINE_MOE_ERR_INVALID;
     if (s->gate[layer] == NULL || s->up[layer] == NULL || s->down[layer] == NULL) return LLMENGINE_MOE_ERR_NOT_IMPLEMENTED;
+    uint32_t ne = gguf_tensor_experts(s->gate[layer]);   /* K5: bounds, mai silenzioso */
+    if (ne == 0 || expert >= ne) {
+        if (s->store != NULL) s->store->unresolvable++;
+        return LLMENGINE_MOE_ERR_EXPERT_MISSING;
+    }
     if (s->store != NULL) {   /* batch: l'esperto viene dequantizzato UNA volta dallo store */
         const uint8_t *pu, *pd;
         const uint8_t* pg = llmengine_moe_gguf_store_expert(s->store, layer, expert, &pu, &pd);
@@ -147,7 +164,7 @@ static void gguf_publish(GgufSelf* s, LlmEngineMoeRuntime* rt) {
     llmengine_moe_set_stream_metrics(rt, s->store->bytes_read, s->store->hits, s->store->misses,
                                s->store->evictions, s->store->resident_hits,
                                llmengine_moe_gguf_store_resident_bytes(s->store),
-                               s->store_mb * 1024ull * 1024ull);
+                               s->store_mb * 1024ull * 1024ull, s->store->unresolvable);
 }
 
 static LlmEngineMoeStatus gguf_forward(void* self, LlmEngineMoeRuntime* rt, const float* in, uint32_t seq,
@@ -191,7 +208,9 @@ static LlmEngineMoeStatus gguf_forward(void* self, LlmEngineMoeRuntime* rt, cons
         LlmEngineMoeStatus ps = llmengine_moe_qwen3_prefill_batchfn(&s->cfg, s->lv, s->cfg.n_layers,
                                                         gguf_expert_batch_cb, s, gguf_route_cb, s,
                                                         seq, s->pos, xa, oa, &kv);
-        if (ps != LLMENGINE_MOE_OK) { free(x); free(y); free(xn); free(xa); free(oa); return ps; }
+        if (ps != LLMENGINE_MOE_OK) {   /* K5: pubblica anche le metriche di errore (unresolvable) */
+            gguf_publish(s, rt); free(x); free(y); free(xn); free(xa); free(oa); return ps;
+        }
         s->pos += seq;
         llmengine_moe_rmsnorm(oa + (size_t)(seq - 1) * hidden, s->final_norm, s->cfg.eps, hidden, xn);
         LlmEngineMoeStatus ls = gguf_lmhead(s, xn, out);
@@ -209,7 +228,9 @@ static LlmEngineMoeStatus gguf_forward(void* self, LlmEngineMoeRuntime* rt, cons
         for (uint32_t l = 0; l < s->cfg.n_layers; ++l) {
             LlmEngineMoeStatus st = llmengine_moe_qwen3_decode_layer(&s->cfg, &s->lv[l], gguf_expert_cb, s,
                                                          gguf_route_cb, s, l, s->pos, x, y, &kv);
-            if (st != LLMENGINE_MOE_OK) { free(x); free(y); free(xn); return st; }
+            if (st != LLMENGINE_MOE_OK) {   /* K5: pubblica anche le metriche di errore (unresolvable) */
+                gguf_publish(s, rt); free(x); free(y); free(xn); return st;
+            }
             float* tmp = x; x = y; y = tmp;
         }
         s->pos++;

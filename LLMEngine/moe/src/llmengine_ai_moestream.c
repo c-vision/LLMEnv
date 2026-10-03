@@ -34,6 +34,7 @@ typedef struct {
     uint64_t prefetch_predictions;
     uint64_t prefetch_hits;
     uint64_t prefetch_wasted;
+    uint64_t unresolvable_experts;  /* K5: esperti assenti/corrotti (output non affidabile) */
 } LlmEngineMoeAiMoestreamStats;
 
 static void to_runtime_config(const LlmEngineMoeAiMoestreamConfig* in, LlmEngineMoeRuntimeConfig* out) {
@@ -180,6 +181,7 @@ int llmengine_ai_moestream_stats(const LlmEngineMoeProvider* p, const char* name
     out->prefetch_predictions = s.prefetch_predictions;
     out->prefetch_hits = s.prefetch_hits;
     out->prefetch_wasted = s.prefetch_wasted;
+    out->unresolvable_experts = s.unresolvable_experts;
     return 0;
 }
 
