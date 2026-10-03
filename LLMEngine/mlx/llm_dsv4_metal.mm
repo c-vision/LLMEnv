@@ -2701,6 +2701,39 @@ int llm_dsv4_metal_indexer_scores(LlmDsv4Metal* b, const float* q, int nh, int h
     return rc;
 }
 
+/* Score indexer BATCHED (una threadgroup per (riga c, token t)) -> scores[nt*max_comp].
+ * scores[t][c] = sum_h relu(dot(q[t][h], kv[c][h])) * w[t][h], per c < n_comp[t]. 0 = ok.
+ * (Stessa struttura del kernel usato nel mid prefill; qui esposta per il test unit.) */
+int llm_dsv4_metal_indexer_scores_t(LlmDsv4Metal* b, const float* q, int nh, int hd,
+        const float* kvc, int n_tokens, int max_comp, const int* n_comp, const float* w, float* scores) {
+    if (!b || !b->pso_iscore_t || !q || !kvc || !n_comp || !w || !scores) return -1;
+    if (nh <= 0 || hd <= 0 || n_tokens <= 0 || max_comp <= 0) return -1;
+    uint32_t* nc = (uint32_t*)malloc(sizeof(uint32_t) * (size_t)n_tokens);
+    if (!nc) return -2;
+    for (int t = 0; t < n_tokens; t++) nc[t] = (uint32_t)(n_comp[t] > 0 ? n_comp[t] : 0);
+    id<MTLBuffer> BQ = [b->dev newBufferWithBytes:q length:(NSUInteger)((size_t)n_tokens*nh*hd*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BK = [b->dev newBufferWithBytes:kvc length:(NSUInteger)((size_t)max_comp*hd*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BW = [b->dev newBufferWithBytes:w length:(NSUInteger)((size_t)n_tokens*nh*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BS = [b->dev newBufferWithLength:(NSUInteger)((size_t)n_tokens*max_comp*sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BN = [b->dev newBufferWithBytes:nc length:(NSUInteger)((size_t)n_tokens*sizeof(uint32_t)) options:MTLResourceStorageModeShared];
+    int rc = (BQ && BK && BW && BS && BN) ? 0 : -2;
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:b->pso_iscore_t];
+        [e setBuffer:BQ offset:0 atIndex:0]; [e setBuffer:BK offset:0 atIndex:1]; [e setBuffer:BW offset:0 atIndex:2]; [e setBuffer:BS offset:0 atIndex:3];
+        uint32_t P[3] = { (uint32_t)nh, (uint32_t)hd, (uint32_t)max_comp }; [e setBytes:P length:sizeof(P) atIndex:4];
+        [e setBuffer:BN offset:0 atIndex:5];
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)max_comp, (NSUInteger)n_tokens, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) memcpy(scores, [BS contents], (size_t)n_tokens*max_comp*sizeof(float));
+    }
+    if (BQ)[BQ release]; if (BK)[BK release]; if (BW)[BW release]; if (BS)[BS release]; if (BN)[BN release];
+    free(nc);
+    return rc;
+}
+
 /* Indexer top-k deterministico -> allowed[n_comp]. 0 = ok. */
 int llm_dsv4_metal_indexer_topk(LlmDsv4Metal* b, const float* scores, int n_comp, int top_k, int* allowed) {
     if (!b || !b->pso_idx_topk || !scores || !allowed) return -1;

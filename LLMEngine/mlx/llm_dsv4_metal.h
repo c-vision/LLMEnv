@@ -103,6 +103,9 @@ int llm_dsv4_metal_comp_fp8(LlmDsv4Metal* b, float* x, int hd, int n_rot);
 int llm_dsv4_metal_indexer_qat(LlmDsv4Metal* b, float* x, int n_rows, int hd);
 int llm_dsv4_metal_indexer_scores(LlmDsv4Metal* b, const float* q, int nh, int hd,
         const float* kvc, int n_comp, const float* w, float* scores);
+/* Batched: q[nt*nh*hd], w[nt*nh], scores[nt*max_comp], n_comp[nt] (kv condiviso). */
+int llm_dsv4_metal_indexer_scores_t(LlmDsv4Metal* b, const float* q, int nh, int hd,
+        const float* kvc, int n_tokens, int max_comp, const int* n_comp, const float* w, float* scores);
 int llm_dsv4_metal_indexer_topk(LlmDsv4Metal* b, const float* scores, int n_comp, int top_k, int* allowed);
 /* Batched: allowed[nt*max_comp], scores[nt*max_comp], n_comp[nt]. Radix-select O(n_comp) per token. */
 int llm_dsv4_metal_indexer_topk_t(LlmDsv4Metal* b, const float* scores, int n_tokens, int max_comp,

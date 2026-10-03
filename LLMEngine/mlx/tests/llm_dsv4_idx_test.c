@@ -55,6 +55,30 @@ static int test_scores_topk(LlmDsv4Metal* b, int nh, int hd, int n_comp, int top
     return ok;
 }
 
+/* Test del kernel score BATCHED (una threadgroup per (riga c, token t)) vs reference CPU. */
+static int test_scores_t(LlmDsv4Metal* b, int nt, int nh, int hd, int maxc) {
+    int* nc = (int*)malloc(sizeof(int) * (size_t)nt);
+    float* q = (float*)malloc(sizeof(float) * (size_t)nt * nh * hd);
+    float* w = (float*)malloc(sizeof(float) * (size_t)nt * nh);
+    float* kv = (float*)malloc(sizeof(float) * (size_t)maxc * hd);
+    float* gpu = (float*)malloc(sizeof(float) * (size_t)nt * maxc);
+    for (int i = 0; i < nt * nh * hd; i++) q[i] = fr();
+    for (int i = 0; i < nt * nh; i++) w[i] = fr() * (1.0f / sqrtf((float)(hd * nh)));
+    for (int i = 0; i < maxc * hd; i++) kv[i] = fr();
+    for (int t = 0; t < nt; t++) { s_state = s_state * 1103515245u + 12345u; nc[t] = 1 + (int)((s_state >> 4) % (unsigned)maxc); }
+    int rc = llm_dsv4_metal_indexer_scores_t(b, q, nh, hd, kv, nt, maxc, nc, w, gpu);
+    double mx = 0.0;
+    for (int t = 0; t < nt; t++) for (int c = 0; c < nc[t]; c++) {
+        float s = 0.f;
+        for (int h = 0; h < nh; h++) { float d = dotf(q + ((size_t)t * nh + h) * hd, kv + (size_t)c * hd, hd); if (d < 0.f) d = 0.f; s += d * w[(size_t)t * nh + h]; }
+        double df = fabs((double)s - (double)gpu[(size_t)t * maxc + c]); if (df > mx) mx = df;
+    }
+    int ok = (rc == 0 && mx < 1e-4);
+    printf("[SCORt] nt=%d nh=%d hd=%d maxc=%d rc=%d max|diff|=%.3e %s\n", nt, nh, hd, maxc, rc, mx, ok ? "ok" : "BAD");
+    free(nc); free(q); free(w); free(kv); free(gpu);
+    return ok;
+}
+
 /* Test del top-k BATCHED (una threadgroup per token, radix-select) vs reference CPU per token.
  * Include score NEGATIVI (la reference somma dot*pesi, che possono essere <0), n_comp variabili
  * e duplicati (tie -> tie-break su indice minore). */
@@ -103,6 +127,9 @@ int main(void) {
     ok &= test_scores_topk(b, 64, 128, 200, 12);  /* selezione parziale */
     ok &= test_scores_topk(b, 64, 128, 10, 10);   /* top_k == n_comp -> tutte ammesse */
     ok &= test_scores_topk(b, 32, 128, 130, 1);
+    /* score batched (una TG per (c,t)) vs reference */
+    ok &= test_scores_t(b, 6, 64, 128, 300);
+    ok &= test_scores_t(b, 3, 32, 128, 100);
     /* top-k batched (radix, una threadgroup per token) vs reference, con negativi e tie */
     ok &= test_scores_topk_t(b, 8, 300, 12);
     ok &= test_scores_topk_t(b, 4, 1024, 512);
