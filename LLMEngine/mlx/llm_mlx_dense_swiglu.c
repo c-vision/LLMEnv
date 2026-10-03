@@ -190,7 +190,6 @@ bool llm_bonsai_rotate(mlx_array* x, LlmMlxModel* m, int layer_idx, const char* 
 }
 
 bool dense_swiglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out) {
-    (void)n_tokens;
     bool ok = true;
     const int gsz = m->cfg.quant_group_size;
     const int bts = m->cfg.quant_bits;
@@ -296,7 +295,17 @@ bool dense_swiglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
      * identica a mlx_lm.models.activations.swiglu. */
     mlx_array sig = mlx_array_new(), silu = mlx_array_new(), act = mlx_array_new();
     bool swiglu_done = false;
-    if (ok && llm_mlx_fuse_swiglu_metal_enabled()) {
+    /* #86/R4 (2026-10-03): PREFILL BATTEZZATO (n_tokens>1) -> fold `mx.compile`.
+     * Oracolo DETERMINISTICO (LLM_DISPATCH, nodi/token sul verify battezzato N=47 di llama1b):
+     *   eager=332, kernel Metal=300, fold mx.compile=246. Il fold e' il piu' node-efficiente
+     *   (assorbe anche i cast intra-regione) ed e' PARITA'-ESATTO (GEN_IDS greedy identici nelle
+     *   tre vie). Il suo unico costo e' il `closure_apply` CPU, che a n_tokens==1 NON si
+     *   ammortizza (misurato -1,5% decode) MA si ammortizza sul battezzato: quindi lo si usa QUI.
+     * Default ON come il ramo sorted MoE (stessa opzione LLM_FUSE_SWIGLU_PREFILL; opt-out =0). */
+    if (ok && n_tokens > 1 && llm_mlx_fuse_swiglu_prefill_enabled()) {
+        swiglu_done = llm_mlx_swiglu_compiled(gate_out, up_out, &act, m->stream);
+    }
+    if (ok && !swiglu_done && llm_mlx_fuse_swiglu_metal_enabled()) {
         swiglu_done = llm_mlx_swiglu_metal(gate_out, up_out, &act, m->stream);
         if (swiglu_done && llm_env_isset("LLMMETAL_FUSE_SWIGLU_METAL_VERIFY")) {
             /* Confronta il kernel col riferimento CPU float32 per layer; stampa max-diff/NaN
