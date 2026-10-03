@@ -386,6 +386,7 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
         llm_kvq_hook.ctx = &g_kvq_cold;
         kvq_read_used = true;
     }
+
     if (!kvq_read_used && kvq_sess && kvq_sess->kvq_len && kvq_sess->kvq_len[layer_idx] > 0) {
         int cold = kvq_sess->kvq_len[layer_idx];
         int bits = kvq_sess->kvq_bits;
@@ -671,15 +672,26 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
             int valid_count = (N <= total) ? N : total;
             int committed = kvqp->committed_l[layer_idx];
             int n_new = upto - committed;
+            if (getenv("LLM_KVQ_DBG") && layer_idx == 0) {
+                static int dbgn = 0;
+                if (dbgn < 8) { dbgn++;
+                    fprintf(stderr, "[KVQDBG] L0 total=%d thr=%d upto=%d committed=%d valid_start=%d valid_count=%d n_new=%d i0=%d i1=%d N=%d\n",
+                        total, thr, upto, committed, valid_start, valid_count, n_new, committed-valid_start, upto-valid_start, N);
+                }
+            }
             int one[4] = {1,1,1,1};
             if (n_new > 0) {
                 int i0 = committed - valid_start, i1 = upto - valid_start;
                 if (i0 >= 0 && i1 <= valid_count && i1 > i0) {
                     int s0[4] = {0,0,i0,0}, s1[4] = {1,nkv,i1,hd};
                     mlx_array kn = mlx_array_new(), vn = mlx_array_new();
+                    bool st_ok = false;
                     if (mlx_slice(&kn, *k_cache, s0,4,s1,4,one,4,m->stream) == 0 &&
                         mlx_slice(&vn, *v_cache, s0,4,s1,4,one,4,m->stream) == 0)
-                        llm_kvq_pool_store(kvqp, layer_idx, kn, vn, committed, n_new, m->stream);
+                        st_ok = llm_kvq_pool_store(kvqp, layer_idx, kn, vn, committed, n_new, m->stream);
+                    if (getenv("LLM_KVQ_DBG") && layer_idx == 0)
+                        fprintf(stderr, "[KVQSTORE] pos=%d n=%d -> committed_now=%d ok=%d\n",
+                                committed, n_new, kvqp->committed_l[0], (int)st_ok);
                     mlx_array_free(kn); mlx_array_free(vn);
                 }
             }

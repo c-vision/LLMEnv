@@ -135,9 +135,19 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
     /* CRESCITA 1.25x (2026-10-01): il raddoppio portava la cap a ~2x l'usato -> il pool
      * int8 costava ~66KB/token (misurato +4.5GB@71k, picco 44 vs 39.6 con kvquant=off).
      * Con +1/8 l'over-allocazione scende a ~1.125x; le riallocazioni restano O(log). */
-    const int ngrow = (p->pt.phys_capacity / 8) > 1 ? (p->pt.phys_capacity / 8) : 1;
-    if (!llm_kv_pt_grow(&p->pt, p->pt.phys_capacity + ngrow, p->pt.phys_capacity + ngrow)) return false;
-    const int ncap = p->cap_tokens + (p->cap_tokens / 8 > (int)LLM_KVQ_PAGE_TOKENS ? p->cap_tokens / 8 : (int)LLM_KVQ_PAGE_TOKENS);
+    /* FIX W5 (2026-10-03): `cap_tokens` e la PAGE TABLE dovevano crescere allineati, ma con
+     * l'arrotondamento (cap per TOKEN, pt per PAGINE) divergevano: cap_tokens arrivava MAGGIORE
+     * di `pt.n_logical * page_tokens` -> il flush mappava una pagina logica oltre la tabella
+     * (`llm_kv_pt_map` -> -1) -> lo store FALLIVA -> `committed_l` si bloccava -> la cold non
+     * veniva piu' scritta -> output garbage a >16k. Ora si cresce la page table per COPRIRE la
+     * capacita' e si DERIVA `cap_tokens = pt.n_logical * page_tokens` (allineato per costruzione). */
+    const int ncap_raw = p->cap_tokens + (p->cap_tokens / 8 > (int)LLM_KVQ_PAGE_TOKENS ? p->cap_tokens / 8 : (int)LLM_KVQ_PAGE_TOKENS);
+    int need_pages = (ncap_raw + p->page_tokens - 1) / p->page_tokens;
+    {   int cur = p->pt.phys_capacity;
+        int newp = cur + (cur / 8 > 1 ? cur / 8 : 1);
+        if (newp < need_pages) newp = need_pages;
+        if (!llm_kv_pt_grow(&p->pt, newp, newp)) return false; }
+    const int ncap = p->pt.logical_capacity * p->page_tokens;   /* allineato: cap == capacidade pagine logiche*32 */
     const mlx_dtype edt = (p->fmt == LLM_KVQ_FMT_INT8) ? MLX_INT8 : MLX_BFLOAT16;
     for (int l = 0; l < p->layers; l++) {
         if (p->keyData[l].ctx == NULL) continue;
@@ -184,13 +194,16 @@ static inline bool llm_kvq_pool_grow(llm_kvq_pool* p, mlx_stream s) {
 static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
                                       mlx_array k, mlx_array v, int pos, int n, mlx_stream s) {
     if (!p || layer < 0 || layer >= p->layers || n <= 0) return false;
-    if (!llm_kvq_pool_ensure(p, layer, s)) return false;
-    while (pos + n > p->cap_tokens) { if (!llm_kvq_pool_grow(p, s)) return false; }
+    int _dbg = (getenv("LLM_KVQ_DBG") != NULL) && pos > 0;
+    if (!llm_kvq_pool_ensure(p, layer, s)) { if (_dbg) fprintf(stderr, "[KVQST] ensure FAIL\n"); return false; }
+    while (pos + n > p->cap_tokens) { if (!llm_kvq_pool_grow(p, s)) { if (_dbg) fprintf(stderr, "[KVQST] grow FAIL pos=%d n=%d cap=%d\n", pos, n, p->cap_tokens); return false; } }
+    if (_dbg) fprintf(stderr, "[KVQST] pos=%d n=%d cap_after_grow=%d\n", pos, n, p->cap_tokens);
     int sh3[3] = {p->kv_heads, n, p->head_dim};
     mlx_array k3 = mlx_array_new(), v3 = mlx_array_new();
     bool ok = mlx_reshape(&k3, k, sh3, 3, s) == 0 && mlx_reshape(&v3, v, sh3, 3, s) == 0;
     mlx_array kq = mlx_array_new(), vq = mlx_array_new(), ks = mlx_array_new(), vs = mlx_array_new();
     if (ok) ok = llm_splash_store_run(&kq, &vq, &ks, &vs, k3, v3, s) == 0;
+    if (!ok && _dbg) fprintf(stderr, "[KVQST] store_run(quantize) FAIL n=%d\n", n);
     mlx_array_free(k3); mlx_array_free(v3);
     mlx_array sc2 = mlx_array_new(), vsc2 = mlx_array_new(), vqt = mlx_array_new();
     if (ok) { int s2[3] = {p->kv_heads, n, 1};
@@ -203,7 +216,7 @@ static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
     while (ok && j < n) {
         int abs = pos + j, lp = abs / p->page_tokens, r = abs % p->page_tokens;
         int phys = llm_kv_pt_map(&p->pt, lp);
-        if (phys < 0) { ok = false; break; }
+        if (phys < 0) { if (_dbg) fprintf(stderr, "[KVQST] map FAIL lp=%d phys=%d cap=%d pt_logical=%d\n", lp, phys, p->cap_tokens, p->pt.n_logical); ok = false; break; }
         int ptok = phys * p->page_tokens + r;
         int seg = n - j; if (seg > p->page_tokens - r) seg = p->page_tokens - r;
         {   /* estendi la corsa finche' le pagine fisiche successive sono contigue */
@@ -233,11 +246,14 @@ static inline bool llm_kvq_pool_store(llm_kvq_pool* p, int layer,
                  mlx_slice_update(&nvs, p->valueScales[layer], vsc_seg, c0,3,c1,3,cst,3, s) == 0;
             if (ok) { mlx_array_set(&p->keyData[layer], nk); mlx_array_set(&p->valueData[layer], nv);
                       mlx_array_set(&p->keyScales[layer], nks); mlx_array_set(&p->valueScales[layer], nvs); }
+            if (!ok && _dbg) fprintf(stderr, "[KVQST] slice_update FAIL j=%d seg=%d ptok=%d\n", j, seg, ptok);
             mlx_array_free(nk); mlx_array_free(nv); mlx_array_free(nks); mlx_array_free(nvs);
         }
+        if (!ok && _dbg) fprintf(stderr, "[KVQST] slice FAIL j=%d seg=%d\n", j, seg);
         mlx_array_free(kq_seg); mlx_array_free(vq_seg); mlx_array_free(sc_seg); mlx_array_free(vsc_seg);
         j += seg;
     }
+    if (_dbg) fprintf(stderr, "[KVQST] loop done ok=%d j=%d n=%d\n", ok, j, n);
     if (ok) p->committed_l[layer] = pos + n;
     mlx_array_free(sc2); mlx_array_free(vsc2); mlx_array_free(vqt);
     mlx_array_free(kq); mlx_array_free(vq); mlx_array_free(ks); mlx_array_free(vs);
