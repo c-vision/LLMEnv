@@ -141,11 +141,12 @@ typedef struct {
     int n_raw, n_acomp, n_icomp;
     float* heads;
     int dev_in;   /* 1 = xn/q/kv_cur/qrn sono GIA' nei buffer device del project (sx[6/8/9/10]): niente upload */
+    int dev_heads;/* 1 = NON scaricare heads su host (restano in device, restituiti via heads_dev_out) */
 } LlmDsv4MidParams;
 
 int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p);
 /* `nt` token consecutivi (stesso layer, params in ordine di posizione) in UNA command buffer. */
-int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, int nt);
+int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, int nt, void** heads_dev_out);
 
 /* Output grouped-LoRA FUSO (ds4): out_a (ng gruppi) + out_b in UNA command buffer, `low` su device. */
 int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b, const void* outa_w, size_t outa_row_bytes,
@@ -163,7 +164,7 @@ int llm_dsv4_metal_moe_mm_batch(LlmDsv4Metal* b, int nt, const void* gate_w, con
 /* Output grouped-LoRA via mul_mm_id Q8_0 (gruppi = esperti) per `nt` token; attivazioni a half nel kernel. */
 int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes, int ng, uint32_t gd,
         uint32_t rank, const void* outb_w, size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
-        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg);
+        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg, const void* heads_dev);
 /* Prewarm delle view statiche (pesi) + commit UNICO del residency set. */
 void llm_dsv4_metal_prewarm_view(LlmDsv4Metal* b, const void* ptr, size_t bytes);
 void llm_dsv4_metal_prewarm_commit(LlmDsv4Metal* b);
@@ -184,7 +185,7 @@ int llm_dsv4_metal_attn_proj_mm_batch(LlmDsv4Metal* b, int nt, const void* qa_w,
 int llm_dsv4_metal_attn_out_fused_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes,
         size_t outa_lead0, int ng, uint32_t gd, uint32_t rank, const void* outb_w,
         size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
-        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg);
+        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg, const void* heads_dev);
 /* Come attn_proj_fused per `nt` token consecutivi (pos0..): xn [nt*embd] -> q_out [nt*qd], kv_out [nt*hd], qrn_out [nt*lq]. */
 int llm_dsv4_metal_attn_proj_fused_batch(LlmDsv4Metal* b, int nt, const void* qa_w, size_t qa_row_bytes,
         const void* kv_w, size_t kv_row_bytes, const void* qb_w, size_t qb_row_bytes,

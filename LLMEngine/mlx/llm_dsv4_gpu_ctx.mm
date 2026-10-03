@@ -237,10 +237,12 @@ int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeight
     Dsv4Mid* m = &g_mid[il];
     if (!m->inited && !dsv4_mid_init(m, c, L, ratio, raw_cap, comp_cap)) return 0;
     const int hd = c->n_head_dim, qd = c->n_head * hd;
-    /* ITEM B device-resident: il project scrive q/kv/qrn negli slot device sx[6/8/9/10] (out=NULL -> no download);
-     * il mid li legge direttamente (dev_in=1) senza ri-caricarli. heads resta host (RoPE inversa CPU bit-exact). */
+    /* ITEM B device-resident (branch non-bit-exact): il project scrive q/kv/qrn negli slot device sx[6/8/9/10]
+     * (out=NULL -> no download); il mid li legge (dev_in=1) e lascia heads in device (dev_heads=1); l'out-batch
+     * legge heads da device e applica la RoPE inversa su GPU (dsv4_rope_rows_inv). */
     float* hds = (float*)malloc(sizeof(float) * (size_t)nt * qd);
     LlmDsv4MidParams* ps = (LlmDsv4MidParams*)malloc(sizeof(LlmDsv4MidParams) * (size_t)nt);
+    void* heads_dev = NULL;
     int ok = hds && ps;
     if (ok) ok = llm_dsv4_gpu_attn_project_batch(&g_attn, c, L, il, xn, pos0, nt, NULL, NULL, NULL);
     int nr = m->n_raw, na = m->n_acomp, ni = m->n_icomp;
@@ -250,12 +252,14 @@ int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeight
             dsv4_mid_fill(m, c, ratio, raw_cap, comp_cap, nr, na, ni, NULL, NULL, NULL, NULL, pos0 + t,
                           hds + (size_t)t * qd, &ps[t], &nr2, &na2, &ni2);
             ps[t].dev_in = 1;
+            ps[t].dev_heads = 1;
             nr = nr2; na = na2; ni = ni2;
         }
-        ok = llm_dsv4_metal_attn_mid_batch(g_be, ps, nt) == 0;
+        ok = llm_dsv4_metal_attn_mid_batch(g_be, ps, nt, &heads_dev) == 0;
+        if (!ok) heads_dev = NULL;
         if (ok) { m->n_raw = nr; m->n_acomp = na; m->n_icomp = ni; }
     }
-    if (ok) ok = llm_dsv4_gpu_attn_finish_batch(&g_attn, c, L, il, hds, pos0, nt, out);
+    if (ok) ok = llm_dsv4_gpu_attn_finish_batch(&g_attn, c, L, il, hds, pos0, nt, out, heads_dev);
     free(ps); free(hds);
     return ok ? 1 : 0;
 }

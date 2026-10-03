@@ -2384,12 +2384,12 @@ int llm_dsv4_metal_moe_mm_addr_batch(LlmDsv4Metal* b, int nt, const void* const*
  * Pesi Q8_0, heads [nt*heads_total] f32 -> out [nt*embd] f32. Attivazioni a half nel kernel (staging come ds4). 0 = ok. */
 int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes, int ng, uint32_t gd,
         uint32_t rank, const void* outb_w, size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
-        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg) {
+        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg, const void* heads_dev) {
     if (!b || nt <= 0 || nt > 4096 || ng <= 0 || ng != 8 || !b->pso_mm_q8 || !b->pso_mm_map8 || !b->pso_mm_map1) return -1;
     if ((rank % 64u) || (embd % 64u) || (gd % 32u) || (ol % 32u)) return -1;
     id<MTLBuffer> IDS = dsv4_scratch(b, &b->sx[29], &b->sx_cap[29], (size_t)nt * ng * 4);
     id<MTLBuffer> IDB = dsv4_scratch(b, &b->sx[30], &b->sx_cap[30], (size_t)nt * 4);
-    id<MTLBuffer> H   = dsv4_scratch(b, &b->sx[3], &b->sx_cap[3], (size_t)nt * heads_total * sizeof(float));
+    id<MTLBuffer> H   = heads_dev ? (id<MTLBuffer>)heads_dev : dsv4_scratch(b, &b->sx[3], &b->sx_cap[3], (size_t)nt * heads_total * sizeof(float));
     id<MTLBuffer> LOW = dsv4_scratch(b, &b->sx[4], &b->sx_cap[4], (size_t)nt * ol * sizeof(float));
     id<MTLBuffer> OUT = dsv4_scratch(b, &b->sx[5], &b->sx_cap[5], (size_t)nt * embd * sizeof(float));
     id<MTLBuffer> MA  = dsv4_scratch(b, &b->sx[31], &b->sx_cap[31], dsv4_mm_map_bytes((uint32_t)ng, nt, (uint32_t)ng));
@@ -2400,7 +2400,7 @@ int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w
     if (!IDS || !IDB || !H || !LOW || !OUT || !MA || !MB || !WA || !WB) return -2;
     { int32_t* ip = (int32_t*)[IDS contents]; for (int t = 0; t < nt; t++) for (int g = 0; g < ng; g++) ip[t * ng + g] = g;
       int32_t* ib = (int32_t*)[IDB contents]; for (int t = 0; t < nt; t++) ib[t] = 0; }
-    memcpy([H contents], heads, (size_t)nt * heads_total * sizeof(float));
+    if (!heads_dev) memcpy([H contents], heads, (size_t)nt * heads_total * sizeof(float));
     Dsv4MmMapArgs ma = { ng, (int32_t)gd, ng, (uint64_t)gd * 4, (uint64_t)ng * gd * 4, nt, ng, (uint64_t)ng * 4 };
     Dsv4MmArgs aa; memset(&aa, 0, sizeof aa);
     aa.ne00 = (int32_t)gd; aa.ne02 = ng; aa.nb01 = outa_row_bytes; aa.nb02 = (uint64_t)rank * outa_row_bytes; aa.nb03 = (uint64_t)ng * aa.nb02;
@@ -2617,18 +2617,18 @@ int llm_dsv4_metal_attn_out_fused_batch(LlmDsv4Metal* b, int nt,
         int ng, uint32_t gd, uint32_t rank,
         const void* outb_w, size_t outb_row_bytes,
         uint32_t ol, uint32_t embd, uint32_t heads_total,
-        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg) {
-    if (!b || !b->pso || ng <= 0 || ng > 64 || nt <= 0 || !outa_w || !outb_w || !heads || !out) return -1;
+        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg, const void* heads_dev) {
+    if (!b || !b->pso || ng <= 0 || ng > 64 || nt <= 0 || !outa_w || !outb_w || !out || (!heads && !heads_dev)) return -1;
     size_t abytes = (size_t)ng * rank * outa_row_bytes;
     size_t bbytes = (size_t)embd * outb_row_bytes;
     size_t la, lb;
     id<MTLBuffer> WA  = dsv4_nocopy_view(b, outa_w, abytes, &la);
     id<MTLBuffer> WB  = dsv4_nocopy_view(b, outb_w, bbytes, &lb);
-    id<MTLBuffer> H   = dsv4_scratch(b, &b->sx[3], &b->sx_cap[3], (size_t)nt * heads_total * sizeof(float));
+    id<MTLBuffer> H   = heads_dev ? (id<MTLBuffer>)heads_dev : dsv4_scratch(b, &b->sx[3], &b->sx_cap[3], (size_t)nt * heads_total * sizeof(float));
     id<MTLBuffer> LOW = dsv4_scratch(b, &b->sx[4], &b->sx_cap[4], (size_t)ol * sizeof(float));
     id<MTLBuffer> OUT = dsv4_scratch(b, &b->sx[5], &b->sx_cap[5], (size_t)nt * embd * sizeof(float));
     int rc = (WA && WB && H && LOW && OUT) ? 0 : -2;
-    if (rc == 0) memcpy([H contents], heads, (size_t)nt * heads_total * sizeof(float));
+    if (rc == 0 && !heads_dev) memcpy([H contents], heads, (size_t)nt * heads_total * sizeof(float));
     if (rc == 0) {
         id<MTLCommandBuffer> cb = [b->queue commandBuffer];
         id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
@@ -2676,7 +2676,7 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b,
         const float* heads, float* out) {
     return llm_dsv4_metal_attn_out_fused_batch(b, 1, outa_w, outa_row_bytes, outa_lead0, ng, gd, rank,
                                                outb_w, outb_row_bytes, ol, embd, heads_total, heads, out,
-                                               0, 0, 0, 0, NULL);   /* single-token: RoPE gia' fatta su CPU dal chiamante */
+                                               0, 0, 0, 0, NULL, NULL);   /* single-token: RoPE gia' fatta su CPU dal chiamante */
 }
 
 /* Codifica l'attenzione mista: split (flash-decoding) + merge se possibile (hd multiplo di 128, <=512),
@@ -2954,7 +2954,7 @@ int llm_dsv4_metal_comp_shift(LlmDsv4Metal* b, void* h, int n, int src) {
 
 /* Middle attenzione (compressor+indexer+attn) in UNA command buffer. Replica
  * llm_dsv4_attn_cached_mid a valle della proiezione. KV/stato su device. 0 = ok. */
-int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, int nt) {
+int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, int nt, void** heads_dev_out) {
     if (!b || !ps || nt <= 0 || !ps[0].heads) return -1;
     if (!b->pso_gemv_f32 || !b->pso_rms_w || !b->pso_rope || !b->pso_add || !b->pso_comp_pool || !b->pso_attn_mixed) return -1;
     const LlmDsv4MidParams* p0 = &ps[0];
@@ -3318,12 +3318,14 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
     dsv4_res_commit(b); [cb commit];
     [cb waitUntilCompleted];
     if (cb.error) return -3;
+    if (heads_dev_out) *heads_dev_out = NULL;
+    if (p0->dev_heads) { if (heads_dev_out) *heads_dev_out = (void*)HD; return 0; }   /* heads restano device (item b) */
     for (int t = 0; t < nt; t++)
         memcpy(ps[t].heads, (const char*)[HD contents] + (size_t)t * p0->n_head * hd * sizeof(float), (size_t)p0->n_head * hd * sizeof(float));
     return 0;
 }
 
-int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p) { return llm_dsv4_metal_attn_mid_batch(b, p, 1); }
+int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p) { return llm_dsv4_metal_attn_mid_batch(b, p, 1, NULL); }
 
 /* Proiezioni Q-LoRA + KV FUSE (ds4) per `nt` token consecutivi (pos0..pos0+nt-1) in UNA command buffer:
  * q_a, kv, RMS, q_b, head_rms, RoPE. Pesi Q8_0. xn [nt*embd] -> q_out [nt*qd], kv_out [nt*hd], qrn_out [nt*lq]. 0 = ok. */
