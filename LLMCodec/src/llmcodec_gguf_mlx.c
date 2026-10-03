@@ -589,7 +589,6 @@ int llmcodec_gguf_to_mlx_ex(const char* gguf_path, const char* out_dir, uint32_t
          * nomi HF (model.layers.N.self_attn.q_proj) per essere caricabile dagli strumenti MLX/HF.
          * Fallback: nome canonico GGUF verbatim (caricabile via gguf_rm). */
         char hfn[288]; int hfok = (rm != NULL) ? llmcodec_rolemap_canonical_to_hf(rm, t->name, hfn, sizeof hfn) : 0;
-        if (strstr(t->name, "exps")) fprintf(stderr, "[HFDBG] %s -> hfok=%d hf=%s\n", t->name, hfok, hfn);
         const char* outname = hfok ? hfn : t->name;
         uint64_t numel = 1; for (int d=0; d<t->ndim; ++d) numel *= t->dims[d];
         uint64_t nb = 0; if (llmcodec_ggml_type_bytes(t->ggml_type, numel, &nb) != 0) continue;
