@@ -522,7 +522,12 @@ static void llmcodec_write_config_from_gguf(const char* gguf_path, const char* o
     fprintf(f, "{\n  \"architectures\": [\"%s\"],\n  \"model_type\": \"%s\",\n  \"tie_word_embeddings\": false", arch, arch);
     if (have) {
         char k[192];
-#define KVN(SUF, JSON) { snprintf(k, sizeof k, "%s.%s", arch, SUF); long long v = gkv_num(kv, n, k); if (v >= 0) fprintf(f, ",\n  \"%s\": %lld", JSON, v); }
+        /* Le chiavi metadato GGUF usano l'arch di `general.architecture` (es. "qwen3moe"), che
+         * può DIVERGERE dal nome ABI (`rm->arch`, es. "qwen3_moe"): usando `arch` (ABI) le chiavi
+         * non si trovavano e la config usciva VUOTA (hidden=0 -> modello non caricabile). */
+        const char* archk = gkv_str(kv, n, "general.architecture");
+        if (archk == NULL || !archk[0]) archk = arch;
+#define KVN(SUF, JSON) { snprintf(k, sizeof k, "%s.%s", archk, SUF); long long v = gkv_num(kv, n, k); if (v >= 0) fprintf(f, ",\n  \"%s\": %lld", JSON, v); }
         KVN("embedding_length", "hidden_size")
         KVN("block_count", "num_hidden_layers")
         KVN("attention.head_count", "num_attention_heads")
