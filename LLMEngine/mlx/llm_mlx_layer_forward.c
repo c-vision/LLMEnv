@@ -102,16 +102,16 @@ static bool llm_kvq_sdpa_hook_dispatch(mlx_array* out, mlx_array q, mlx_array k,
     if (getenv("LLM_KVQ_DBG"))
         fprintf(stderr, "[KVQHOOK] nc(cold)=%d nr(recent)=%d kcap=%d nh=%d hd=%d\n",
                 (int)c->nc, nr, (int)mlx_array_shape(c->kw)[1], nh, hd);
-    if (lq != 1 || hd % 64 != 0) return false;
+    if (hd % 64 != 0) return false;
     if (mlx_array_dtype(q) != mlx_array_dtype(k) || mlx_array_dtype(q) != mlx_array_dtype(v)) return false;
     mlx_array q2 = mlx_array_new(), k2 = mlx_array_new(), v2 = mlx_array_new();
     mlx_array kw = mlx_array_new(), ks = mlx_array_new(), kb = mlx_array_new();
     mlx_array vw = mlx_array_new(), vs = mlx_array_new(), vb = mlx_array_new();
-    int qsh[2] = {nh, hd}, ksh[3] = {nkv, nr, hd};
+    int qsh[3] = {nh, lq, hd}, ksh[3] = {nkv, nr, hd};
     int kcap = (int)mlx_array_shape(c->kw)[1];                 /* capacita' del pool (K) */
     int cw[3] = {nkv, kcap, hd}, cs[3] = {nkv, kcap, 1};       /* Splash: int8 byte + 1 scala/token */
     int cwv[3] = {nkv, kcap, hd};
-    bool ok = mlx_reshape(&q2, q, qsh, 2, s) == 0 &&
+    bool ok = mlx_reshape(&q2, q, qsh, 3, s) == 0 &&
               mlx_reshape(&k2, k, ksh, 3, s) == 0 &&
               mlx_reshape(&v2, v, ksh, 3, s) == 0 &&
               mlx_reshape(&kw, c->kw, cw, 3, s) == 0 &&
@@ -126,7 +126,7 @@ static bool llm_kvq_sdpa_hook_dispatch(mlx_array* out, mlx_array q, mlx_array k,
         mlx_array o2c = mlx_array_new();
         ok = (mlx_array_dtype(o2) == mlx_array_dtype(q)) ? (mlx_array_set(&o2c, o2) == 0)
                                                         : (mlx_astype(&o2c, o2, mlx_array_dtype(q), s) == 0);
-        if (ok) { int osh[4] = {1, nh, 1, hd}; ok = mlx_reshape(out, o2c, osh, 4, s) == 0; }
+        if (ok) { int osh[4] = {1, nh, lq, hd}; ok = mlx_reshape(out, o2c, osh, 4, s) == 0; }
         mlx_array_free(o2c);
     }
     mlx_array_free(q2); mlx_array_free(k2); mlx_array_free(v2);
@@ -370,7 +370,7 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
                     cache_offset + n_tokens);
         }
     }
-    bool kvq_read = (n_tokens == 1) && m->cfg.kv_quantize;   /* read FUSED (kernel Splash layout) */
+    bool kvq_read = m->cfg.kv_quantize;
     /* KV-quant (port Splash): il cold vive nel PAGE POOL int8 = storage PRIMARIO.
      * La cache fp e' SOLO la finestra recente; il read fused legge il pool. */
     llm_kvq_pool* kvqp = NULL;
