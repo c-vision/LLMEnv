@@ -50,7 +50,7 @@ static const char llm_kvq_sdpa_kernel_src[] =
     "    constexpr uint G = GK;                // group della scala (64 affine / Dhead Splash-symmetric)\n"
     "    constexpr uint KWB = (Dhead * BK) / 8u;   // byte per token (K)\n"
     "    constexpr uint VWB = (Dhead * BV) / 8u;   // byte per token (V)\n"
-    "    uint kh = (qh % NH) * NKV / NH;  /* W3: qh = qi*NH+qh_in (nq query righe); kh condiviso */\n"
+    "    uint kh = (qh / NQX) * NKV / NH;  /* W3 head-major: qh=qh_in*NQX+qi */\n"
     "\n"
     "    float qreg[DPL];\n"
     "    for (uint i = 0; i < DPL; ++i) qreg[i] = (float)q[qh * Dhead + lane + 32u * i];\n"
@@ -363,7 +363,7 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
      * indicizza la riga q con qh = qi*NH+qh_in e usa kh=(qh%NH)*NKV/NH (KV condiviso fra query). */
     int nqy = 1, nh, hd;
     if (mlx_array_ndim(q) == 2) { nh = (int)mlx_array_shape(q)[0]; hd = (int)mlx_array_shape(q)[1]; }
-    else if (mlx_array_ndim(q) == 3) { nqy = (int)mlx_array_shape(q)[0]; nh = (int)mlx_array_shape(q)[1]; hd = (int)mlx_array_shape(q)[2]; }
+    else if (mlx_array_ndim(q) == 3) { nh = (int)mlx_array_shape(q)[0]; nqy = (int)mlx_array_shape(q)[1]; hd = (int)mlx_array_shape(q)[2]; }
     else return false;
     mlx_array q_flat = mlx_array_new();
     if (nqy > 1) { int fsh[2] = {nqy * nh, hd}; if (mlx_reshape(&q_flat, q, fsh, 2, stream) != 0) { mlx_array_free(q_flat); return false; } q = q_flat; }
@@ -438,6 +438,7 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, "ST", st);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "Dhead", hd);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "NH", nh);
+    mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "NQX", nqy);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "NKV", nkv);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "GK", gval > 0 ? gval : 64);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "SYM", gval > 0 ? 1 : 0);
