@@ -241,6 +241,28 @@ int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out
     if (arch[0]) {
         memset(out, 0, sizeof *out);
         snprintf(out->arch, sizeof out->arch, "%s", arch);
+        /* DEDUZIONE delle STRUTTURE dal config.json (HF standard): tipo di attenzione (mla/gqa/mha),
+         * MoE, norma. Cosi' il percorso COMPOSABILE del motore ha le primitive anche senza
+         * `.gmbarch`. Un arch esplicito resta la via per sovrascrivere. */
+        char* cj = slurp(cfg);
+        if (cj) {
+            const char* s_nkv = jv(cj, "num_key_value_heads");
+            const char* s_nh  = jv(cj, "num_attention_heads");
+            const char* s_kl  = jv(cj, "kv_lora_rank");
+            const char* s_qn  = jv(cj, "qk_nope_head_dim");
+            int nkv = s_nkv ? atoi(s_nkv) : 0, nh = s_nh ? atoi(s_nh) : 0;
+            int kl = s_kl ? atoi(s_kl) : 0, qn = s_qn ? atoi(s_qn) : 0;
+            const char* s_ne = jv(cj, "num_experts"); if (!s_ne) s_ne = jv(cj, "n_routed_experts");
+            if (!s_ne) s_ne = jv(cj, "num_local_experts"); if (!s_ne) s_ne = jv(cj, "moe_num_experts");
+            int ne = s_ne ? atoi(s_ne) : 0;
+            const char* attn = (kl > 0 || qn > 0) ? "mla" : (nkv > 0 && nh > 0 && nkv < nh) ? "gqa" : "mha";
+            snprintf(out->structures[out->n_struct].key, 32, "attention");
+            snprintf(out->structures[out->n_struct].type, 32, "%s", attn); out->n_struct++;
+            if (ne > 0 && out->n_struct < 16) { snprintf(out->structures[out->n_struct].key,32,"moe"); snprintf(out->structures[out->n_struct].type,32,"moe"); out->n_struct++; }
+            if (out->n_struct < 16) { snprintf(out->structures[out->n_struct].key,32,"norm"); snprintf(out->structures[out->n_struct].type,32,"rmsnorm"); out->n_struct++; }
+            snprintf(out->source_format, sizeof out->source_format, "safetensors");
+            free(cj);
+        }
         if (out_path && out_path_cap) out_path[0] = 0;   /* "" -> role map generico */
         return 0;
     }
