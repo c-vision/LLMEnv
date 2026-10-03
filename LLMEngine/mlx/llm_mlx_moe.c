@@ -63,6 +63,52 @@ static bool llm_mlx_moe_gateup_fuse_enabled(void) {
  * Mixtral con x BF16 e scale F16, ma era la PROMUZIONE MANCANTE la causa, non il cast --
  * la stessa lezione gia' arbitrata sul GLM (flavor attivo -> il flag valeva 0). */
 
+/* Guardia NAX #3856 (MLX 0.32.x su M5): gather_qmm(sorted_indices=true) con M>32768 e
+ * M%64!=0 corrompe la coda (ultimo blocco parziale di 64 righe). Riprodotto OFFLINE senza
+ * modello da `oracoli/llm_gather_qmm_sorted_probe` (forme reali esperti GLM-4.5): M<=32768
+ * sempre bit-exact; M>32768 bit-exact sse M%64==0; altrimenti un blocco esperto corrotto
+ * (max|diff| ~1.5e3, deterministico su piu' seed). Fix locale: segmentare in slice di
+ * <=32768 righe (multiplo di 64) e concatenare. Vale per OGNI MoE sorted (GLM/DS/qwen3/
+ * mixtral): tutte passano da qui. */
+#define LLM_GATHER_SORTED_MAX_ROWS 32768
+
+static int llm_mlx_gather_qmm_guarded(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc,
+                                      mlx_array bi, mlx_array lhs, mlx_array rhs, bool transpose,
+                                      mlx_optional_int gsz, mlx_optional_int bts, const char* mode,
+                                      bool sorted, mlx_stream st) {
+    const int64_t rows = (rhs.ctx != NULL) ? (int64_t)mlx_array_size(rhs) : 0;
+    const bool need_slice = sorted && rows > LLM_GATHER_SORTED_MAX_ROWS && (rows % 64) != 0 &&
+                            mlx_array_ndim(rhs) == 1 && mlx_array_ndim(x) >= 1 &&
+                            (int64_t)mlx_array_shape(x)[0] == rows;
+    static int g_guard_dbg = -1;
+    if (g_guard_dbg < 0) g_guard_dbg = getenv("LLM_MOE_GUARD_DBG") != NULL ? 1 : 0;
+    if (g_guard_dbg) fprintf(stderr, "[moe-guard] rows=%lld sorted=%d slice=%d\n",
+                             (long long)rows, (int)sorted, (int)need_slice);
+    if (!need_slice)
+        return mlx_gather_qmm(res, x, w, sc, bi, lhs, rhs, transpose, gsz, bts, mode, sorted, st);
+    mlx_vector_array parts = mlx_vector_array_new();
+    int rc = 0;
+    for (int64_t off = 0; off < rows && rc == 0; off += LLM_GATHER_SORTED_MAX_ROWS) {
+        int64_t stop = off + LLM_GATHER_SORTED_MAX_ROWS;
+        if (stop > rows) stop = rows;
+        int s0[8], s1[8], st1[8];
+        const int ndx = mlx_array_ndim(x);
+        const int* shp = mlx_array_shape(x);
+        for (int d = 0; d < ndx; d++) { s0[d] = 0; s1[d] = shp[d]; st1[d] = 1; }
+        s0[0] = (int)off; s1[0] = (int)stop;
+        const int r0[1] = {(int)off}, r1[1] = {(int)stop}, rst[1] = {1};
+        mlx_array xs = mlx_array_new(), rs = mlx_array_new(), o = mlx_array_new();
+        rc = mlx_slice(&xs, x, s0, ndx, s1, ndx, st1, ndx, st);
+        if (rc == 0) rc = mlx_slice(&rs, rhs, r0, 1, r1, 1, rst, 1, st);
+        if (rc == 0) rc = mlx_gather_qmm(&o, xs, w, sc, bi, lhs, rs, transpose, gsz, bts, mode, true, st);
+        if (rc == 0) mlx_vector_array_append_value(parts, o);
+        mlx_array_free(o); mlx_array_free(rs); mlx_array_free(xs);
+    }
+    if (rc == 0) rc = mlx_concatenate_axis(res, parts, 0, st);
+    mlx_vector_array_free(parts);
+    return rc;
+}
+
 /* Prova il gather_qmm fuso; ritorna false SENZA scrivere out_gate/out_up se non applicabile
  * (fq NULL, fusione non riuscita al caricamento, flag OFF, o l'apply stesso fallisce) -- il
  * chiamante deve fare fallback ai due gather_qmm separati in quel caso. */
@@ -74,7 +120,7 @@ bool llm_mlx_moe_gateup_gather(GmoeFfnQuant* fq, mlx_array x, mlx_array lhs_indi
     if (fq == NULL || !fq->has_gate_up_fused || !llm_mlx_moe_gateup_fuse_enabled()) return false;
     if (llm_mlx_moe_swap_on()) return false; /* streaming esperti: niente fused (peso pieno) */
     mlx_array gate_up = mlx_array_new();
-    bool ok = mlx_gather_qmm(&gate_up, x, fq->guw, fq->gus, fq->gub, lhs_indices, rhs_indices,
+    bool ok = llm_mlx_gather_qmm_guarded(&gate_up, x, fq->guw, fq->gus, fq->gub, lhs_indices, rhs_indices,
                              /*transpose=*/true, gsz_opt, bts_opt, mode, sorted_indices, stream) == 0;
     if (ok) {
         mlx_vector_array parts = mlx_vector_array_new();
@@ -125,7 +171,7 @@ int llm_mlx_moe_gather_mm(const ModelConfig* cfg, mlx_array* res, mlx_array x, m
         mlx_array_free(wt);
         return r;
     }
-    return mlx_gather_qmm(res, x, w, scales, biases, lhs, idxs, transpose, gsz, bts, mode, sorted, s);
+    return llm_mlx_gather_qmm_guarded(res, x, w, scales, biases, lhs, idxs, transpose, gsz, bts, mode, sorted, s);
 }
 /* ── SWAP esperti (streaming): ingest safetensors + remap + builder. Env-gated, default OFF
  * offload esperti (dir via API). Include relativo: nessuna modifica al CMakeLists. ── */
@@ -210,7 +256,7 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
                 mlx_array x_rot = mlx_array_new();
                 mlx_array x_use = x;
                 if (llm_mlx_tq_rotate_input(ing, layer, proj, x, st, cdt, &x_rot) == 0) x_use = x_rot;
-                int rc = mlx_gather_qmm(res, x_use, fw, fs, fb, lhs, idxs, transpose,
+                int rc = llm_mlx_gather_qmm_guarded(res, x_use, fw, fs, fb, lhs, idxs, transpose,
                                         (mlx_optional_int){grp, true}, (mlx_optional_int){2, true},
                                         "affine", sorted, st);
                 mlx_array_free(x_rot);
