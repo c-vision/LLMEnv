@@ -604,18 +604,6 @@ bool llm_mlx_fuse_moe_decode_enabled(void) {
     }
     return g_fuse_moe_decode_state == 1;
 }
-/* LLMENGINE_GLM_QKV_FUSE: proiezioni q/k/v di glm4_moe in UNA quantized_matmul (concat
- * asse 0 dei pesi, poi 3 slice). Misurato model-free (oracoli/llm_glm_qkv_probe, 46 layer
- * pesi distinti): 3,962 -> 3,855 ms/token (ratio 0,97, -0,107 ms/token), parita' bit-exact.
- * DEFAULT OFF finche' la parita' greedy model-level (GEN_IDS) non e' verificata. */
-static int g_glm_qkv_fuse_state = -1;
-bool llm_mlx_glm_qkv_fuse_enabled(void) {
-    if (g_glm_qkv_fuse_state < 0) {
-        const char* e = llm_ai_mlx_opt_env("LLMENGINE_GLM_QKV_FUSE");
-        g_glm_qkv_fuse_state = (e != NULL && strcmp(e, "1") == 0) ? 1 : 0;
-    }
-    return g_glm_qkv_fuse_state == 1;
-}
 static int g_fuse_moe_decode_verify_state = -1;
 bool llm_mlx_fuse_moe_decode_verify_enabled(void) {
     if (g_fuse_moe_decode_verify_state < 0) g_fuse_moe_decode_verify_state = (llm_ai_mlx_opt_env("LLMENGINE_MOE_FUSE_MOE_DECODE_VERIFY") != NULL) ? 1 : 0;

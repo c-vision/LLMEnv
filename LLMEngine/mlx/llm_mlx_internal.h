@@ -395,8 +395,6 @@ typedef struct {
     mlx_array qn_w, kn_w;          /* QK-norm (se presenti) */
     bool has_qn;
     bool has_v;                    /* v_proj presente (assente sui layer K=V gemma4) */
-    mlx_array qkvw, qkvs, qkvb;    /* q/k/v fusi (concat asse 0, solo glm4_moe, opz.) */
-    bool has_qkv_fused;
     LlmMlxPackedQkv packed_qkv;
     bool valid;
 } GattnQuant;
@@ -1002,7 +1000,6 @@ bool llm_mlx_reshape_canonical_enabled(void);
 GmoeFfnQuant* llm_mlx_moe_ffn_quant(LlmMlxModel* m, int layer_idx);
 /* Definiti nel monolite, usati dal dominio MoE. */
 bool llm_mlx_fuse_moe_decode_enabled(void);
-bool llm_mlx_glm_qkv_fuse_enabled(void);
 bool llm_mlx_fuse_moe_decode_verify_enabled(void);
 bool llm_mlx_fuse_swiglu_metal_enabled(void);
 void llm_mlx_imatrix_accumulate_rows(LlmMlxModel* m, int layer_idx, mlx_array x3d,
