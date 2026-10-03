@@ -983,13 +983,13 @@ static const char* const LLM_DSV4_METAL_MOE =
 " * fp8 round-trip -> f16, in UN kernel (una TG per evento, 32 thread). Elimina 4 dispatch/evento/pass\n"
 " * e i round-trip su device (la riga compressa resta in threadgroup). Stessa matematica esatta. */\n"
 "kernel void dsv4_comp_chain(device const float* SKV0 [[buffer(0)]], device const float* SSC0 [[buffer(1)]],\n"
-"    device float* OUT0 [[buffer(2)]], device const float* WN [[buffer(3)]], constant uint* P [[buffer(4)]], constant float* CF [[buffer(5)]],\n"
+"    device half* OUT0 [[buffer(2)]], device const float* WN [[buffer(3)]], constant uint* P [[buffer(4)]], constant float* CF [[buffer(5)]],\n"
 "    uint ev [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
 "    const uint hd=P[0], ratio=P[1], co=P[2], row0=P[3]; const int n_nope=(int)P[4], n_rot=(int)P[5], pos=(int)(P[6]+ev*(int)ratio);\n"
 "    const float eps=CF[0], freq_base=CF[1], freq_scale=CF[2], ext_factor=CF[3], attn_factor=CF[4], beta_fast=CF[5], beta_slow=CF[6], n_ctx_orig=CF[7];\n"
 "    const uint width=co*hd;\n"
 "    device const float* SKV=SKV0+(ulong)(row0+ev*ratio)*width; device const float* SSC=SSC0+(ulong)(row0+ev*ratio)*width;\n"
-"    device float* OUT=OUT0+(ulong)ev*hd; threadgroup float buf[512];\n"
+"    device half* OUT=OUT0+(ulong)ev*hd; threadgroup float buf[512];\n"
 "    for (uint d=tiisg; d<hd; d+=32u) {\n"
 "        float mx=-1.0e30f;\n"
 "        if (co==2u) { for (uint r=0;r<ratio;r++){ float sp=SSC[r*width+d]; float sc=SSC[(ratio+r)*width+hd+d]; if(sp>mx)mx=sp; if(sc>mx)mx=sc; } }\n"
@@ -1020,7 +1020,7 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        for (uint i=0;i<64u;i++){ float v=buf[off+i]/scale; if(v>448.f)v=448.f; if(v<-448.f)v=-448.f; float a=fabs(v); if(a>448.f)a=448.f; float am=a<1.953125e-3f?1.953125e-3f:a; int e=(int)floor(log2(am)); int ste=e-3; if(ste<-9)ste=-9; float stp=exp2((float)ste); float q=rint(a/stp)*stp; if(q>448.f)q=448.f; buf[off+i]=(v<0.f?-q:q)*scale; }\n"
 "      } }\n"
 "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-"    for (uint d=tiisg; d<hd; d+=32u) OUT[d]=(float)((half)buf[d]);\n"
+"    for (uint d=tiisg; d<hd; d+=32u) OUT[d]=(half)buf[d];\n"
 "}\n"
 "kernel void dsv4_rope_ev(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], constant float* CF [[buffer(2)]],\n"
 "    uint2 tg [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
@@ -1190,7 +1190,7 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    }\n"
 "}\n"
 "kernel void dsv4_attn_part_t(device const float* Q0 [[buffer(0)]], device const float* RAWK0 [[buffer(1)]],\n"
-"    device const float* COMPK [[buffer(2)]], device const int* SELT0 [[buffer(3)]],\n"
+"    device const half* COMPK [[buffer(2)]], device const int* SELT0 [[buffer(3)]],\n"
 "    device float* PART [[buffer(4)]], constant uint* P [[buffer(5)]], device const uint4* TP [[buffer(6)]],\n"
 "    uint3 tg [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]],\n"
 "    ushort tiisg [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) {\n"
@@ -1206,12 +1206,11 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    for (uint j = 0; j < 4u; j++) { qv[j] = j < nch ? q4[j * 32u + tiisg] : float4(0.f); acc[j] = float4(0.f); }\n"
 "    float m = -INFINITY, l = 0.f;\n"
 "    for (uint t = t0 + sg; t < t1; t += 4u) {\n"
-"        device const float* kvp;\n"
-"        if (t < n_raw) kvp = RAWK + (ulong)t * (ulong)hd;\n"
-"        else { const uint rr = t - n_raw; const uint r = (top_k != 0u) ? (uint)SELT[rr] : rr; kvp = COMPK + (ulong)r * (ulong)hd; }\n"
-"        device const float4* k4 = (device const float4*)kvp;\n"
 "        float4 kv[4]; float d = 0.f;\n"
-"        for (uint j = 0; j < 4u; j++) { if (j < nch) { kv[j] = k4[j * 32u + tiisg]; d += dot(qv[j], kv[j]); } }\n"
+"        if (t < n_raw) { device const float4* k4 = (device const float4*)(RAWK + (ulong)t * (ulong)hd);\n"
+"            for (uint j = 0; j < 4u; j++) if (j < nch) { kv[j] = k4[j * 32u + tiisg]; d += dot(qv[j], kv[j]); } }\n"
+"        else { const uint rr = t - n_raw; const uint r = (top_k != 0u) ? (uint)SELT[rr] : rr; device const half* kh = COMPK + (ulong)r * (ulong)hd;\n"
+"            for (uint j = 0; j < 4u; j++) if (j < nch) { device const half* hh = kh + j * 128u + tiisg * 4u; kv[j] = float4((float)hh[0], (float)hh[1], (float)hh[2], (float)hh[3]); d += dot(qv[j], kv[j]); } }\n"
 "        d = simd_sum(d) * kq;\n"
 "        const float mn = max(m, d), corr = exp(m - mn), w = exp(d - mn);\n"
 "        l = l * corr + w;\n"
@@ -3200,13 +3199,14 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             { uint32_t P_[4] = { (uint32_t)w_, (uint32_t)ratio, (uint32_t)pm0, (uint32_t)nt }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; }
             [e dispatchThreads:MTLSizeMake((NSUInteger)w_, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
             if (evn > 0) {
-                id<MTLBuffer> cB = (id<MTLBuffer>)(pass == 0 ? p0->acomp : p0->icomp);
-                const NSUInteger coff = (NSUInteger)((size_t)(pass == 0 ? ps[evf].acomp_off : ps[evf].icomp_off) * 4);
+                /* pass 0 (KV compresso per l'attenzione): PACKED half in acomp_h -> l'attenzione legge
+                 * half (banda KV /2). pass 1 (indexer): f32 in icomp. */
+                id<MTLBuffer> cB = (id<MTLBuffer>)(pass == 0 ? p0->acomp_h : p0->icomp);
+                const NSUInteger coff = (NSUInteger)(pass == 0 ? (size_t)ps[evf].acomp_off * 2 : (size_t)ps[evf].icomp_off * 4);
                 const int idx_first = S0 + (ps[evf].pos - p0->pos);
                 const int row0 = idx_first - (co * ratio - 1);
-                /* Catena compressore FUSA (opt-in dsv4_comp_fuse): pool+rms+rope+fp8+f16 in 1 dispatch. */
-                int fuse_ok = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_comp_fuse", &v) == 0) fuse_ok = v; }   /* default ON: bit-exact +12..29% @16k */
-                if (fuse_ok) fuse_ok = (pass == 0) && (b->pso_comp_chain != nil) && ((hdd - p0->n_rot) % 64 == 0);
+                int fuse_ok = (pass == 0) && (b->pso_comp_chain != nil) && ((hdd - p0->n_rot) % 64 == 0);
+                { int v; if (llm_ai_mlx_opt_get_bool("dsv4_comp_fuse", &v) == 0 && !v) fuse_ok = 0; }
                 if (fuse_ok) {
                     [e setComputePipelineState:b->pso_comp_chain];
                     [e setBuffer:XK offset:0 atIndex:0]; [e setBuffer:XS offset:0 atIndex:1]; [e setBuffer:cB offset:coff atIndex:2];
@@ -3279,7 +3279,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
                 /* attenzione: GATHER delle top_k (SELT) invece di scandire n_comp (O(top_k) vs O(n_comp)).
                  * P[1] = top_k per i layer CSA (has_idx), 0 per HCA (scansiona tutte le compresse, SELT=identita'). */
                 [e setComputePipelineState:b->pso_apart_t];
-                [e setBuffer:Q offset:0 atIndex:0]; [e setBuffer:RAWX offset:0 atIndex:1]; [e setBuffer:(id<MTLBuffer>)p0->acomp offset:0 atIndex:2];
+                [e setBuffer:Q offset:0 atIndex:0]; [e setBuffer:RAWX offset:0 atIndex:1]; [e setBuffer:(id<MTLBuffer>)p0->acomp_h offset:0 atIndex:2];
                 [e setBuffer:SELB offset:0 atIndex:3]; [e setBuffer:PT offset:0 atIndex:4];
                 { uint32_t P_[6] = { (uint32_t)hd, (uint32_t)(p0->has_idx ? (uint32_t)p0->idx_top_k : 0u), (uint32_t)nsm, (uint32_t)g0, (uint32_t)max_ic, (uint32_t)nh_ }; [e setBytes:P_ length:sizeof(P_) atIndex:5]; }
                 [e setBuffer:TPB offset:0 atIndex:6];

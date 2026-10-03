@@ -134,7 +134,7 @@ typedef struct {
     void* w_iqb; void* w_iproj; void* sinks;
     void* st_akv; void* st_asc; void* st_ikv; void* st_isc;
     void* raw;  int raw_cap; int raw_off; int raw_full;
-    void* acomp; int acomp_off;
+    void* acomp; int acomp_off; void* acomp_h;   /* KV compresso PACKED half (path chunk) */
     void* icomp; int icomp_off;
     void* allowed;
     const float* xn; const float* qrn; const float* q; const float* kv_cur;

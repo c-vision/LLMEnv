@@ -106,6 +106,7 @@ typedef struct {
     int n_raw, n_acomp, n_icomp;
     void *w_ckv, *w_cgate, *w_cape, *w_cnorm, *w_ickv, *w_icgate, *w_icape, *w_icnorm, *w_iqb, *w_iproj, *sinks;
     void *st_akv, *st_asc, *st_ikv, *st_isc, *raw, *acomp, *icomp, *allowed;
+    void *acomp_h;   /* KV compresso PACKED half (solo path chunk): l'attenzione legge half -> banda/2 */
 } Dsv4Mid;
 static Dsv4Mid g_mid[LLM_DSV4_MAX_LAYER];
 
@@ -121,7 +122,7 @@ static void dsv4_mid_free(Dsv4Mid* m) {
     llm_dsv4_metal_buf_free(m->w_ickv); llm_dsv4_metal_buf_free(m->w_icgate); llm_dsv4_metal_buf_free(m->w_icape); llm_dsv4_metal_buf_free(m->w_icnorm);
     llm_dsv4_metal_buf_free(m->w_iqb); llm_dsv4_metal_buf_free(m->w_iproj); llm_dsv4_metal_buf_free(m->sinks);
     llm_dsv4_metal_buf_free(m->st_akv); llm_dsv4_metal_buf_free(m->st_asc); llm_dsv4_metal_buf_free(m->st_ikv); llm_dsv4_metal_buf_free(m->st_isc);
-    llm_dsv4_metal_buf_free(m->raw); llm_dsv4_metal_buf_free(m->acomp); llm_dsv4_metal_buf_free(m->icomp); llm_dsv4_metal_buf_free(m->allowed);
+    llm_dsv4_metal_buf_free(m->raw); llm_dsv4_metal_buf_free(m->acomp); llm_dsv4_metal_buf_free(m->acomp_h); llm_dsv4_metal_buf_free(m->icomp); llm_dsv4_metal_buf_free(m->allowed);
     memset(m, 0, sizeof *m);
 }
 /* Attenzione solo-raw (layer 0-1, ratio 0) su GPU: opzione di registro dsv4_gpu_raw_attn (default 1; 0 = percorso CPU). */
@@ -159,9 +160,10 @@ static int dsv4_mid_init(Dsv4Mid* m, const LlmDsv4Config* c, const LlmDsv4LayerW
     m->raw   = llm_dsv4_metal_buf_alloc(g_be, (size_t)raw_cap * hd * 4);
     { const size_t cc = comp_cap > 0 ? (size_t)comp_cap : 4;   /* ratio 0: buffer minimi (mai letti) */
     m->acomp = llm_dsv4_metal_buf_alloc(g_be, cc * hd * 4);
+    m->acomp_h = llm_dsv4_metal_buf_alloc(g_be, cc * hd * 2);
     m->icomp = llm_dsv4_metal_buf_alloc(g_be, cc * ihd * 4);
     m->allowed = llm_dsv4_metal_buf_alloc(g_be, cc * sizeof(int)); }
-    if (!m->sinks || !m->raw || !m->acomp || !m->icomp || !m->allowed || (ratio > 0 && (!m->w_ckv || !m->w_cgate || !m->w_cape || !m->w_cnorm || !m->st_akv || !m->st_asc))) { dsv4_mid_free(m); return 0; }
+    if (!m->sinks || !m->raw || !m->acomp || !m->acomp_h || !m->icomp || !m->allowed || (ratio > 0 && (!m->w_ckv || !m->w_cgate || !m->w_cape || !m->w_cnorm || !m->st_akv || !m->st_asc))) { dsv4_mid_free(m); return 0; }
     if (ratio > 0) dsv4_mid_state_zero(m->st_akv, m->st_asc, co * ratio * width);
     if (ratio == 4) dsv4_mid_state_zero(m->st_ikv, m->st_isc, co * ratio * iwidth);
     m->inited = 1;
@@ -201,7 +203,7 @@ static void dsv4_mid_fill(const Dsv4Mid* m, const LlmDsv4Config* c, int ratio, i
     pp->w_iqb = m->w_iqb; pp->w_iproj = m->w_iproj; pp->sinks = m->sinks;
     pp->st_akv = m->st_akv; pp->st_asc = m->st_asc; pp->st_ikv = m->st_ikv; pp->st_isc = m->st_isc;
     pp->raw = m->raw; pp->raw_cap = raw_cap; pp->raw_off = raw_off; pp->raw_full = raw_full;
-    pp->acomp = m->acomp; pp->acomp_off = n_acomp0 * hd; pp->icomp = m->icomp; pp->icomp_off = n_icomp0 * ihd;
+    pp->acomp = m->acomp; pp->acomp_off = n_acomp0 * hd; pp->acomp_h = m->acomp_h; pp->icomp = m->icomp; pp->icomp_off = n_icomp0 * ihd;
     pp->allowed = m->allowed;
     pp->xn = xn; pp->qrn = qrn; pp->q = q; pp->kv_cur = kv;
     pp->n_raw = nr; pp->n_acomp = na; pp->n_icomp = ni;
