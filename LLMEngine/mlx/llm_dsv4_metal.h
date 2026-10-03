@@ -162,7 +162,7 @@ int llm_dsv4_metal_moe_mm_batch(LlmDsv4Metal* b, int nt, const void* gate_w, con
 /* Output grouped-LoRA via mul_mm_id Q8_0 (gruppi = esperti) per `nt` token; attivazioni a half nel kernel. */
 int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes, int ng, uint32_t gd,
         uint32_t rank, const void* outb_w, size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
-        const float* heads, float* out);
+        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg);
 /* Prewarm delle view statiche (pesi) + commit UNICO del residency set. */
 void llm_dsv4_metal_prewarm_view(LlmDsv4Metal* b, const void* ptr, size_t bytes);
 void llm_dsv4_metal_prewarm_commit(LlmDsv4Metal* b);
@@ -183,7 +183,7 @@ int llm_dsv4_metal_attn_proj_mm_batch(LlmDsv4Metal* b, int nt, const void* qa_w,
 int llm_dsv4_metal_attn_out_fused_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes,
         size_t outa_lead0, int ng, uint32_t gd, uint32_t rank, const void* outb_w,
         size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
-        const float* heads, float* out);
+        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg);
 /* Come attn_proj_fused per `nt` token consecutivi (pos0..): xn [nt*embd] -> q_out [nt*qd], kv_out [nt*hd], qrn_out [nt*lq]. */
 int llm_dsv4_metal_attn_proj_fused_batch(LlmDsv4Metal* b, int nt, const void* qa_w, size_t qa_row_bytes,
         const void* kv_w, size_t kv_row_bytes, const void* qb_w, size_t qb_row_bytes,

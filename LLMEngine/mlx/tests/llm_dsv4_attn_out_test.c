@@ -21,14 +21,14 @@ int main(int argc, char** argv) {
     size_t ar = (size_t)llm_ggml_nbytes(pe->out_a_type, gd), br = (size_t)llm_ggml_nbytes(pe->out_b_type, ol);
     float* h = malloc(sizeof(float) * (size_t)nt * ht); float* ref = malloc(sizeof(float) * (size_t)nt * embd); float* got = malloc(sizeof(float) * (size_t)nt * embd);
     for (int i = 0; i < nt * ht; i++) h[i] = fr();
-    int r1 = llm_dsv4_metal_attn_out_fused_batch(be, nt, pe->out_a, ar, 0, ng, gd, rank, pe->out_b, br, ol, embd, ht, h, ref);
-    int r2 = llm_dsv4_metal_attn_out_mm_batch(be, nt, pe->out_a, ar, ng, gd, rank, pe->out_b, br, ol, embd, ht, h, got);
+    int r1 = llm_dsv4_metal_attn_out_fused_batch(be, nt, pe->out_a, ar, 0, ng, gd, rank, pe->out_b, br, ol, embd, ht, h, ref, 0, 0, 0, 0, NULL);
+    int r2 = llm_dsv4_metal_attn_out_mm_batch(be, nt, pe->out_a, ar, ng, gd, rank, pe->out_b, br, ol, embd, ht, h, got, 0, 0, 0, 0, NULL);
     double mx = 0, ss = 0, sr = 0;
     for (int i = 0; i < nt * embd; i++) { double d = fabs((double)ref[i] - got[i]); if (d > mx) mx = d; ss += d * d; sr += (double)ref[i] * ref[i]; }
     double rel = sqrt(ss / (sr > 0 ? sr : 1));
     printf("[OUT] layer=%d nt=%d ng=%d rank=%d rc=%d/%d max|diff|=%.3e rel=%.3e |ref|rms=%.3e\n", il, nt, ng, rank, r1, r2, mx, rel, sqrt(sr / ((double)nt * embd)));
-    double t0 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_attn_out_fused_batch(be, nt, pe->out_a, ar, 0, ng, gd, rank, pe->out_b, br, ol, embd, ht, h, ref);
-    double t1 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_attn_out_mm_batch(be, nt, pe->out_a, ar, ng, gd, rank, pe->out_b, br, ol, embd, ht, h, got);
+    double t0 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_attn_out_fused_batch(be, nt, pe->out_a, ar, 0, ng, gd, rank, pe->out_b, br, ol, embd, ht, h, ref, 0, 0, 0, 0, NULL);
+    double t1 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_attn_out_mm_batch(be, nt, pe->out_a, ar, ng, gd, rank, pe->out_b, br, ol, embd, ht, h, got, 0, 0, 0, 0, NULL);
     double t2 = now();
     printf("tempo (caldo): per-token-chain %.2f ms | mul_mm_id %.2f ms per chunk di %d token\n", (t1 - t0) * 200, (t2 - t1) * 200, nt);
     int ok = r1 == 0 && r2 == 0 && rel < 5e-3;

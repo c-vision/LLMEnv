@@ -177,17 +177,29 @@ static inline bool llm_dsv4_gpu_attn_finish_batch(LlmDsv4AttnGpu* m, const LlmDs
     if (!llm_dsv4_gpu_attn_batch_ready(m, il)) return false;
     const int ng = c->n_out_group, rank = c->n_lora_o, embd = c->n_embd;
     const int gd = c->n_head_dim * (c->n_head / ng), ol = ng * rank, ht = c->n_head * c->n_head_dim;
-    for (int t = 0; t < nt; t++)
-        llm_dsv4_rope_tail_layer_inplace(c, heads + (size_t)t * ht, c->n_head, c->n_head_dim, c->n_rot, pos0 + t, il, 1);
+    /* MISURA (2026-10-03): portare la RoPE INVERSA su GPU (kernel dsv4_rope_rows_inv, come ds4) rompe la
+     * parita' f32 (max|A-B| 1.21, top5 4/5) perche' la RoPE GPU non e' bit-identica alla CPU (`pow/cos`),
+     * e recupera solo ~3% CPU -> DEFAULT OFF (opzione dsv4_rope_gpu=1 per l'esperimento). */
+    int rope_gpu = 0; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_rope_gpu", &v) == 0 && v) rope_gpu = 1; }
+    if (!rope_gpu)
+        for (int t = 0; t < nt; t++)
+            llm_dsv4_rope_tail_layer_inplace(c, heads + (size_t)t * ht, c->n_head, c->n_head_dim, c->n_rot, pos0 + t, il, 1);
+    int compressed = llm_dsv4_layer_compress_ratio(c, il) != 0;
+    float rb = (compressed && c->compress_rope_freq_base > 0.0f) ? c->compress_rope_freq_base : c->rope_freq_base;
+    float rsc = (!compressed || c->rope_scale_factor <= 0.0f) ? 1.0f : 1.0f / c->rope_scale_factor;
+    float rext = (compressed && c->rope_scale_factor > 1.0f) ? 1.0f : 0.0f;
+    float raf = 1.0f; if (rext != 0.0f && rsc > 0.0f) raf /= 1.0f + 0.1f * logf(1.0f / rsc);
+    float rope_cfg[7] = { rb, rsc, rext, raf, c->rope_yarn_beta_fast, c->rope_yarn_beta_slow, (float)(compressed ? c->rope_orig_ctx : 0) };
+    int nrot = rope_gpu ? c->n_rot : 0;
     /* chunk grande: out_a/out_b come mul_mm_id Q8_0 (pesi letti una volta per il chunk; attivazioni a half come ds4, quindi
      * NON bit-exact col per-token: opzione dsv4_prefill_f16=0 per il percorso f32 identico al token-per-token) */
     int f16_ok = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_f16", &v) == 0) f16_ok = v; }   /* default: ON (come ds4) */
     if (f16_ok && nt >= 16 && llm_dsv4_metal_attn_out_mm_batch(m->be, nt, m->outa[il].w, m->outa[il].row_bytes, ng, (uint32_t)gd, (uint32_t)rank,
                                                      m->outb[il].w, m->outb[il].row_bytes, (uint32_t)ol, (uint32_t)embd,
-                                                     (uint32_t)ht, heads, out) == 0) return true;
+                                                     (uint32_t)ht, heads, out, nrot, c->n_head_dim, pos0, c->n_head, rope_gpu ? rope_cfg : NULL) == 0) return true;
     return llm_dsv4_metal_attn_out_fused_batch(m->be, nt, m->outa[il].w, m->outa[il].row_bytes, 0, ng, (uint32_t)gd,
                                                (uint32_t)rank, m->outb[il].w, m->outb[il].row_bytes, (uint32_t)ol,
-                                               (uint32_t)embd, (uint32_t)ht, heads, out) == 0;
+                                               (uint32_t)embd, (uint32_t)ht, heads, out, nrot, c->n_head_dim, pos0, c->n_head, rope_gpu ? rope_cfg : NULL) == 0;
 }
 
 #endif /* LLM_DSV4_GPU_ATTN_H */

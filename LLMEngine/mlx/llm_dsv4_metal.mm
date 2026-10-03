@@ -448,6 +448,41 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        tail[i + 1] = x0 * s + x1 * c;\n"
 "    }\n"
 "}\n"
+"/* RoPE tail INVERSA (per gli heads dopo l'attenzione): identica a dsv4_rope_rows ma con sin negato\n"
+" * (inverse = sin_sign -1, come llm_dsv4_rope_tail_ext_inplace). Stesso grid (nh, nt). */\n"
+"kernel void dsv4_rope_rows_inv(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], constant float* CF [[buffer(2)]],\n"
+"    uint2 tg [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
+"    const int n_rot = (int)P[0], head_dim = (int)P[1], pos = (int)(P[2] + tg.y); const uint nh = P[3];\n"
+"    const float freq_base = CF[0], freq_scale = CF[1], ext_factor = CF[2], attn_factor = CF[3];\n"
+"    const float beta_fast = CF[4], beta_slow = CF[5]; const float n_ctx_orig = CF[6];\n"
+"    const int n_nope = head_dim - n_rot;\n"
+"    const float theta_scale = pow(freq_base, -2.f / (float)n_rot);\n"
+"    float corr0 = 0.f, corr1 = 0.f;\n"
+"    const float TWO_PI = 6.28318530717958647692f;\n"
+"    if (ext_factor != 0.f) {\n"
+"        float start = floor((float)n_rot * log(n_ctx_orig / (beta_fast * TWO_PI)) / (2.f * log(freq_base)));\n"
+"        float end = ceil((float)n_rot * log(n_ctx_orig / (beta_slow * TWO_PI)) / (2.f * log(freq_base)));\n"
+"        corr0 = max(0.f, start); corr1 = min((float)(n_rot - 1), end);\n"
+"    }\n"
+"    device float* tail = X + ((ulong)tg.y * nh + tg.x) * (ulong)head_dim + n_nope;\n"
+"    for (int i = (int)tiisg * 2; i < n_rot; i += 64) {\n"
+"        float theta_extrap = (float)pos;\n"
+"        for (int t = 0; t < i; t += 2) theta_extrap *= theta_scale;\n"
+"        float theta_interp = freq_scale * theta_extrap;\n"
+"        float theta = theta_interp, mscale = attn_factor;\n"
+"        if (ext_factor != 0.f) {\n"
+"            float y = ((float)(i / 2) - corr0) / max(0.001f, corr1 - corr0);\n"
+"            float ramp = 1.f - min(1.f, max(0.f, y));\n"
+"            float ramp_mix = ramp * ext_factor;\n"
+"            theta = theta_interp * (1.f - ramp_mix) + theta_extrap * ramp_mix;\n"
+"            mscale *= 1.f + 0.1f * log(1.f / freq_scale);\n"
+"        }\n"
+"        float c = cos(theta) * mscale, s = -sin(theta) * mscale;\n"
+"        float x0 = tail[i], x1 = tail[i + 1];\n"
+"        tail[i] = x0 * c - x1 * s;\n"
+"        tail[i + 1] = x0 * s + x1 * c;\n"
+"    }\n"
+"}\n"
 /* ── mHC BATCHED (token = grid y): stessa matematica di llm_dsv4_block_pre/post, per il prefill a chunk ── */
 /* scale[t] = 1/sqrt(mean(x^2)+eps) sull'intero stato [HC*D] del token. P={n}. */
 "kernel void dsv4_hcb_scale(device const float* X [[buffer(0)]], device float* SC [[buffer(1)]], constant uint* P [[buffer(2)]], constant float* CF [[buffer(3)]],\n"
@@ -1285,7 +1320,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
     id<MTLComputePipelineState> pso_mmp_q8, pso_mmp_iq2, pso_mmp_q2k, pso_mmp_q4k, pso_mmp_iq2a, pso_mmp_q2ka, pso_mmp_q4ka;   /* MPP (nil se non disponibile) */
-    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_rope_ev, pso_iscore_t, pso_itopk_t, pso_apart_t, pso_apart_mma, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
+    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_rope_rows_inv, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_rope_ev, pso_iscore_t, pso_itopk_t, pso_apart_t, pso_apart_mma, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
@@ -1457,7 +1492,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
             { "dsv4_hcb_sinkhorn", &b->pso_hcb_sink }, { "dsv4_hcb_norm", &b->pso_hcb_norm }, { "dsv4_hcb_post", &b->pso_hcb_post }, { "kernel_mul_mm_id_iq2_xxs_addr_f32", &b->pso_mm_iq2a },
             { "kernel_mul_mm_id_q2_K_addr_f32", &b->pso_mm_q2ka }, { "kernel_mul_mm_id_q4_K_addr_f32", &b->pso_mm_q4ka }, { "kernel_mul_mv_slots6_q4_K_pair_swiglu_f32", &b->pso_q4_pair },
             { "kernel_mul_mv_slots6_q4_K_sum6_f32", &b->pso_q4_sum6 }, { "dsv4_rms_w_rows", &b->pso_rms_rows },
-            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_comp_fp8_rows", &b->pso_fp8_rows }, { "dsv4_comp_pool_ev", &b->pso_pool_ev }, { "dsv4_rope_ev", &b->pso_rope_ev }, { "dsv4_indexer_scores_t", &b->pso_iscore_t }, { "dsv4_indexer_topk_t", &b->pso_itopk_t }, { "dsv4_attn_part_t", &b->pso_apart_t }, { "dsv4_attn_part_mma", &b->pso_apart_mma }, { "dsv4_attn_merge_t", &b->pso_amerge_t }, { "dsv4_ape_rows", &b->pso_ape_rows }, { "dsv4_rope_rows", &b->pso_rope_rows },
+            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_comp_fp8_rows", &b->pso_fp8_rows }, { "dsv4_comp_pool_ev", &b->pso_pool_ev }, { "dsv4_rope_ev", &b->pso_rope_ev }, { "dsv4_indexer_scores_t", &b->pso_iscore_t }, { "dsv4_indexer_topk_t", &b->pso_itopk_t }, { "dsv4_attn_part_t", &b->pso_apart_t }, { "dsv4_attn_part_mma", &b->pso_apart_mma }, { "dsv4_attn_merge_t", &b->pso_amerge_t }, { "dsv4_ape_rows", &b->pso_ape_rows }, { "dsv4_rope_rows", &b->pso_rope_rows }, { "dsv4_rope_rows_inv", &b->pso_rope_rows_inv },
             { "kernel_mul_mm_id_map0_ne20_8", &b->pso_mm_map8 }, { "kernel_mul_mm_id_q8_0_f32", &b->pso_mm_q8 }, { "kernel_mul_mm_id_iq2_xxs_f32", &b->pso_mm_iq2 },
             { "kernel_mul_mm_id_q2_K_f32", &b->pso_mm_q2k }, { "kernel_mul_mm_id_q4_K_f32", &b->pso_mm_q4k },
             { "dsv4_swiglu_w", &b->pso_swiglu_w }, { "dsv4_sum_slots6", &b->pso_sum_slots6 } };
@@ -2349,7 +2384,7 @@ int llm_dsv4_metal_moe_mm_addr_batch(LlmDsv4Metal* b, int nt, const void* const*
  * Pesi Q8_0, heads [nt*heads_total] f32 -> out [nt*embd] f32. Attivazioni a half nel kernel (staging come ds4). 0 = ok. */
 int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w, size_t outa_row_bytes, int ng, uint32_t gd,
         uint32_t rank, const void* outb_w, size_t outb_row_bytes, uint32_t ol, uint32_t embd, uint32_t heads_total,
-        const float* heads, float* out) {
+        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg) {
     if (!b || nt <= 0 || nt > 4096 || ng <= 0 || ng != 8 || !b->pso_mm_q8 || !b->pso_mm_map8 || !b->pso_mm_map1) return -1;
     if ((rank % 64u) || (embd % 64u) || (gd % 32u) || (ol % 32u)) return -1;
     id<MTLBuffer> IDS = dsv4_scratch(b, &b->sx[29], &b->sx_cap[29], (size_t)nt * ng * 4);
@@ -2378,6 +2413,14 @@ int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w
     ab.ne20 = 1; ab.ne21 = nt; ab.ne0 = (int32_t)embd; ab.ne1 = 1; ab.r2 = 1; ab.r3 = 1;
     id<MTLCommandBuffer> cb = [b->queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    /* RoPE INVERSA su GPU sugli heads (device): elimina il sincosf CPU del path a chunk (come ds4). */
+    if (n_rot > 0 && b->pso_rope_rows_inv && rope_cfg) {
+        [e setComputePipelineState:b->pso_rope_rows_inv];
+        [e setBuffer:H offset:0 atIndex:0];
+        { uint32_t PR[4] = { (uint32_t)n_rot, (uint32_t)hd_rope, (uint32_t)pos0, (uint32_t)n_head }; [e setBytes:PR length:sizeof(PR) atIndex:1]; }
+        [e setBytes:rope_cfg length:7 * sizeof(float) atIndex:2];
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_head, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    }
     dsv4_encode_mm_id_full(e, b->pso_mm_map8, dsv4_pso_q8(b), &ma, &aa, IDS, MA, WA, la, H, 0, LOW);
     dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &mb, &ab, IDB, MB, WB, lb, LOW, 0, OUT);
     [e endEncoding];
@@ -2574,7 +2617,7 @@ int llm_dsv4_metal_attn_out_fused_batch(LlmDsv4Metal* b, int nt,
         int ng, uint32_t gd, uint32_t rank,
         const void* outb_w, size_t outb_row_bytes,
         uint32_t ol, uint32_t embd, uint32_t heads_total,
-        const float* heads, float* out) {
+        const float* heads, float* out, int n_rot, int hd_rope, int pos0, int n_head, const float* rope_cfg) {
     if (!b || !b->pso || ng <= 0 || ng > 64 || nt <= 0 || !outa_w || !outb_w || !heads || !out) return -1;
     size_t abytes = (size_t)ng * rank * outa_row_bytes;
     size_t bbytes = (size_t)embd * outb_row_bytes;
@@ -2589,6 +2632,13 @@ int llm_dsv4_metal_attn_out_fused_batch(LlmDsv4Metal* b, int nt,
     if (rc == 0) {
         id<MTLCommandBuffer> cb = [b->queue commandBuffer];
         id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        if (n_rot > 0 && b->pso_rope_rows_inv && rope_cfg) {
+            [e setComputePipelineState:b->pso_rope_rows_inv];
+            [e setBuffer:H offset:0 atIndex:0];
+            { uint32_t PR[4] = { (uint32_t)n_rot, (uint32_t)hd_rope, (uint32_t)pos0, (uint32_t)n_head }; [e setBytes:PR length:sizeof(PR) atIndex:1]; }
+            [e setBytes:rope_cfg length:7 * sizeof(float) atIndex:2];
+            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_head, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        }
         for (int t = 0; t < nt; t++) {
             const size_t hbase = (size_t)t * heads_total * sizeof(float);
             for (int g = 0; g < ng; g++) {
@@ -2625,7 +2675,8 @@ int llm_dsv4_metal_attn_out_fused(LlmDsv4Metal* b,
         uint32_t ol, uint32_t embd, uint32_t heads_total,
         const float* heads, float* out) {
     return llm_dsv4_metal_attn_out_fused_batch(b, 1, outa_w, outa_row_bytes, outa_lead0, ng, gd, rank,
-                                               outb_w, outb_row_bytes, ol, embd, heads_total, heads, out);
+                                               outb_w, outb_row_bytes, ol, embd, heads_total, heads, out,
+                                               0, 0, 0, 0, NULL);   /* single-token: RoPE gia' fatta su CPU dal chiamante */
 }
 
 /* Codifica l'attenzione mista: split (flash-decoding) + merge se possibile (hd multiplo di 128, <=512),
