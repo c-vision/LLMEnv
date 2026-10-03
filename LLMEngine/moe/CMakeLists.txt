@@ -138,6 +138,10 @@ add_executable(test_moe_gguf_corrupt tests/test_moe_gguf_corrupt.c)
 target_link_libraries(test_moe_gguf_corrupt PRIVATE llmengine_moe)
 target_compile_options(test_moe_gguf_corrupt PRIVATE -Wall -Wextra -Wpedantic)
 
+# K8: bench LOAD-FREE dello storage (buffered vs F_NOCACHE/O_DIRECT): solo byte+tempo, no modello.
+add_executable(moe_iobw tools/moe_iobw.c)
+target_compile_options(moe_iobw PRIVATE -Wall -Wextra -Wpedantic)
+
 # [GGUF DEPRECATO] target test_moe_provider rimosso
 
 # [GGUF DEPRECATO] target test_moe_qwen3 rimosso
