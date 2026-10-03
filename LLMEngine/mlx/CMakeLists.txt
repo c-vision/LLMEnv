@@ -141,6 +141,75 @@ if(TARGET mlxc)
     endif()
 endif()
 
+# ── LLMEnv patch mlx-c (2026-10-03) — slice_update_inplace VERO O(n) ──────────
+# La patch precedente aggiungeva `mlx_slice_update_inplace` ma chiamando lo `slice_update`
+# FUNZIONALE (+ overwrite_descriptor) => COPIA O(cap) del buffer. Questa la rende una VERA
+# scrittura in-place O(n) via l'op MLX `slice_update_inplace` (patch mlx_inplace_slice.patch):
+# elimina la ricopia O(pos) dell'append KV (misurato 1,6x@16k / 4,4x@32k sul decode, GEN_IDS
+# identici). Idempotente (guard su GMB_SLICEUP_COPY); A/B parity con GMB_SLICEUP_COPY=1.
+if(TARGET mlxc)
+    get_target_property(LLM_MLXC_SRC_DIR mlxc SOURCE_DIR)
+    if(LLM_MLXC_SRC_DIR AND EXISTS "${LLM_MLXC_SRC_DIR}/mlx/c/ops.cpp")
+        file(READ "${LLM_MLXC_SRC_DIR}/mlx/c/ops.cpp" LLM_MLXC_OPS2)
+        string(FIND "${LLM_MLXC_OPS2}" "GMB_SLICEUP_COPY" LLM_MLXC2_ALREADY)
+        if(NOT LLM_MLXC2_ALREADY EQUAL -1)
+            message(STATUS "llmengine_mlx: inplace slice_update gia' presente in ${LLM_MLXC_SRC_DIR} (patch saltata)")
+        else()
+            execute_process(
+                COMMAND patch -p1 --forward --dry-run --silent -i
+                        "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_c_inplace_slice.patch"
+                WORKING_DIRECTORY "${LLM_MLXC_SRC_DIR}"
+                RESULT_VARIABLE LLM_MLXC2_DRYRUN OUTPUT_QUIET ERROR_QUIET)
+            if(LLM_MLXC2_DRYRUN EQUAL 0)
+                execute_process(
+                    COMMAND patch -p1 --forward -i
+                            "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_c_inplace_slice.patch"
+                    WORKING_DIRECTORY "${LLM_MLXC_SRC_DIR}"
+                    RESULT_VARIABLE LLM_MLXC2_APPLY)
+                if(LLM_MLXC2_APPLY EQUAL 0)
+                    message(STATUS "llmengine_mlx: applicata patch mlx-c inplace slice_update")
+                else()
+                    message(WARNING "llmengine_mlx: patch mlx-c inplace slice_update FALLITA (rc=${LLM_MLXC2_APPLY})")
+                endif()
+            endif()
+        endif()
+    endif()
+endif()
+
+# ── LLMEnv patch MLX (2026-10-03) — op `slice_update_inplace` (append KV O(n)) ─
+# Aggiunge al core MLX la primitiva `SliceUpdate` con flag `inplace` + l'op
+# `slice_update_inplace`: ALIASA il buffer di `src` e scrive solo la regione [start,stop) (O(n)),
+# senza la copia O(cap) dello `slice_update` funzionale. Idempotente (guard su
+# `out.copy_shared_buffer(in);` in indexing.cpp).
+if(TARGET mlx)
+    get_target_property(LLM_MLX_SRC_DIR mlx SOURCE_DIR)
+    if(LLM_MLX_SRC_DIR AND EXISTS "${LLM_MLX_SRC_DIR}/mlx/backend/metal/indexing.cpp")
+        file(READ "${LLM_MLX_SRC_DIR}/mlx/backend/metal/indexing.cpp" LLM_MLX_IDX)
+        string(FIND "${LLM_MLX_IDX}" "out.copy_shared_buffer(in);" LLM_MLX_INP_ALREADY)
+        if(NOT LLM_MLX_INP_ALREADY EQUAL -1)
+            message(STATUS "llmengine_mlx: slice_update_inplace gia' presente in ${LLM_MLX_SRC_DIR} (patch saltata)")
+        else()
+            execute_process(
+                COMMAND patch -p1 --forward --dry-run --silent -i
+                        "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_inplace_slice.patch"
+                WORKING_DIRECTORY "${LLM_MLX_SRC_DIR}"
+                RESULT_VARIABLE LLM_MLX_INP_DRYRUN OUTPUT_QUIET ERROR_QUIET)
+            if(LLM_MLX_INP_DRYRUN EQUAL 0)
+                execute_process(
+                    COMMAND patch -p1 --forward -i
+                            "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx_inplace_slice.patch"
+                    WORKING_DIRECTORY "${LLM_MLX_SRC_DIR}"
+                    RESULT_VARIABLE LLM_MLX_INP_APPLY)
+                if(LLM_MLX_INP_APPLY EQUAL 0)
+                    message(STATUS "llmengine_mlx: applicata patch MLX slice_update_inplace")
+                else()
+                    message(WARNING "llmengine_mlx: patch MLX slice_update_inplace FALLITA (rc=${LLM_MLX_INP_APPLY})")
+                endif()
+            endif()
+        endif()
+    endif()
+endif()
+
 # ── LLMEnv patch MLX (2026-09-12) ─────────────────────────────────────────────
 # Il kernel `qmv_wide` di MLX (usato per M>=2) NON e' bit-identico al `qmv`
 # (M==1): riduzione a shuffle-ladder su k_lanes=8 invece del simd_sum su 32.

@@ -1,0 +1,25 @@
+--- a/mlx/c/ops.cpp
++++ b/mlx/c/ops.cpp
+@@ -3245,8 +3245,21 @@
+       auto sa = mlx::core::array(st.data(), {static_cast<int>(st.size())}, mlx::core::int32);
+       auto res = mlx::core::slice_update(a, mlx_array_get_(update), sa, ax, mlx_stream_get_(s));
+       a.overwrite_descriptor(res);
++    } else if (getenv("GMB_SLICEUP_COPY")) {
++      /* A/B parity: vecchio comportamento (copia O(cap) via slice_update funzionale). */
++      auto res = mlx::core::slice_update(
++        a, mlx_array_get_(update),
++        mlx::core::Shape(start, start + start_num),
++        mlx::core::Shape(stop, stop + stop_num),
++        mlx::core::Shape(strides, strides + strides_num),
++        mlx_stream_get_(s));
++      a.overwrite_descriptor(res);
+     } else {
+-      auto res = mlx::core::slice_update(
++      /* GMBASIC 2026-10-03: vera scrittura IN-PLACE (O(n)) invece della copia O(cap) del
++       * `slice_update` funzionale. `slice_update_inplace` (op MLX) ALIASA il buffer di `a` e
++       * scrive solo la regione [start,stop) in-stream. `a` riprende il descrittore del
++       * risultato (dipendenza grafo preservata). */
++      auto res = mlx::core::slice_update_inplace(
+         a,
+         mlx_array_get_(update),
+         mlx::core::Shape(start, start + start_num),

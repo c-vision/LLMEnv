@@ -1,0 +1,139 @@
+--- a/mlx/primitives.h
++++ b/mlx/primitives.h
+@@ -2066,12 +2066,14 @@
+       ReduceType reduce_type,
+       const Shape& start_indices,
+       const Shape& end_indices,
+-      const Shape& strides)
++      const Shape& strides,
++      bool inplace = false)
+       : UnaryPrimitive(stream),
+         reduce_type_(reduce_type),
+         start_indices_(start_indices),
+         end_indices_(end_indices),
+-        strides_(strides) {}
++        strides_(strides),
++        inplace_(inplace) {}
+ 
+   void eval_cpu(const std::vector<array>& inputs, array& out) override;
+   void eval_gpu(const std::vector<array>& inputs, array& out) override;
+@@ -2097,9 +2099,10 @@
+ 
+   bool is_equivalent(const Primitive& other) const override;
+   DEFINE_INPUT_OUTPUT_SHAPE()
++  bool inplace() const { return inplace_; }
+   auto state() const {
+     return std::make_tuple(
+-        reduce_type_, start_indices_, end_indices_, strides_);
++        reduce_type_, start_indices_, end_indices_, strides_, inplace_);
+   }
+ 
+  private:
+@@ -2107,6 +2110,7 @@
+   Shape start_indices_;
+   Shape end_indices_;
+   Shape strides_;
++  bool inplace_{false};
+ };
+ 
+ class DynamicSlice : public UnaryPrimitive {
+--- a/mlx/backend/metal/indexing.cpp
++++ b/mlx/backend/metal/indexing.cpp
+@@ -743,10 +743,18 @@
+     return;
+   }
+ 
+-  auto ctype = in.flags().contiguous && in.size() == in.data_size()
+-      ? CopyType::Vector
+-      : CopyType::General;
+-  copy_gpu(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype, stream());
++  /* PROTOTIPO GMBASIC (gated MLX_INPLACE_SLICE): append IN-PLACE, senza la copia O(cap) di
++   * `in`->`out`. `out` ALIASA il buffer di `in` e si scrive solo la regione `upd`, ordinato nello
++   * stream (nessun round-trip host). Serve per l'append KV O(n). Default OFF: comportamento
++   * invariato (copia) se l'env e' assente. */
++  if (inplace()) {
++    out.copy_shared_buffer(in);
++  } else {
++    auto ctype = in.flags().contiguous && in.size() == in.data_size()
++        ? CopyType::Vector
++        : CopyType::General;
++    copy_gpu(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype, stream());
++  }
+   auto [data_offset, out_strides] =
+       prepare_slice(out, start_indices_, strides_);
+ 
+--- a/mlx/primitives.cpp
++++ b/mlx/primitives.cpp
+@@ -5170,7 +5170,8 @@
+   return (
+       reduce_type_ == s_other.reduce_type_ &&
+       start_indices_ == s_other.start_indices_ &&
+-      end_indices_ == s_other.end_indices_ && strides_ == s_other.strides_);
++      end_indices_ == s_other.end_indices_ && strides_ == s_other.strides_ &&
++      inplace_ == s_other.inplace_);
+ }
+ 
+ std::pair<std::vector<array>, std::vector<int>> DynamicSlice::vmap(
+--- a/mlx/ops.cpp
++++ b/mlx/ops.cpp
+@@ -898,6 +898,42 @@
+           std::move(start),
+           std::move(stop),
+           std::move(strides)),
++      {src, upd});
++}
++
++/* GMBASIC (2026-10-03): variante IN-PLACE — scrive `update` nella regione `[start,stop)` del
++ * buffer di `src` SENZA copiare `src` (O(n) invece di O(cap)). Muta il buffer di `src` in-stream.
++ * Usata SOLO per l'append KV (il chiamante ri-assegna il risultato allo stesso slot). */
++array slice_update_inplace(
++    const array& src,
++    const array& update,
++    Shape start,
++    Shape stop,
++    Shape strides,
++    StreamOrDevice s /* = {} */) {
++  if (start.size() != src.ndim() || stop.size() != src.ndim() ||
++      strides.size() != src.ndim()) {
++    std::ostringstream msg;
++    msg << "[slice_update_inplace] Invalid number of indices or strides for "
++        << "array with dimension " << src.ndim() << ".";
++    throw std::invalid_argument(msg.str());
++  }
++  auto [has_neg_strides, upd_shape] =
++      normalize_slice(src.shape(), start, stop, strides);
++  auto upd = broadcast_to(astype(update, src.dtype(), s), upd_shape, s);
++  if (!has_neg_strides && upd_shape == src.shape()) {
++    return upd;
++  }
++  return array(
++      src.shape(),
++      src.dtype(),
++      std::make_shared<SliceUpdate>(
++          to_stream(s),
++          SliceUpdate::None,
++          std::move(start),
++          std::move(stop),
++          std::move(strides),
++          /*inplace=*/true),
+       {src, upd});
+ }
+ 
+--- a/mlx/ops.h
++++ b/mlx/ops.h
+@@ -215,6 +215,15 @@
+ 
+ /** Update a slice from the source array. */
+ MLX_API array slice_update(
++    const array& src,
++    const array& update,
++    Shape start,
++    Shape stop,
++    Shape strides,
++    StreamOrDevice s = {});
++
++/** GMBASIC: update a slice IN-PLACE (no O(cap) copy of src; writes only the region). */
++MLX_API array slice_update_inplace(
+     const array& src,
+     const array& update,
+     Shape start,
