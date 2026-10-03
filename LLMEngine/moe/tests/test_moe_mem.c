@@ -67,6 +67,35 @@ int main(void) {
     assert(llmengine_moe_mem_create(&bad, 0, 0.8, 0.95) == LLMENGINE_MOE_ERR_INVALID);
     assert(llmengine_moe_mem_create(&bad, 1000, 0.95, 0.80) == LLMENGINE_MOE_ERR_INVALID);
 
+    /* 9. K3 — oracolo di allocazione (model-free): trunk/dense PINNATO, evinto per ULTIMO.
+     * "Allocation beats capacity": il trunk si pinna prima, la cache esperti riceve il residuo. */
+    assert(llmengine_moe_mem_evict_priority(LLMENGINE_MOE_MEM_DENSE) == 3);
+    assert(llmengine_moe_mem_evict_priority(LLMENGINE_MOE_MEM_DENSE) >
+           llmengine_moe_mem_evict_priority(LLMENGINE_MOE_MEM_KV));
+    assert(llmengine_moe_mem_evict_priority(LLMENGINE_MOE_MEM_KV) >
+           llmengine_moe_mem_evict_priority(LLMENGINE_MOE_MEM_EXPERT_RAM));
+    assert(llmengine_moe_mem_evict_priority(LLMENGINE_MOE_MEM_EXPERT_RAM) >
+           llmengine_moe_mem_evict_priority(LLMENGINE_MOE_MEM_PREFETCH));
+
+    LlmEngineMoeMemMgr* m3 = NULL;
+    assert(llmengine_moe_mem_create(&m3, 1000, 0.80, 0.95) == LLMENGINE_MOE_OK);
+    /* trunk pinnato per primo (700); esperti col residuo (200) */
+    assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_DENSE, 700) == LLMENGINE_MOE_OK);
+    assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_EXPERT_RAM, 200) == LLMENGINE_MOE_OK);
+    assert(llmengine_moe_mem_pressure(m3) == LLMENGINE_MOE_PRESS_WARNING); /* 0.90 */
+    /* a budget esaurito il PREFETCH e' rifiutato, il trunk resta intatto */
+    assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_PREFETCH, 200) == LLMENGINE_MOE_ERR_NO_MEMORY);
+    assert(llmengine_moe_mem_cat_used(m3, LLMENGINE_MOE_MEM_DENSE) == 700);
+    assert(llmengine_moe_mem_cat_used(m3, LLMENGINE_MOE_MEM_EXPERT_RAM) == 200);
+    /* anche a CRITICAL l'ultimo slot disponibile va al trunk, non al prefetch */
+    assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_KV, 150) == LLMENGINE_MOE_OK); /* 950 -> 0.95 */
+    assert(llmengine_moe_mem_pressure(m3) == LLMENGINE_MOE_PRESS_CRITICAL);
+    assert(llmengine_moe_mem_allow_prefetch(m3) == 0);
+    assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_DENSE, 50) == LLMENGINE_MOE_OK); /* 1000 */
+    assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_PREFETCH, 1) == LLMENGINE_MOE_ERR_NO_MEMORY);
+    assert(llmengine_moe_mem_cat_used(m3, LLMENGINE_MOE_MEM_DENSE) == 750); /* trunk mai evinto dal manager */
+    llmengine_moe_mem_destroy(m3);
+
     llmengine_moe_mem_destroy(m);
     printf("test_moe_mem: PASS\n");
     return 0;

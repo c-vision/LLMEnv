@@ -52,7 +52,9 @@ double llmengine_moe_mem_prefetch_factor(const LlmEngineMoeMemMgr* m);
 int llmengine_moe_mem_allow_prefetch(const LlmEngineMoeMemMgr* m);
 
 /* Ordine di eviction a CRITICAL: priorita' piu' BASSA = da evincere PRIMA. A pari pressione le
- * PREFETCH (priorita' 0) vengono evinte prima degli expert attivi (1) e delle KV (2). */
+ * PREFETCH (0) vengono evinte prima degli expert attivi (1), poi le KV (2) e **per ultimo** il
+ * DENSE/trunk (3): la parte always-used e' PINNATA (K3 — "allocation beats capacity": il trunk
+ * si pinna prima, la cache esperti riceve il residuo misurato con il replay K1). */
 int llmengine_moe_mem_evict_priority(LlmEngineMoeMemCat cat);
 
 #endif /* LLMENGINE_MOE_MEM_H */

@@ -86,5 +86,6 @@ int llmengine_moe_mem_allow_prefetch(const LlmEngineMoeMemMgr* m) {
 int llmengine_moe_mem_evict_priority(LlmEngineMoeMemCat cat) {
     if (cat == LLMENGINE_MOE_MEM_PREFETCH) return 0;      /* da evincere PRIMA */
     if (cat == LLMENGINE_MOE_MEM_KV) return 2;
+    if (cat == LLMENGINE_MOE_MEM_DENSE) return 3;     /* K3: trunk/dense pinnato — per ULTIMO */
     return 1;                                        /* expert attivi in mezzo */
 }
