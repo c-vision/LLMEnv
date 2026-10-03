@@ -1134,6 +1134,10 @@ extern mlx_array g_spec_snap_v[];
 extern int g_spec_capture;
 /* Precarica il drafter DFlash2 PRIMA del prefill (evita l'OOM del picco prefill + drafter). */
 void llm_mlx_df2_preload(LlmMlxModel* m);
+/* 1 se la generazione usera' un drafter DFlash2 (opt `dflash_model` esplicita OPPURE auto-detect
+ * del sibling <stem>-DFlash2). Usato per NON usare la radix prefix-cache (append_reuse_prefix non
+ * fa il prefill -> cattura-ctx non armata -> drafter degenerato). Diagnosi 2026-10-03. */
+int llm_mlx_df2_will_use(LlmMlxModel* m);
 /* HOOK cattura-DFlash2-durante-prefill (in forward_tokens_batch): armato da llm_mlx_df2_preload. */
 extern int g_df2_pf_active;
 extern void (*g_df2_pf_hook)(int layer, mlx_array h, int n_tokens, int cache_offset);

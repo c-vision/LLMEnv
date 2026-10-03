@@ -730,6 +730,14 @@ int llm_ai_mlx_session_append_auto_prefix(llm_ai_mlx_session_handle sh, llm_ai_m
         return rc;
     }
 
+    /* DFlash2 (drafter esplicito O auto-rilevato): la radix prefix-cache e' INCOMPATIBILE con la
+     * cattura-ctx del drafter. `append_reuse_prefix` NON esegue il prefill (riusa la KV salvata),
+     * quindi `llm_mlx_df2_preload`/arm non partono -> la cattura non e' armata -> il drafter
+     * degenera (loop di token, es. `<think>` x N). Forza l'append LINEARE, che esegue il prefill e
+     * arma la cattura. Diagnosi 2026-10-03 (test DFlash2Native: il provider "greedy", auto-detect
+     * del sibling, andava in loop; con append lineare = 19s PASS). */
+    if (llm_mlx_df2_will_use(m)) return llm_ai_mlx_session_append(sh, token_ids, n_ids);
+
     /* radix-trie: trova il prefisso salvato piu' lungo (O(prefix_len)) */
     int best_pid = -1;
     int d = llm_radix_longest_match(&m->radix, token_ids, n_ids, &best_pid);

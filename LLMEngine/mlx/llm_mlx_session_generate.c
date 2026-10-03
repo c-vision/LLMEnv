@@ -383,6 +383,18 @@ static int llm_mlx_df2_autodetect(LlmMlxModel* m, char* out, int cap) {
     return 0;
 }
 
+/* 1 se la generazione usera' un drafter DFlash2 (opt esplicita o auto-detect). SIDE-EFFECT FREE:
+ * non crea il drafter ne' tocca i global g_df2_*. Serve a decidere se EVITARE la radix
+ * prefix-cache (llm_ai_mlx_session_append_auto_prefix), perche' il path di riuso prefisso non
+ * esegue il prefill e quindi non arma la cattura-ctx del drafter -> draft degenerato (loop).
+ * Diagnosi 2026-10-03 (test DFlash2Native: greedy con auto-detect andava in loop `<think>` x40). */
+int llm_mlx_df2_will_use(LlmMlxModel* m) {
+    if (m == NULL || m->dsv4 != NULL || m->dsv41 != NULL) return 0;
+    char path[1024];
+    if (llm_ai_mlx_opt_get_str("dflash_model", path, sizeof(path)) == 0 && path[0] != 0) return 1;
+    return llm_mlx_df2_autodetect(m, path, sizeof(path));
+}
+
 static llm_ai_mlx_dflash2_handle llm_mlx_df2_for(LlmMlxModel* m) {
     if (g_df2_target == m) return g_df2_handle;   /* gia' tentato per questo target */
     char path[1024];
@@ -651,8 +663,13 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
              * impostato solo per la durata di QUESTA chiamata (vedi campo in LlmMlxModel). */
             m->q4e_ctx_ids = s->history; m->q4e_ctx_len = s->history_len;
             m->aux_cache = s->aux_cache;
-            ok = forward_one_token(m, s, t.embed_w, t.embed_s, t.embed_b, current_id, s->cache_offset,
+            { const bool _ft = getenv("LLM_FWD_TIME") != NULL; struct timespec _fa, _fb;
+              if (_ft) clock_gettime(CLOCK_MONOTONIC, &_fa);
+              ok = forward_one_token(m, s, t.embed_w, t.embed_s, t.embed_b, current_id, s->cache_offset,
                                     s->k_cache, s->v_cache, s->has_cache, &h);
+              if (_ft) { clock_gettime(CLOCK_MONOTONIC, &_fb);
+                fprintf(stderr, "[FWD_TIME] step=%d fwd=%.2f ms\n", step,
+                        (double)(_fb.tv_sec-_fa.tv_sec)*1e3 + (double)(_fb.tv_nsec-_fa.tv_nsec)*1e-6); } }
             m->q4e_ctx_ids = NULL; m->q4e_ctx_len = 0;
             m->aux_cache = NULL;
         }
@@ -689,8 +706,13 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
             }
         }
         int32_t next_id = 0;
-        if (ok) ok = final_step(m, h, t.final_norm_w, t.out_w, t.out_s, t.out_b,
+        { const bool _ft = getenv("LLM_FWD_TIME") != NULL; struct timespec _fa, _fb;
+          if (_ft) clock_gettime(CLOCK_MONOTONIC, &_fa);
+          if (ok) ok = final_step(m, h, t.final_norm_w, t.out_w, t.out_s, t.out_b,
                                 llm_mlx_session_sampling(s), &next_id);
+          if (_ft) { clock_gettime(CLOCK_MONOTONIC, &_fb);
+            fprintf(stderr, "[FWD_TIME] step=%d final=%.2f ms\n", step,
+                    (double)(_fb.tv_sec-_fa.tv_sec)*1e3 + (double)(_fb.tv_nsec-_fa.tv_nsec)*1e-6); } }
         if (dp_dec) {
             clock_gettime(CLOCK_MONOTONIC, &dpt2);
             dp_eval_s += (double)(dpt2.tv_sec - dpt1.tv_sec) + (double)(dpt2.tv_nsec - dpt1.tv_nsec) * 1e-9;
