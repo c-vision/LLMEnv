@@ -86,6 +86,11 @@ void llmengine_moe_prof_reset(LlmEngineMoeProfiler* p);
 
 /* ── trace su file ─────────────────────────────────────────────────────────── */
 LlmEngineMoeStatus llmengine_moe_prof_trace_open(LlmEngineMoeProfiler* p, const char* path);
+/* Come sopra, ma registra nell'header i parametri del run utili al replay offline (K1):
+ * `cache_budget` (byte della cache esperti) e `expert_size` (byte per esperto, per il
+ * dimensionamento a slot). */
+LlmEngineMoeStatus llmengine_moe_prof_trace_open_ex(LlmEngineMoeProfiler* p, const char* path,
+                                          uint64_t cache_budget, uint64_t expert_size);
 void llmengine_moe_prof_trace_close(LlmEngineMoeProfiler* p);
 int llmengine_moe_prof_trace_active(const LlmEngineMoeProfiler* p);
 /* Emette un evento (no-op se il trace non e' attivo). `end` emette anche PHASE_TIME. */
@@ -113,6 +118,10 @@ typedef struct {
 } LlmEngineMoeTraceSummary;
 
 LlmEngineMoeStatus llmengine_moe_trace_summary(const char* path, LlmEngineMoeTraceSummary* out);
+
+/* Meta del trace (header): budget cache del run e byte-per-esperto (0 se non registrati).
+ * Usata dal replay offline K1 (`tools/moe_sim`). */
+LlmEngineMoeStatus llmengine_moe_trace_meta(const char* path, uint64_t* cache_budget, uint64_t* expert_size);
 
 /* Confronto tra due run (delta per fase e per conteggio): a - b. */
 typedef struct {

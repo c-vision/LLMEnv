@@ -9,6 +9,7 @@
 
 #include "llmengine_moe_types.h"
 #include "llmengine_moe_cache.h"
+#include "llmengine_moe_prof.h"
 
 typedef struct LlmEngineMoeAsync LlmEngineMoeAsync;
 
@@ -37,6 +38,10 @@ LlmEngineMoeStatus llmengine_moe_async_prefetch(LlmEngineMoeAsync* a, LlmEngineM
 
 /* Cancella TUTTE le prefetch in coda (mai le REQUIRED). Ritorna quante ne ha cancellate. */
 uint32_t llmengine_moe_async_cancel_prefetch(LlmEngineMoeAsync* a);
+
+/* K1: profiler opzionale — quando impostato, ogni richiesta emette nel trace CACHE_HIT o
+ * CACHE_MISS (con la chiave), rendendo il `.moetrace` ri-giocabile offline da `tools/moe_sim`. */
+void llmengine_moe_async_set_profiler(LlmEngineMoeAsync* a, LlmEngineMoeProfiler* p);
 
 void llmengine_moe_async_stats(LlmEngineMoeAsync* a, LlmEngineMoeAsyncStats* out);
 

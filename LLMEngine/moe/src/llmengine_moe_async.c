@@ -31,6 +31,7 @@ struct LlmEngineMoeAsync {
     LlmEngineMoeCacheLoadFn load;
     void* ctx;
     LlmEngineMoeExpertCache* cache;
+    LlmEngineMoeProfiler* prof;   /* K1: trace CACHE_HIT/MISS per il replay offline */
     uint32_t prefetch_cap, prefetch_n;
     Req* req_head, *req_tail;   /* REQUIRED (FIFO) */
     Req* pre_head, *pre_tail;   /* PREFETCH (FIFO) */
@@ -132,6 +133,10 @@ uint32_t llmengine_moe_async_cancel_prefetch(LlmEngineMoeAsync* a) {
     return n;
 }
 
+void llmengine_moe_async_set_profiler(LlmEngineMoeAsync* a, LlmEngineMoeProfiler* p) {
+    if (a != NULL) a->prof = p;
+}
+
 void llmengine_moe_async_stats(LlmEngineMoeAsync* a, LlmEngineMoeAsyncStats* out) {
     if (a == NULL || out == NULL) return;
     pthread_mutex_lock(&a->mu);
@@ -158,7 +163,13 @@ static void* worker_main(void* arg) {
         if (cancelled) { free(r); continue; }
 
         const void* data = NULL; size_t size = 0;
-        LlmEngineMoeStatus s = llmengine_moe_cache_get(a->cache, r->key, r->expected, a->load, a->ctx, &data, &size);
+        int was_hit = 0;
+        LlmEngineMoeStatus s = llmengine_moe_cache_get_ex(a->cache, r->key, r->expected, a->load, a->ctx, &data, &size, &was_hit);
+        if (a->prof != NULL) {
+            llmengine_moe_prof_event(a->prof,
+                was_hit ? LLMENGINE_MOE_TRACE_CACHE_HIT : LLMENGINE_MOE_TRACE_CACHE_MISS,
+                r->key.layer, r->key.expert, 0, (uint64_t)size);
+        }
         pthread_mutex_lock(&a->mu);
         r->data = data; r->size = size; r->status = s; r->handled = 1;
         a->st.completed++;

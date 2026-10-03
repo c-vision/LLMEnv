@@ -117,7 +117,8 @@ void llmengine_moe_prof_reset(LlmEngineMoeProfiler* p) {
 }
 
 /* ── trace ─────────────────────────────────────────────────────────────────── */
-LlmEngineMoeStatus llmengine_moe_prof_trace_open(LlmEngineMoeProfiler* p, const char* path) {
+LlmEngineMoeStatus llmengine_moe_prof_trace_open_ex(LlmEngineMoeProfiler* p, const char* path,
+                                          uint64_t cache_budget, uint64_t expert_size) {
     if (p == NULL || path == NULL) return LLMENGINE_MOE_ERR_INVALID;
     if (p->trace != NULL) { fclose(p->trace); p->trace = NULL; }
     FILE* f = fopen(path, "wb");
@@ -128,8 +129,30 @@ LlmEngineMoeStatus llmengine_moe_prof_trace_open(LlmEngineMoeProfiler* p, const 
     h.version = LLMENGINE_MOE_TRACE_VERSION;
     h.endian = LLMENGINE_MOE_TRACE_ENDIAN;
     h.phase_count = LLMENGINE_MOE_PH_COUNT;
+    h.reserved = (uint32_t)expert_size;   /* K1: byte per esperto (dimensionamento a slot) */
+    h.reserved2 = cache_budget;           /* K1: budget cache del run (verifica del replay) */
     if (fwrite(&h, sizeof(h), 1, f) != 1) { fclose(f); return LLMENGINE_MOE_ERR_IO; }
     p->trace = f;
+    return LLMENGINE_MOE_OK;
+}
+
+LlmEngineMoeStatus llmengine_moe_prof_trace_open(LlmEngineMoeProfiler* p, const char* path) {
+    return llmengine_moe_prof_trace_open_ex(p, path, 0, 0);
+}
+
+LlmEngineMoeStatus llmengine_moe_trace_meta(const char* path, uint64_t* cache_budget, uint64_t* expert_size) {
+    if (cache_budget) *cache_budget = 0;
+    if (expert_size) *expert_size = 0;
+    if (path == NULL) return LLMENGINE_MOE_ERR_INVALID;
+    FILE* f = fopen(path, "rb");
+    if (f == NULL) return LLMENGINE_MOE_ERR_IO;
+    LlmEngineMoeTraceHeader h;
+    if (fread(&h, sizeof(h), 1, f) != 1) { fclose(f); return LLMENGINE_MOE_ERR_FORMAT; }
+    fclose(f);
+    if (memcmp(h.magic, LLMENGINE_MOE_TRACE_MAGIC, 4) != 0 || h.endian != LLMENGINE_MOE_TRACE_ENDIAN ||
+        h.version != LLMENGINE_MOE_TRACE_VERSION) return LLMENGINE_MOE_ERR_FORMAT;
+    if (cache_budget) *cache_budget = h.reserved2;
+    if (expert_size) *expert_size = h.reserved;
     return LLMENGINE_MOE_OK;
 }
 

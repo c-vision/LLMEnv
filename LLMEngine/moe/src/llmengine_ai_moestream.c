@@ -30,6 +30,7 @@ typedef struct {
     uint64_t cache_hits;
     uint64_t cache_misses;
     uint64_t cache_evictions;
+    uint64_t cache_resident_hits;   /* K2 */
     uint64_t prefetch_predictions;
     uint64_t prefetch_hits;
     uint64_t prefetch_wasted;
@@ -136,6 +137,7 @@ int llmengine_ai_moestream_stats(const LlmEngineMoeProvider* p, const char* name
     out->cache_hits = s.cache_hits;
     out->cache_misses = s.cache_misses;
     out->cache_evictions = s.cache_evictions;
+    out->cache_resident_hits = s.cache_resident_hits;
     out->prefetch_predictions = s.prefetch_predictions;
     out->prefetch_hits = s.prefetch_hits;
     out->prefetch_wasted = s.prefetch_wasted;

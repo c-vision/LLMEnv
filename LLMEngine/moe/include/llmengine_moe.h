@@ -83,6 +83,7 @@ typedef struct {
     uint64_t cache_hits;
     uint64_t cache_misses;
     uint64_t cache_evictions;
+    uint64_t cache_resident_hits;   /* K2: hit su esperto residente da >=1 step (non prefetch) */
     uint64_t prefetch_predictions;
     uint64_t prefetch_hits;
     uint64_t prefetch_wasted;

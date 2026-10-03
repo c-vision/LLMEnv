@@ -121,6 +121,9 @@ void llmengine_moe_config_defaults(LlmEngineMoeRuntimeConfig* out) {
 }
 
 /* D19: configura una cache appena creata (dims + hotness + profilo `<container>.stats`). */
+/* K1: hook di eviction (definizione piu' sotto, usata alla creazione della cache). */
+static void llmengine_moe_rt_evict_hook(void* ctx, LlmEngineMoeExpertKey key);
+
 static void moe_cache_configure(LlmEngineMoeRuntime* rt, LlmEngineMoeExpertCache* cache, int hotness) {
     if (rt == NULL || cache == NULL) return;
     (void)llmengine_moe_cache_set_dims(cache, rt->meta.layer_count, rt->meta.expert_count);
@@ -166,19 +169,25 @@ LlmEngineMoeStatus llmengine_moe_load_model_ex(LlmEngineMoeRuntime* rt, const ch
             if (c.cache_mb > want_mb) want_mb = c.cache_mb;
             if (want_mb == 0) want_mb = 1;
             LlmEngineMoeExpertCache* cache = NULL;
-            if (llmengine_moe_cache_create(&cache, want_mb * 1024ull * 1024ull) == LLMENGINE_MOE_OK)
+            if (llmengine_moe_cache_create(&cache, want_mb * 1024ull * 1024ull) == LLMENGINE_MOE_OK) {
+                llmengine_moe_cache_set_evict_hook(cache, llmengine_moe_rt_evict_hook, rt);   /* K1 */
                 rt->cache = cache;
+            }
         } else {
             if (c.cache_mb > 0) {
                 LlmEngineMoeExpertCache* cache = NULL;
-                if (llmengine_moe_cache_create(&cache, c.cache_mb * 1024ull * 1024ull) == LLMENGINE_MOE_OK)
+                if (llmengine_moe_cache_create(&cache, c.cache_mb * 1024ull * 1024ull) == LLMENGINE_MOE_OK) {
+                    llmengine_moe_cache_set_evict_hook(cache, llmengine_moe_rt_evict_hook, rt);   /* K1 */
                     rt->cache = cache;
+                }
             }
             if (c.async_workers > 0 && rt->cache != NULL) {
                 LlmEngineMoeAsync* async = NULL;
                 if (llmengine_moe_async_create(&async, c.async_workers, llmengine_moe_rt_load_expert, rt,
-                                         rt->cache, c.prefetch_cap) == LLMENGINE_MOE_OK)
+                                         rt->cache, c.prefetch_cap) == LLMENGINE_MOE_OK) {
+                    llmengine_moe_async_set_profiler(async, rt->prof);   /* K1: trace richieste */
                     rt->async = async;
+                }
             }
             if (c.prefetch_topn > 0 && rt->meta.layer_count > 0 && rt->meta.expert_count > 0) {
                 LlmEngineMoePredictor* pred = NULL;
@@ -242,6 +251,13 @@ int llmengine_moe_is_loaded(const LlmEngineMoeRuntime* rt) {
 const LlmEngineMoeModelMeta* llmengine_moe_meta(const LlmEngineMoeRuntime* rt) {
     if (rt == NULL || !rt->loaded) return NULL;
     return &rt->meta;
+}
+
+/* K1: eviction nel trace (il summary e il replay contano le stesse eviction). */
+static void llmengine_moe_rt_evict_hook(void* ctx, LlmEngineMoeExpertKey key) {
+    LlmEngineMoeRuntime* rt = (LlmEngineMoeRuntime*)ctx;
+    if (rt != NULL && rt->prof != NULL)
+        llmengine_moe_prof_event(rt->prof, LLMENGINE_MOE_TRACE_EVICT, key.layer, key.expert, 0, 1);
 }
 
 static LlmEngineMoeStatus llmengine_moe_rt_load_expert(void* ctx, LlmEngineMoeExpertKey key,
@@ -452,6 +468,7 @@ LlmEngineMoeStatus llmengine_moe_stream_stats(const LlmEngineMoeRuntime* rt, Llm
         out->cache_hits = cs.hits;
         out->cache_misses = cs.misses;
         out->cache_evictions = cs.evictions;
+        out->cache_resident_hits = cs.resident_hits;   /* K2 */
         out->resident_bytes = llmengine_moe_cache_bytes_used(rt->cache);
     } else if (rt->ext_valid) {
         /* Adapter con store proprio (GGUF stile DS4): metriche pubblicate dall'adapter. */
@@ -549,6 +566,7 @@ LlmEngineMoeStatus llmengine_moe_set_async(LlmEngineMoeRuntime* rt, uint32_t wor
     LlmEngineMoeAsync* a = NULL;
     if (llmengine_moe_async_create(&a, workers, llmengine_moe_rt_load_expert, rt, rt->cache, cap) != LLMENGINE_MOE_OK)
         return LLMENGINE_MOE_ERR_NO_MEMORY;
+    llmengine_moe_async_set_profiler(a, rt->prof);   /* K1: trace richieste */
     rt->async = a;
     return LLMENGINE_MOE_OK;
 }

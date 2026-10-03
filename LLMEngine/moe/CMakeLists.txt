@@ -47,6 +47,7 @@ add_library(llmengine_moe STATIC
     src/llmengine_moe_mem.c
     src/llmengine_moe_kv.c
     src/llmengine_moe_prof.c
+    src/llmengine_moe_sim.c
     src/llmengine_moe_provider.c
     src/llmengine_moe_qwen3.c
     src/llmengine_moe_diverge.c
@@ -122,6 +123,15 @@ target_compile_options(test_moe_kv PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(test_moe_prof tests/test_moe_prof.c)
 target_link_libraries(test_moe_prof PRIVATE llmengine_moe)
 target_compile_options(test_moe_prof PRIVATE -Wall -Wextra -Wpedantic)
+
+# K1: replay offline della cache da trace (moe_sim) + test di parità col runtime.
+add_executable(moe_sim tools/moe_sim.c)
+target_link_libraries(moe_sim PRIVATE llmengine_moe)
+target_compile_options(moe_sim PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(test_moe_sim tests/test_moe_sim.c)
+target_link_libraries(test_moe_sim PRIVATE llmengine_moe)
+target_compile_options(test_moe_sim PRIVATE -Wall -Wextra -Wpedantic)
 
 # [GGUF DEPRECATO] target test_moe_provider rimosso
 

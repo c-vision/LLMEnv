@@ -19,6 +19,7 @@ typedef struct LlmEngineMoeCacheEntry {
     int in_flight;
     uint64_t use_count;   /* frequenza (M7) */
     uint64_t last_used;   /* tick di recency (M7) */
+    uint64_t last_step;   /* K2: ultimo step in cui l'entry e' stata servita/caricata */
     float route_prob;     /* probabilita' di routing (M7) */
     float future;         /* probabilita' d'uso futuro (M7, dal prefetcher) */
     struct LlmEngineMoeCacheEntry* hnext;              /* catena hash */
@@ -38,6 +39,9 @@ struct LlmEngineMoeExpertCache {
     LlmEngineMoeCachePolicy policy;             /* M7 */
     float alpha, beta, gamma, delta;      /* pesi scoring (M7) */
     uint64_t tick;                        /* orologio logico per la recency */
+    uint64_t step;                        /* K2: clock di step (routing/decodifica) */
+    LlmEngineMoeCacheEvictFn evict_fn;    /* K1: hook di eviction (trace EVICT) */
+    void* evict_ctx;
     /* D19: hotness appresa (freq[layer*experts+expert]) + profilo persistito. NULL = non attiva. */
     uint32_t* freq;
     uint32_t f_layers, f_experts;
@@ -122,6 +126,7 @@ static void evict_over_budget(LlmEngineMoeExpertCache* c, LlmEngineMoeCacheEntry
             }
         }
         if (best == NULL) break; /* restano solo keep/in-flight: non si evince oltre */
+        if (c->evict_fn != NULL) c->evict_fn(c->evict_ctx, best->key);
         entry_free(c, best);
         c->st.evictions++;
     }
@@ -245,9 +250,10 @@ void llmengine_moe_cache_clear(LlmEngineMoeExpertCache* c) {
     pthread_mutex_unlock(&c->mu);
 }
 
-LlmEngineMoeStatus llmengine_moe_cache_get(LlmEngineMoeExpertCache* c, LlmEngineMoeExpertKey key, size_t expected_size,
+LlmEngineMoeStatus llmengine_moe_cache_get_ex(LlmEngineMoeExpertCache* c, LlmEngineMoeExpertKey key, size_t expected_size,
                                LlmEngineMoeCacheLoadFn load, void* ctx,
-                               const void** data_out, size_t* size_out) {
+                               const void** data_out, size_t* size_out, int* was_hit) {
+    if (was_hit) *was_hit = 0;
     if (c == NULL || load == NULL || data_out == NULL || size_out == NULL) return LLMENGINE_MOE_ERR_INVALID;
     *data_out = NULL; *size_out = 0;
     if (c->budget == 0) { /* cache disabilitata: carica nello scratch (nessuna retention) */
@@ -272,6 +278,10 @@ LlmEngineMoeStatus llmengine_moe_cache_get(LlmEngineMoeExpertCache* c, LlmEngine
         e = hash_find(c, key);
         if (e != NULL && !e->in_flight) {
             c->st.hits++;
+            if (was_hit) *was_hit = 1;
+            /* K2: residente PRIMA di questo step (non appena caricato dal prefetch/load) */
+            if (e->last_step < c->step) c->st.resident_hits++;
+            e->last_step = c->step;
             lru_touch(c, e);
             *data_out = e->data; *size_out = e->size;
             pthread_mutex_unlock(&c->mu);
@@ -297,6 +307,7 @@ LlmEngineMoeStatus llmengine_moe_cache_get(LlmEngineMoeExpertCache* c, LlmEngine
     pthread_mutex_lock(&c->mu);
     if (s == LLMENGINE_MOE_OK) {
         e->data = buf; e->size = got; e->in_flight = 0;
+        e->last_step = c->step;   /* K2: caricata in QUESTO step -> non residente */
         c->total += got; c->st.bytes_loaded += got;
         lru_touch(c, e);
         evict_over_budget(c, e);
@@ -308,6 +319,27 @@ LlmEngineMoeStatus llmengine_moe_cache_get(LlmEngineMoeExpertCache* c, LlmEngine
     pthread_cond_broadcast(&c->cv);
     pthread_mutex_unlock(&c->mu);
     return s;
+}
+
+LlmEngineMoeStatus llmengine_moe_cache_get(LlmEngineMoeExpertCache* c, LlmEngineMoeExpertKey key, size_t expected_size,
+                               LlmEngineMoeCacheLoadFn load, void* ctx,
+                               const void** data_out, size_t* size_out) {
+    return llmengine_moe_cache_get_ex(c, key, expected_size, load, ctx, data_out, size_out, NULL);
+}
+
+void llmengine_moe_cache_set_evict_hook(LlmEngineMoeExpertCache* c, LlmEngineMoeCacheEvictFn fn, void* ctx) {
+    if (c == NULL) return;
+    pthread_mutex_lock(&c->mu);
+    c->evict_fn = fn;
+    c->evict_ctx = ctx;
+    pthread_mutex_unlock(&c->mu);
+}
+
+void llmengine_moe_cache_step_begin(LlmEngineMoeExpertCache* c) {
+    if (c == NULL) return;
+    pthread_mutex_lock(&c->mu);
+    c->step++;
+    pthread_mutex_unlock(&c->mu);
 }
 
 void llmengine_moe_cache_stats(LlmEngineMoeExpertCache* c, LlmEngineMoeCacheStats* out) {

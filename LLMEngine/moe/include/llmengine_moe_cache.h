@@ -15,6 +15,10 @@ typedef struct {
     uint64_t misses;
     uint64_t evictions;
     uint64_t bytes_loaded;
+    /* K2 (metrica "TRUE resident hit rate"): hit su un esperto GIA' residente all'inizio
+     * dello step corrente (non caricato dal prefetch/load di questo step). `step` avanza
+     * con `llmengine_moe_cache_step_begin`; senza chiamate resta 0 e `resident_hits`=0. */
+    uint64_t resident_hits;
 } LlmEngineMoeCacheStats;
 
 /* Politica di eviction (M7). LRU e' il caso particolare di ROUTING con α=1, β=γ=δ=0. */
@@ -56,10 +60,26 @@ LlmEngineMoeStatus llmengine_moe_cache_remove(LlmEngineMoeExpertCache* c, LlmEng
 void llmengine_moe_cache_clear(LlmEngineMoeExpertCache* c);
 
 /* Get con SINGLE-FLIGHT: se piu' thread chiedono lo stesso key, la `load` viene invocata UNA
- * sola volta; gli altri attendono e ricevono lo stesso blob. Conta hits/misses/bytes_loaded. */
+ * sola volta; gli altri attendono e ricevono lo stesso blob. Conta hits/misses/bytes_loaded.
+ * `get_ex` riporta anche `was_hit` (1 = servito dalla cache, 0 = load eseguita): usato dal
+ * layer async per emettere gli eventi CACHE_HIT/CACHE_MISS nel trace (replay K1). */
 LlmEngineMoeStatus llmengine_moe_cache_get(LlmEngineMoeExpertCache* c, LlmEngineMoeExpertKey key, size_t expected_size,
                                LlmEngineMoeCacheLoadFn load, void* ctx,
                                const void** data_out, size_t* size_out);
+LlmEngineMoeStatus llmengine_moe_cache_get_ex(LlmEngineMoeExpertCache* c, LlmEngineMoeExpertKey key, size_t expected_size,
+                               LlmEngineMoeCacheLoadFn load, void* ctx,
+                               const void** data_out, size_t* size_out, int* was_hit);
+
+/* Avanza il "clock di step" (una unita' = una fase di routing/decodifica): un hit su una
+ * entry residente da uno step PRECEDENTE conta in `resident_hits` (K2). Chiamare una volta
+ * per step prima delle richieste dello step. */
+void llmengine_moe_cache_step_begin(LlmEngineMoeExpertCache* c);
+
+/* Hook di EVICTION (K1): chiamato (con lock tenuto, deve essere veloce e non bloccante) per
+ * ogni esperto evitto — il runtime lo usa per emettere l'evento EVICT nel trace, cosi' il
+ * summary e il replay offline contano le stesse eviction. */
+typedef void (*LlmEngineMoeCacheEvictFn)(void* ctx, LlmEngineMoeExpertKey key);
+void llmengine_moe_cache_set_evict_hook(LlmEngineMoeExpertCache* c, LlmEngineMoeCacheEvictFn fn, void* ctx);
 
 void llmengine_moe_cache_stats(LlmEngineMoeExpertCache* c, LlmEngineMoeCacheStats* out);
 
