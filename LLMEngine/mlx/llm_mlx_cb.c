@@ -18,6 +18,7 @@
 #include <time.h>   /* CLOCK_MONOTONIC */
 #include "llm_mlx_geglu_kernel.h"
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
+#include "llm_mlx_splash_store.h"
 #include "llm_mlx_moe_fused_kernel.h"
 #include "llm_mlx_swiglu_kernel.h"
 #include "llm_mlx_swiglu_gptoss_kernel.h"
@@ -1081,6 +1082,7 @@ int llm_ai_mlx_core_bench(const char* op, int iters, char* out, size_t cap) {
     return done;
 }
 
+
 /* Self-test del port Splash (store/quant in scrittura, splash_store_kv_row).
  * Ritorna 0 se kq/vq/ks/  corrispondono al riferimento C; stampa il max diff. */
 int llm_ai_mlx_splash_store_selftest(char* out, size_t cap) {
@@ -1581,4 +1583,32 @@ int llm_ai_mlx_spec_state_selftest(char* out, size_t cap) {
     mlx_array_free(a1); mlx_array_free(a2); mlx_array_free(a3);
     free(base); free(qd); free(A); free(B);
     return pass ? 0 : 1;
+}
+
+/* Probe: MPP (MetalPerformancePrimitives) e' compilabile sotto metal_kernel di MLX? */
+int llm_ai_mlx_splash_mpp_probe(char* out, size_t cap) {
+    if (out == NULL || cap == 0) return -1;
+    out[0] = '\0';
+    const char* hdr = "#include <metal_stdlib>\n#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n"
+                      "using namespace metal;\nusing namespace mpp::tensor_ops;\n";
+    const char* src = "  auto d = matmul2d_descriptor(8,8,8,false,true,false, matmul2d_descriptor::mode::multiply);\n"
+                      "  x[0] = (float)d.get_capacity();\n";   /* tocca MPP nel corpo */
+    mlx_vector_string iv = mlx_vector_string_new(); mlx_vector_string_append_value(iv, "a");
+    mlx_vector_string ov = mlx_vector_string_new(); mlx_vector_string_append_value(ov, "x");
+    mlx_fast_metal_kernel k = mlx_fast_metal_kernel_new("mpp_probe", iv, ov, src, hdr, true, false);
+    mlx_vector_string_free(iv); mlx_vector_string_free(ov);
+    if (k.ctx == NULL) { snprintf(out, cap, "MPP probe: build FALLITA (MPP non disponibile sotto mlx_fast_metal_kernel)"); return 1; }
+    mlx_fast_metal_kernel_config cfg = mlx_fast_metal_kernel_config_new();
+    mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, "T", MLX_FLOAT32);
+    int osh[1] = {1}; mlx_fast_metal_kernel_config_add_output_arg(cfg, osh, 1, MLX_FLOAT32);
+    mlx_fast_metal_kernel_config_set_grid(cfg, 1, 1, 1); mlx_fast_metal_kernel_config_set_thread_group(cfg, 32, 1, 1);
+    mlx_stream s = mlx_default_gpu_stream_new();
+    int ash[1] = {1}; mlx_array a = mlx_array_new_data((float[]){0.0f}, ash, 1, MLX_FLOAT32);
+    mlx_vector_array in = mlx_vector_array_new(); mlx_vector_array_append_value(in, a);
+    mlx_vector_array outs = mlx_vector_array_new();
+    int rc = mlx_fast_metal_kernel_apply(&outs, k, in, cfg, s);
+    snprintf(out, cap, "MPP probe: build OK, apply rc=%d", rc);
+    mlx_vector_array_free(in); mlx_vector_array_free(outs); mlx_array_free(a);
+    mlx_fast_metal_kernel_config_free(cfg);
+    return 0;
 }
