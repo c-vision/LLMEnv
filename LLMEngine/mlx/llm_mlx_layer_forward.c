@@ -99,6 +99,9 @@ static bool llm_kvq_sdpa_hook_dispatch(mlx_array* out, mlx_array q, mlx_array k,
      * selftest in `llm_mlx_cb.c`). Vedi `Todo/(open) - Splash-Port-...` e `Kernel-Metal-Da-Portare`
      * se si decidera' di completarlo (fondere recente + tiling >256). */
     int nkv = mlx_array_shape(k)[1], nr = mlx_array_shape(k)[2];
+    if (getenv("LLM_KVQ_DBG"))
+        fprintf(stderr, "[KVQHOOK] nc(cold)=%d nr(recent)=%d kcap=%d nh=%d hd=%d\n",
+                (int)c->nc, nr, (int)mlx_array_shape(c->kw)[1], nh, hd);
     if (lq != 1 || hd % 64 != 0) return false;
     if (mlx_array_dtype(q) != mlx_array_dtype(k) || mlx_array_dtype(q) != mlx_array_dtype(v)) return false;
     mlx_array q2 = mlx_array_new(), k2 = mlx_array_new(), v2 = mlx_array_new();

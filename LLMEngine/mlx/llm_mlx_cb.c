@@ -1228,7 +1228,10 @@ int llm_ai_mlx_splash_attn_selftest(char* out, size_t cap) {
 int llm_ai_mlx_kvq_splash_selftest(char* out, size_t cap) {
     if (out == NULL || cap == 0) return -1;
     out[0] = '\0';
-    const int nh = 8, nkv = 2, hd = 64, n = 96;
+    int nh = 8; const int nkv = 2, hd = 64;
+    int n = 96;
+    { const char* e = getenv("LLM_KVQ_SELFTEST_N"); if (e != NULL && atoi(e) > 0) n = atoi(e); }  /* W5 DEBUG: scala */
+    { const char* e = getenv("LLM_KVQ_SELFTEST_NH"); if (e != NULL && atoi(e) > 0) nh = atoi(e); }  /* W5 DEBUG: n. teste */
     const float attn = 1.0f / sqrtf((float)hd);
     size_t nk = (size_t)nkv * n * hd;
     float* kbuf = (float*)malloc(nk * sizeof(float));
@@ -1254,7 +1257,7 @@ int llm_ai_mlx_kvq_splash_selftest(char* out, size_t cap) {
         float* ref = (float*)malloc((size_t)nh * hd * sizeof(float));
         for (int h = 0; h < nh && ref; h++) {
             int kh = (int)((long long)h * nkv / nh);
-            float scn[1026]; if (n > 1024) break;
+            float* scn = (float*)malloc((size_t)(n + 1) * sizeof(float)); if (!scn) break;
             for (int t = 0; t < n; t++) {
                 float scv = SC[(size_t)kh * n + t];
                 float dot = 0.0f;
@@ -1272,6 +1275,7 @@ int llm_ai_mlx_kvq_splash_selftest(char* out, size_t cap) {
                 }
                 ref[h*hd+d] = acc;
             }
+            free(scn);
         }
         /* cold int8 + recente fp nullo [nkv,1,hd] */
         mlx_array kr = mlx_array_new(), vr = mlx_array_new();
