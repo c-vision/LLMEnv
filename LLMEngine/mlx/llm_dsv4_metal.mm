@@ -1026,6 +1026,45 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
 "    if (sg == 0u && tiisg == 0u) SCORES[(ulong)t * maxc + c] = ss[0] + ss[1] + ss[2] + ss[3];\n"
 "}\n"
+"/* Indexer scores VARIANTE MMA (rif. dsv41 LLM_DSV41_INDEX_MMA_SRC): una threadgroup per (blocco di\n"
+" * 32 chiavi, token); QK^T con simdgroup_matrix<float,8,8>, relu*pesi, riduzione teste. Fonte KV f32\n"
+" * (icomp). Riduce la rilettura di q di ~32x e usa i tensor core. Stessa semantica di dsv4_indexer_scores_t. */\n"
+"kernel void dsv4_indexer_scores_t_mma(device const float* Q0 [[buffer(0)]], device const float* KVC0 [[buffer(1)]],\n"
+"    device const float* W0 [[buffer(2)]], device float* SCORES0 [[buffer(3)]], constant uint* P [[buffer(4)]],\n"
+"    device const uint* NC [[buffer(5)]], uint2 g [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]]) {\n"
+"    const uint H = P[0], D = P[1], Mmax = P[2]; const uint t = g.y, n_comp = NC[t]; const uint block = g.x * 32u;\n"
+"    const uint sg = tid / 32u, lane = tid % 32u;\n"
+"    const uint fm = ((lane >> 2) & 4u) + ((lane >> 1) & 3u);\n"
+"    const uint fn = (((lane >> 2) & 2u) << 1u) + ((lane & 1u) << 1u);\n"
+"    device const float* q = Q0 + (ulong)t * H * D; device const float* w = W0 + (ulong)t * H;\n"
+"    threadgroup float tile[128u * 32u];\n"
+"    for (uint i = tid; i < D * 32u; i += 128u) {\n"
+"        const uint d = i / 32u, col = i % 32u, pos = block + col;\n"
+"        tile[i] = (pos < n_comp) ? KVC0[(ulong)pos * D + d] : 0.f;\n"
+"    }\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    float total0 = 0.f, total1 = 0.f;\n"
+"    for (uint h = 0u; h < H; h += 8u) {\n"
+"        simdgroup_matrix<float,8,8> acc, a, b;\n"
+"        acc.thread_elements()[0] = 0.f; acc.thread_elements()[1] = 0.f;\n"
+"        for (uint d = 0u; d < D; d += 8u) {\n"
+"            a.thread_elements()[0] = (h + fm < H) ? q[(ulong)(h + fm) * D + d + fn] : 0.f;\n"
+"            a.thread_elements()[1] = (h + fm < H) ? q[(ulong)(h + fm) * D + d + fn + 1u] : 0.f;\n"
+"            b.thread_elements()[0] = tile[(d + fm) * 32u + sg * 8u + fn];\n"
+"            b.thread_elements()[1] = tile[(d + fm) * 32u + sg * 8u + fn + 1u];\n"
+"            simdgroup_multiply_accumulate(acc, a, b, acc);\n"
+"        }\n"
+"        const float weight = (h + fm < H) ? w[h + fm] : 0.f;\n"
+"        float v0 = max(acc.thread_elements()[0], 0.f) * weight;\n"
+"        float v1 = max(acc.thread_elements()[1], 0.f) * weight;\n"
+"        for (uint i = 0u; i < 3u; ++i) { const uint mask = i == 0u ? 2u : (i == 1u ? 4u : 16u); v0 += simd_shuffle_xor(v0, (ushort)mask); v1 += simd_shuffle_xor(v1, (ushort)mask); }\n"
+"        total0 += v0; total1 += v1;\n"
+"    }\n"
+"    device float* sc = SCORES0 + (ulong)t * Mmax;\n"
+"    if (fm == 0u) {\n"
+"        for (uint j = 0u; j < 2u; ++j) { const uint pos = block + sg * 8u + fn + j; if (pos < Mmax) sc[pos] = (pos < n_comp) ? (j == 0u ? total0 : total1) : 0.f; }\n"
+"    }\n"
+"}\n"
 "/* Chiave order-preserving float->uint (monotona anche per negativi; -0 canonico a +0).\n"
 " * Gli score dell'indexer possono essere negativi (somma di dot*pesi), quindi NON si puo'\n"
 " * usare il trucco ds4 max(v,0): la radix deve ordinare anche i negativi. */\n"
@@ -1320,7 +1359,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
     id<MTLComputePipelineState> pso_mmp_q8, pso_mmp_iq2, pso_mmp_q2k, pso_mmp_q4k, pso_mmp_iq2a, pso_mmp_q2ka, pso_mmp_q4ka;   /* MPP (nil se non disponibile) */
-    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_rope_rows_inv, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_rope_ev, pso_iscore_t, pso_itopk_t, pso_apart_t, pso_apart_mma, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
+    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_rope_rows_inv, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_rope_ev, pso_iscore_t, pso_iscore_t_mma, pso_itopk_t, pso_apart_t, pso_apart_mma, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
@@ -1492,7 +1531,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
             { "dsv4_hcb_sinkhorn", &b->pso_hcb_sink }, { "dsv4_hcb_norm", &b->pso_hcb_norm }, { "dsv4_hcb_post", &b->pso_hcb_post }, { "kernel_mul_mm_id_iq2_xxs_addr_f32", &b->pso_mm_iq2a },
             { "kernel_mul_mm_id_q2_K_addr_f32", &b->pso_mm_q2ka }, { "kernel_mul_mm_id_q4_K_addr_f32", &b->pso_mm_q4ka }, { "kernel_mul_mv_slots6_q4_K_pair_swiglu_f32", &b->pso_q4_pair },
             { "kernel_mul_mv_slots6_q4_K_sum6_f32", &b->pso_q4_sum6 }, { "dsv4_rms_w_rows", &b->pso_rms_rows },
-            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_comp_fp8_rows", &b->pso_fp8_rows }, { "dsv4_comp_pool_ev", &b->pso_pool_ev }, { "dsv4_rope_ev", &b->pso_rope_ev }, { "dsv4_indexer_scores_t", &b->pso_iscore_t }, { "dsv4_indexer_topk_t", &b->pso_itopk_t }, { "dsv4_attn_part_t", &b->pso_apart_t }, { "dsv4_attn_part_mma", &b->pso_apart_mma }, { "dsv4_attn_merge_t", &b->pso_amerge_t }, { "dsv4_ape_rows", &b->pso_ape_rows }, { "dsv4_rope_rows", &b->pso_rope_rows }, { "dsv4_rope_rows_inv", &b->pso_rope_rows_inv },
+            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_comp_fp8_rows", &b->pso_fp8_rows }, { "dsv4_comp_pool_ev", &b->pso_pool_ev }, { "dsv4_rope_ev", &b->pso_rope_ev }, { "dsv4_indexer_scores_t", &b->pso_iscore_t }, { "dsv4_indexer_scores_t_mma", &b->pso_iscore_t_mma }, { "dsv4_indexer_topk_t", &b->pso_itopk_t }, { "dsv4_attn_part_t", &b->pso_apart_t }, { "dsv4_attn_part_mma", &b->pso_apart_mma }, { "dsv4_attn_merge_t", &b->pso_amerge_t }, { "dsv4_ape_rows", &b->pso_ape_rows }, { "dsv4_rope_rows", &b->pso_rope_rows }, { "dsv4_rope_rows_inv", &b->pso_rope_rows_inv },
             { "kernel_mul_mm_id_map0_ne20_8", &b->pso_mm_map8 }, { "kernel_mul_mm_id_q8_0_f32", &b->pso_mm_q8 }, { "kernel_mul_mm_id_iq2_xxs_f32", &b->pso_mm_iq2 },
             { "kernel_mul_mm_id_q2_K_f32", &b->pso_mm_q2k }, { "kernel_mul_mm_id_q4_K_f32", &b->pso_mm_q4k },
             { "dsv4_swiglu_w", &b->pso_swiglu_w }, { "dsv4_sum_slots6", &b->pso_sum_slots6 } };
@@ -3143,11 +3182,18 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             }
         }
         if (p0->has_idx) {
-            [e setComputePipelineState:b->pso_iscore_t];
+            /* Indexer scores MMA (una TG per blocco di 32 chiavi): riduce la rilettura di q (~32x) e usa i
+             * tensor core. Opt-in dsv4_indexer_mma=1 (default OFF: l'ordine di accumulo differisce dallo scalare). */
+            /* Default ADATTIVO: a contesto lungo (max_ic>=2048, ~ctx>=8k) l'MMA e' piu' veloce (+14% a 16k);
+             * sotto e' piu' lento -> scalare. Override: dsv4_indexer_mma=0|1. */
+            int imma = (max_ic >= 2048u) ? 1 : 0; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_indexer_mma", &v) == 0) imma = v; }
+            if (imma) imma = (b->pso_iscore_t_mma != nil) && (p0->idx_hd % 32u == 0u) && p0->idx_hd <= 128 && p0->idx_nh >= 8;
+            [e setComputePipelineState:imma ? b->pso_iscore_t_mma : b->pso_iscore_t];
             [e setBuffer:QI offset:0 atIndex:0]; [e setBuffer:(id<MTLBuffer>)p0->icomp offset:0 atIndex:1]; [e setBuffer:WI offset:0 atIndex:2]; [e setBuffer:SCB offset:0 atIndex:3];
             { uint32_t P_[3] = { (uint32_t)p0->idx_nh, (uint32_t)p0->idx_hd, (uint32_t)max_ic }; [e setBytes:P_ length:sizeof(P_) atIndex:4]; }
             [e setBuffer:NCB offset:0 atIndex:5];
-            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)max_ic, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            if (imma) [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((max_ic + 31) / 32), (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            else      [e dispatchThreadgroups:MTLSizeMake((NSUInteger)max_ic, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
             [e setComputePipelineState:b->pso_itopk_t];
             [e setBuffer:SCB offset:0 atIndex:0]; [e setBuffer:ALB offset:0 atIndex:1];
             { uint32_t P_[3] = { (uint32_t)max_ic, (uint32_t)p0->idx_top_k, 256u }; [e setBytes:P_ length:sizeof(P_) atIndex:2]; }
