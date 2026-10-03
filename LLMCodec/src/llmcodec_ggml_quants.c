@@ -959,7 +959,8 @@ int llmcodec_ggml_quant_row(int t, const float* src, void* dst, int64_t n, const
             const float* x = src + i*256;
             float max_scale = 0.0f, max_abs_scale = 0.0f;
             for (int ib = 0; ib < 16; ++ib) {
-                float sc = llmcodec_make_qx_quants(16, 32, x + 16*ib, L + 16*ib, 1, NULL);
+                float sc = llmcodec_make_qx_quants(16, 32, x + 16*ib, L + 16*ib, 1,
+                                                    imatrix ? imatrix + i*256 + 16*ib : NULL);
                 scales[ib] = sc;
                 float ab = fabsf(sc);
                 if (ab > max_abs_scale) { max_abs_scale = ab; max_scale = sc; }
@@ -1126,6 +1127,36 @@ int llmcodec_ggml_quant_row(int t, const float* src, void* dst, int64_t n, const
     }
     if (t == LLMCODEC_GGML_T_Q2_K) {
         blk_q2_K* y = (blk_q2_K*)dst;
+        if (imatrix) {   /* weighted (§ ggml quantize_row_q2_K_impl) */
+            uint8_t L[256], Laux[16], Ls[16], Lm[16];
+            float mins[16], scales[16], sw[16], weight[16];
+            for (int64_t i = 0; i < nb; ++i) {
+                const float* x = src + i*256;
+                for (int j = 0; j < 16; ++j) sw[j] = 0.0f;
+                float sumx2 = 0; for (int j = 0; j < 256; ++j) sumx2 += x[j]*x[j];
+                float sigma2 = sumx2/256.0f;
+                for (int j = 0; j < 16; ++j) {
+                    const float* qw = imatrix + i*256 + 16*j;
+                    for (int l = 0; l < 16; ++l) weight[l] = qw[l] * sqrtf(sigma2 + x[16*j+l]*x[16*j+l]);
+                    for (int l = 0; l < 16; ++l) sw[j] += weight[l];
+                    scales[j] = llmcodec_make_qkx3_quants(16, 3, x + 16*j, weight, L + 16*j, &mins[j], Laux, -0.9f, 0.05f, 36, 0);
+                }
+                float dm = llmcodec_make_qp_quants(16, 15, scales, Ls, sw);
+                float mm = llmcodec_make_qp_quants(16, 15, mins,   Lm, sw);
+                y[i].d = llmcodec_f16_from_f32(dm); y[i].dmin = llmcodec_f16_from_f32(mm);
+                dm = q_f16_to_f32(y[i].d); mm = q_f16_to_f32(y[i].dmin);
+                for (int j = 0; j < 16; ++j) y[i].scales[j] = (uint8_t)(Ls[j] | (Lm[j] << 4));
+                for (int j = 0; j < 16; ++j) {
+                    float d = dm * (float)(y[i].scales[j] & 0xF); if (!d) continue;
+                    float m = mm * (float)(y[i].scales[j] >> 4);
+                    for (int ii = 0; ii < 16; ++ii) { int l = llmcodec_nearest_int((x[16*j+ii] + m)/d); l = l<0?0:(l>3?3:l); L[16*j+ii] = (uint8_t)l; }
+                }
+                for (int j = 0; j < 256; j += 128)
+                    for (int l = 0; l < 32; ++l)
+                        y[i].qs[j/4 + l] = (uint8_t)(L[j+l] | (L[j+l+32] << 2) | (L[j+l+64] << 4) | (L[j+l+96] << 6));
+            }
+            return 0;
+        }
         uint8_t L[256], Laux[16]; float wgt[16], mins[16], scales[16];
         for (int64_t i = 0; i < nb; ++i) {
             const float* x = src + i*256;
@@ -1165,6 +1196,41 @@ int llmcodec_ggml_quant_row(int t, const float* src, void* dst, int64_t n, const
     }
     if (t == LLMCODEC_GGML_T_Q3_K) {
         blk_q3_K* y = (blk_q3_K*)dst;
+        if (imatrix) {   /* weighted (§ ggml quantize_row_q3_K_impl) */
+            int8_t L[256]; float scales[16], weight[16], sw[16]; int8_t Ls[16];
+            for (int64_t i = 0; i < nb; ++i) {
+                const float* x = src + i*256;
+                float sumx2 = 0; for (int j = 0; j < 256; ++j) sumx2 += x[j]*x[j];
+                float sigma2 = 2.0f*sumx2/256.0f;
+                for (int j = 0; j < 16; ++j) {
+                    const float* qw = imatrix + i*256 + 16*j;
+                    for (int l = 0; l < 16; ++l) weight[l] = qw[l] * sqrtf(sigma2 + x[16*j+l]*x[16*j+l]);
+                    float sumw = 0; for (int l = 0; l < 16; ++l) sumw += weight[l];
+                    sw[j] = sumw;
+                    scales[j] = llmcodec_make_qx_quants(16, 4, x + 16*j, L + 16*j, 1, weight);
+                }
+                memset(y[i].scales, 0, 12);
+                float d_block = llmcodec_make_qx_quants(16, 32, scales, Ls, 1, sw);
+                for (int j = 0; j < 16; ++j) {
+                    int l = Ls[j];
+                    if (j < 8) y[i].scales[j] = (uint8_t)(l & 0xF);
+                    else y[i].scales[j-8] = (uint8_t)(y[i].scales[j-8] | ((l & 0xF) << 4));
+                    l >>= 4;
+                    y[i].scales[j%4 + 8] = (uint8_t)(y[i].scales[j%4 + 8] | (l << (2*(j/4))));
+                }
+                y[i].d = llmcodec_f16_from_f32(d_block);
+                memset(y[i].hmask, 0, 32);
+                int m = 0; uint8_t hm = 1;
+                for (int j = 0; j < 256; ++j) {
+                    if (L[j] > 3) { y[i].hmask[m] = (uint8_t)(y[i].hmask[m] | hm); L[j] = (int8_t)(L[j] - 4); }
+                    if (++m == 32) { m = 0; hm = (uint8_t)(hm << 1); }
+                }
+                for (int j = 0; j < 256; j += 128)
+                    for (int l = 0; l < 32; ++l)
+                        y[i].qs[j/4 + l] = (uint8_t)(L[j+l] | (L[j+l+32] << 2) | (L[j+l+64] << 4) | (L[j+l+96] << 6));
+            }
+            return 0;
+        }
         int8_t L[256]; float scales[16];
         for (int64_t i = 0; i < nb; ++i) {
             const float* x = src + i*256;

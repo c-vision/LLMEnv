@@ -139,6 +139,22 @@ int main(void) {
         free(q); free(y);
       } }
 
+    /* (b2) WEIGHTED (imatrix): Q6_K/Q2_K/Q3_K con pesi tutti-1 -> round-trip limitato. */
+    { float x[256]; unsigned s=17; for (int i=0;i<256;i++){ s=s*1103515245u+12345u; x[i]=(float)((s>>8)&0xFFFF)/32768.0f-1.0f; }
+      float qw[256]; for (int i=0;i<256;i++) qw[i]=1.0f;
+      struct { int t; double tol; const char* n; size_t bs; } wc[] = {
+        { LLMCODEC_GGML_T_Q6_K, 5.0e-2, "Q6_K", 210 }, { LLMCODEC_GGML_T_Q2_K, 4.5e-1, "Q2_K", 84 },
+        { LLMCODEC_GGML_T_Q3_K, 2.5e-1, "Q3_K", 110 } };
+      for (size_t k=0;k<sizeof(wc)/sizeof(wc[0]);++k){
+        unsigned char* q=(unsigned char*)malloc(wc[k].bs); float* y=(float*)malloc(256*sizeof(float));
+        CHECK(llmcodec_ggml_quant_row(wc[k].t, x, q, 256, qw)==0, wc[k].n);
+        CHECK(llmcodec_ggml_dequant_row(wc[k].t, q, y, 256)==0, wc[k].n);
+        double md=0; for (int i=0;i<256;i++) md=fmax(md,fabs((double)y[i]-x[i]));
+        printf("[ggml-w] %-5s weighted round-trip maxerr=%.4e (tol %.4e)\n", wc[k].n, md, wc[k].tol);
+        CHECK(md <= wc[k].tol, wc[k].n);
+        free(q); free(y);
+      } }
+
     /* (c) validazione */
     { float y[32]; CHECK(llmcodec_ggml_dequant_row(LLMCODEC_GGML_T_Q4_0, y, y, 30) < 0, "n non multiplo -> -1");
       CHECK(llmcodec_ggml_dequant_row(999, y, y, 32) < 0, "tipo ignoto -> -1"); }
