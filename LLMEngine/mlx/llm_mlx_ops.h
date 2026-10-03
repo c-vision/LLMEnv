@@ -348,6 +348,12 @@ static bool llm_mlx_kv_append_inplace(mlx_array* k_cache, mlx_array* v_cache,
     const int vd = (int)mlx_array_shape(*v_cache)[3];
     const int need = off + n_tokens;
     const int esz = llm_da_esz(mlx_array_dtype(*k_cache));
+    /* FIX W5 (2026-10-03): con la KV-quant int8 attiva la cache FP16 e' SOLO la finestra recente,
+     * mentre `off` e' la posizione LOGICA (include il cold nel pool) -> la cache NON contiene
+     * `off` token. Il grow path copierebbe `off` token da una cache piu' corta -> slice_update con
+     * update/slice incoerenti (broadcast error a >16k). Se `off > cap` la cache non rappresenta
+     * `off` token -> NON e' il caso in-place (fallback al path normale). */
+    if (off > cap) return false;
     if (cap >= need) {
         int s0[4] = {0,0,off,0}, st[4] = {1,1,1,1};
         int sk[4] = {1,nkv,need,kd}, sv[4] = {1,nkv,need,vd};
