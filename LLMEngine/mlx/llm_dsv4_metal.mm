@@ -17,6 +17,7 @@
 /* ── sorgente kernel (le tabelle IQ2 vengono anteposte a runtime) ── */
 static const char* const LLM_DSV4_METAL_KERNELS =
 "#include <metal_stdlib>\n"
+"#include <metal_simdgroup_matrix>\n"
 "using namespace metal;\n"
 "static inline float dsv4_iq2_xxs_value(device const uchar* blk, uint idx) {\n"
 "    ushort dh = (ushort)blk[0] | ((ushort)blk[1] << 8);\n"
@@ -1099,6 +1100,89 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        out[i] = e0 * sacc[i] + e1 * sacc[512u + i] + e2 * sacc[1024u + i] + e3 * sacc[1536u + i];\n"
 "    if (tid == 0u) { out[hd] = M; out[hd + 1u] = e0 * sl[0] + e1 * sl[1] + e2 * sl[2] + e3 * sl[3]; }\n"
 "}\n"
+"/* Attenzione di mezzo VARIANTE MMA (rif. dsv41 packed_sparse_attention): 8 TESTE per threadgroup e\n"
+" * tile KV CONDIVISO -> la KV (RAWK/COMPK, f32) e' letta una volta per 8 teste (nel kernel scalare\n"
+" * sopra era letta una volta PER TESTA). QK^T e PV con simdgroup_matrix<float,8,8>. Stesso layout di\n"
+" * PART del kernel scalare (merge invariato). 4 simdgroup dividono la dimensione canale D/4. */\n"
+"kernel void dsv4_attn_part_mma(device const float* Q0 [[buffer(0)]], device const float* RAWK0 [[buffer(1)]],\n"
+"    device const float* COMPK [[buffer(2)]], device const int* ALLOWED0 [[buffer(3)]],\n"
+"    device float* PART [[buffer(4)]], constant uint* P [[buffer(5)]], device const uint4* TP [[buffer(6)]],\n"
+"    uint3 tg [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]],\n"
+"    ushort tiisg [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) {\n"
+"    const uint hd = P[0], has_allowed = P[1], nsm = P[2], g0 = P[3], maxc = P[4], nh = P[5]; const uint tok = g0 + tg.z;\n"
+"    const uint4 tp = TP[tok]; const uint n_raw = tp.x, n_comp = tp.y, ns = tp.w;\n"
+"    const uint s = tg.y; if (s >= ns) return;\n"
+"    const uint first_head = tg.x * 8u; if (first_head >= nh) return;\n"
+"    device const float* RAWK = RAWK0 + (ulong)tp.z * (ulong)hd;\n"
+"    device const int* ALLOWED = ALLOWED0 + (ulong)tok * maxc;\n"
+"    device const float* Q = Q0 + (ulong)tok * nh * hd;\n"
+"    const uint total = n_raw + n_comp, per = (total + ns - 1u) / ns;\n"
+"    const uint t0 = s * per, t1 = min(total, t0 + per);\n"
+"    const float kq = 1.f / sqrt((float)hd);\n"
+"    const uint lane = tiisg;\n"
+"    const uint fm = ((lane >> 2) & 4u) + ((lane >> 1) & 3u);\n"
+"    const uint fn = (((lane >> 2) & 2u) << 1u) + ((lane & 1u) << 1u);\n"
+"    threadgroup float tile[8 * 128]; threadgroup float dots[4 * 64], probability[64];\n"
+"    threadgroup float maxima[8], denom[8], corr[8]; threadgroup int valid[8];\n"
+"    if (tid < 8u) { maxima[tid] = -INFINITY; denom[tid] = 0.f; }\n"
+"    const uint nv = hd / 32u, D4 = hd / 4u;\n"
+"    simdgroup_matrix<float,8,8> out_m[16];\n"
+"    for (uint v = 0; v < nv; ++v) { out_m[v].thread_elements()[0] = 0.f; out_m[v].thread_elements()[1] = 0.f; }\n"
+"    for (uint begin = t0; begin < t1; begin += 8u) {\n"
+"        for (uint i = tid; i < 8u*hd; i += 128u) {\n"
+"            const uint r = i / hd, d = i % hd, j = begin + r;\n"
+"            int okk = 0, israw = 0; uint row = 0u;\n"
+"            if (j < t1) {\n"
+"                if (j < n_raw) { okk = 1; israw = 1; row = j; }\n"
+"                else { const uint rr = j - n_raw; if (!has_allowed || ALLOWED[rr]) { okk = 1; row = rr; } }\n"
+"            }\n"
+"            tile[i] = okk ? (israw ? RAWK[(ulong)row*hd + d] : COMPK[(ulong)row*hd + d]) : 0.f;\n"
+"            if (d == 0u) valid[r] = okk;\n"
+"        }\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        simdgroup_matrix<float,8,8> score, a, b;\n"
+"        score.thread_elements()[0] = 0.f; score.thread_elements()[1] = 0.f;\n"
+"        for (uint k = sg*D4; k < (sg+1u)*D4; k += 8u) {\n"
+"            const uint head = first_head + fm;\n"
+"            a.thread_elements()[0] = head < nh ? Q[(ulong)head*hd + k + fn] : 0.f;\n"
+"            a.thread_elements()[1] = head < nh ? Q[(ulong)head*hd + k + fn + 1u] : 0.f;\n"
+"            b.thread_elements()[0] = tile[fn*hd + k + fm];\n"
+"            b.thread_elements()[1] = tile[(fn+1u)*hd + k + fm];\n"
+"            simdgroup_multiply_accumulate(score, a, b, score);\n"
+"        }\n"
+"        dots[sg*64u + fm*8u + fn] = score.thread_elements()[0];\n"
+"        dots[sg*64u + fm*8u + fn + 1u] = score.thread_elements()[1];\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        if (tid < 8u) {\n"
+"            float nm = maxima[tid];\n"
+"            for (uint r = 0u; r < 8u; ++r) { const float sc = (dots[tid*8u+r]+dots[64u+tid*8u+r]+dots[128u+tid*8u+r]+dots[192u+tid*8u+r])*kq; if (valid[r] && sc > nm) nm = sc; }\n"
+"            corr[tid] = (maxima[tid] == -INFINITY) ? 0.f : exp(maxima[tid] - nm);\n"
+"            float tot = denom[tid]*corr[tid];\n"
+"            for (uint r = 0u; r < 8u; ++r) { const float sc = (dots[tid*8u+r]+dots[64u+tid*8u+r]+dots[128u+tid*8u+r]+dots[192u+tid*8u+r])*kq; const float pr = valid[r] ? exp(sc - nm) : 0.f; probability[tid*8u+r] = pr; tot += pr; }\n"
+"            maxima[tid] = nm; denom[tid] = tot;\n"
+"        }\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        a.thread_elements()[0] = probability[fm*8u + fn];\n"
+"        a.thread_elements()[1] = probability[fm*8u + fn + 1u];\n"
+"        for (uint v = 0; v < nv; ++v) {\n"
+"            const uint d = sg*D4 + v*8u + fn;\n"
+"            b.thread_elements()[0] = tile[fm*hd + d];\n"
+"            b.thread_elements()[1] = tile[fm*hd + d + 1u];\n"
+"            out_m[v].thread_elements()[0] *= corr[fm]; out_m[v].thread_elements()[1] *= corr[fm];\n"
+"            simdgroup_multiply_accumulate(out_m[v], a, b, out_m[v]);\n"
+"        }\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    }\n"
+"    const uint head = first_head + fm;\n"
+"    if (head < nh) {\n"
+"        device float* out = PART + (((ulong)tg.z*nh + head)*(ulong)nsm + (ulong)s)*(ulong)(hd + 2u);\n"
+"        for (uint v = 0; v < nv; ++v) { const uint d = sg*D4 + v*8u + fn; out[d] = out_m[v].thread_elements()[0]; out[d+1u] = out_m[v].thread_elements()[1]; }\n"
+"    }\n"
+"    if (tid < 8u && first_head + tid < nh) {\n"
+"        device float* out = PART + (((ulong)tg.z*nh + first_head + tid)*(ulong)nsm + (ulong)s)*(ulong)(hd + 2u);\n"
+"        out[hd] = maxima[tid]; out[hd + 1u] = denom[tid];\n"
+"    }\n"
+"}\n"
 "kernel void dsv4_attn_merge_t(device const float* PART [[buffer(0)]], device const float* SINKS [[buffer(1)]],\n"
 "    device float* OUT [[buffer(2)]], constant uint* P [[buffer(3)]], device const uint4* TP [[buffer(4)]],\n"
 "    uint2 hz [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]]) {\n"
@@ -1201,7 +1285,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
     id<MTLComputePipelineState> pso_mmp_q8, pso_mmp_iq2, pso_mmp_q2k, pso_mmp_q4k, pso_mmp_iq2a, pso_mmp_q2ka, pso_mmp_q4ka;   /* MPP (nil se non disponibile) */
-    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_rope_ev, pso_iscore_t, pso_itopk_t, pso_apart_t, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
+    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_rope_ev, pso_iscore_t, pso_itopk_t, pso_apart_t, pso_apart_mma, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
@@ -1373,7 +1457,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
             { "dsv4_hcb_sinkhorn", &b->pso_hcb_sink }, { "dsv4_hcb_norm", &b->pso_hcb_norm }, { "dsv4_hcb_post", &b->pso_hcb_post }, { "kernel_mul_mm_id_iq2_xxs_addr_f32", &b->pso_mm_iq2a },
             { "kernel_mul_mm_id_q2_K_addr_f32", &b->pso_mm_q2ka }, { "kernel_mul_mm_id_q4_K_addr_f32", &b->pso_mm_q4ka }, { "kernel_mul_mv_slots6_q4_K_pair_swiglu_f32", &b->pso_q4_pair },
             { "kernel_mul_mv_slots6_q4_K_sum6_f32", &b->pso_q4_sum6 }, { "dsv4_rms_w_rows", &b->pso_rms_rows },
-            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_comp_fp8_rows", &b->pso_fp8_rows }, { "dsv4_comp_pool_ev", &b->pso_pool_ev }, { "dsv4_rope_ev", &b->pso_rope_ev }, { "dsv4_indexer_scores_t", &b->pso_iscore_t }, { "dsv4_indexer_topk_t", &b->pso_itopk_t }, { "dsv4_attn_part_t", &b->pso_apart_t }, { "dsv4_attn_merge_t", &b->pso_amerge_t }, { "dsv4_ape_rows", &b->pso_ape_rows }, { "dsv4_rope_rows", &b->pso_rope_rows },
+            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_comp_fp8_rows", &b->pso_fp8_rows }, { "dsv4_comp_pool_ev", &b->pso_pool_ev }, { "dsv4_rope_ev", &b->pso_rope_ev }, { "dsv4_indexer_scores_t", &b->pso_iscore_t }, { "dsv4_indexer_topk_t", &b->pso_itopk_t }, { "dsv4_attn_part_t", &b->pso_apart_t }, { "dsv4_attn_part_mma", &b->pso_apart_mma }, { "dsv4_attn_merge_t", &b->pso_amerge_t }, { "dsv4_ape_rows", &b->pso_ape_rows }, { "dsv4_rope_rows", &b->pso_rope_rows },
             { "kernel_mul_mm_id_map0_ne20_8", &b->pso_mm_map8 }, { "kernel_mul_mm_id_q8_0_f32", &b->pso_mm_q8 }, { "kernel_mul_mm_id_iq2_xxs_f32", &b->pso_mm_iq2 },
             { "kernel_mul_mm_id_q2_K_f32", &b->pso_mm_q2k }, { "kernel_mul_mm_id_q4_K_f32", &b->pso_mm_q4k },
             { "dsv4_swiglu_w", &b->pso_swiglu_w }, { "dsv4_sum_slots6", &b->pso_sum_slots6 } };
@@ -3023,12 +3107,18 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             if (!PT) return -2;
             for (int g0 = 0; g0 < nt; g0 += G_) {
                 const int gt = nt - g0 < G_ ? nt - g0 : G_;
-                [e setComputePipelineState:b->pso_apart_t];
+                /* variante MMA (8 teste/TG, tile KV condiviso, simdgroup_matrix) se disponibile e hd<=512;
+                 * opt-out con l'opzione di registro dsv4_attn_mma=0. Altrimenti kernel scalare (fallback). */
+                int mma_ok = 0;   /* MISURA 2026-10-03: MMA ~pari allo scalare (115.3 vs 116.8 t/s) -> default OFF */
+                { int v; if (llm_ai_mlx_opt_get_bool("dsv4_attn_mma", &v) == 0 && v) mma_ok = 1; }
+                if (mma_ok) mma_ok = (b->pso_apart_mma != nil) && (hd % 32u) == 0u && hd <= 128u;
+                [e setComputePipelineState:mma_ok ? b->pso_apart_mma : b->pso_apart_t];
                 [e setBuffer:Q offset:0 atIndex:0]; [e setBuffer:RAWX offset:0 atIndex:1]; [e setBuffer:(id<MTLBuffer>)p0->acomp offset:0 atIndex:2];
                 [e setBuffer:ALB offset:0 atIndex:3]; [e setBuffer:PT offset:0 atIndex:4];
                 { uint32_t P_[6] = { (uint32_t)hd, (uint32_t)(p0->has_idx ? 1 : 0), (uint32_t)nsm, (uint32_t)g0, (uint32_t)max_ic, (uint32_t)nh_ }; [e setBytes:P_ length:sizeof(P_) atIndex:5]; }
                 [e setBuffer:TPB offset:0 atIndex:6];
-                [e dispatchThreadgroups:MTLSizeMake((NSUInteger)nh_, (NSUInteger)nsm, (NSUInteger)gt) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                if (mma_ok) [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((nh_ + 7) / 8), (NSUInteger)nsm, (NSUInteger)gt) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                else        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)nh_, (NSUInteger)nsm, (NSUInteger)gt) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
                 [e setComputePipelineState:b->pso_amerge_t];
                 [e setBuffer:PT offset:0 atIndex:0]; [e setBuffer:(id<MTLBuffer>)p0->sinks offset:0 atIndex:1]; [e setBuffer:HD offset:0 atIndex:2];
                 { uint32_t P_[4] = { (uint32_t)hd, (uint32_t)nsm, (uint32_t)g0, (uint32_t)nh_ }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; }

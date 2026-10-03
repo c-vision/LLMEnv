@@ -16,6 +16,7 @@ int main(int argc, char** argv) {
         else { while (k < n && fscanf(f, "%d", &v) == 1) tok[k++] = v;
                fclose(f); if (k < n) { fprintf(stderr, "solo %d token\n", k); n = k; } } }
     if (argc > 6) llm_ai_mlx_opt_set("dsv4_prefetch_hot", argv[6]);   /* item B: prefetch top-K hot del layer L+1 (0=off) */
+    if (argc > 8) llm_ai_mlx_opt_set("dsv4_attn_mma", argv[8]);        /* (a): attenzione MMA 8 teste (0=scalare, 1=MMA) */
     LlmDsv4Engine* e = llm_dsv4_engine_load_swap(path, n + 64, 3000);
     if (!e) { fprintf(stderr, "load fallita\n"); return 1; }
     const LlmDsv4Config* c = &e->w.cfg;
