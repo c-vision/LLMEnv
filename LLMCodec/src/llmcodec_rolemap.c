@@ -28,6 +28,48 @@ static int jstr(const char* v, char* out, size_t cap) {
     return 1;
 }
 
+/* ── ROLE MAP GENERICO (dedotto) ──────────────────────────────────────────────────────
+ * Per un modello senza `.gmbarch` si DEDUCE la mappa dalla CONVENZIONE HF/GGUF: i nomi
+ * `*.q_proj` -> ATTN_Q/`blk.%d.attn_q`/`model.layers.%d.self_attn.q_proj`, ecc. Copre le
+ * famiglie transformer standard (llama/qwen/mistral/MoE). Gli arch ESPLICITI (`.gmbarch`)
+ * restano la via per sovrascrivere/estendere (MLA, ibridi, multimodale). */
+typedef struct { const char* match; const char* role; const char* gguf; const char* hf; } rp_generic_t;
+static const rp_generic_t s_rp_generic[] = {
+    /* Ordine: regole PIU' SPECIFICHE prima (MoE switch_mlp/router PRIMA dei *_proj densi). */
+    { "switch_mlp",     "ROUTED_EXPERT","blk.%d.ffn_%s_exps.weight",     "model.layers.%d.mlp.switch_mlp.%s_proj.weight" },
+    { "mlp.gate.weight","ROUTER",       "blk.%d.ffn_gate_inp.weight",    "model.layers.%d.mlp.gate.weight" },
+    { "lm_head",        "OUTPUT",       "output.weight",                 "lm_head.weight" },
+    { "embed_tokens",   "EMBEDDING",    "token_embd.weight",             "model.embed_tokens.weight" },
+    { "input_layernorm", "NORM",        "blk.%d.attn_norm.weight",       "model.layers.%d.input_layernorm.weight" },
+    { "post_attention_layernorm", "NORM","blk.%d.ffn_norm.weight",       "model.layers.%d.post_attention_layernorm.weight" },
+    { "q_norm",         "NORM",         "blk.%d.attn_q_norm.weight",     "model.layers.%d.self_attn.q_norm.weight" },
+    { "k_norm",         "NORM",         "blk.%d.attn_k_norm.weight",     "model.layers.%d.self_attn.k_norm.weight" },
+    { "q_proj",         "ATTN_Q",       "blk.%d.attn_q.weight",          "model.layers.%d.self_attn.q_proj.weight" },
+    { "k_proj",         "ATTN_KV",      "blk.%d.attn_k.weight",          "model.layers.%d.self_attn.k_proj.weight" },
+    { "v_proj",         "ATTN_V",       "blk.%d.attn_v.weight",          "model.layers.%d.self_attn.v_proj.weight" },
+    { "o_proj",         "ATTN_WO",      "blk.%d.attn_output.weight",     "model.layers.%d.self_attn.o_proj.weight" },
+    { "gate_proj",      "FFN",          "blk.%d.ffn_gate.weight",        "model.layers.%d.mlp.gate_proj.weight" },
+    { "up_proj",        "FFN",          "blk.%d.ffn_up.weight",          "model.layers.%d.mlp.up_proj.weight" },
+    { "down_proj",      "FFN",          "blk.%d.ffn_down.weight",        "model.layers.%d.mlp.down_proj.weight" },
+    { "norm",           "NORM",         "output_norm.weight",            "model.norm.weight" },
+};
+int llmcodec_rolemap_generic(LlmCodecRoleMap* out) {
+    if (out == NULL) return -1;
+    memset(out, 0, sizeof *out);
+    snprintf(out->scale_suffix, sizeof out->scale_suffix, ".scales");
+    snprintf(out->bias_suffix,  sizeof out->bias_suffix,  ".biases");
+    out->expert_axis = 3;
+    int n = (int)(sizeof s_rp_generic / sizeof s_rp_generic[0]);
+    for (int i = 0; i < n && i < 128; i++) {
+        LlmCodecRoleRule* r = &out->r[out->n];
+        snprintf(r->match, sizeof r->match, "%s", s_rp_generic[i].match);
+        snprintf(r->role,  sizeof r->role,  "%s", s_rp_generic[i].role);
+        snprintf(r->gguf,  sizeof r->gguf,  "%s", s_rp_generic[i].gguf);
+        snprintf(r->hf,    sizeof r->hf,    "%s", s_rp_generic[i].hf);
+        out->n++;
+    }
+    return 0;
+}
 int llmcodec_rolemap_load(const char* llmarch_path, LlmCodecRoleMap* out) {
     if (llmarch_path == NULL || out == NULL) return -1;
     memset(out, 0, sizeof *out);
@@ -35,7 +77,11 @@ int llmcodec_rolemap_load(const char* llmarch_path, LlmCodecRoleMap* out) {
     snprintf(out->bias_suffix,  sizeof out->bias_suffix,  ".biases");
     out->expert_axis = 3;
     FILE* f = fopen(llmarch_path, "rb");
-    if (f == NULL) return -1;
+    if (f == NULL) {
+        /* Nessun `.gmbarch` per questo modello -> DEDUCI la mappa generica dalla convenzione
+         * HF/GGUF (famiglie standard). Un arch esplicito resta la via per sovrascrivere. */
+        return llmcodec_rolemap_generic(out);
+    }
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     char* j = (char*)malloc((size_t)n + 1);
     if (j == NULL) { fclose(f); return -1; }
@@ -213,6 +259,7 @@ int llmcodec_rolemap_load(const char* llmarch_path, LlmCodecRoleMap* out) {
                     jstr(jval(obj, "role"), R->role, sizeof R->role);
                     jstr(jval(obj, "submodel"), R->submodel, sizeof R->submodel);
                     R->gguf[0] = 0; { const char* gv = jval(obj, "gguf"); if (gv) jstr(gv, R->gguf, sizeof R->gguf); }
+                    R->hf[0] = 0; { const char* hv = jval(obj, "hf"); if (hv) jstr(hv, R->hf, sizeof R->hf); }
                     R->stack = 0; { const char* sv = jval(obj, "stack"); if (sv && (strncmp(sv, "true", 4) == 0 || *sv == '1')) R->stack = 1; }
                     out->n++;
                 }
@@ -438,4 +485,45 @@ int llmcodec_rolemap_unsupported(const LlmCodecRoleMap* m, char* out, size_t cap
 
 int llmcodec_rolemap_is_expert(const char* role) {
     return role != NULL && (strstr(role, "EXPERT") != NULL || strstr(role, "expert") != NULL);
+}
+
+/* ── Reverse GGUF(canonico) -> HF via i template `hf` ──────────────────────────────── */
+static int rp_pat_match(const char* pat, const char* s, char vals[][64], int maxv) {
+    int nv = 0;
+    while (*pat) {
+        if (pat[0] == '%' && (pat[1] == 'd' || pat[1] == 's')) {
+            pat += 2;
+            const char* lit = pat; size_t ll = 0;
+            while (lit[ll] && !(lit[ll] == '%' && (lit[ll+1] == 'd' || lit[ll+1] == 's'))) ll++;
+            const char* found = NULL;
+            if (ll == 0) found = s + strlen(s);
+            else { size_t sl = strlen(s); for (size_t k = 0; k + ll <= sl; ++k) if (memcmp(s + k, lit, ll) == 0) { found = s + k; break; } }
+            if (!found) return -1;
+            size_t vl = (size_t)(found - s);
+            if (vl > 63) return -1;
+            if (nv < maxv) { memcpy(vals[nv], s, vl); vals[nv][vl] = 0; }
+            nv++; s = found;
+        } else { if (*pat != *s) return -1; pat++; s++; }
+    }
+    return *s ? -1 : nv;
+}
+int llmcodec_rolemap_canonical_to_hf(const LlmCodecRoleMap* m, const char* canon, char* out, size_t cap) {
+    if (m == NULL || canon == NULL || out == NULL || cap == 0) return 0;
+    out[0] = 0;
+    for (int i = 0; i < m->n; ++i) {
+        if (!m->r[i].gguf[0] || !m->r[i].hf[0]) continue;
+        char vals[8][64];
+        int nv = rp_pat_match(m->r[i].gguf, canon, vals, 8);
+        if (nv < 0) continue;
+        size_t o = 0; int vi = 0;
+        for (const char* p = m->r[i].hf; *p && o < cap - 1; ) {
+            if (p[0] == '%' && (p[1] == 'd' || p[1] == 's')) {
+                const char* v = (vi < nv) ? vals[vi] : "";
+                o += (size_t)snprintf(out + o, cap - o, "%s", v); vi++; p += 2;
+            } else out[o++] = *p++;
+        }
+        out[o < cap ? o : cap - 1] = 0;
+        return 1;
+    }
+    return 0;
 }

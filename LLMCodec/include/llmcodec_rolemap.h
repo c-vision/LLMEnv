@@ -13,7 +13,7 @@
  * `%d` sostituito dall'indice layer estratto dal nome sorgente (es. "blk.%d.attn_q_a.weight");
  * vuoto = si conserva il nome sorgente. `stack`=1 -> gli esperti per-esperto vanno IMPILATI in un
  * unico tensore 3D `[cols, rows, E]` col nome `gguf` (es. ffn_gate_exps). */
-typedef struct { char match[96]; char role[32]; char submodel[32]; char gguf[64]; int stack; } LlmCodecRoleRule;
+typedef struct { char match[96]; char role[32]; char submodel[32]; char gguf[64]; char hf[128]; int stack; } LlmCodecRoleRule;
 typedef struct { char role[32]; char fmt[16]; } LlmCodecRoleFmt;
 typedef struct { char key[32]; char type[32]; } LlmCodecRoleStruct;
 /* Sorgente pesi: formato -> come decodificarlo. `codec` seleziona l'implementazione dal file
@@ -40,6 +40,9 @@ typedef struct {
 
 /* Carica `roles`/`scale_suffix`/`arch` da una `.llmarch` (JSON). 0 ok / -1. */
 int llmcodec_rolemap_load(const char* llmarch_path, LlmCodecRoleMap* out);
+/* Mappa generica DEDOTTA dalla convenzione HF/GGUF (nessun `.gmbarch`). */
+int llmcodec_rolemap_generic(LlmCodecRoleMap* out);
+int llmcodec_rolemap_canonical_to_hf(const LlmCodecRoleMap* m, const char* canon, char* out, size_t cap);
 
 /* Risolve il ruolo di `name`: prima regola la cui `match` compare in `name`, o "OTHER". */
 const char* llmcodec_rolemap_of(const LlmCodecRoleMap* m, const char* name);

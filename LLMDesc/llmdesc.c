@@ -234,6 +234,16 @@ int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out
             if (sl == dir) { dir[1] = 0; } else *sl = 0;
         }
     }
+    /* FALLBACK GENERICO (2026-10-03): nessun `.gmbarch` per questo modello -> desc MINIMALE
+     * (arch = model_type) e role map GENERICO dedotto dalla convenzione HF/GGUF (llmcodec_
+     * rolemap_generic). Cosi' un modello a decoder standard si carica/convertе SENZA file arch;
+     * un `.gmbarch` esplicito resta la via per sovrascrivere/estendere (MLA, ibridi, multimodale). */
+    if (arch[0]) {
+        memset(out, 0, sizeof *out);
+        snprintf(out->arch, sizeof out->arch, "%s", arch);
+        if (out_path && out_path_cap) out_path[0] = 0;   /* "" -> role map generico */
+        return 0;
+    }
     if (out_path) out_path[0] = 0;
     return -1;
 }
