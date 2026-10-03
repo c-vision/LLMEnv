@@ -13,3 +13,7 @@ __pycache__/
 # build dirs (non tracciare)
 LLMEngine/mlx/build-gmbasic/
 libs/mlx-deps/precompiled/
+
+# oracoli: script e binari di misura locali, NON tracciati (vedi
+# AiWiki/01-Projects/LLMEnv/Knowledge/oracoli.md)
+oracoli/
