@@ -17,6 +17,9 @@ int main(int argc, char** argv) {
                fclose(f); if (k < n) { fprintf(stderr, "solo %d token\n", k); n = k; } } }
     if (argc > 6) llm_ai_mlx_opt_set("dsv4_prefetch_hot", argv[6]);   /* item B: prefetch top-K hot del layer L+1 (0=off) */
     if (argc > 8) llm_ai_mlx_opt_set("dsv4_attn_mma", argv[8]);        /* (a): attenzione MMA 8 teste (0=scalare, 1=MMA) */
+    if (argc > 9)  llm_ai_mlx_opt_set("dsv4_hotlist_out", argv[9]);    /* hotlist I/O: salva il profilo hotness */
+    if (argc > 10) llm_ai_mlx_opt_set("dsv4_hotlist_in", argv[10]);    /* hotlist I/O: carica profilo + seed top-K */
+    if (argc > 11) llm_ai_mlx_opt_set("dsv4_hotlist_topk", argv[11]);  /* K esperti/layer da seedare */
     LlmDsv4Engine* e = llm_dsv4_engine_load_swap(path, n + 64, 3000);
     if (!e) { fprintf(stderr, "load fallita\n"); return 1; }
     const LlmDsv4Config* c = &e->w.cfg;

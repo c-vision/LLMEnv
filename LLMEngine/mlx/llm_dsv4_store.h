@@ -143,6 +143,11 @@ static inline int llm_dsv4_store_q4_ensure(LlmDsv4Store* s, int layer, const int
     return bad ? -4 : 0;
 }
 
+/* forward decl: hotlist I/O (definite in fondo a questo header) */
+static inline int llm_dsv4_store_save_hot(const LlmDsv4Store* s, const char* path);
+static inline int llm_dsv4_store_load_hot(LlmDsv4Store* s, const char* path);
+static inline void llm_dsv4_store_seed_hot(LlmDsv4Store* s, int top_k);
+
 static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngineMoeGguf* g,
         const LlmDsv4Config* c, LlmDsv4StoreMode mode, int cap_bundles) {
     LlmDsv4Store* s = (LlmDsv4Store*)calloc(1, sizeof *s);
@@ -194,10 +199,25 @@ static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngin
     { int v = 0; if (mode == LLM_DSV4_STORE_SWAP && llm_ai_mlx_opt_get_bool("dsv4_q4_arena", &v) == 0 && v) llm_dsv4_store_enable_q4(s, c->n_expert); }
     /* item B: se il prefetch mirato e' attivo serve la mappa di hotness (alimentata in claim). */
     { int v = 0; if (mode == LLM_DSV4_STORE_SWAP && llm_ai_mlx_opt_get_int("dsv4_prefetch_hot", &v) == 0 && v > 0) llm_dsv4_store_set_dims(s, c->n_layer, c->n_expert); }
+    /* HOTLIST I/O (item B/c): carica la hotness persistita e pre-carica i top-K esperti per layer. */
+    if (mode == LLM_DSV4_STORE_SWAP) {
+        char hin[1024], hout[1024];
+        int has_in = llm_ai_mlx_opt_get_str("dsv4_hotlist_in", hin, sizeof hin) == 0 && hin[0];
+        int has_out = llm_ai_mlx_opt_get_str("dsv4_hotlist_out", hout, sizeof hout) == 0 && hout[0];
+        if (has_in || has_out) {
+            llm_dsv4_store_set_dims(s, c->n_layer, c->n_expert);
+            if (has_in && llm_dsv4_store_load_hot(s, hin) == 0) {
+                int K = 64; { int v; if (llm_ai_mlx_opt_get_int("dsv4_hotlist_topk", &v) == 0 && v > 0) K = v; }
+                llm_dsv4_store_seed_hot(s, K);
+            }
+        }
+    }
     return s;
 }
 static inline void llm_dsv4_store_free(LlmDsv4Store* s) {
     if (!s) return;
+    /* HOTLIST I/O: se richiesto, salva la hotness osservata (profilo) per il seed di run successivi. */
+    { char p[1024]; if (s->freq && llm_ai_mlx_opt_get_str("dsv4_hotlist_out", p, sizeof p) == 0 && p[0]) llm_dsv4_store_save_hot(s, p); }
     if (s->ents) { for (int i = 0; i < s->cap; i++) free(s->ents[i].buf); free(s->ents); }
     free(s->ht_keys); free(s->ht_vals);
     if (s->fd >= 0) close(s->fd);
@@ -379,6 +399,51 @@ static inline void llm_dsv4_store_madvise_layer(LlmDsv4Store* s, int layer) {
         (void)posix_madvise((void*)(s->resident_base + L->off_d + (uint64_t)best * L->stride_d), L->stride_d, POSIX_MADV_WILLNEED);
 #endif
     }
+}
+
+/* ── HOTLIST I/O (item B/c, come `ds4 --ssd-streaming`): persisti la hotness (freq) su file e
+ * pre-carica i top-K esperti per layer nella cache. Attacca l'I/O (~29%) senza speculazione cieca:
+ * il seed usa le frequenze OSSERVATE (profilo), non una predizione arbitraria. ── */
+static inline int llm_dsv4_store_save_hot(const LlmDsv4Store* s, const char* path) {
+    if (!s || !path || !path[0] || !s->freq || s->f_layers <= 0 || s->f_experts <= 0) return -1;
+    FILE* f = fopen(path, "wb"); if (!f) return -1;
+    int hdr[2] = { s->f_layers, s->f_experts };
+    int ok = (fwrite(hdr, sizeof(int), 2, f) == 2) &&
+             (fwrite(s->freq, sizeof(uint32_t), (size_t)s->f_layers * s->f_experts, f) ==
+              (size_t)s->f_layers * s->f_experts);
+    fclose(f); return ok ? 0 : -1;
+}
+static inline int llm_dsv4_store_load_hot(LlmDsv4Store* s, const char* path) {
+    if (!s || !path || !path[0]) return -1;
+    FILE* f = fopen(path, "rb"); if (!f) return -1;
+    int hdr[2] = { 0, 0 };
+    if (fread(hdr, sizeof(int), 2, f) != 2 || hdr[0] <= 0 || hdr[1] <= 0 || hdr[1] > 65536) { fclose(f); return -1; }
+    llm_dsv4_store_set_dims(s, hdr[0], hdr[1]);
+    if (!s->freq) { fclose(f); return -1; }
+    size_t n = (size_t)hdr[0] * hdr[1];
+    size_t got = fread(s->freq, sizeof(uint32_t), n, f);
+    fclose(f); return got == n ? 0 : -1;
+}
+/* Pre-carica i top-K (per freq>0) esperti di OGNI layer nella cache (claim+pread via prefetch). */
+static inline void llm_dsv4_store_seed_hot(LlmDsv4Store* s, int top_k) {
+    if (!s || !s->freq || top_k <= 0 || s->f_experts <= 0 || s->f_experts > 4096) return;
+    int* sel = (int*)malloc(sizeof(int) * (size_t)top_k);
+    if (!sel) return;
+    for (int L = 0; L < s->f_layers; L++) {
+        const uint32_t* f = &s->freq[(size_t)L * s->f_experts];
+        int n = 0;
+        for (int k = 0; k < top_k; k++) {
+            int best = -1; uint32_t bf = 0;
+            for (int e = 0; e < s->f_experts; e++) {
+                int chosen = 0; for (int j = 0; j < n; j++) if (sel[j] == e) { chosen = 1; break; }
+                if (!chosen && f[e] > bf) { bf = f[e]; best = e; }
+            }
+            if (best < 0) break;   /* nessuna osservazione (>0) rimasta */
+            sel[n++] = best;
+        }
+        if (n > 0) llm_dsv4_store_prefetch(s, L, sel, n);
+    }
+    free(sel);
 }
 
 #endif /* LLM_DSV4_STORE_H */
