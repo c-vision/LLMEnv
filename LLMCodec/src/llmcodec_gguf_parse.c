@@ -219,8 +219,100 @@ int llmcodec_gguf_parse_mem(const uint8_t* buf, size_t size, LlmCodecGgufMetaKVO
 }
 
 /* Mappa il file in sola lettura e chiama il parser (parse_mem copia le stringhe -> si può smappare). */
+/* ============ DIR MLX/HF -> GGUF-equivalente (read-only) ============
+ * I consumer `LLM TENSOR` devono funzionare su un file .gguf *o* una directory MLX/HF
+ * (config.json + *.safetensors) indifferentemente. Se `path` e' una directory, si sintetizza
+ * un `LlmCodecGgufFileInfo` + metadata KV dall'header dei safetensors + config.json. La
+ * `data_start`/offset non sono usati dai consumer report-only (PROFILE/MEMORY/COST/...). */
+#include "llmcodec_safetensors.h"
+#include <dirent.h>
+static int ggml_type_of_dtype(const char* dt) {
+    if (!dt) return LLMCODEC_GGML_T_F32;
+    if (strcasecmp(dt, "F32") == 0) return LLMCODEC_GGML_T_F32;
+    if (strcasecmp(dt, "F16") == 0) return LLMCODEC_GGML_T_F16;
+    if (strcasecmp(dt, "BF16") == 0) return LLMCODEC_GGML_T_BF16;
+    if (strcasecmp(dt, "I8") == 0 || strcasecmp(dt, "U8") == 0) return LLMCODEC_GGML_T_I8;
+    if (strcasecmp(dt, "I16") == 0) return LLMCODEC_GGML_T_I16;
+    if (strcasecmp(dt, "I32") == 0) return LLMCODEC_GGML_T_I32;
+    if (strcasecmp(dt, "I64") == 0) return LLMCODEC_GGML_T_I64;
+    return LLMCODEC_GGML_T_F16;
+}
+static char* mlx_read_file(const char* path) {
+    FILE* f = fopen(path, "rb"); if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    char* b = (char*)malloc((size_t)n + 1);
+    if (b && fread(b, 1, (size_t)n, f) == (size_t)n) b[n] = 0; else { free(b); b = NULL; }
+    fclose(f); return b;
+}
+static int mlx_json_int(const char* j, const char* key, long* out) {
+    if (!j) return 0; char pat[128]; snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char* p = strstr(j, pat); if (!p) return 0; p += strlen(pat);
+    while (*p == ' ' || *p == '\t' || *p == ':' || *p == '\r' || *p == '\n') p++;
+    if (!(*p == '-' || (*p >= '0' && *p <= '9'))) return 0; *out = strtol(p, NULL, 10); return 1;
+}
+static int mlx_json_int_any(const char* j, const char** keys, int nk, long dflt) { long v; for (int i = 0; i < nk; i++) if (mlx_json_int(j, keys[i], &v)) return v; return dflt; }
+static char* mlx_json_str(const char* j, const char* key) {
+    if (!j) return NULL; char pat[128]; snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char* p = strstr(j, pat); if (!p) return NULL; p = strchr(p + strlen(pat), ':'); if (!p) return NULL;
+    p = strchr(p, '"'); if (!p) return NULL; const char* q = strchr(p + 1, '"'); if (!q) return NULL;
+    return strndup(p + 1, (size_t)(q - p - 1));
+}
+static int llmcodec_gguf_read_meta_mlx(const char* dir, LlmCodecGgufMetaKVOwned** out_kv, int* out_n, LlmCodecGgufFileInfo* out_info) {
+    if (out_kv) *out_kv = NULL; if (out_n) *out_n = 0; if (out_info) memset(out_info, 0, sizeof *out_info);
+    char cp[2048]; snprintf(cp, sizeof cp, "%s/config.json", dir);
+    char* cfg = mlx_read_file(cp);
+    /* shard *.safetensors */
+    char** shards = NULL; int ns = 0;
+    DIR* dp = opendir(dir); if (!dp) { free(cfg); return -1; }
+    struct dirent* e;
+    while ((e = readdir(dp)) != NULL) { size_t L = strlen(e->d_name);
+        if (L > 12 && strcmp(e->d_name + L - 12, ".safetensors") == 0) { shards = (char**)realloc(shards, sizeof(char*) * (ns + 1)); char sp[2048]; snprintf(sp, sizeof sp, "%s/%s", dir, e->d_name); shards[ns++] = strdup(sp); } }
+    closedir(dp);
+    if (!out_info) { for (int i = 0; i < ns; i++) free(shards[i]); free(shards); free(cfg); return 0; }
+    uint64_t cap = 0; for (int s = 0; s < ns; s++) { LlmCodecStTensorInfo* ti = NULL; int nt = 0; uint64_t base = 0; if (llmcodec_safetensors_read(shards[s], &ti, &nt, &base) == 0) { cap += nt; llmcodec_safetensors_info_free(ti); } }
+    out_info->version = 3; out_info->n_tensors = 0; out_info->tensors = (LlmCodecGgufTensorInfo*)calloc(cap ? cap : 1, sizeof(LlmCodecGgufTensorInfo));
+    for (int s = 0; s < ns; s++) {
+        LlmCodecStTensorInfo* ti = NULL; int nt = 0; uint64_t base = 0;
+        if (llmcodec_safetensors_read(shards[s], &ti, &nt, &base) != 0) continue;
+        for (int i = 0; i < nt; i++) {
+            LlmCodecGgufTensorInfo* t = &out_info->tensors[out_info->n_tensors++];
+            snprintf(t->name, sizeof t->name, "%s", ti[i].name);
+            t->ggml_type = ggml_type_of_dtype(ti[i].dtype);
+            t->ndim = ti[i].ndim; for (int d = 0; d < t->ndim && d < 8; d++) t->dims[d] = ti[i].shape[d];
+            t->offset = 0;
+        }
+        llmcodec_safetensors_info_free(ti);
+    }
+    /* metadata KV (dai campi config.json; nomi = quelli GGUF attesi dai consumer) */
+    if (out_kv) {
+        const char* k_lay[] = {"num_hidden_layers","n_layer","num_layers"};
+        const char* k_hd[]  = {"num_attention_heads","n_head","num_heads"};
+        const char* k_hkv[] = {"num_key_value_heads","n_head_kv","num_kv_heads"};
+        const char* k_en[]  = {"hidden_size","n_embd","d_model"};
+        const char* k_hdim[]= {"head_dim","key_length"};
+        const char* k_ne[]  = {"n_routed_experts","num_experts","n_experts","num_local_experts"};
+        const char* k_tk[]  = {"num_experts_per_tok","num_experts_per_token","top_k"};
+        long lay = mlx_json_int_any(cfg,k_lay,3,-1), hd = mlx_json_int_any(cfg,k_hd,3,-1), hkv = mlx_json_int_any(cfg,k_hkv,3,-1);
+        long en = mlx_json_int_any(cfg,k_en,3,-1), hdim = mlx_json_int_any(cfg,k_hdim,2,-1), ne = mlx_json_int_any(cfg,k_ne,4,-1), tk = mlx_json_int_any(cfg,k_tk,3,-1);
+        char* mt = mlx_json_str(cfg, "model_type");
+        int nk = 1 + (lay>0) + (hd>0) + (hkv>0) + (en>0) + (hdim>0) + (ne>0) + (tk>0);
+        LlmCodecGgufMetaKVOwned* kv = (LlmCodecGgufMetaKVOwned*)calloc((size_t)nk, sizeof *kv);
+        int i = 0;
+        if (mt) { kv[i].key = strdup("general.architecture"); kv[i].type = LLMCODEC_GGUF_MT_STRING; kv[i].str = mt; i++; }
+        #define MKI(KEY,VAL) if ((VAL)>0) { kv[i].key = strdup(KEY); kv[i].type = LLMCODEC_GGUF_MT_U32; kv[i].u32 = (uint32_t)(VAL); i++; }
+        MKI("block_count", lay) MKI("attention.head_count", hd) MKI("attention.head_count_kv", hkv)
+        MKI("embedding_length", en) MKI("attention.key_length", hdim) MKI("attention.value_length", hdim)
+        MKI("expert_count", ne) MKI("expert_used_count", tk)
+        #undef MKI
+        *out_kv = kv; *out_n = i;
+    }
+    for (int i = 0; i < ns; i++) free(shards[i]); free(shards); free(cfg);
+    return 0;
+}
 LlmCodecGgufStatus llmcodec_gguf_read_meta_status(const char* path, LlmCodecGgufMetaKVOwned** out_kv, int* out_n, LlmCodecGgufFileInfo* out_info) {
     if (path == NULL) return LLMCODEC_GGUF_STATUS_IO;
+    { struct stat dst; if (stat(path, &dst) == 0 && S_ISDIR(dst.st_mode))
+        return llmcodec_gguf_read_meta_mlx(path, out_kv, out_n, out_info) == 0 ? LLMCODEC_GGUF_STATUS_OK : LLMCODEC_GGUF_STATUS_IO; }
     if (out_kv) *out_kv = NULL;
     if (out_n) *out_n = 0;
     if (out_info) memset(out_info, 0, sizeof *out_info);
