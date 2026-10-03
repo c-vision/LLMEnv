@@ -36,6 +36,9 @@ static inline const uint8_t* llm_dsv4_engine_store_cb(void* s, int layer, int e,
 static inline void llm_dsv4_engine_store_prefetch_cb(void* s, int layer, const int* experts, int n) {
     llm_dsv4_store_prefetch((LlmDsv4Store*)s, layer, experts, n);
 }
+static inline void llm_dsv4_engine_store_madvise_cb(void* s, int layer) {
+    llm_dsv4_store_madvise_layer((LlmDsv4Store*)s, layer);
+}
 
 static inline int llm_dsv4_engine_q4_stacks_cb(void* s, int layer, const uint8_t** g, const uint8_t** u, const uint8_t** d) {
     return llm_dsv4_store_q4_stacks((LlmDsv4Store*)s, layer, g, u, d);
@@ -54,6 +57,7 @@ static inline bool llm_dsv4_engine_enable_swap(LlmDsv4Engine* e, int cap_bundles
         e->w.exps[il].store = e->store;
         e->w.exps[il].store_get = llm_dsv4_engine_store_cb;
         e->w.exps[il].store_prefetch = llm_dsv4_engine_store_prefetch_cb;
+        e->w.exps[il].store_madvise = llm_dsv4_engine_store_madvise_cb;
         e->w.exps[il].q4_stacks = llm_dsv4_engine_q4_stacks_cb;
         e->w.exps[il].q4_ensure = llm_dsv4_engine_q4_ensure_cb;
     }

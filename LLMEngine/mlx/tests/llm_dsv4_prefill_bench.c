@@ -11,10 +11,11 @@ int main(int argc, char** argv) {
     if (argc > 4) llm_ai_mlx_opt_set("dsv4_cache_mb", argv[4]);
     int* tok = (int*)malloc(sizeof(int) * (size_t)n); unsigned s = 12345;
     for (int i = 0; i < n; i++) { s = s * 1103515245u + 12345u; tok[i] = 1000 + (int)((s >> 8) % 20000); }
-    if (argc > 5) { FILE* f = fopen(argv[5], "r"); int v, k = 0;   /* token id separati da spazio (es. da `ds4 --dump-tokens`) */
-        if (!f) { fprintf(stderr, "tokfile?\n"); return 1; }
-        while (k < n && fscanf(f, "%d", &v) == 1) tok[k++] = v;
-        fclose(f); if (k < n) { fprintf(stderr, "solo %d token\n", k); n = k; } }
+    if (argc > 5 && argv[5][0]) { FILE* f = fopen(argv[5], "r"); int v, k = 0;   /* token id separati da spazio (es. da `ds4 --dump-tokens`) */
+        if (!f) fprintf(stderr, "tokfile %s non apribile: uso token sintetici\n", argv[5]);
+        else { while (k < n && fscanf(f, "%d", &v) == 1) tok[k++] = v;
+               fclose(f); if (k < n) { fprintf(stderr, "solo %d token\n", k); n = k; } } }
+    if (argc > 6) llm_ai_mlx_opt_set("dsv4_prefetch_hot", argv[6]);   /* item B: prefetch top-K hot del layer L+1 (0=off) */
     LlmDsv4Engine* e = llm_dsv4_engine_load_swap(path, n + 64, 3000);
     if (!e) { fprintf(stderr, "load fallita\n"); return 1; }
     const LlmDsv4Config* c = &e->w.cfg;

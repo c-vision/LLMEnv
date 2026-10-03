@@ -59,8 +59,14 @@ static inline void llm_dsv4_forward_batch(const LlmDsv4Config* c, const LlmDsv4W
     float* cur = (float*)malloc(sizeof(float) * hcn * (size_t)N);
     float* nxt = (float*)malloc(sizeof(float) * hcn * (size_t)N);
     for (int t = 0; t < N; t++) llm_dsv4_hc_from_embedding(c, w->token_embd + (long)tokens[t] * D, cur + hcn * t);
+    int pf_hot = 0; { int v; if (llm_ai_mlx_opt_get_int("dsv4_prefetch_hot", &v) == 0) pf_hot = v; }
     for (int il = 0; il < c->n_layer; il++) {
         const LlmDsv4PackedExperts* pe = w->exps ? &w->exps[il] : NULL;
+        /* ITEM B (opt-in, default OFF): prefetch ASINCRONO (madvise WILLNEED) dei K esperti piu'
+         * frequenti del layer SUCCESSIVO mentre QUESTO calcola -> l'I/O si sovrappone alla GPU.
+         * Vedi llm_dsv4_store_madvise_layer (misura: whole-layer NOCIVO). */
+        if (pf_hot > 0 && w->exps && il + 1 < c->n_layer && w->exps[il + 1].store_madvise)
+            w->exps[il + 1].store_madvise(w->exps[il + 1].store, il + 1);
         llm_dsv4_layer_forward_batch(c, &w->layers[il], pe, &cs->layers[il], cur, tokens, pos0, N, il, nxt);
         float* tmp = cur; cur = nxt; nxt = tmp;
     }

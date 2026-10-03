@@ -36,6 +36,7 @@ typedef struct {
     void* store;   /* LlmDsv4Store* opzionale (swap/residency esperti); NULL = mmap residente */
     const uint8_t* (*store_get)(void* store, int layer, int e, const uint8_t** g, const uint8_t** u, const uint8_t** d);
     void (*store_prefetch)(void* store, int layer, const int* experts, int n);   /* letture parallele dei mancanti (opz.) */
+    void (*store_madvise)(void* store, int layer);   /* prefetch asincrono WILLNEED di un intero layer (item B, opz.) */
     /* Layer Q4_K in ARENA (tensori impilati): 1 se servito, riempie i tre tensori di layer; q4_ensure legge i mancanti. */
     int (*q4_stacks)(void* store, int layer, const uint8_t** g, const uint8_t** u, const uint8_t** d);
     int (*q4_ensure)(void* store, int layer, const int* experts, int n);

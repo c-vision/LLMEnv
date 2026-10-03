@@ -34,6 +34,7 @@ typedef struct {
     const uint8_t* resident_base;   /* g->buf (RESIDENT) */
     int fd;                         /* SWAP (pread) */
     int n_layer;
+    int n_expert;                   /* esperti per layer (per il prefetch WILLNEED di layer interi) */
     LlmDsv4StoreLayer* layers;
     LlmDsv4StoreEnt* ents;
     int cap, n, tick;
@@ -149,6 +150,7 @@ static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngin
     s->mode = mode;
     s->resident_base = g->buf;
     s->n_layer = c->n_layer;
+    s->n_expert = c->n_expert;
     s->cap = cap_bundles > 0 ? cap_bundles : 64;
     s->layers = (LlmDsv4StoreLayer*)calloc((size_t)c->n_layer, sizeof(LlmDsv4StoreLayer));
     s->ents = (LlmDsv4StoreEnt*)calloc((size_t)s->cap, sizeof(LlmDsv4StoreEnt));
@@ -190,6 +192,8 @@ static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngin
     /* Arena Q4_K: SPERIMENTALE, DISATTIVA di default (alloca ~21 GB e li rende residenti: sopra il budget di una macchina da 128 GB
      * con la cache esperti da 86 GB). Si attiva solo con l'opzione di registro `dsv4_q4_arena=1` (mai env). */
     { int v = 0; if (mode == LLM_DSV4_STORE_SWAP && llm_ai_mlx_opt_get_bool("dsv4_q4_arena", &v) == 0 && v) llm_dsv4_store_enable_q4(s, c->n_expert); }
+    /* item B: se il prefetch mirato e' attivo serve la mappa di hotness (alimentata in claim). */
+    { int v = 0; if (mode == LLM_DSV4_STORE_SWAP && llm_ai_mlx_opt_get_int("dsv4_prefetch_hot", &v) == 0 && v > 0) llm_dsv4_store_set_dims(s, c->n_layer, c->n_expert); }
     return s;
 }
 static inline void llm_dsv4_store_free(LlmDsv4Store* s) {
@@ -342,6 +346,39 @@ static inline void llm_dsv4_store_prefetch(LlmDsv4Store* s, int layer, const int
         else s->bytes_read += L->nb_g + L->nb_u + L->nb_d;
     }
     free(jobs);
+}
+
+/* PREFETCH ASINCRONO MIRATO di un layer (item B): `posix_madvise(WILLNEED)` sui K ESPERTI piu'
+ * frequenti osservati (hotness `freq`, D19-A) del layer, non su tutto il layer. Il kernel legge in
+ * BACKGROUND (ritorna subito) → l'I/O si sovrappone al calcolo GPU del layer precedente. Opzione di
+ * registro `dsv4_prefetch_hot=K` (K esperti; default 0 = OFF). Il GGUF e' gia' mmap (`resident_base`).
+ *
+ * MISURA (2026-10-03): il prefetch dell'INTERO layer e' NOCIVO (8192 tok sintetici: 67.9 → 17.7 t/s,
+ * 3.8x piu' lento: legge tutti gli esperti di ogni layer e satura l'I/O). Quindi QUI si limita ai
+ * top-K per frequenza; senza localita' (token sintetici casuali) freq e' ~uniforme → nessun guadagno
+ * atteso (serve testo reale, come la hotlist ds4). Se `freq` non e' allocata → no-op. */
+static inline void llm_dsv4_store_madvise_layer(LlmDsv4Store* s, int layer) {
+    if (!s || s->mode != LLM_DSV4_STORE_SWAP || !s->resident_base || s->freq == NULL) return;
+    if (layer < 0 || layer >= s->f_layers) return;
+    if (s->q4_off && s->q4_off[layer * 3] != (size_t)-1) return;   /* arena Q4_K: gestita da q4_ensure */
+    int K = 0; { int v; if (llm_ai_mlx_opt_get_int("dsv4_prefetch_hot", &v) == 0) K = v; }
+    if (K <= 0 || s->f_experts <= 0 || s->f_experts > 512) return;
+    if (K > s->f_experts) K = s->f_experts;
+    const LlmDsv4StoreLayer* L = &s->layers[layer];
+    if (L->stride_g == 0 || L->stride_u == 0 || L->stride_d == 0) return;
+    uint32_t tmp[512];
+    memcpy(tmp, &s->freq[(size_t)layer * s->f_experts], sizeof(uint32_t) * (size_t)s->f_experts);
+    for (int k = 0; k < K; k++) {
+        int best = -1; uint32_t bf = 0;
+        for (int e = 0; e < s->f_experts; e++) if (tmp[e] > bf) { bf = tmp[e]; best = e; }
+        if (best < 0) break;   /* nessuna osservazione (>0) per questo layer */
+        tmp[best] = 0;
+#if defined(POSIX_MADV_WILLNEED)
+        (void)posix_madvise((void*)(s->resident_base + L->off_g + (uint64_t)best * L->stride_g), L->stride_g, POSIX_MADV_WILLNEED);
+        (void)posix_madvise((void*)(s->resident_base + L->off_u + (uint64_t)best * L->stride_u), L->stride_u, POSIX_MADV_WILLNEED);
+        (void)posix_madvise((void*)(s->resident_base + L->off_d + (uint64_t)best * L->stride_d), L->stride_d, POSIX_MADV_WILLNEED);
+#endif
+    }
 }
 
 #endif /* LLM_DSV4_STORE_H */
