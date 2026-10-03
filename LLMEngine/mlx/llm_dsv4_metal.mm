@@ -990,13 +990,73 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
 "    if (sg == 0u && tiisg == 0u) SCORES[(ulong)t * maxc + c] = ss[0] + ss[1] + ss[2] + ss[3];\n"
 "}\n"
+"/* Chiave order-preserving float->uint (monotona anche per negativi; -0 canonico a +0).\n"
+" * Gli score dell'indexer possono essere negativi (somma di dot*pesi), quindi NON si puo'\n"
+" * usare il trucco ds4 max(v,0): la radix deve ordinare anche i negativi. */\n"
+"static inline uint dsv4_idx_key(float v) {\n"
+"    if (v == 0.0f) v = 0.0f;\n"
+"    const uint bb = as_type<uint>(v);\n"
+"    return (bb & 0x80000000u) ? ~bb : (bb | 0x80000000u);\n"
+"}\n"
+"/* Top-k indexer BATCHED (una threadgroup per token): radix-select a 4 passi sugli 8 bit piu'\n"
+" * significativi della chiave -> O(n_comp) invece di O(n_comp^2) per token (contesti lunghi).\n"
+" * Esatto e deterministico: rank(chiave) < top_k, con tie-break su indice MINORE (come la\n"
+" * reference). Scrive ALLOWED[t*maxc + b] = 0/1 per b < n_comp. */\n"
 "kernel void dsv4_indexer_topk_t(device const float* SCORES0 [[buffer(0)]], device int* ALLOWED0 [[buffer(1)]],\n"
-"    constant uint* P [[buffer(2)]], device const uint* NC [[buffer(3)]], uint2 g2 [[thread_position_in_grid]]) {\n"
-"    const uint maxc = P[0], top_k = P[1]; const uint c = g2.x, t = g2.y; const uint n_comp = NC[t]; if (c >= n_comp) return;\n"
+"    constant uint* P [[buffer(2)]], device const uint* NC [[buffer(3)]],\n"
+"    uint tgid [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]],\n"
+"    ushort sgitg [[simdgroup_index_in_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
+"    const uint maxc = P[0], top_k = P[1], nth = P[2]; const uint t = tgid, n = NC[t];\n"
 "    device const float* SCORES = SCORES0 + (ulong)t * maxc; device int* ALLOWED = ALLOWED0 + (ulong)t * maxc;\n"
-"    const float s = SCORES[c]; uint rank = 0;\n"
-"    for (uint j = 0; j < n_comp; j++) { const float sj = SCORES[j]; if (sj > s || (sj == s && j < c)) rank++; }\n"
-"    ALLOWED[c] = rank < top_k ? 1 : 0;\n"
+"    if (n == 0u) return;\n"
+"    if (n <= top_k) { for (uint b = tid; b < n; b += nth) ALLOWED[b] = 1; return; }\n"
+"    threadgroup atomic_uint hist[256]; threadgroup uint scan[32]; threadgroup uint found[2];\n"
+"    uint prefix = 0u, need = top_k;\n"
+"    for (uint pass = 0u; pass < 4u; pass++) {\n"
+"        const uint shift = 24u - 8u * pass;\n"
+"        const uint mask_hi = pass == 0u ? 0u : (0xFFFFFFFFu << (shift + 8u));\n"
+"        for (uint i = tid; i < 256u; i += nth) atomic_store_explicit(&hist[i], 0u, memory_order_relaxed);\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        for (uint b = tid; b < n; b += nth) {\n"
+"            const uint key = dsv4_idx_key(SCORES[b]);\n"
+"            if ((key & mask_hi) == prefix) atomic_fetch_add_explicit(&hist[(key >> shift) & 0xFFu], 1u, memory_order_relaxed);\n"
+"        }\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        const uint c = tid < 256u ? atomic_load_explicit(&hist[255u - tid], memory_order_relaxed) : 0u;\n"
+"        const uint p = simd_prefix_inclusive_sum(c);\n"
+"        if (tiisg == 31u && sgitg < 8u) scan[sgitg] = p;\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        if (tid < 256u) {\n"
+"            uint above = p - c;\n"
+"            for (uint g = 0u; g < sgitg; g++) above += scan[g];\n"
+"            if (above < need && above + c >= need) { found[0] = prefix | ((255u - tid) << shift); found[1] = need - above; }\n"
+"        }\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        prefix = found[0]; need = found[1];\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    }\n"
+"    const uint chunk = (n + nth - 1u) / nth;\n"
+"    const uint b0 = min(tid * chunk, n), b1 = min(b0 + chunk, n);\n"
+"    uint n_eq = 0u;\n"
+"    for (uint b = b0; b < b1; b++) n_eq += (dsv4_idx_key(SCORES[b]) == prefix) ? 1u : 0u;\n"
+"    const uint pe = simd_prefix_exclusive_sum(n_eq);\n"
+"    if (tiisg == 31u) scan[sgitg] = pe + n_eq;\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    if (sgitg == 0u) {\n"
+"        const uint nsg = (nth + 31u) / 32u;\n"
+"        const uint sv = tiisg < nsg ? scan[tiisg] : 0u;\n"
+"        const uint sp = simd_prefix_exclusive_sum(sv);\n"
+"        if (tiisg < nsg) scan[tiisg] = sp;\n"
+"    }\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    uint r_eq = pe + scan[sgitg];\n"
+"    for (uint b = b0; b < b1; b++) {\n"
+"        const uint key = dsv4_idx_key(SCORES[b]);\n"
+"        int a = 0;\n"
+"        if (key > prefix) a = 1;\n"
+"        else if (key == prefix) { a = (r_eq < need) ? 1 : 0; r_eq++; }\n"
+"        ALLOWED[b] = a;\n"
+"    }\n"
 "}\n"
 "kernel void dsv4_attn_part_t(device const float* Q0 [[buffer(0)]], device const float* RAWK0 [[buffer(1)]],\n"
 "    device const float* COMPK [[buffer(2)]], device const int* ALLOWED0 [[buffer(3)]],\n"
@@ -2664,6 +2724,37 @@ int llm_dsv4_metal_indexer_topk(LlmDsv4Metal* b, const float* scores, int n_comp
     return rc;
 }
 
+/* Indexer top-k BATCHED (una threadgroup per token, radix-select) -> allowed[nt*max_comp]. 0 = ok.
+ * Stessa selezione della reference (rank<top_k, tie-break indice minore), O(n_comp) per token. */
+int llm_dsv4_metal_indexer_topk_t(LlmDsv4Metal* b, const float* scores, int n_tokens, int max_comp,
+        const int* n_comp, int top_k, int* allowed) {
+    if (!b || !b->pso_itopk_t || !scores || !n_comp || !allowed) return -1;
+    if (n_tokens <= 0 || max_comp <= 0) return -1;
+    if (top_k < 1) top_k = 1; if (top_k > max_comp) top_k = max_comp;
+    uint32_t* nc = (uint32_t*)malloc(sizeof(uint32_t) * (size_t)n_tokens);
+    if (!nc) return -2;
+    for (int t = 0; t < n_tokens; t++) nc[t] = (uint32_t)(n_comp[t] > 0 ? n_comp[t] : 0);
+    id<MTLBuffer> BS = [b->dev newBufferWithBytes:scores length:(NSUInteger)((size_t)n_tokens * max_comp * sizeof(float)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BA = [b->dev newBufferWithLength:(NSUInteger)((size_t)n_tokens * max_comp * sizeof(int)) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BN = [b->dev newBufferWithBytes:nc length:(NSUInteger)((size_t)n_tokens * sizeof(uint32_t)) options:MTLResourceStorageModeShared];
+    int rc = (BS && BA && BN) ? 0 : -2;
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        [e setComputePipelineState:b->pso_itopk_t];
+        [e setBuffer:BS offset:0 atIndex:0]; [e setBuffer:BA offset:0 atIndex:1];
+        uint32_t P[3] = { (uint32_t)max_comp, (uint32_t)top_k, 256u }; [e setBytes:P length:sizeof(P) atIndex:2];
+        [e setBuffer:BN offset:0 atIndex:3];
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_tokens, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted];
+        rc = cb.error ? -3 : 0;
+        if (rc == 0) memcpy(allowed, [BA contents], (size_t)n_tokens * max_comp * sizeof(int));
+    }
+    if (BS)[BS release]; if (BA)[BA release]; if (BN)[BN release];
+    free(nc);
+    return rc;
+}
+
 /* ── Buffer device opachi (per il middle persistente su GPU: pesi f32 + stato KV) ── */
 void* llm_dsv4_metal_buf_alloc(LlmDsv4Metal* b, size_t bytes) {
     if (!b || bytes == 0) return NULL;
@@ -2888,9 +2979,10 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             [e dispatchThreadgroups:MTLSizeMake((NSUInteger)max_ic, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
             [e setComputePipelineState:b->pso_itopk_t];
             [e setBuffer:SCB offset:0 atIndex:0]; [e setBuffer:ALB offset:0 atIndex:1];
-            { uint32_t P_[2] = { (uint32_t)max_ic, (uint32_t)p0->idx_top_k }; [e setBytes:P_ length:sizeof(P_) atIndex:2]; }
+            { uint32_t P_[3] = { (uint32_t)max_ic, (uint32_t)p0->idx_top_k, 256u }; [e setBytes:P_ length:sizeof(P_) atIndex:2]; }
             [e setBuffer:NCB offset:0 atIndex:3];
-            [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)max_ic + 63) / 64, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            /* radix-select: una threadgroup (256) per token, O(n_comp) invece di O(n_comp^2) */
+            [e dispatchThreadgroups:MTLSizeMake((NSUInteger)nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
         {   /* attenzione a gruppi di 32 token */
             const int G_ = 32;

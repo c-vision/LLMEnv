@@ -55,6 +55,44 @@ static int test_scores_topk(LlmDsv4Metal* b, int nh, int hd, int n_comp, int top
     return ok;
 }
 
+/* Test del top-k BATCHED (una threadgroup per token, radix-select) vs reference CPU per token.
+ * Include score NEGATIVI (la reference somma dot*pesi, che possono essere <0), n_comp variabili
+ * e duplicati (tie -> tie-break su indice minore). */
+static int test_scores_topk_t(LlmDsv4Metal* b, int nt, int maxc, int top_k) {
+    int* nc = (int*)malloc(sizeof(int) * (size_t)nt);
+    float* sc = (float*)malloc(sizeof(float) * (size_t)nt * maxc);
+    int* ga = (int*)malloc(sizeof(int) * (size_t)nt * maxc);
+    int* ra = (int*)malloc(sizeof(int) * (size_t)nt * maxc);
+    for (int t = 0; t < nt; t++) {
+        s_state = s_state * 1103515245u + 12345u;
+        int n = 1 + (int)((s_state >> 4) % (unsigned)maxc);
+        nc[t] = n;
+        for (int c = 0; c < n; c++) {
+            float v = fr() * 4.0f - 1.5f;
+            if ((c % 37) == 0 && c > 0) v = sc[(size_t)t * maxc + (c - 1)];
+            sc[(size_t)t * maxc + c] = v;
+        }
+        for (int c = n; c < maxc; c++) sc[(size_t)t * maxc + c] = 0.0f;
+        for (int c = 0; c < maxc; c++) ga[(size_t)t * maxc + c] = 0;
+    }
+    int rc = llm_dsv4_metal_indexer_topk_t(b, sc, nt, maxc, nc, top_k, ga);
+    int same = 1;
+    for (int t = 0; t < nt; t++) {
+        int n = nc[t]; int k = top_k > n ? n : top_k;
+        for (int c = 0; c < n; c++) ra[(size_t)t * maxc + c] = 0;
+        for (int kk = 0; kk < k; kk++) {
+            int bi = -1; float bs = -1e30f;
+            for (int c = 0; c < n; c++) if (!ra[(size_t)t * maxc + c] && sc[(size_t)t * maxc + c] > bs) { bi = c; bs = sc[(size_t)t * maxc + c]; }
+            ra[(size_t)t * maxc + bi] = 1;
+        }
+        for (int c = 0; c < n; c++) if (ra[(size_t)t * maxc + c] != ga[(size_t)t * maxc + c]) same = 0;
+    }
+    int ok = (rc == 0 && same);
+    printf("[IDXt] nt=%d maxc=%d top_k=%d rc=%d sel=%s %s\n", nt, maxc, top_k, rc, same ? "match" : "MISMATCH", ok ? "ok" : "BAD");
+    free(nc); free(sc); free(ga); free(ra);
+    return ok;
+}
+
 int main(void) {
     if (!llm_dsv4_metal_available()) { printf("SKIP: nessun device Metal\n"); return 0; }
     LlmDsv4Metal* b = llm_dsv4_metal_create();
@@ -65,6 +103,11 @@ int main(void) {
     ok &= test_scores_topk(b, 64, 128, 200, 12);  /* selezione parziale */
     ok &= test_scores_topk(b, 64, 128, 10, 10);   /* top_k == n_comp -> tutte ammesse */
     ok &= test_scores_topk(b, 32, 128, 130, 1);
+    /* top-k batched (radix, una threadgroup per token) vs reference, con negativi e tie */
+    ok &= test_scores_topk_t(b, 8, 300, 12);
+    ok &= test_scores_topk_t(b, 4, 1024, 512);
+    ok &= test_scores_topk_t(b, 3, 50, 50);    /* alcuni token n<=top_k -> tutte ammesse */
+    ok &= test_scores_topk_t(b, 2, 200, 1);
     printf(ok ? "PASS indexer: QAT bit-exact, scores<1e-4, top-k identico alla reference CPU\n"
               : "FAIL indexer\n");
     llm_dsv4_metal_destroy(b);
