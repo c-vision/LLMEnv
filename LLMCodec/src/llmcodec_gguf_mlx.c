@@ -548,6 +548,9 @@ static void llmcodec_write_config_from_gguf(const char* gguf_path, const char* o
         KVN("attention.qk_rope_head_dim", "qk_rope_head_dim")
         KVN("attention.v_head_dim", "v_head_dim")
         KVN("attention.q_lora_rank", "q_lora_rank")
+        /* Fallback vocab_size: se il GGUF non porta `<arch>.vocab_size`, derivalo dalla shape di
+         * `token_embd.weight` ([hidden, vocab] in GGUF: dims[1]=vocab) — senza, load_config
+         * fallisce ("chiave attesa mancante: vocab_size") e il modello MLX non si carica. */
         { snprintf(k, sizeof k, "%s.vocab_size", archk);
           if (gkv_num(kv, n, k) < 0)
             for (uint64_t ti = 0; ti < fi.n_tensors; ti++)
@@ -582,6 +585,9 @@ int llmcodec_gguf_to_mlx_ex(const char* gguf_path, const char* out_dir, uint32_t
     int ns = 0;
     for (uint64_t i = 0; i < info.n_tensors; ++i) {
         LlmCodecGgufTensorInfo* t = &info.tensors[i];
+        /* Nome HF di destinazione (se l'arch ha il template `hf`): un artefatto MLX deve usare i
+         * nomi HF (model.layers.N.self_attn.q_proj) per essere caricabile dagli strumenti MLX/HF.
+         * Fallback: nome canonico GGUF verbatim (caricabile via gguf_rm). */
         char hfn[288]; int hfok = (rm != NULL) ? llmcodec_rolemap_canonical_to_hf(rm, t->name, hfn, sizeof hfn) : 0;
         const char* outname = hfok ? hfn : t->name;
         uint64_t numel = 1; for (int d=0; d<t->ndim; ++d) numel *= t->dims[d];

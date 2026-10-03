@@ -547,7 +547,9 @@ int llmcodec_rolemap_is_expert(const char* role) {
     return role != NULL && (strstr(role, "EXPERT") != NULL || strstr(role, "expert") != NULL);
 }
 
-/* ── Reverse GGUF(canonico) -> HF via i template `hf` ──────────────────────────────── */
+/* ── Reverse GGUF(canonico) -> HF via i template `hf` ────────────────────────────────
+ * Mini pattern-matcher: `%d` = cifre (layer), `%s` = alfanumerico (gate/up/down). Estrae i
+ * valori posizionali dal template `gguf` combaciante e li riapplica al template `hf`. */
 static int rp_pat_match(const char* pat, const char* s, char vals[][64], int maxv) {
     int nv = 0;
     while (*pat) {
@@ -555,6 +557,9 @@ static int rp_pat_match(const char* pat, const char* s, char vals[][64], int max
             pat += 2;
             const char* lit = pat; size_t ll = 0;
             while (lit[ll] && !(lit[ll] == '%' && (lit[ll+1] == 'd' || lit[ll+1] == 's'))) ll++;
+            /* Ricerca BOUNDED di `ll` caratteri: `lit` punta dentro il pattern e NON è
+             * terminato a ll (usare strstr cercava il literal INTERO col successivo %s -> mai
+             * trovato sui pattern multi-placeholder, es. blk.%d.ffn_%s_exps.weight). */
             const char* found = NULL;
             if (ll == 0) found = s + strlen(s);
             else { size_t sl = strlen(s); for (size_t k = 0; k + ll <= sl; ++k) if (memcmp(s + k, lit, ll) == 0) { found = s + k; break; } }
