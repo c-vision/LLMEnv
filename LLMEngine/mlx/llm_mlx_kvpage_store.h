@@ -127,9 +127,21 @@ static inline bool llm_kv_pt_grow(LlmKvPageTable* t, int new_phys, int new_logic
     int32_t* nt = (int32_t*)realloc(t->table, (size_t)new_logical * sizeof(int32_t));
     if (!nf || !nt) { if (nf) t->next_free = nf; if (nt) t->table = nt; return false; }
     t->next_free = nf; t->table = nt;
-    /* le nuove pagine fisiche entrano in testa alla free-list */
-    for (int i = new_phys - 1; i >= t->phys_capacity; i--) {
-        t->next_free[i] = (int32_t)t->free_head; t->free_head = i;
+    /* FIX (2026-10-03): le nuove pagine fisiche vanno in CODA alla free-list, NON in testa.
+     * In testa, dopo >=2 grow l'ordine di allocazione non era piu' monotono -> `map(lp) != lp`
+     * (mapping NON identita'), mentre il `llm_kvq_pool_grow` copia il prefisso fisico [0..committed)
+     * ASSUMENDO identita' -> mescolava i token -> pool int8 corrotto (misurato da 2400 token). In
+     * coda, l'allocazione resta monotona (0,1,2,...) = identita' -> la copia del grow e' valida. */
+    if (t->free_head < 0) {
+        t->free_head = t->phys_capacity;
+        for (int i = t->phys_capacity; i < new_phys; i++)
+            t->next_free[i] = (i + 1 < new_phys) ? (int32_t)(i + 1) : -1;
+    } else {
+        int cur = t->free_head;
+        while (t->next_free[cur] != -1) cur = t->next_free[cur];
+        t->next_free[cur] = (int32_t)t->phys_capacity;
+        for (int i = t->phys_capacity; i < new_phys; i++)
+            t->next_free[i] = (i + 1 < new_phys) ? (int32_t)(i + 1) : -1;
     }
     for (int i = t->phys_capacity; i < new_logical; i++) t->table[i] = -1;
     t->phys_capacity = new_phys;
