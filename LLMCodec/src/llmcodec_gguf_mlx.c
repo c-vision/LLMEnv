@@ -585,6 +585,12 @@ int llmcodec_gguf_to_mlx_ex(const char* gguf_path, const char* out_dir, uint32_t
     int ns = 0;
     for (uint64_t i = 0; i < info.n_tensors; ++i) {
         LlmCodecGgufTensorInfo* t = &info.tensors[i];
+        /* Nome HF di destinazione (se l'arch ha il template `hf`): un artefatto MLX deve usare i
+         * nomi HF (model.layers.N.self_attn.q_proj) per essere caricabile dagli strumenti MLX/HF.
+         * Fallback: nome canonico GGUF verbatim (caricabile via gguf_rm). */
+        char hfn[288]; int hfok = (rm != NULL) ? llmcodec_rolemap_canonical_to_hf(rm, t->name, hfn, sizeof hfn) : 0;
+        if (strstr(t->name, "exps")) fprintf(stderr, "[HFDBG] %s -> hfok=%d hf=%s\n", t->name, hfok, hfn);
+        const char* outname = hfok ? hfn : t->name;
         uint64_t numel = 1; for (int d=0; d<t->ndim; ++d) numel *= t->dims[d];
         uint64_t nb = 0; if (llmcodec_ggml_type_bytes(t->ggml_type, numel, &nb) != 0) continue;
         uint8_t* raw = llmcodec_slurp_range(gguf_path, info.data_start + t->offset, nb);
@@ -615,7 +621,7 @@ int llmcodec_gguf_to_mlx_ex(const char* gguf_path, const char* out_dir, uint32_t
                     free(f);
                     if (!cerr) {
                         int od=(E>1)?3:2;
-                        char base[300]; snprintf(base,sizeof base,"%s",t->name);
+                        char base[300]; snprintf(base,sizeof base,"%s",outname);
                         { size_t bl=strlen(base); if(bl>7&&strcmp(base+bl-7,".weight")==0) base[bl-7]=0; }
                         char b1[300]; snprintf(b1,sizeof b1,"%s.weight",base);
                         nms[ns]=strdup(b1);
@@ -649,7 +655,7 @@ int llmcodec_gguf_to_mlx_ex(const char* gguf_path, const char* out_dir, uint32_t
         if (f && llmcodec_ggml_dequant_row(t->ggml_type, raw, f, (int64_t)numel)==0) {
             const char* odt = "F32";
             void* data = f;
-            nms[ns]=strdup(t->name); for(int d=0;d<t->ndim;++d) shp[ns*8+d]=(int)t->dims[t->ndim-1-d];
+            nms[ns]=strdup(outname); for(int d=0;d<t->ndim;++d) shp[ns*8+d]=(int)t->dims[t->ndim-1-d];
             st[ns].name=nms[ns]; st[ns].dtype=odt; st[ns].shape=&shp[ns*8]; st[ns].ndim=t->ndim; st[ns].data=data; bufs[ns]=(uint8_t*)data; ns++;
             if (data != f) free(f);
         } else free(f);

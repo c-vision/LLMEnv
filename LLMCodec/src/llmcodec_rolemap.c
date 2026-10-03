@@ -213,6 +213,7 @@ int llmcodec_rolemap_load(const char* llmarch_path, LlmCodecRoleMap* out) {
                     jstr(jval(obj, "role"), R->role, sizeof R->role);
                     jstr(jval(obj, "submodel"), R->submodel, sizeof R->submodel);
                     R->gguf[0] = 0; { const char* gv = jval(obj, "gguf"); if (gv) jstr(gv, R->gguf, sizeof R->gguf); }
+                    R->hf[0] = 0; { const char* hv = jval(obj, "hf"); if (hv) jstr(hv, R->hf, sizeof R->hf); }
                     R->stack = 0; { const char* sv = jval(obj, "stack"); if (sv && (strncmp(sv, "true", 4) == 0 || *sv == '1')) R->stack = 1; }
                     out->n++;
                 }
@@ -438,4 +439,55 @@ int llmcodec_rolemap_unsupported(const LlmCodecRoleMap* m, char* out, size_t cap
 
 int llmcodec_rolemap_is_expert(const char* role) {
     return role != NULL && (strstr(role, "EXPERT") != NULL || strstr(role, "expert") != NULL);
+}
+
+/* ── Reverse GGUF(canonico) -> HF via i template `hf` ────────────────────────────────
+ * Mini pattern-matcher: `%d` = cifre (layer), `%s` = alfanumerico (gate/up/down). Estrae i
+ * valori posizionali dal template `gguf` combaciante e li riapplica al template `hf`. */
+static int rp_pat_match(const char* pat, const char* s, char vals[][64], int maxv) {
+    int nv = 0;
+    while (*pat) {
+        if (pat[0] == '%' && (pat[1] == 'd' || pat[1] == 's')) {
+            pat += 2;
+            const char* lit = pat; size_t ll = 0;
+            while (lit[ll] && !(lit[ll] == '%' && (lit[ll+1] == 'd' || lit[ll+1] == 's'))) ll++;
+            /* Ricerca BOUNDED di `ll` caratteri: `lit` punta dentro il pattern e NON è
+             * terminato a ll (usare strstr cercava il literal INTERO col successivo %s -> mai
+             * trovato sui pattern multi-placeholder, es. blk.%d.ffn_%s_exps.weight). */
+            const char* found = NULL;
+            if (ll == 0) found = s + strlen(s);
+            else { size_t sl = strlen(s); for (size_t k = 0; k + ll <= sl; ++k) if (memcmp(s + k, lit, ll) == 0) { found = s + k; break; } }
+            if (!found) return -1;
+            size_t vl = (size_t)(found - s);
+            if (vl > 63) return -1;
+            if (nv < maxv) { memcpy(vals[nv], s, vl); vals[nv][vl] = 0; }
+            nv++;
+            s = found;
+        } else {
+            if (*pat != *s) return -1;
+            pat++; s++;
+        }
+    }
+    return *s ? -1 : nv;
+}
+int llmcodec_rolemap_canonical_to_hf(const LlmCodecRoleMap* m, const char* canon, char* out, size_t cap) {
+    if (m == NULL || canon == NULL || out == NULL || cap == 0) return 0;
+    out[0] = 0;
+    for (int i = 0; i < m->n; ++i) {
+        if (!m->r[i].gguf[0] || !m->r[i].hf[0]) continue;
+        char vals[8][64];
+        int nv = rp_pat_match(m->r[i].gguf, canon, vals, 8);
+        if (nv < 0) continue;
+        size_t o = 0; int vi = 0;
+        for (const char* p = m->r[i].hf; *p && o < cap - 1; ) {
+            if (p[0] == '%' && (p[1] == 'd' || p[1] == 's')) {
+                const char* v = (vi < nv) ? vals[vi] : "";
+                o += (size_t)snprintf(out + o, cap - o, "%s", v);
+                vi++; p += 2;
+            } else out[o++] = *p++;
+        }
+        out[o < cap ? o : cap - 1] = 0;
+        return 1;
+    }
+    return 0;
 }
