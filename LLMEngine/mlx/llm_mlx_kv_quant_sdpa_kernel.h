@@ -407,6 +407,9 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     if (splits < 1) splits = 1;
     int splits_max = llm_mlx_kvq_splits_max();
     if (splits > splits_max) splits = splits_max;
+    /* W3 (prefill): le query (nh*nq threadgroup) parallellizzano gia' -> lo split-K non serve e le
+     * sue partial pacc=[nh*nq,splits,hd] esplodono con nq. Clampa a 1 split per nq>1. */
+    if (nqy > 1) { int ps = 8; llm_ai_mlx_opt_get_int("kvq_prefill_splits", &ps); if (ps > 0) splits = ps; }
 
     /* page table: se il chiamante non ne fornisce una, usa l'IDENTITA' (pool contiguo). */
     mlx_array ptab_own = mlx_array_new();
