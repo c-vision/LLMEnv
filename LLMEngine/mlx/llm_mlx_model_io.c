@@ -703,7 +703,10 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
             if (strncmp(kvs, "off", 3) == 0) {
                 /* resta bf16 (default) */
             } else if (strncmp(kvs, "auto", 4) == 0) {
-                int trig = 8192; const char* c = strchr(kvs, ':');
+                /* W5 (2026-10-03): default 8192 -> 65536. L'int8 e' una feature di MEMORIA (contesti
+                 * estremi): ai contesti normali (<=64k) il kernel int8 di decode e' ~3x piu' lento
+                 * dell'FP16 in-place, quindi NON conviene di default. Override: `kvquant=auto:N`. */
+                int trig = 65536; const char* c = strchr(kvs, ':');
                 if (c) trig = atoi(c + 1);
                 if (trig < 512) trig = 512;
                 m->cfg.kv_quantize_auto = true;

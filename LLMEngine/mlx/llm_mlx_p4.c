@@ -99,7 +99,7 @@ uint64_t llm_p4_kv_needed(LlmMlxModel* m, int offset, int n) {
     /* KV-quant int8 (esplicita o auto sopra soglia): il KV/token scende a ~meta'.
      * Senza questo l'admission rifiuta 1M/2M col budget f16 anche se l'int8 li farebbe entrare. */
     const ModelConfig* c = &m->cfg;
-    int trig = c->kv_quantize_auto_trigger > 0 ? c->kv_quantize_auto_trigger : 8192;
+    int trig = c->kv_quantize_auto_trigger > 0 ? c->kv_quantize_auto_trigger : 65536;  /* W5: default 64k (int8 = feature di memoria) */
     if (m->p4_kv_per_token_q > 0 &&
         (c->kv_quantize || (c->kv_quantize_auto && (int)tot > trig)))
         per = m->p4_kv_per_token_q;
