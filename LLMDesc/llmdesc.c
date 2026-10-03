@@ -258,7 +258,7 @@ int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out
             const char* attn = (kl > 0 || qn > 0) ? "mla" : (nkv > 0 && nh > 0 && nkv < nh) ? "gqa" : "mha";
             snprintf(out->structures[out->n_struct].key, 32, "attention");
             snprintf(out->structures[out->n_struct].type, 32, "%s", attn); out->n_struct++;
-            if (ne > 0 && out->n_struct < 16) { snprintf(out->structures[out->n_struct].key,32,"moe"); snprintf(out->structures[out->n_struct].type,32,"moe"); out->n_struct++; }
+            if (ne > 0 && out->n_struct < 16) { snprintf(out->structures[out->n_struct].key,32,"moe"); out->structures[out->n_struct].type[0]=0; out->n_struct++; }
             if (out->n_struct < 16) { snprintf(out->structures[out->n_struct].key,32,"norm"); snprintf(out->structures[out->n_struct].type,32,"rmsnorm"); out->n_struct++; }
             snprintf(out->source_format, sizeof out->source_format, "safetensors");
             free(cj);
