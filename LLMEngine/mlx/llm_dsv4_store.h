@@ -3,7 +3,7 @@
  *  - SWAP: record-esperto letti on-demand (pread, `llmengine_moe_storage`) in una cache LRU a bundle
  *    (gate+up+down per esperto). Metriche: bytes_read / hit / miss / eviction.
  * I/O POSIX self-contained (open/pread; specchia llmengine_moe_storage del runtime).
- * Header-only. Test: tools/llm_dsv4_store_test.sh. */
+ * Header-only. Test policy (D19-A): tools/llm_dsv4_store_policy_test.sh. */
 #ifndef LLM_DSV4_STORE_H
 #define LLM_DSV4_STORE_H
 
@@ -39,6 +39,11 @@ typedef struct {
     int cap, n, tick;
     int* ht_keys; int* ht_vals; int ht_cap;   /* hash (layer,e) -> idx entry, open addressing */
     uint64_t bytes_read, hits, misses, evictions;
+    /* D19-follow-up A: hotness appresa (freq per (layer,expert) dalle claim osservate).
+     * Default OFF → LRU invariata. La feed avviene in `claim` (ogni accesso è una route osservata). */
+    uint32_t* freq;
+    int f_layers, f_experts;
+    int hotness;
     /* ARENA per i layer con esperti Q4_K (gate/up/down tutti tipo 12): i tensori di layer con gli esperti IMPILATI
      * (stessa disposizione del GGUF) vivono in un'unica regione anonima, riempita a richiesta con pread. Cosi' il kernel
      * mul_mm_id (src0 = tensore impilato, stride per esperto) li legge senza modifiche; niente LRU per questi layer. */
@@ -46,6 +51,41 @@ typedef struct {
     size_t* q4_off;        /* [n_layer*3]: offset gate/up/down nell'arena (size_t(-1) = layer non in arena) */
     uint8_t* q4_present;   /* [n_layer*q4_ne] */
 } LlmDsv4Store;
+
+/* ── D19-follow-up A: hotness appresa (policy per frequenza, opt-in; default LRU) ── */
+static inline void llm_dsv4_store_set_dims(LlmDsv4Store* s, int layers, int experts) {
+    if (s == NULL || layers <= 0 || experts <= 0) return;
+    if (s->freq != NULL && s->f_layers == layers && s->f_experts == experts) return;
+    uint32_t* nf = (uint32_t*)calloc((size_t)layers * (size_t)experts, sizeof(uint32_t));
+    if (nf == NULL) return;
+    free(s->freq);
+    s->freq = nf; s->f_layers = layers; s->f_experts = experts;
+}
+
+static inline void llm_dsv4_store_set_hotness(LlmDsv4Store* s, int on) {
+    if (s != NULL) s->hotness = on ? 1 : 0;
+}
+
+static inline uint32_t llm_dsv4_store_freq(const LlmDsv4Store* s, int layer, int e) {
+    if (s == NULL || s->freq == NULL || layer < 0 || e < 0 || layer >= s->f_layers || e >= s->f_experts) return 0;
+    return s->freq[(size_t)layer * s->f_experts + e];
+}
+
+/* Sceglie lo slot da evincere: hotness ON → MINOR freq osservata (tie-break LRU); OFF → LRU pura.
+ * Pura sul contenuto dello store → testabile offline (tests/llm_dsv4_store_policy_test.c). */
+static inline int llm_dsv4_store_evict_choice(const LlmDsv4Store* s) {
+    int best = -1; uint32_t bf = 0; uint64_t ba = ~0ull;
+    for (int i = 0; i < s->cap; ++i) {
+        uint32_t f = 0;
+        if (s->hotness && s->freq != NULL) {
+            int L = s->ents[i].layer, E = s->ents[i].e;
+            if (L >= 0 && L < s->f_layers && E >= 0 && E < s->f_experts)
+                f = s->freq[(size_t)L * s->f_experts + E];
+        }
+        if (best < 0 || f < bf || (f == bf && s->ents[i].age < ba)) { best = i; bf = f; ba = s->ents[i].age; }
+    }
+    return best;
+}
 
 /* Crea l'arena per i layer Q4_K (vedi sopra). Ritorna il numero di layer in arena (0 = nessuno / fallito). */
 static inline int llm_dsv4_store_enable_q4(LlmDsv4Store* s, int n_expert) {
@@ -159,6 +199,7 @@ static inline void llm_dsv4_store_free(LlmDsv4Store* s) {
     if (s->fd >= 0) close(s->fd);
     if (s->q4_base) munmap(s->q4_base, s->q4_size);
     free(s->q4_off); free(s->q4_present);
+    free(s->freq);
     free(s->layers); free(s);
 }
 static inline int llm_dsv4_store_find(LlmDsv4Store* s, int layer, int e) {
@@ -197,12 +238,14 @@ static inline void llm_dsv4_store_ht_del(LlmDsv4Store* s, int layer, int e) {
 static inline int llm_dsv4_store_claim(LlmDsv4Store* s, int layer, int e, int* miss) {
     LlmDsv4StoreLayer* L = &s->layers[layer];
     *miss = 0;
+    if (s->freq != NULL && layer >= 0 && layer < s->f_layers && e >= 0 && e < s->f_experts)
+        s->freq[(size_t)layer * s->f_experts + e]++;   /* D19-A: hotness osservata */
     int idx = llm_dsv4_store_find(s, layer, e);
     if (idx >= 0) { s->hits++; s->ents[idx].age = ++s->tick; return idx; }
     s->misses++;
     for (int i = 0; i < s->cap; i++) if (!s->ents[i].valid) { idx = i; break; }
-    if (idx < 0) {  /* evict LRU */
-        uint64_t oldest = ~0ull; for (int i = 0; i < s->cap; i++) if (s->ents[i].age < oldest) { oldest = s->ents[i].age; idx = i; }
+    if (idx < 0) {  /* D19-A: hotness ON → min-freq (tie-break LRU); OFF → LRU pura */
+        idx = llm_dsv4_store_evict_choice(s);
         s->evictions++;
         llm_dsv4_store_ht_del(s, s->ents[idx].layer, s->ents[idx].e);
     }
