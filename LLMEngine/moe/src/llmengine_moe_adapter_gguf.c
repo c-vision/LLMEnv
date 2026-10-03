@@ -191,7 +191,9 @@ static LlmEngineMoeStatus gguf_forward(void* self, LlmEngineMoeRuntime* rt, cons
                 llmengine_moe_gguf_store_set_hotness(s->store, llmengine_moe_hotness(rt));
                 if (llmengine_moe_hotness(rt)) {
                     char pp[1200]; snprintf(pp, sizeof(pp), "%s.stats", s->path);
-                    (void)llmengine_moe_gguf_store_profile_load(s->store, pp);   /* advisory: assente ok */
+                    /* advisory: profilo assente = ok; se presente, preload top-K (warm-up). */
+                    if (llmengine_moe_gguf_store_profile_load(s->store, pp) == 0)
+                        (void)llmengine_moe_gguf_store_preload_topk(s->store, LLMENGINE_MOE_GGUF_PRELOAD_TOPK);
                 }
             }
         }

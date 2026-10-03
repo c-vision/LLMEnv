@@ -253,6 +253,33 @@ int main(void) {
                 llmengine_moe_gguf_store_close(s2);
             }
             remove(pp);
+
+            /* B (follow-up D19): preload top-K dal profilo — warm-up deterministico. */
+            char pp2[1200]; snprintf(pp2, sizeof(pp2), "%s/topk.stats", dir);
+            {
+                FILE* pf = fopen(pp2, "wb");
+                if (pf) { fprintf(pf, "GMSTATS 1\n0 0 100\n0 3 50\n0 7 10\n"); fclose(pf); }
+            }
+            GgufStore* s3 = llmengine_moe_gguf_store_open(gp10, &g10, 1, 1, 1);
+            CHECK(s3 != NULL);
+            if (s3 != NULL) {
+                llmengine_moe_gguf_store_set_dims(s3, 1, 10);
+                CHECK(llmengine_moe_gguf_store_profile_load(s3, pp2) == 0);
+                uint64_t m1 = s3->misses, h1 = s3->hits;
+                CHECK(llmengine_moe_gguf_store_preload_topk(s3, 2) == 2);   /* carica e0 (100) e e3 (50) */
+                CHECK(s3->misses == m1 + 2);
+                CHECK(llmengine_moe_gguf_store_expert(s3, 0, 0, &u, &d) != NULL);
+                CHECK(s3->hits == h1 + 1);   /* e0 residente grazie al preload */
+                CHECK(llmengine_moe_gguf_store_expert(s3, 0, 3, &u, &d) != NULL);
+                CHECK(s3->hits == h1 + 2);   /* e3 residente grazie al preload */
+                uint64_t m2 = s3->misses;
+                CHECK(llmengine_moe_gguf_store_expert(s3, 0, 7, &u, &d) != NULL);
+                CHECK(s3->misses == m2 + 1); /* e7 (terzo per freq) NON precaricato con k=2 */
+                CHECK(llmengine_moe_gguf_store_freq(s3, 0, 0) == 100);   /* il preload NON muta il profilo */
+                llmengine_moe_gguf_store_close(s3);
+            }
+            remove(pp2);
+
             llmengine_moe_gguf_store_close(sh);
         }
         llmengine_moe_gguf_free(&g10);

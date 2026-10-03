@@ -90,6 +90,48 @@ static inline uint32_t llmengine_moe_gguf_store_freq(const GgufStore* s, uint32_
     return s->freq[(size_t)layer * s->f_experts + e];
 }
 
+/* Default del preload warm-up (K esperti più caldi dal profilo). */
+#define LLMENGINE_MOE_GGUF_PRELOAD_TOPK 64
+
+/* Forward: definita sotto (il preload la usa). */
+static inline const uint8_t* llmengine_moe_gguf_store_expert(GgufStore* s, uint32_t layer, uint32_t e,
+                                                             const uint8_t** up, const uint8_t** down);
+
+/* D19-follow-up B: preload dei K esperti più caldi del profilo (warm-up senza attendere il router).
+ * Chiama `_expert` (che legge e inserisce in cache) per i top-K; ritorna quanti ne ha precaricati.
+ * No-op se la tabella freq è assente (nessun profilo) o k<=0. Deterministico (tie-break layer,e). */
+static inline int llmengine_moe_gguf_store_preload_topk(GgufStore* s, int k) {
+    if (s == NULL || s->freq == NULL || k <= 0) return 0;
+    if (k > 4096) k = 4096;
+    uint32_t* sel_l = (uint32_t*)malloc((size_t)k * sizeof(uint32_t));
+    uint32_t* sel_e = (uint32_t*)malloc((size_t)k * sizeof(uint32_t));
+    if (sel_l == NULL || sel_e == NULL) { free(sel_l); free(sel_e); return 0; }
+    int loaded = 0;
+    for (int rank = 0; rank < k; ++rank) {
+        uint32_t best_f = 0; int best_l = -1, best_e = -1;
+        for (uint32_t l = 0; l < s->f_layers; ++l)
+            for (uint32_t e = 0; e < s->f_experts; ++e) {
+                uint32_t f = s->freq[(size_t)l * s->f_experts + e];
+                if (f == 0) continue;
+                int skip = 0;
+                for (int j = 0; j < loaded; ++j)
+                    if (sel_l[j] == l && sel_e[j] == e) { skip = 1; break; }
+                if (skip) continue;
+                if (best_l < 0 || f > best_f ||
+                    (f == best_f && (l < (uint32_t)best_l ||
+                                     (l == (uint32_t)best_l && e < (uint32_t)best_e)))) {
+                    best_f = f; best_l = (int)l; best_e = (int)e;
+                }
+            }
+        if (best_l < 0) break;   /* nessun candidato con freq > 0 */
+        const uint8_t *u, *d;
+        if (llmengine_moe_gguf_store_expert(s, (uint32_t)best_l, (uint32_t)best_e, &u, &d) == NULL) break;
+        sel_l[loaded] = (uint32_t)best_l; sel_e[loaded] = (uint32_t)best_e; loaded++;
+    }
+    free(sel_l); free(sel_e);
+    return loaded;
+}
+
 /* Profilo `GMSTATS 1` (stesso formato del profilo della cache: righe `layer expert freq`). */
 static inline int llmengine_moe_gguf_store_profile_save(const GgufStore* s, const char* path) {
     if (s == NULL || s->freq == NULL || path == NULL || *path == 0) return -1;
