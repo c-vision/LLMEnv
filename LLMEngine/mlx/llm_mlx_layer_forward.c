@@ -386,6 +386,10 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
         llm_kvq_hook.ctx = &g_kvq_cold;
         kvq_read_used = true;
     }
+    if (getenv("LLM_KVQ_DBG") && layer_idx == 0)
+        fprintf(stderr, "[KVQREAD] L0 kvq_read=%d used=%d committed=%d nc=%d off=%d nt=%d\n",
+                (int)kvq_read, (int)kvq_read_used, kvqp ? kvqp->committed_l[0] : -1,
+                (int)g_kvq_cold.nc, cache_offset, n_tokens);
 
     if (!kvq_read_used && kvq_sess && kvq_sess->kvq_len && kvq_sess->kvq_len[layer_idx] > 0) {
         int cold = kvq_sess->kvq_len[layer_idx];
