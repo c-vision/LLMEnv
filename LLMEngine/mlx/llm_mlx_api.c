@@ -1356,13 +1356,10 @@ int llm_ai_mlx_dflash2_generate_multi(llm_ai_mlx_dflash2_handle handle,
     return 0;
 }
 
-/* Gate d'uscita RMSNormGated condiviso (sigmoid, non silu -- vedi qwen3_next_linear_block
- * sopra, unico chiamante). Le funzioni gemelle q4_zc_rmsnorm/q4_linear_helper/
- * q4_gated_residual (hyper-connection di Qwen4-Exp, mai chiamate da nessuno) sono state
- * rimosse 2026-09-06: duplicavano esattamente llm_mlx_gated_residual/
- * llm_mlx_zero_centered_rmsnorm/llm_mlx_qwen4exp_plain_linear (llm_mlx_qwen4exp.h),
- * quelle si' verificate contro numpy e quelle si' effettivamente wired nel dispatch reale
- * di qwen4_exp (qwen4_exp_attention_dispatch/ffn_dispatch, vedi Todo C17). */
+/* Gate d'uscita RMSNormGated condiviso: sigmoid(gate) oppure silu(gate) in base a `use_silu`
+ * (come i gemelli llm_mlx_sigmoid_rmsnorm_gated in cb.c e llm_mlx_qwen4exp_sigmoid_rmsnorm_gated
+ * in qwen4exp.h: `use_silu` NON va ignorato). Il chiamante e' qwen4_linear_gdn_block
+ * (llm_mlx_gdn.c:1023) con m->cfg.q4_gate_silu (true = silu, salvo config "sigmoid"). */
 bool q4_sigmoid_rmsnorm_gated(mlx_array* res, mlx_array hidden, mlx_array gate,
                                      mlx_array w, float eps, bool use_silu, mlx_stream s) {
     mlx_array n = mlx_array_new();
@@ -1372,7 +1369,14 @@ bool q4_sigmoid_rmsnorm_gated(mlx_array* res, mlx_array hidden, mlx_array gate,
     mlx_array gf = mlx_array_new();
     if (ok) ok = mlx_astype(&gf, gate, MLX_FLOAT32, s) == 0;
     mlx_array act = mlx_array_new();
-    if (ok) ok = mlx_sigmoid(&act, gf, s) == 0;                    /* sigmoid */
+    if (ok && use_silu) {
+        mlx_array sg = mlx_array_new();                     /* silu(gate) = gate * sigmoid(gate) */
+        ok = mlx_sigmoid(&sg, gf, s) == 0;
+        if (ok) ok = mlx_multiply(&act, gf, sg, s) == 0;
+        mlx_array_free(sg);
+    } else if (ok) {
+        ok = mlx_sigmoid(&act, gf, s) == 0;                 /* sigmoid(gate) */
+    }
     mlx_array out = mlx_array_new();
     if (ok) ok = mlx_multiply(&out, nf, act, s) == 0;
     mlx_dtype dt = mlx_array_dtype(hidden);
@@ -1381,7 +1385,6 @@ bool q4_sigmoid_rmsnorm_gated(mlx_array* res, mlx_array hidden, mlx_array gate,
     if (ok) ok = mlx_array_set(res, outd) == 0;
     mlx_array_free(n); mlx_array_free(nf); mlx_array_free(gf); mlx_array_free(act);
     mlx_array_free(out); mlx_array_free(outd);
-    (void)use_silu;
     return ok;
 }
 /* DEBUG correttezza: hidden fp32 dopo OGNI layer per un forward di n token da zero.
