@@ -1121,13 +1121,14 @@ static const char* const LLM_DSV4_METAL_MOE =
 " * Esatto e deterministico: rank(chiave) < top_k, con tie-break su indice MINORE (come la\n"
 " * reference). Scrive ALLOWED[t*maxc + b] = 0/1 per b < n_comp. */\n"
 "kernel void dsv4_indexer_topk_t(device const float* SCORES0 [[buffer(0)]], device int* ALLOWED0 [[buffer(1)]],\n"
-"    constant uint* P [[buffer(2)]], device const uint* NC [[buffer(3)]],\n"
+"    constant uint* P [[buffer(2)]], device const uint* NC [[buffer(3)]], device int* SELT0 [[buffer(4)]],\n"
 "    uint tgid [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]],\n"
 "    ushort sgitg [[simdgroup_index_in_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
 "    const uint maxc = P[0], top_k = P[1], nth = P[2]; const uint t = tgid, n = NC[t];\n"
 "    device const float* SCORES = SCORES0 + (ulong)t * maxc; device int* ALLOWED = ALLOWED0 + (ulong)t * maxc;\n"
+"    device int* SELT = SELT0 + (ulong)t * top_k;\n"
 "    if (n == 0u) return;\n"
-"    if (n <= top_k) { for (uint b = tid; b < n; b += nth) ALLOWED[b] = 1; return; }\n"
+"    if (n <= top_k) { for (uint b = tid; b < n; b += nth) { ALLOWED[b] = 1; SELT[b] = (int)b; } return; }\n"
 "    threadgroup atomic_uint hist[256]; threadgroup uint scan[32]; threadgroup uint found[2];\n"
 "    uint prefix = 0u, need = top_k;\n"
 "    for (uint pass = 0u; pass < 4u; pass++) {\n"
@@ -1167,25 +1168,37 @@ static const char* const LLM_DSV4_METAL_MOE =
 "        if (tiisg < nsg) scan[tiisg] = sp;\n"
 "    }\n"
 "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-"    uint r_eq = pe + scan[sgitg];\n"
+"    const uint r_eq0 = pe + scan[sgitg];\n"
+"    uint nsel = 0u; { uint rq = r_eq0; for (uint b = b0; b < b1; b++) { const uint key = dsv4_idx_key(SCORES[b]); if (key > prefix) nsel++; else if (key == prefix) { if (rq < need) nsel++; rq++; } } }\n"
+"    const uint psel = simd_prefix_exclusive_sum(nsel);\n"
+"    if (tiisg == 31u) scan[sgitg] = psel + nsel;\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    if (sgitg == 0u) {\n"
+"        const uint nsg = (nth + 31u) / 32u;\n"
+"        const uint sv = tiisg < nsg ? scan[tiisg] : 0u;\n"
+"        const uint sp = simd_prefix_exclusive_sum(sv);\n"
+"        if (tiisg < nsg) scan[tiisg] = sp;\n"
+"    }\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    uint wsel = psel + scan[sgitg], r_eq = r_eq0;\n"
 "    for (uint b = b0; b < b1; b++) {\n"
 "        const uint key = dsv4_idx_key(SCORES[b]);\n"
 "        int a = 0;\n"
-"        if (key > prefix) a = 1;\n"
-"        else if (key == prefix) { a = (r_eq < need) ? 1 : 0; r_eq++; }\n"
+"        if (key > prefix) { a = 1; SELT[wsel++] = (int)b; }\n"
+"        else if (key == prefix) { if (r_eq < need) { a = 1; SELT[wsel++] = (int)b; } r_eq++; }\n"
 "        ALLOWED[b] = a;\n"
 "    }\n"
 "}\n"
 "kernel void dsv4_attn_part_t(device const float* Q0 [[buffer(0)]], device const float* RAWK0 [[buffer(1)]],\n"
-"    device const float* COMPK [[buffer(2)]], device const int* ALLOWED0 [[buffer(3)]],\n"
+"    device const float* COMPK [[buffer(2)]], device const int* SELT0 [[buffer(3)]],\n"
 "    device float* PART [[buffer(4)]], constant uint* P [[buffer(5)]], device const uint4* TP [[buffer(6)]],\n"
 "    uint3 tg [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]],\n"
 "    ushort tiisg [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) {\n"
-"    const uint hd = P[0], has_allowed = P[1], nsm = P[2], g0 = P[3], maxc = P[4], nh = P[5]; const uint tok = g0 + tg.z;\n"
-"    const uint4 tp = TP[tok]; const uint n_raw = tp.x, n_comp = tp.y, ns = tp.w;\n"
+"    const uint hd = P[0], top_k = P[1], nsm = P[2], g0 = P[3], maxc = P[4], nh = P[5]; const uint tok = g0 + tg.z;\n"
+"    const uint4 tp = TP[tok]; const uint n_raw = tp.x, n_sel = tp.y, ns = tp.w;\n"
 "    const uint h = tg.x, s = tg.y, nch = hd / 128u; if (s >= ns) return;\n"
-"    device const float* RAWK = RAWK0 + (ulong)tp.z * (ulong)hd; device const int* ALLOWED = ALLOWED0 + (ulong)tok * maxc; device const float* Q = Q0 + (ulong)tok * nh * hd;\n"
-"    const uint total = n_raw + n_comp, per = (total + ns - 1u) / ns;\n"
+"    device const float* RAWK = RAWK0 + (ulong)tp.z * (ulong)hd; device const int* SELT = SELT0 + (ulong)tok * top_k; device const float* Q = Q0 + (ulong)tok * nh * hd;\n"
+"    const uint total = n_raw + n_sel, per = (total + ns - 1u) / ns;\n"
 "    const uint t0 = s * per, t1 = min(total, t0 + per);\n"
 "    const float kq = 1.f / sqrt((float)hd);\n"
 "    device const float4* q4 = (device const float4*)(Q + (ulong)h * (ulong)hd);\n"
@@ -1195,7 +1208,7 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    for (uint t = t0 + sg; t < t1; t += 4u) {\n"
 "        device const float* kvp;\n"
 "        if (t < n_raw) kvp = RAWK + (ulong)t * (ulong)hd;\n"
-"        else { const uint r = t - n_raw; if (has_allowed && !ALLOWED[r]) continue; kvp = COMPK + (ulong)r * (ulong)hd; }\n"
+"        else { const uint rr = t - n_raw; const uint r = (top_k != 0u) ? (uint)SELT[rr] : rr; kvp = COMPK + (ulong)r * (ulong)hd; }\n"
 "        device const float4* k4 = (device const float4*)kvp;\n"
 "        float4 kv[4]; float d = 0.f;\n"
 "        for (uint j = 0; j < 4u; j++) { if (j < nch) { kv[j] = k4[j * 32u + tiisg]; d += dot(qv[j], kv[j]); } }\n"
@@ -3157,12 +3170,13 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         id<MTLBuffer> NCB = dsv4_scratch(b, &b->sx[76], &b->sx_cap[76], (size_t)nt * 4);
         id<MTLBuffer> SCB = dsv4_scratch(b, &b->sx[81], &b->sx_cap[81], (size_t)nt * max_ic * 4);
         id<MTLBuffer> ALB = dsv4_scratch(b, &b->sx[82], &b->sx_cap[82], (size_t)nt * max_ic * 4);
+        id<MTLBuffer> SELB = dsv4_scratch(b, &b->sx[84], &b->sx_cap[84], (size_t)nt * (size_t)(p0->has_idx ? p0->idx_top_k : 1) * 4);
         if (!TPB || !NCB || !SCB || !ALB) return -2;
         int nsm = 1;
         { uint32_t* tp = (uint32_t*)[TPB contents]; uint32_t* nc = (uint32_t*)[NCB contents];
           for (int t = 0; t < nt; t++) {
-            const int nr_ = ps[t].n_raw, na_ = ps[t].n_acomp; int total = nr_ + na_; int ns_ = (total + 63) / 64; if (ns_ < 1) ns_ = 1; if (ns_ > 16) ns_ = 16;
-            tp[4 * t] = (uint32_t)nr_; tp[4 * t + 1] = (uint32_t)na_; tp[4 * t + 2] = (uint32_t)(n_prev + t + 1 - nr_); tp[4 * t + 3] = (uint32_t)ns_;
+            const int nr_ = ps[t].n_raw, na_ = ps[t].n_acomp; int nsel_ = ps[t].has_idx ? (int)p0->idx_top_k : na_; if (nsel_ > na_) nsel_ = na_; int total = nr_ + nsel_; int ns_ = (total + 63) / 64; if (ns_ < 1) ns_ = 1; if (ns_ > 16) ns_ = 16;
+            tp[4 * t] = (uint32_t)nr_; tp[4 * t + 1] = (uint32_t)nsel_; tp[4 * t + 2] = (uint32_t)(n_prev + t + 1 - nr_); tp[4 * t + 3] = (uint32_t)ns_;
             nc[t] = (uint32_t)(ps[t].has_idx ? ps[t].n_icomp : 0);
             if (ns_ > nsm) nsm = ns_;
           } }
@@ -3252,7 +3266,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             [e setComputePipelineState:b->pso_itopk_t];
             [e setBuffer:SCB offset:0 atIndex:0]; [e setBuffer:ALB offset:0 atIndex:1];
             { uint32_t P_[3] = { (uint32_t)max_ic, (uint32_t)p0->idx_top_k, 256u }; [e setBytes:P_ length:sizeof(P_) atIndex:2]; }
-            [e setBuffer:NCB offset:0 atIndex:3];
+            [e setBuffer:NCB offset:0 atIndex:3]; [e setBuffer:SELB offset:0 atIndex:4];
             /* radix-select: una threadgroup (256) per token, O(n_comp) invece di O(n_comp^2) */
             [e dispatchThreadgroups:MTLSizeMake((NSUInteger)nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
@@ -3262,18 +3276,14 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             if (!PT) return -2;
             for (int g0 = 0; g0 < nt; g0 += G_) {
                 const int gt = nt - g0 < G_ ? nt - g0 : G_;
-                /* variante MMA (8 teste/TG, tile KV condiviso, simdgroup_matrix) se disponibile e hd<=512;
-                 * opt-out con l'opzione di registro dsv4_attn_mma=0. Altrimenti kernel scalare (fallback). */
-                int mma_ok = 0;   /* MISURA 2026-10-03: MMA ~pari allo scalare (115.3 vs 116.8 t/s) -> default OFF */
-                { int v; if (llm_ai_mlx_opt_get_bool("dsv4_attn_mma", &v) == 0 && v) mma_ok = 1; }
-                if (mma_ok) mma_ok = (b->pso_apart_mma != nil) && (hd % 32u) == 0u && hd <= 128u;
-                [e setComputePipelineState:mma_ok ? b->pso_apart_mma : b->pso_apart_t];
+                /* attenzione: GATHER delle top_k (SELT) invece di scandire n_comp (O(top_k) vs O(n_comp)).
+                 * P[1] = top_k per i layer CSA (has_idx), 0 per HCA (scansiona tutte le compresse, SELT=identita'). */
+                [e setComputePipelineState:b->pso_apart_t];
                 [e setBuffer:Q offset:0 atIndex:0]; [e setBuffer:RAWX offset:0 atIndex:1]; [e setBuffer:(id<MTLBuffer>)p0->acomp offset:0 atIndex:2];
-                [e setBuffer:ALB offset:0 atIndex:3]; [e setBuffer:PT offset:0 atIndex:4];
-                { uint32_t P_[6] = { (uint32_t)hd, (uint32_t)(p0->has_idx ? 1 : 0), (uint32_t)nsm, (uint32_t)g0, (uint32_t)max_ic, (uint32_t)nh_ }; [e setBytes:P_ length:sizeof(P_) atIndex:5]; }
+                [e setBuffer:SELB offset:0 atIndex:3]; [e setBuffer:PT offset:0 atIndex:4];
+                { uint32_t P_[6] = { (uint32_t)hd, (uint32_t)(p0->has_idx ? (uint32_t)p0->idx_top_k : 0u), (uint32_t)nsm, (uint32_t)g0, (uint32_t)max_ic, (uint32_t)nh_ }; [e setBytes:P_ length:sizeof(P_) atIndex:5]; }
                 [e setBuffer:TPB offset:0 atIndex:6];
-                if (mma_ok) [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((nh_ + 7) / 8), (NSUInteger)nsm, (NSUInteger)gt) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-                else        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)nh_, (NSUInteger)nsm, (NSUInteger)gt) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [e dispatchThreadgroups:MTLSizeMake((NSUInteger)nh_, (NSUInteger)nsm, (NSUInteger)gt) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
                 [e setComputePipelineState:b->pso_amerge_t];
                 [e setBuffer:PT offset:0 atIndex:0]; [e setBuffer:(id<MTLBuffer>)p0->sinks offset:0 atIndex:1]; [e setBuffer:HD offset:0 atIndex:2];
                 { uint32_t P_[4] = { (uint32_t)hd, (uint32_t)nsm, (uint32_t)g0, (uint32_t)nh_ }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; }
