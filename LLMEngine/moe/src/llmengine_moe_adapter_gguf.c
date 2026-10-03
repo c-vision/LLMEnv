@@ -46,6 +46,7 @@ typedef struct {
      * forward dal config del runtime (mode + cache_mb). NULL = fallback dequant-on-read via FILE*. */
     GgufStore* store;
     uint64_t   store_mb;   /* budget (MB) con cui lo store e' stato aperto (per il resize CACHE) */
+    LlmEngineMoeRuntime* rt;   /* runtime del forward corrente (route-cb: trace ROUTER + step K2) */
     char       path[1024];
 } GgufSelf;
 
@@ -127,12 +128,25 @@ static LlmEngineMoeStatus gguf_lmhead(GgufSelf* s, const float* xn, float* out) 
     return LLMENGINE_MOE_OK;
 }
 
+/* M6 v2 + K1/K2: il router del layer notifica gli esperti scelti (feed predittore/prefetch),
+ * emette il ROUTER nel trace (confine di step per il replay) e avanza lo step dello store
+ * (un hit su un bundle di uno step precedente conta in `resident_hits`). */
+static void gguf_route_cb(void* ctx, uint32_t layer, const uint32_t* experts, uint32_t n) {
+    GgufSelf* s = (GgufSelf*)ctx;
+    if (s->store != NULL) {
+        s->store->step++;
+        if (s->rt != NULL) s->store->prof = llmengine_moe_profiler(s->rt);   /* K1: trace avviato dopo il load */
+    }
+    if (s->rt != NULL) llmengine_moe_notify_routing(s->rt, layer, experts, n);
+}
+
 /* Pubblica le metriche dello store nel runtime (per AI.STREAMSTATS / LLM.STREAMSTATS). no-op se
  * rt==NULL (uso diretto dell'adapter nei test) o store assente. */
 static void gguf_publish(GgufSelf* s, LlmEngineMoeRuntime* rt) {
     if (s->store == NULL) return;
     llmengine_moe_set_stream_metrics(rt, s->store->bytes_read, s->store->hits, s->store->misses,
-                               s->store->evictions, llmengine_moe_gguf_store_resident_bytes(s->store),
+                               s->store->evictions, s->store->resident_hits,
+                               llmengine_moe_gguf_store_resident_bytes(s->store),
                                s->store_mb * 1024ull * 1024ull);
 }
 
@@ -140,6 +154,7 @@ static LlmEngineMoeStatus gguf_forward(void* self, LlmEngineMoeRuntime* rt, cons
                                  uint32_t hidden, float* out) {
     GgufSelf* s = (GgufSelf*)self;
     if (hidden != s->cfg.hidden) return LLMENGINE_MOE_ERR_INVALID;
+    s->rt = rt;
     /* Fase 2 (stile DS4): apre lo store al primo forward, dal config del runtime (mode+cache_mb).
      * RESIDENT → mmap zero-copy; SWAP → pread+LRU bundle. Fallback su dequant-on-read se assente.
      * `LLM MODEL CACHE`/`DEVICE` possono cambiare mode/budget → lo store viene riaperto. */
@@ -153,6 +168,7 @@ static LlmEngineMoeStatus gguf_forward(void* self, LlmEngineMoeRuntime* rt, cons
             s->store = llmengine_moe_gguf_store_open(s->path, &s->g, s->cfg.n_layers, swap, mb);
             s->store_mb = mb;
         }
+        if (s->store != NULL) s->store->prof = llmengine_moe_profiler(rt);   /* K1: trace */
     }
     Q3KvCache kv; kv.k = s->kv_k; kv.v = s->kv_v;
     float* x = (float*)malloc((size_t)hidden * sizeof(float));
@@ -173,7 +189,7 @@ static LlmEngineMoeStatus gguf_forward(void* self, LlmEngineMoeRuntime* rt, cons
             }
         }
         LlmEngineMoeStatus ps = llmengine_moe_qwen3_prefill_batchfn(&s->cfg, s->lv, s->cfg.n_layers,
-                                                        gguf_expert_batch_cb, s, NULL, NULL,
+                                                        gguf_expert_batch_cb, s, gguf_route_cb, s,
                                                         seq, s->pos, xa, oa, &kv);
         if (ps != LLMENGINE_MOE_OK) { free(x); free(y); free(xn); free(xa); free(oa); return ps; }
         s->pos += seq;
@@ -192,7 +208,7 @@ static LlmEngineMoeStatus gguf_forward(void* self, LlmEngineMoeRuntime* rt, cons
         }
         for (uint32_t l = 0; l < s->cfg.n_layers; ++l) {
             LlmEngineMoeStatus st = llmengine_moe_qwen3_decode_layer(&s->cfg, &s->lv[l], gguf_expert_cb, s,
-                                                         NULL, NULL, l, s->pos, x, y, &kv);
+                                                         gguf_route_cb, s, l, s->pos, x, y, &kv);
             if (st != LLMENGINE_MOE_OK) { free(x); free(y); free(xn); return st; }
             float* tmp = x; x = y; y = tmp;
         }
@@ -299,6 +315,21 @@ static LlmEngineMoeStatus gguf_load(void* self, const char* path, LlmEngineMoeMo
     if (meta != NULL) {
         meta->layer_count = s->cfg.n_layers; meta->expert_count = s->cfg.n_experts;
         meta->experts_per_tok = s->cfg.topk; meta->hidden_size = s->cfg.hidden;
+        /* K1: byte totali degli esperti routed (per l'header del trace: byte/esperto =
+         * routed_bytes / (layer*expert)); somma dei bundle gate+up+down per layer. */
+        uint64_t routed = 0;
+        for (uint32_t l = 0; l < s->cfg.n_layers; ++l) {
+            char b[160];
+            GgufStoreTensor tg, tu, td;
+            snprintf(b, sizeof(b), "blk.%u.ffn_gate_exps.weight", l);
+            if (!gguf_store_tensor(&s->g, b, &tg)) continue;
+            snprintf(b, sizeof(b), "blk.%u.ffn_up_exps.weight", l);
+            if (!gguf_store_tensor(&s->g, b, &tu)) continue;
+            snprintf(b, sizeof(b), "blk.%u.ffn_down_exps.weight", l);
+            if (!gguf_store_tensor(&s->g, b, &td)) continue;
+            routed += (uint64_t)(tg.nb + tu.nb + td.nb) * tg.n_experts;
+        }
+        meta->routed_bytes = routed;
     }
     return LLMENGINE_MOE_OK;
 }

@@ -112,6 +112,45 @@ void llmengine_ai_moestream_set_priority(LlmEngineMoeProvider* p, const char* na
     llmengine_moe_provider_set_priority(p, name, priority);
 }
 
+/* K1: avvia la registrazione del trace `.moetrace` per il modello (LLM MODEL TRACE nome, path).
+ * Il trace e' il "carburante" del replay offline `moe_sim` (stessa cache/policy del runtime).
+ * Header: budget cache (byte) + byte per esperto (per la simulazione a slot). */
+int llmengine_ai_moestream_trace_start(LlmEngineMoeProvider* p, const char* name, const char* path) {
+    if (p == NULL || name == NULL || path == NULL || path[0] == '\0') return LLMENGINE_MOE_ERR_INVALID;
+    LlmEngineMoeRuntime* rt = llmengine_moe_provider_get(p, name);
+    if (rt == NULL) return LLMENGINE_MOE_ERR_MODEL_NOT_FOUND;
+    LlmEngineMoeProfiler* prof = llmengine_moe_profiler(rt);
+    if (prof == NULL) {
+        prof = llmengine_moe_prof_create();
+        if (prof == NULL) return LLMENGINE_MOE_ERR_NO_MEMORY;
+        llmengine_moe_set_profiler(rt, prof);
+    }
+    uint64_t budget = llmengine_moe_cache_mb(rt) * 1024ull * 1024ull;
+    uint64_t expert = 0;
+    const LlmEngineMoeModelMeta* meta = llmengine_moe_meta(rt);
+    if (meta != NULL && meta->layer_count > 0 && meta->expert_count > 0)
+        expert = meta->routed_bytes / ((uint64_t)meta->layer_count * meta->expert_count);
+    LlmEngineMoeStatus s = llmengine_moe_prof_trace_open_ex(prof, path, budget, expert);
+    if (s != LLMENGINE_MOE_OK && llmengine_moe_profiler(rt) == prof) {
+        llmengine_moe_set_profiler(rt, NULL);
+        llmengine_moe_prof_destroy(prof);
+    }
+    return (int)s;
+}
+
+/* K1: ferma il trace e stacca il profiler (idempotente se non attivo). */
+int llmengine_ai_moestream_trace_stop(LlmEngineMoeProvider* p, const char* name) {
+    if (p == NULL || name == NULL) return LLMENGINE_MOE_ERR_INVALID;
+    LlmEngineMoeRuntime* rt = llmengine_moe_provider_get(p, name);
+    if (rt == NULL) return LLMENGINE_MOE_ERR_MODEL_NOT_FOUND;
+    LlmEngineMoeProfiler* prof = llmengine_moe_profiler(rt);
+    if (prof == NULL) return LLMENGINE_MOE_OK;
+    llmengine_moe_prof_trace_close(prof);
+    llmengine_moe_set_profiler(rt, NULL);
+    llmengine_moe_prof_destroy(prof);
+    return LLMENGINE_MOE_OK;
+}
+
 int llmengine_ai_moestream_count(const LlmEngineMoeProvider* p) {
     return (int)llmengine_moe_provider_count(p);
 }

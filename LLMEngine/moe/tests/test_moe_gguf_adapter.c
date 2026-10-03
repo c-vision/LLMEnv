@@ -5,6 +5,9 @@
 #include "llmengine_moe_gguf.h"
 #include "llmengine_moe_gguf_expert.h"
 #include "llmengine_moe_ggml.h"
+#include "llmengine_moe_provider.h"
+#include "llmengine_moe_prof.h"
+#include "llmengine_moe_sim.h"
 #include "llmcodec_fp16.h"   /* f32->f16 = atomo del CODEC */
 
 #include <math.h>
@@ -181,6 +184,61 @@ int main(void) {
     a4.destroy(a4.self);
     a1.destroy(a1.self);
     a2.destroy(a2.self);
+
+    /* ── K1/K2: trace di PRODUZIONE dallo store GGUF + replay offline (gate `moe_sim --verify`) ──
+     * Il trace deve venire dal cache REALE del path SWAP (GgufStore), coi confini di step dati
+     * dal route-callback; il replay offline deve riprodurre hits/misses/evictions. */
+    {
+        LlmEngineMoeProvider* p = llmengine_moe_provider_create();
+        CHECK(p != NULL);
+        LlmEngineMoeRuntimeConfig rc;
+        llmengine_moe_config_defaults(&rc);
+        rc.mode = LLMENGINE_MOE_MODE_SWAP;
+        rc.cache_mb = 1;            /* store SWAP (cap min 8 bundle) */
+        rc.async_workers = 0;       /* solo eventi dello store (nessun async) */
+        rc.prefetch_topn = 0;
+        CHECK(llmengine_moe_provider_load(p, "tiny", gp, &rc) == LLMENGINE_MOE_OK);
+        LlmEngineMoeRuntime* rt = llmengine_moe_provider_get(p, "tiny");
+        CHECK(rt != NULL);
+        const LlmEngineMoeModelMeta* meta = llmengine_moe_meta(rt);
+        CHECK(meta != NULL && meta->layer_count > 0 && meta->expert_count > 0);
+        uint64_t expert = meta ? meta->routed_bytes / ((uint64_t)meta->layer_count * meta->expert_count) : 0;
+        CHECK(expert > 0);
+
+        char tp[1200]; snprintf(tp, sizeof(tp), "%s/tiny.moetrace", dir);
+        LlmEngineMoeProfiler* prof = llmengine_moe_prof_create();
+        CHECK(prof != NULL);
+        CHECK(llmengine_moe_prof_trace_open_ex(prof, tp, rc.cache_mb * 1024ull * 1024ull, expert) == LLMENGINE_MOE_OK);
+        llmengine_moe_set_profiler(rt, prof);
+
+        float in1[1] = { 0.0f }, out4[4];
+        for (int i = 0; i < 4; ++i)
+            CHECK(llmengine_moe_forward(rt, in1, 1, out4) == LLMENGINE_MOE_OK);
+        llmengine_moe_prof_trace_close(prof);
+        llmengine_moe_set_profiler(rt, NULL);
+        llmengine_moe_prof_destroy(prof);
+
+        /* K2: gli stats (path store) riportano la resident hit rate vera */
+        LlmEngineMoeStreamStats st;
+        CHECK(llmengine_moe_stream_stats(rt, &st) == LLMENGINE_MOE_OK);
+        CHECK(st.cache_misses > 0);
+        CHECK(st.cache_hits > 0);
+        CHECK(st.cache_resident_hits > 0);
+        CHECK(st.cache_resident_hits <= st.cache_hits);
+
+        /* K1: replay offline == summary del trace (stesso trace, stessa policy) */
+        LlmEngineMoeTraceSummary sum;
+        CHECK(llmengine_moe_trace_summary(tp, &sum) == LLMENGINE_MOE_OK);
+        LlmEngineMoeSimResult sim;
+        CHECK(llmengine_moe_sim_replay(tp, 0, 0, &sim) == LLMENGINE_MOE_OK);
+        CHECK(sim.hits == sum.cache_hits);
+        CHECK(sim.misses == sum.cache_misses);
+        CHECK(sim.evictions == sum.evictions);
+        CHECK(sim.resident_hits == st.cache_resident_hits);   /* K2: store == replay */
+
+        llmengine_moe_provider_destroy(p);
+        remove(tp);
+    }
 
     remove(gp);
     rmdir(dir);

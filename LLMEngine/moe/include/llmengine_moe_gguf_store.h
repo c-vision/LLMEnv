@@ -22,6 +22,7 @@
 
 #include "llmengine_moe_gguf.h"
 #include "llmengine_moe_ggml.h"
+#include "llmengine_moe_prof.h"   /* K1/K2: eventi trace HIT/MISS/EVICT dal cache reale */
 
 typedef struct {
     uint64_t off;        /* offset assoluto nel file del primo esperto */
@@ -34,7 +35,7 @@ typedef struct {
     GgufStoreTensor g, u, d;   /* gate/up/down; n_experts coincide */
 } GgufStoreLayer;
 
-typedef struct { int layer, e, valid; uint64_t age; uint8_t* buf; size_t len, cap; } GgufStoreEnt;
+typedef struct { int layer, e, valid; uint64_t age; uint64_t born_step; uint8_t* buf; size_t len, cap; } GgufStoreEnt;
 
 typedef struct {
     int swap;                    /* 0 RESIDENT (mmap), 1 SWAP (pread+LRU) */
@@ -47,6 +48,11 @@ typedef struct {
     int cap, n;
     uint64_t tick;
     uint64_t bytes_read, hits, misses, evictions;
+    /* K2: hit su un bundle residente da uno step PRECEDENTE (non caricato in questo step);
+     * lo step avanza col route-callback per layer (stesso confine dei ROUTER nel trace). */
+    uint64_t resident_hits, step;
+    /* K1: profiler opzionale (NULL = nessun trace): emette CACHE_HIT/MISS/EVICT dal cache reale. */
+    LlmEngineMoeProfiler* prof;
 } GgufStore;
 
 /* Riempe un GgufStoreTensor dal tensore `name` (3D stacked). 0 = ok. */
@@ -139,8 +145,13 @@ static inline const uint8_t* llmengine_moe_gguf_store_expert(GgufStore* s, uint3
     const uint8_t* rd = s->base + L->d.off + (uint64_t)e * L->d.nb;
     if (!s->swap) { *up = ru; *down = rd; return rg; }
     int idx = gguf_store_find(s, (int)layer, (int)e);
-    if (idx >= 0) { s->hits++; s->ents[idx].age = ++s->tick; }
-    else {
+    if (idx >= 0) {
+        s->hits++;
+        if (s->ents[idx].born_step < s->step) s->resident_hits++;   /* K2 */
+        s->ents[idx].age = ++s->tick;
+        if (s->prof != NULL)
+            llmengine_moe_prof_event(s->prof, LLMENGINE_MOE_TRACE_CACHE_HIT, layer, e, 0, (uint64_t)s->ents[idx].len);
+    } else {
         s->misses++;
         idx = -1;
         for (int i = 0; i < s->cap; i++) if (!s->ents[i].valid) { idx = i; break; }
@@ -149,6 +160,9 @@ static inline const uint8_t* llmengine_moe_gguf_store_expert(GgufStore* s, uint3
             for (int i = 0; i < s->cap; i++)
                 if (s->ents[i].age < oldest) { oldest = s->ents[i].age; idx = i; }
             s->evictions++;
+            if (s->prof != NULL)   /* K1: EVICT reale (chiave evitta) prima di sovrascrivere */
+                llmengine_moe_prof_event(s->prof, LLMENGINE_MOE_TRACE_EVICT,
+                                   (uint32_t)s->ents[idx].layer, (uint32_t)s->ents[idx].e, 0, 1);
         }
         GgufStoreEnt* en = &s->ents[idx];
         size_t len = L->g.nb + L->u.nb + L->d.nb;
@@ -163,7 +177,10 @@ static inline const uint8_t* llmengine_moe_gguf_store_expert(GgufStore* s, uint3
         }
         s->bytes_read += len;
         en->valid = 1; en->layer = (int)layer; en->e = (int)e; en->age = ++s->tick;
+        en->born_step = s->step;   /* K2: residente da questo step in poi */
         if ((int)idx >= s->n) s->n = idx + 1;
+        if (s->prof != NULL)
+            llmengine_moe_prof_event(s->prof, LLMENGINE_MOE_TRACE_CACHE_MISS, layer, e, 0, (uint64_t)len);
     }
     GgufStoreEnt* en = &s->ents[idx];
     *up = en->buf + L->g.nb;

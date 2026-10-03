@@ -431,7 +431,10 @@ const LlmEngineMoeKvCache* llmengine_moe_kv(const LlmEngineMoeRuntime* rt) {
 }
 
 void llmengine_moe_set_profiler(LlmEngineMoeRuntime* rt, LlmEngineMoeProfiler* prof) {
-    if (rt != NULL) rt->prof = prof;
+    if (rt == NULL) return;
+    rt->prof = prof;
+    /* K1: l'async (se già creato al load) emette HIT/MISS sul trace corrente. */
+    if (rt->async != NULL) llmengine_moe_async_set_profiler(rt->async, prof);
 }
 
 LlmEngineMoeProfiler* llmengine_moe_profiler(const LlmEngineMoeRuntime* rt) {
@@ -462,7 +465,16 @@ LlmEngineMoeStatus llmengine_moe_stream_stats(const LlmEngineMoeRuntime* rt, Llm
     out->experts = rt->meta.expert_count;
     out->bytes_read = rt->bytes_read;
     out->expert_bytes = rt->meta.routed_bytes;
-    if (rt->cache != NULL) {
+    if (rt->ext_valid) {
+        /* Adapter con store proprio (GGUF stile DS4): metriche pubblicate dall'adapter —
+         * è la cache REALE del path (rt->cache può esistere ma non essere usata). */
+        out->bytes_read = rt->ext.bytes_read;
+        out->cache_hits = rt->ext.cache_hits;
+        out->cache_misses = rt->ext.cache_misses;
+        out->cache_evictions = rt->ext.cache_evictions;
+        out->cache_resident_hits = rt->ext.cache_resident_hits;   /* K2 */
+        out->resident_bytes = rt->ext.resident_bytes;
+    } else if (rt->cache != NULL) {
         LlmEngineMoeCacheStats cs;
         llmengine_moe_cache_stats(rt->cache, &cs);
         out->cache_hits = cs.hits;
@@ -470,13 +482,6 @@ LlmEngineMoeStatus llmengine_moe_stream_stats(const LlmEngineMoeRuntime* rt, Llm
         out->cache_evictions = cs.evictions;
         out->cache_resident_hits = cs.resident_hits;   /* K2 */
         out->resident_bytes = llmengine_moe_cache_bytes_used(rt->cache);
-    } else if (rt->ext_valid) {
-        /* Adapter con store proprio (GGUF stile DS4): metriche pubblicate dall'adapter. */
-        out->bytes_read = rt->ext.bytes_read;
-        out->cache_hits = rt->ext.cache_hits;
-        out->cache_misses = rt->ext.cache_misses;
-        out->cache_evictions = rt->ext.cache_evictions;
-        out->resident_bytes = rt->ext.resident_bytes;
     }
     if (rt->predictor != NULL) {
         LlmEngineMoePrefetchMetrics pm;
@@ -489,14 +494,15 @@ LlmEngineMoeStatus llmengine_moe_stream_stats(const LlmEngineMoeRuntime* rt, Llm
 }
 
 void llmengine_moe_set_stream_metrics(LlmEngineMoeRuntime* rt, uint64_t bytes_read, uint64_t hits,
-                                uint64_t misses, uint64_t evictions, uint64_t resident_bytes,
-                                uint64_t budget_bytes) {
+                                uint64_t misses, uint64_t evictions, uint64_t resident_hits,
+                                uint64_t resident_bytes, uint64_t budget_bytes) {
     if (rt == NULL) return;
     memset(&rt->ext, 0, sizeof(rt->ext));
     rt->ext.bytes_read = bytes_read;
     rt->ext.cache_hits = hits;
     rt->ext.cache_misses = misses;
     rt->ext.cache_evictions = evictions;
+    rt->ext.cache_resident_hits = resident_hits;   /* K2 */
     rt->ext.resident_bytes = resident_bytes;
     rt->ext.expert_bytes = budget_bytes;   /* budget dello store (per AI.STREAMSTATS) */
     rt->ext_valid = 1;
