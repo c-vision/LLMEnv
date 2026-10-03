@@ -211,6 +211,7 @@ int main(void) {
         rc.cache_mb = 1;            /* store SWAP (cap min 8 bundle) */
         rc.async_workers = 0;       /* solo eventi dello store (nessun async) */
         rc.prefetch_topn = 0;
+        rc.hotness = 1;             /* D19: hotness alimentata dal route-callback */
         CHECK(llmengine_moe_provider_load(p, "tiny", gp, &rc) == LLMENGINE_MOE_OK);
         LlmEngineMoeRuntime* rt = llmengine_moe_provider_get(p, "tiny");
         CHECK(rt != NULL);
@@ -239,6 +240,12 @@ int main(void) {
         CHECK(st.cache_hits > 0);
         CHECK(st.cache_resident_hits > 0);
         CHECK(st.cache_resident_hits <= st.cache_hits);
+
+        /* D19: la hotness è alimentata dal route-callback anche nel path GGUF (freq osservata) */
+        const LlmEngineMoeExpertCache* hc = llmengine_moe_expert_cache(rt);
+        CHECK(hc != NULL);
+        CHECK(llmengine_moe_cache_fetches(hc) > 0);
+        CHECK(llmengine_moe_cache_freq(hc, (LlmEngineMoeExpertKey){ 0, 0 }) > 0);
 
         /* K1: replay offline == summary del trace (stesso trace, stessa policy) */
         LlmEngineMoeTraceSummary sum;

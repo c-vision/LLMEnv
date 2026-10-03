@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -56,7 +57,69 @@ typedef struct {
     uint64_t unresolvable;
     /* K1: profiler opzionale (NULL = nessun trace): emette CACHE_HIT/MISS/EVICT dal cache reale. */
     LlmEngineMoeProfiler* prof;
+    /* D19: hotness appresa (freq per (layer,expert) dai routing osservati). Default OFF → LRU. */
+    uint32_t* freq;
+    uint32_t f_layers, f_experts;
+    int hotness;
 } GgufStore;
+
+/* ── D19: hotness appresa + policy di eviction per frequenza (opt-in) ─────────────────── */
+static inline void llmengine_moe_gguf_store_set_dims(GgufStore* s, uint32_t layers, uint32_t experts) {
+    if (s == NULL || layers == 0 || experts == 0) return;
+    if (s->freq != NULL && s->f_layers == layers && s->f_experts == experts) return;
+    uint32_t* nf = (uint32_t*)calloc((size_t)layers * experts, sizeof(uint32_t));
+    if (nf == NULL) return;
+    free(s->freq);
+    s->freq = nf; s->f_layers = layers; s->f_experts = experts;
+}
+
+static inline void llmengine_moe_gguf_store_note_route(GgufStore* s, uint32_t layer,
+                                                       const uint32_t* experts, uint32_t n) {
+    if (s == NULL || s->freq == NULL || layer >= s->f_layers) return;
+    for (uint32_t i = 0; i < n; ++i)
+        if (experts != NULL && experts[i] < s->f_experts)
+            s->freq[(size_t)layer * s->f_experts + experts[i]]++;
+}
+
+static inline void llmengine_moe_gguf_store_set_hotness(GgufStore* s, int on) {
+    if (s != NULL) s->hotness = on ? 1 : 0;
+}
+
+static inline uint32_t llmengine_moe_gguf_store_freq(const GgufStore* s, uint32_t layer, uint32_t e) {
+    if (s == NULL || s->freq == NULL || layer >= s->f_layers || e >= s->f_experts) return 0;
+    return s->freq[(size_t)layer * s->f_experts + e];
+}
+
+/* Profilo `GMSTATS 1` (stesso formato del profilo della cache: righe `layer expert freq`). */
+static inline int llmengine_moe_gguf_store_profile_save(const GgufStore* s, const char* path) {
+    if (s == NULL || s->freq == NULL || path == NULL || *path == 0) return -1;
+    FILE* f = fopen(path, "wb");
+    if (f == NULL) return -1;
+    fprintf(f, "GMSTATS 1\n");
+    for (uint32_t l = 0; l < s->f_layers; ++l)
+        for (uint32_t e = 0; e < s->f_experts; ++e) {
+            uint32_t v = s->freq[(size_t)l * s->f_experts + e];
+            if (v != 0) fprintf(f, "%u %u %u\n", l, e, v);
+        }
+    fclose(f);
+    return 0;
+}
+
+static inline int llmengine_moe_gguf_store_profile_load(GgufStore* s, const char* path) {
+    if (s == NULL || s->freq == NULL || path == NULL || *path == 0) return -1;
+    FILE* f = fopen(path, "rb");
+    if (f == NULL) return -1;
+    char magic[16] = {0}; int ver = 0;
+    if (fscanf(f, "%15s", magic) != 1 || strcmp(magic, "GMSTATS") != 0) { fclose(f); return -1; }
+    if (fscanf(f, "%d", &ver) != 1 || ver != 1) { fclose(f); return -1; }
+    unsigned l = 0, e = 0, v = 0; int nread = 0;
+    while (fscanf(f, "%u %u %u", &l, &e, &v) == 3) {
+        if (l < s->f_layers && e < s->f_experts) s->freq[(size_t)l * s->f_experts + e] += v;
+        nread++;
+    }
+    fclose(f);
+    return nread > 0 ? 0 : -1;
+}
 
 /* Riempe un GgufStoreTensor dal tensore `name` (3D stacked). 0 = ok. */
 static inline int gguf_store_tensor(const LlmEngineMoeGguf* g, const char* name, GgufStoreTensor* out) {
@@ -127,6 +190,7 @@ static inline void llmengine_moe_gguf_store_close(GgufStore* s) {
     if (s->ents) { for (int i = 0; i < s->cap; i++) free(s->ents[i].buf); free(s->ents); }
     if (s->base) munmap((void*)s->base, s->map_len);
     if (s->fd >= 0) close(s->fd);
+    free(s->freq);
     free(s->layers);
     free(s);
 }
@@ -167,9 +231,21 @@ static inline const uint8_t* llmengine_moe_gguf_store_expert(GgufStore* s, uint3
         idx = -1;
         for (int i = 0; i < s->cap; i++) if (!s->ents[i].valid) { idx = i; break; }
         if (idx < 0) {
-            uint64_t oldest = ~0ull;
-            for (int i = 0; i < s->cap; i++)
-                if (s->ents[i].age < oldest) { oldest = s->ents[i].age; idx = i; }
+            /* D19: hotness ON → evince il MINOR freq osservato (tie-break: il più vecchio);
+             * default (OFF o freq assente) → LRU puro. */
+            int best = -1; uint32_t best_freq = 0; uint64_t best_age = ~0ull;
+            for (int i = 0; i < s->cap; i++) {
+                uint32_t f = 0;
+                if (s->hotness && s->freq != NULL) {
+                    int L = s->ents[i].layer, E = s->ents[i].e;
+                    if (L >= 0 && (uint32_t)L < s->f_layers && (uint32_t)E < s->f_experts)
+                        f = s->freq[(size_t)(uint32_t)L * s->f_experts + (uint32_t)E];
+                }
+                if (best < 0 || f < best_freq || (f == best_freq && s->ents[i].age < best_age)) {
+                    best = i; best_freq = f; best_age = s->ents[i].age;
+                }
+            }
+            idx = best;
             s->evictions++;
             if (s->prof != NULL)   /* K1: EVICT reale (chiave evitta) prima di sovrascrivere */
                 llmengine_moe_prof_event(s->prof, LLMENGINE_MOE_TRACE_EVICT,

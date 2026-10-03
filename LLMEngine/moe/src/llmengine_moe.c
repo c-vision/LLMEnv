@@ -442,6 +442,10 @@ LlmEngineMoeProfiler* llmengine_moe_profiler(const LlmEngineMoeRuntime* rt) {
     return rt == NULL ? NULL : rt->prof;
 }
 
+int llmengine_moe_hotness(const LlmEngineMoeRuntime* rt) {
+    return rt == NULL ? 0 : rt->hotness;
+}
+
 /* RESIDENT (M14): precarica tutti gli esperti nella cache -> nessuno swap dopo il load.
  * Le chiavi assenti (container sparso) vengono ignorate. */
 static LlmEngineMoeStatus llmengine_moe_preload_resident(LlmEngineMoeRuntime* rt) {

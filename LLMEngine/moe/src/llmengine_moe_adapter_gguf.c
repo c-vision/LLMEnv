@@ -153,6 +153,7 @@ static void gguf_route_cb(void* ctx, uint32_t layer, const uint32_t* experts, ui
     if (s->store != NULL) {
         s->store->step++;
         if (s->rt != NULL) s->store->prof = llmengine_moe_profiler(s->rt);   /* K1: trace avviato dopo il load */
+        llmengine_moe_gguf_store_note_route(s->store, layer, experts, n);    /* D19: hotness sul cache reale */
     }
     if (s->rt != NULL) llmengine_moe_notify_routing(s->rt, layer, experts, n);
 }
@@ -184,6 +185,15 @@ static LlmEngineMoeStatus gguf_forward(void* self, LlmEngineMoeRuntime* rt, cons
         if (s->store == NULL) {
             s->store = llmengine_moe_gguf_store_open(s->path, &s->g, s->cfg.n_layers, swap, mb);
             s->store_mb = mb;
+            if (s->store != NULL) {
+                /* D19: hotness appresa sul cache REALE; profilo `<path>.stats` se opt-in. */
+                llmengine_moe_gguf_store_set_dims(s->store, s->cfg.n_layers, s->cfg.n_experts);
+                llmengine_moe_gguf_store_set_hotness(s->store, llmengine_moe_hotness(rt));
+                if (llmengine_moe_hotness(rt)) {
+                    char pp[1200]; snprintf(pp, sizeof(pp), "%s.stats", s->path);
+                    (void)llmengine_moe_gguf_store_profile_load(s->store, pp);   /* advisory: assente ok */
+                }
+            }
         }
         if (s->store != NULL) s->store->prof = llmengine_moe_profiler(rt);   /* K1: trace */
     }

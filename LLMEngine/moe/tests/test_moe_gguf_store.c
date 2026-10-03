@@ -29,8 +29,9 @@ static void w_kv_str(FILE* f, const char* k, const char* v) { w_str(f, k); w_u32
 
 typedef struct { const char* name; uint32_t nd; uint64_t dims[4]; uint32_t type; } TDef;
 
-/* hidden=4, inter=2, n_experts=2 (2 layer) — rampe diverse per layer per distinguere le chiavi. */
-static void write_tiny_moe_gguf(const char* path) {
+/* hidden=4, `inter`/`experts` parametrici (2 layer) — rampe diverse per layer per le chiavi.
+ * `inter` grande serve al test D19: bundle grande → cap dello store piccolo → eviction. */
+static void write_tiny_moe_gguf_ex(const char* path, uint32_t experts, uint32_t inter) {
     TDef T[32]; uint32_t NT = 0;
     const TDef base[] = {
         { "token_embd.weight",            2, {4,4,0,0}, LLMENGINE_MOE_GGML_F16 },
@@ -60,6 +61,16 @@ static void write_tiny_moe_gguf(const char* path) {
         { "blk.1.ffn_down_exps.weight",   3, {2,4,2,0}, LLMENGINE_MOE_GGML_F16 },
     };
     for (uint32_t i = 0; i < (uint32_t)(sizeof(base) / sizeof(base[0])); ++i) T[NT++] = base[i];
+    /* D19: esperti/inter parametrici (router [hidden, experts]; gate/up [hidden, inter, experts];
+     * down [inter, hidden, experts]). */
+    for (uint32_t i = 0; i < NT; ++i) {
+        if (strstr(T[i].name, "ffn_gate_inp")) T[i].dims[1] = experts;
+        else if (strstr(T[i].name, "ffn_gate_exps") || strstr(T[i].name, "ffn_up_exps")) {
+            T[i].dims[1] = inter; T[i].dims[2] = experts;
+        } else if (strstr(T[i].name, "ffn_down_exps")) {
+            T[i].dims[0] = inter; T[i].dims[2] = experts;
+        }
+    }
     FILE* f = fopen(path, "wb");
     CHECK(f != NULL); if (!f) return;
     w_u32(f, 0x46554747u); w_u32(f, 3);
@@ -70,9 +81,9 @@ static void write_tiny_moe_gguf(const char* path) {
     w_kv_u32(f, "qwen3moe.attention.head_count", 1);
     w_kv_u32(f, "qwen3moe.attention.head_count_kv", 1);
     w_kv_u32(f, "qwen3moe.attention.key_length", 4);
-    w_kv_u32(f, "qwen3moe.expert_count", 2);
+    w_kv_u32(f, "qwen3moe.expert_count", experts);
     w_kv_u32(f, "qwen3moe.expert_used_count", 1);
-    w_kv_u32(f, "qwen3moe.expert_feed_forward_length", 2);
+    w_kv_u32(f, "qwen3moe.expert_feed_forward_length", inter);
     w_kv_u32(f, "general.alignment", 32);
     uint64_t off = 0;
     for (uint32_t i = 0; i < NT; ++i) {
@@ -101,6 +112,8 @@ static void write_tiny_moe_gguf(const char* path) {
     }
     fclose(f);
 }
+
+static void write_tiny_moe_gguf(const char* path) { write_tiny_moe_gguf_ex(path, 2, 2); }
 
 int main(void) {
     char tmpl[] = "/tmp/gguf-store-XXXXXX";
@@ -187,6 +200,63 @@ int main(void) {
         CHECK(st.bytes_read > 0);          /* lo store SWAP ha letto via pread */
         CHECK(llmengine_moe_cache_mb(rt) == 1);
         llmengine_moe_destroy(rt);
+    }
+
+    /* ── D19: policy hotness sul cache REALE (oracolo deterministico LRU vs freq) ──
+     * Modello 10 esperti con bundle grande → cap dello store = 8 (clamp) → eviction. */
+    {
+        char gp10[1200]; snprintf(gp10, sizeof(gp10), "%s/tiny10.gguf", dir);
+        write_tiny_moe_gguf_ex(gp10, 10, 8192);
+        LlmEngineMoeGguf g10;
+        CHECK(llmengine_moe_gguf_read(gp10, &g10) == LLMENGINE_MOE_OK);
+
+        /* OFF (LRU): riempie e0..e7, l'accesso a e8 evince il PIÙ VECCHIO (e0) → e0 = MISS */
+        GgufStore* so = llmengine_moe_gguf_store_open(gp10, &g10, 1, 1, 1);
+        CHECK(so != NULL);
+        if (so != NULL) {
+            llmengine_moe_gguf_store_set_dims(so, 1, 10);
+            const uint8_t *u, *d;
+            for (uint32_t e = 0; e < 8; ++e)
+                CHECK(llmengine_moe_gguf_store_expert(so, 0, e, &u, &d) != NULL);
+            CHECK(llmengine_moe_gguf_store_expert(so, 0, 8, &u, &d) != NULL);
+            uint64_t m0 = so->misses;
+            CHECK(llmengine_moe_gguf_store_expert(so, 0, 0, &u, &d) != NULL);
+            CHECK(so->misses == m0 + 1);   /* e0 era stato evitto dall'LRU */
+            llmengine_moe_gguf_store_close(so);
+        }
+
+        /* ON (hotness): freq(e0)=1000 → l'eviction sceglie un esperto FREDDO (e1), e0 resta → HIT */
+        GgufStore* sh = llmengine_moe_gguf_store_open(gp10, &g10, 1, 1, 1);
+        CHECK(sh != NULL);
+        if (sh != NULL) {
+            llmengine_moe_gguf_store_set_dims(sh, 1, 10);
+            llmengine_moe_gguf_store_set_hotness(sh, 1);
+            uint32_t hot[1] = { 0 };
+            for (int i = 0; i < 1000; ++i) llmengine_moe_gguf_store_note_route(sh, 0, hot, 1);
+            CHECK(llmengine_moe_gguf_store_freq(sh, 0, 0) == 1000);
+            const uint8_t *u, *d;
+            for (uint32_t e = 0; e < 8; ++e)
+                CHECK(llmengine_moe_gguf_store_expert(sh, 0, e, &u, &d) != NULL);
+            CHECK(llmengine_moe_gguf_store_expert(sh, 0, 8, &u, &d) != NULL);   /* evince un freddo */
+            uint64_t h0 = sh->hits;
+            CHECK(llmengine_moe_gguf_store_expert(sh, 0, 0, &u, &d) != NULL);
+            CHECK(sh->hits == h0 + 1);   /* e0 (caldo) è sopravvissuto */
+            /* profilo GMSTATS 1: save → load su uno store nuovo (round-trip freq) */
+            char pp[1200]; snprintf(pp, sizeof(pp), "%s.stats", gp10);
+            CHECK(llmengine_moe_gguf_store_profile_save(sh, pp) == 0);
+            GgufStore* s2 = llmengine_moe_gguf_store_open(gp10, &g10, 1, 1, 1);
+            CHECK(s2 != NULL);
+            if (s2 != NULL) {
+                llmengine_moe_gguf_store_set_dims(s2, 1, 10);
+                CHECK(llmengine_moe_gguf_store_profile_load(s2, pp) == 0);
+                CHECK(llmengine_moe_gguf_store_freq(s2, 0, 0) == 1000);
+                llmengine_moe_gguf_store_close(s2);
+            }
+            remove(pp);
+            llmengine_moe_gguf_store_close(sh);
+        }
+        llmengine_moe_gguf_free(&g10);
+        remove(gp10);
     }
 
     if (fails == 0) { printf("test_moe_gguf_store: OK\n"); return 0; }

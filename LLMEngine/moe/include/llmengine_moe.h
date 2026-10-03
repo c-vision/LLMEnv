@@ -179,6 +179,9 @@ const LlmEngineMoeKvCache* llmengine_moe_kv(const LlmEngineMoeRuntime* rt);
 /* M12: profiler opzionale (di proprieta' del chiamante). Default NULL => zero overhead.
  * Se impostato, il runtime misura DISK (read esperti) e COMPUTE (forward) ed emette eventi. */
 void llmengine_moe_set_profiler(LlmEngineMoeRuntime* rt, LlmEngineMoeProfiler* prof);
+
+/* D19: hotness opt-in corrente (0/1) — letto dall'adapter per la policy dello store reale. */
+int llmengine_moe_hotness(const LlmEngineMoeRuntime* rt);
 LlmEngineMoeProfiler* llmengine_moe_profiler(const LlmEngineMoeRuntime* rt);
 
 #endif /* LLMENGINE_MOE_RUNTIME_H */
