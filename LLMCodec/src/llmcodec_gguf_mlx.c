@@ -548,14 +548,22 @@ static void llmcodec_write_config_from_gguf(const char* gguf_path, const char* o
         KVN("attention.qk_rope_head_dim", "qk_rope_head_dim")
         KVN("attention.v_head_dim", "v_head_dim")
         KVN("attention.q_lora_rank", "q_lora_rank")
+        /* Fallback vocab_size: se il GGUF non porta `<arch>.vocab_size`, derivalo dalla shape di
+         * `token_embd.weight` ([hidden, vocab] in GGUF: dims[1]=vocab) — senza, load_config
+         * fallisce ("chiave attesa mancante: vocab_size") e il modello MLX non si carica. */
+        { snprintf(k, sizeof k, "%s.vocab_size", archk);
+          if (gkv_num(kv, n, k) < 0)
+            for (uint64_t ti = 0; ti < fi.n_tensors; ti++)
+              if (fi.tensors[ti].name && strcmp(fi.tensors[ti].name, "token_embd.weight") == 0 && fi.tensors[ti].ndim >= 2) {
+                fprintf(f, ",\n  \"vocab_size\": %llu", (unsigned long long)fi.tensors[ti].dims[1]); break; } }
 #undef KVN
-        { snprintf(k, sizeof k, "%s.rope.freq_base", arch); double v = gkv_flt(kv, n, k); if (v > 0) fprintf(f, ",\n  \"rope_theta\": %g", v); }
-        { snprintf(k, sizeof k, "%s.attention.layer_norm_rms_epsilon", arch); double v = gkv_flt(kv, n, k); if (v > 0) fprintf(f, ",\n  \"rms_norm_eps\": %g", v); }
+        { snprintf(k, sizeof k, "%s.rope.freq_base", archk); double v = gkv_flt(kv, n, k); if (v > 0) fprintf(f, ",\n  \"rope_theta\": %g", v); }
+        { snprintf(k, sizeof k, "%s.attention.layer_norm_rms_epsilon", archk); double v = gkv_flt(kv, n, k); if (v > 0) fprintf(f, ",\n  \"rms_norm_eps\": %g", v); }
         { long long b = gkv_num(kv, n, "tokenizer.ggml.bos_token_id"); if (b >= 0) fprintf(f, ",\n  \"bos_token_id\": %lld", b); }
         { long long e = gkv_num(kv, n, "tokenizer.ggml.eos_token_id"); if (e >= 0) fprintf(f, ",\n  \"eos_token_id\": %lld", e); }
         /* Router scoring (softmax|sigmoid): SEMANTICAMENTE CRITICO (cambia il routing). Senza,
          * l'engine usa l'euristica per-arch -> output incoerente. */
-        { snprintf(k, sizeof k, "%s.expert_scoring_func", arch); const char* sf = gkv_str(kv, n, k); if (sf) fprintf(f, ",\n  \"scoring_func\": \"%s\"", sf); }
+        { snprintf(k, sizeof k, "%s.expert_scoring_func", archk); const char* sf = gkv_str(kv, n, k); if (sf) fprintf(f, ",\n  \"scoring_func\": \"%s\"", sf); }
         llmcodec_gguf_free_info(&fi); llmcodec_gguf_meta_free(kv, n);
     }
     fprintf(f, ",\n  \"quantization\": {\"group_size\": %u, \"bits\": %u}\n}\n", group, bits);

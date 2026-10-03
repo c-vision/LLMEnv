@@ -7,6 +7,7 @@
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llmengine_plugin.h"
 #include "llm_mlx_internal.h"
+#include "llmcodec_rolemap.h"   /* role map HF<->GGUF (.gmbarch): gguf_rm per artefatti da GGUF */
 #include "llm_mlx_ops.h"
 #include "llm_mlx_kvpage.h"
 #include "llm_mlx_kvdisk.h"
@@ -758,6 +759,17 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
     mlx_stream cpu_stream = mlx_default_cpu_stream_new();
     bool shards_ok = load_all_shards(model_dir, cpu_stream, &m->weights);
     mlx_stream_free(cpu_stream);
+    /* Role map `.gmbarch` dell'arch (da `config.json`): se i pesi sono chiavati coi nomi CANONICI
+     * GGUF (artefatto MLX derivato da un GGUF via `LLM MODEL SAVE`), il forward chiede nomi HF:
+     * `multishard_get` traduce HF->canonico via questa mappa (fallback-only, la lookup diretta dei
+     * modelli HF nativi riesce sempre -> nessun impatto). Prima di ogni lookup (awq/pretouch/forward). */
+    if (shards_ok) {
+        char archp[2048]; LlmDesc adesc; memset(&adesc, 0, sizeof adesc);
+        if (llmdesc_resolve(model_dir, &adesc, archp, sizeof archp) == 0 && archp[0]) {
+            LlmCodecRoleMap* rm = (LlmCodecRoleMap*)calloc(1, sizeof(LlmCodecRoleMap));
+            if (rm != NULL) { if (llmcodec_rolemap_load(archp, rm) == 0) m->weights.gguf_rm = rm; else free(rm); }
+        }
+    }
     if (!shards_ok) {
         llm_mlx_model_destroy(m);
         free(m);
