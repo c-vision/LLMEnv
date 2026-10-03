@@ -187,6 +187,7 @@ void llm_mlx_model_destroy(LlmMlxModel* m) {
             mlx_array_free(c->vw); mlx_array_free(c->vs); mlx_array_free(c->vb);
             mlx_array_free(c->ow); mlx_array_free(c->os); mlx_array_free(c->ob);
             if (c->has_qn) { mlx_array_free(c->qn_w); mlx_array_free(c->kn_w); }
+            if (c->has_qkv_fused) { mlx_array_free(c->qkvw); mlx_array_free(c->qkvs); mlx_array_free(c->qkvb); }
         }
         free(m->attn_quant);
         m->attn_quant = NULL;

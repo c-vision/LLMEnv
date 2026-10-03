@@ -329,13 +329,37 @@ bool glm4_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
     CHK(ok, "q/k/v_proj.bias lookup");
 
     mlx_array q0 = mlx_array_new(), k0 = mlx_array_new(), v0 = mlx_array_new();
-    if (ok) { ok = quantized_linear_cfg(&q0, normed, qw, qs, qb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "q_proj matmul"); }
-    if (ok) { ok = quantized_linear_cfg(&k0, normed, kw, ks, kb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "k_proj matmul"); }
-    if (ok) { ok = quantized_linear_cfg(&v0, normed, vw, vs, vb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "v_proj matmul"); }
-    /* §D R6 (multi-arch): LoRA su q/k/v_proj. */
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&q0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "k_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&k0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "v_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&v0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
+    /* LLMENGINE_GLM_QKV_FUSE: q/k/v in UNA matmul (concat asse 0) + 3 slice. Non applicabile
+     * se c'e' LoRA su q/k/v_proj (il path separato la applica per-proiezione). */
+    const bool qkv_fused = (ac != NULL && ac->has_qkv_fused) &&
+                           llm_mlx_model_lora_get(m, layer_idx, "q_proj") < 0 &&
+                           llm_mlx_model_lora_get(m, layer_idx, "k_proj") < 0 &&
+                           llm_mlx_model_lora_get(m, layer_idx, "v_proj") < 0;
+    if (ok && qkv_fused) {
+        const int NQ = m->cfg.n_heads * m->cfg.head_dim;
+        const int NKV = m->cfg.n_kv_heads * m->cfg.head_dim;
+        mlx_array qkv = mlx_array_new();
+        ok = quantized_linear_cfg(&qkv, normed, ac->qkvw, ac->qkvs, ac->qkvb, gsz, bts, m->cfg.quant_mode, m->stream);
+        CHK(ok, "qkv_proj matmul fused");
+        if (ok) {
+            const int sv[3] = {1, 1, 1};
+            const int sa[3] = {0, 0, 0}, sb[3] = {0, 0, NQ}, sc2[3] = {0, 0, NQ + NKV};
+            const int ea[3] = {1, n_tokens, NQ}, eb[3] = {1, n_tokens, NQ + NKV}, ec[3] = {1, n_tokens, NQ + 2 * NKV};
+            ok = mlx_slice(&q0, qkv, sa, 3, ea, 3, sv, 3, m->stream) == 0 &&
+                 mlx_slice(&k0, qkv, sb, 3, eb, 3, sv, 3, m->stream) == 0 &&
+                 mlx_slice(&v0, qkv, sc2, 3, ec, 3, sv, 3, m->stream) == 0;
+            CHK(ok, "qkv_proj slice");
+        }
+        mlx_array_free(qkv);
+    } else {
+        if (ok) { ok = quantized_linear_cfg(&q0, normed, qw, qs, qb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "q_proj matmul"); }
+        if (ok) { ok = quantized_linear_cfg(&k0, normed, kw, ks, kb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "k_proj matmul"); }
+        if (ok) { ok = quantized_linear_cfg(&v0, normed, vw, vs, vb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "v_proj matmul"); }
+        /* §D R6 (multi-arch): LoRA su q/k/v_proj. */
+        { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&q0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
+        { int li = llm_mlx_model_lora_get(m, layer_idx, "k_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&k0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
+        { int li = llm_mlx_model_lora_get(m, layer_idx, "v_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&v0, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
+    }
     mlx_array q = mlx_array_new(), k = mlx_array_new(), v = mlx_array_new();
     if (ok) {
         ok = mlx_add(&q, q0, q_lb, m->stream) == 0 &&

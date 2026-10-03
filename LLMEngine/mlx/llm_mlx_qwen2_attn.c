@@ -428,6 +428,36 @@ GattnQuant* llm_mlx_attn_quant(LlmMlxModel* m, int layer_idx) {
     tname(m->cfg.layer_prefix, layer_idx, "self_attn.k_norm.weight", nb, sizeof(nb));
     bool ko = multishard_get(&m->weights, nb, &c->kn_w);
     c->has_qn = qo && ko;
+    /* q/k/v fusi (solo glm4_moe, opt-in LLMENGINE_GLM_QKV_FUSE=1): concat asse 0 = out_features. */
+    c->has_qkv_fused = false;
+    if (strcmp(m->cfg.model_type, "glm4_moe") == 0 && llm_mlx_glm_qkv_fuse_enabled() &&
+        c->qw.ctx != NULL && c->kw.ctx != NULL && c->vw.ctx != NULL &&
+        ((c->qb.ctx != NULL) == (c->kb.ctx != NULL)) &&
+        ((c->qb.ctx != NULL) == (c->vb.ctx != NULL))) {
+        mlx_vector_array wv = mlx_vector_array_new();
+        mlx_vector_array_append_value(wv, c->qw);
+        mlx_vector_array_append_value(wv, c->kw);
+        mlx_vector_array_append_value(wv, c->vw);
+        bool fok = mlx_concatenate_axis(&c->qkvw, wv, 0, m->stream) == 0;
+        mlx_vector_array_free(wv);
+        if (fok) {
+            mlx_vector_array sv = mlx_vector_array_new();
+            mlx_vector_array_append_value(sv, c->qs);
+            mlx_vector_array_append_value(sv, c->ks);
+            mlx_vector_array_append_value(sv, c->vs);
+            fok = mlx_concatenate_axis(&c->qkvs, sv, 0, m->stream) == 0;
+            mlx_vector_array_free(sv);
+        }
+        if (fok && c->qb.ctx != NULL) {
+            mlx_vector_array bv = mlx_vector_array_new();
+            mlx_vector_array_append_value(bv, c->qb);
+            mlx_vector_array_append_value(bv, c->kb);
+            mlx_vector_array_append_value(bv, c->vb);
+            fok = mlx_concatenate_axis(&c->qkvb, bv, 0, m->stream) == 0;
+            mlx_vector_array_free(bv);
+        }
+        c->has_qkv_fused = fok;
+    }
     c->valid = true;
     return c;
 }
