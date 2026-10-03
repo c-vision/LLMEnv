@@ -50,7 +50,7 @@ static const char llm_kvq_sdpa_kernel_src[] =
     "    constexpr uint G = GK;                // group della scala (64 affine / Dhead Splash-symmetric)\n"
     "    constexpr uint KWB = (Dhead * BK) / 8u;   // byte per token (K)\n"
     "    constexpr uint VWB = (Dhead * BV) / 8u;   // byte per token (V)\n"
-    "    uint kh = qh * NKV / NH;\n"
+    "    uint kh = (qh % NH) * NKV / NH;  /* W3: qh = qi*NH+qh_in (nq query righe); kh condiviso */\n"
     "\n"
     "    float qreg[DPL];\n"
     "    for (uint i = 0; i < DPL; ++i) qreg[i] = (float)q[qh * Dhead + lane + 32u * i];\n"
@@ -358,11 +358,17 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
                                     mlx_array Kr, mlx_array Vr, int nc, int kbits, int vbits,
                                     float scale, int gval, mlx_array ptab, mlx_stream stream) {
     if (llm_mlx_kvq_sdpa_kernel_build() != 0) return false;
-    if (mlx_array_ndim(q) != 2) return false;
     if (kbits < 2 || kbits > 8 || vbits < 2 || vbits > 8) return false;
-    int nh = (int)mlx_array_shape(q)[0];
-    int hd = (int)mlx_array_shape(q)[1];
-    if (hd % 32 != 0) return false;
+    /* W3 (2026-10-03): q = [nh,hd] (decode, nq=1) oppure [nq,nh,hd] (PREFILL, nq>1). Il kernel
+     * indicizza la riga q con qh = qi*NH+qh_in e usa kh=(qh%NH)*NKV/NH (KV condiviso fra query). */
+    int nqy = 1, nh, hd;
+    if (mlx_array_ndim(q) == 2) { nh = (int)mlx_array_shape(q)[0]; hd = (int)mlx_array_shape(q)[1]; }
+    else if (mlx_array_ndim(q) == 3) { nqy = (int)mlx_array_shape(q)[0]; nh = (int)mlx_array_shape(q)[1]; hd = (int)mlx_array_shape(q)[2]; }
+    else return false;
+    mlx_array q_flat = mlx_array_new();
+    if (nqy > 1) { int fsh[2] = {nqy * nh, hd}; if (mlx_reshape(&q_flat, q, fsh, 2, stream) != 0) { mlx_array_free(q_flat); return false; } q = q_flat; }
+    else mlx_array_set(&q_flat, q);
+    if (hd % 32 != 0) { mlx_array_free(q_flat); return false; }
     if (mlx_array_ndim(Kr) != 3 || mlx_array_ndim(Kc_w) != 3) return false;
     int nkv = (int)mlx_array_shape(Kr)[0];
     int nr = (int)mlx_array_shape(Kr)[1];
@@ -441,11 +447,11 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "NR", nr);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "SPLITS", splits);
     mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "PT", 32);
-    int pmsh[2] = {nh, splits}, plsh[2] = {nh, splits}, pash[3] = {nh, splits, hd};
+    int pmsh[2] = {nh*nqy, splits}, plsh[2] = {nh*nqy, splits}, pash[3] = {nh*nqy, splits, hd};
     mlx_fast_metal_kernel_config_add_output_arg(cfg, pmsh, 2, MLX_FLOAT32);
     mlx_fast_metal_kernel_config_add_output_arg(cfg, plsh, 2, MLX_FLOAT32);
     mlx_fast_metal_kernel_config_add_output_arg(cfg, pash, 3, MLX_FLOAT32);
-    mlx_fast_metal_kernel_config_set_grid(cfg, (llm_kvq_gqa() ? nkv : nh) * 32, splits, 1);   /* THREAD totali */
+    mlx_fast_metal_kernel_config_set_grid(cfg, (llm_kvq_gqa() ? nkv : nh*nqy) * 32, splits, 1);   /* THREAD totali */
     mlx_fast_metal_kernel_config_set_thread_group(cfg, 32, 1, 1);
 
     mlx_vector_array outputs = mlx_vector_array_new();
@@ -463,9 +469,9 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
         mlx_fast_metal_kernel_config ccfg = mlx_fast_metal_kernel_config_new();
         mlx_fast_metal_kernel_config_add_template_arg_int(ccfg, "Dhead", hd);
         mlx_fast_metal_kernel_config_add_template_arg_int(ccfg, "SPLITS", splits);
-        int osh[2] = {nh, hd};
+        int osh[2] = {nh*nqy, hd};
         mlx_fast_metal_kernel_config_add_output_arg(ccfg, osh, 2, MLX_FLOAT32);
-        mlx_fast_metal_kernel_config_set_grid(ccfg, nh * 32, 1, 1);   /* THREAD totali */
+        mlx_fast_metal_kernel_config_set_grid(ccfg, nh*nqy * 32, 1, 1);   /* THREAD totali */
         mlx_fast_metal_kernel_config_set_thread_group(ccfg, 32, 1, 1);
         mlx_vector_array couts = mlx_vector_array_new();
         int rc2 = mlx_fast_metal_kernel_apply(&couts, llm_kvq_sdpa_singleton.combine, cin, ccfg, stream);
@@ -486,6 +492,7 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
     mlx_vector_array_free(outputs);
     mlx_array_free(scale_arr); mlx_array_free(nci_arr); mlx_array_free(capi_arr);
     mlx_array_free(ptab_own);
+    mlx_array_free(q_flat);
     return ok;
 }
 
