@@ -448,3 +448,26 @@ set_target_properties(llm_ai_mlx PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     LINKER_LANGUAGE CXX
 )
+
+# ── Test DS4 (OPZIONALE) — dipendenze CMake TRACCIATE: MAI stale ──────────────
+# REGOLA (utente): non deve esistere il concetto di "stale". I test DS4 erano compilati ad-hoc
+# con clang: un binario compilato prima di una modifica a un header condiviso (es.
+# LlmCodecGgufTensorInfo in LLMCodec) restava VECCHIO mentre la dylib era nuova -> mismatch ABI
+# silenzioso ("manca blk..."). Qui i test diventano target CMake: si ricompilano automaticamente
+# quando cambia QUALSIASI header transitivo. Abilita con -DLLM_BUILD_DSV4_TESTS=ON.
+option(LLM_BUILD_DSV4_TESTS "Compila i test/bench DS4 come target CMake (dipendenze tracciate, niente stale)" OFF)
+if(LLM_BUILD_DSV4_TESTS)
+    file(GLOB DSV4_TEST_SRCS CONFIGURE_DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/llm_dsv4_*_test.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/llm_dsv4_prefill_bench.c)
+    foreach(_src ${DSV4_TEST_SRCS})
+        get_filename_component(_t ${_src} NAME_WE)
+        add_executable(${_t} ${_src})
+        target_link_libraries(${_t} PRIVATE llm_ai_mlx llmcodec_ggml)
+        target_include_directories(${_t} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/../Options
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include)
+        set_target_properties(${_t} PROPERTIES LINKER_LANGUAGE CXX)
+    endforeach()
+endif()
