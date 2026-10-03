@@ -51,6 +51,7 @@ int main(int argc, char** argv) {
     int tok[4096]; unsigned s = 12345; for (int i = 0; i < n; i++) { s = s * 1103515245u + 12345u; tok[i] = 1000 + (int)((s >> 8) % 20000); }
     const int nv = 129280; double ta, tb; int aa, ab;
     llm_ai_mlx_opt_set("dsv4_prefill_f16", "0"); llm_ai_mlx_opt_set("dsv4_gpu_hc", "0"); llm_ai_mlx_opt_set("dsv4_gpu_raw_attn", "1"); llm_ai_mlx_opt_set("dsv4_prefill_mm", "0");
+    if (argc > 6) llm_ai_mlx_opt_set("dsv4_comp_fuse", argv[6]);   /* catena compressore fusa (test) */
     float* A = run(path, tok, n, 1, &ta, &aa);                     /* riferimento: token-per-token, percorso f32 */
     if (!strcmp(cs, "half")) llm_ai_mlx_opt_set("dsv4_prefill_f16", "1");
     if (!strcmp(cs, "hc"))   llm_ai_mlx_opt_set("dsv4_gpu_hc", "1");

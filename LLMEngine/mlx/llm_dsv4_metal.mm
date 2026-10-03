@@ -979,6 +979,49 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    else { for (uint r = 0; r < ratio; r++) { float w = exp(SSC[r*width+tid]-mx); den += w; sum += w*SKV[r*width+tid]; } }\n"
 "    OUT[tid] = sum / den;\n"
 "}\n"
+"/* Catena compressore FUSA (item 2.1 Fase B, esempio qwen4_native): pool_ev -> rms_w -> rope_ev ->\n"
+" * fp8 round-trip -> f16, in UN kernel (una TG per evento, 32 thread). Elimina 4 dispatch/evento/pass\n"
+" * e i round-trip su device (la riga compressa resta in threadgroup). Stessa matematica esatta. */\n"
+"kernel void dsv4_comp_chain(device const float* SKV0 [[buffer(0)]], device const float* SSC0 [[buffer(1)]],\n"
+"    device float* OUT0 [[buffer(2)]], device const float* WN [[buffer(3)]], constant uint* P [[buffer(4)]], constant float* CF [[buffer(5)]],\n"
+"    uint ev [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
+"    const uint hd=P[0], ratio=P[1], co=P[2], row0=P[3]; const int n_nope=(int)P[4], n_rot=(int)P[5], pos=(int)(P[6]+ev*(int)ratio);\n"
+"    const float eps=CF[0], freq_base=CF[1], freq_scale=CF[2], ext_factor=CF[3], attn_factor=CF[4], beta_fast=CF[5], beta_slow=CF[6], n_ctx_orig=CF[7];\n"
+"    const uint width=co*hd;\n"
+"    device const float* SKV=SKV0+(ulong)(row0+ev*ratio)*width; device const float* SSC=SSC0+(ulong)(row0+ev*ratio)*width;\n"
+"    device float* OUT=OUT0+(ulong)ev*hd; threadgroup float buf[512];\n"
+"    for (uint d=tiisg; d<hd; d+=32u) {\n"
+"        float mx=-1.0e30f;\n"
+"        if (co==2u) { for (uint r=0;r<ratio;r++){ float sp=SSC[r*width+d]; float sc=SSC[(ratio+r)*width+hd+d]; if(sp>mx)mx=sp; if(sc>mx)mx=sc; } }\n"
+"        else { for (uint r=0;r<ratio;r++){ float s=SSC[r*width+d]; if(s>mx)mx=s; } }\n"
+"        if (mx<=-1.0e30f*0.5f) { buf[d]=0.f; continue; }\n"
+"        float den=0.f, sum=0.f;\n"
+"        if (co==2u) { for (uint r=0;r<ratio;r++){ float wp=exp(SSC[r*width+d]-mx), wc=exp(SSC[(ratio+r)*width+hd+d]-mx); den+=wp+wc; sum+=wp*SKV[r*width+d]; sum+=wc*SKV[(ratio+r)*width+hd+d]; } }\n"
+"        else { for (uint r=0;r<ratio;r++){ float w=exp(SSC[r*width+d]-mx); den+=w; sum+=w*SKV[r*width+d]; } }\n"
+"        buf[d]=sum/den;\n"
+"    }\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    { float ss=0.f; for (uint d=tiisg; d<hd; d+=32u) ss+=buf[d]*buf[d]; ss=simd_sum(ss);\n"
+"      const float rscale=1.f/sqrt(ss/(float)hd+eps); for (uint d=tiisg; d<hd; d+=32u) buf[d]=buf[d]*rscale*WN[d]; }\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    { const float theta_scale=pow(freq_base,-2.f/(float)n_rot); float corr0=0.f,corr1=0.f; const float TWO_PI=6.28318530717958647692f;\n"
+"      if (ext_factor!=0.f){ float st=floor((float)n_rot*log(n_ctx_orig/(beta_fast*TWO_PI))/(2.f*log(freq_base))); float en=ceil((float)n_rot*log(n_ctx_orig/(beta_slow*TWO_PI))/(2.f*log(freq_base))); corr0=max(0.f,st); corr1=min((float)(n_rot-1),en); }\n"
+"      for (int i=(int)tiisg*2; i<n_rot; i+=64) {\n"
+"        float theta_extrap=(float)pos; for (int t=0;t<i;t+=2) theta_extrap*=theta_scale;\n"
+"        float theta_interp=freq_scale*theta_extrap; float theta=theta_interp, mscale=attn_factor;\n"
+"        if (ext_factor!=0.f){ float y=((float)(i/2)-corr0)/max(0.001f,corr1-corr0); float ramp=1.f-min(1.f,max(0.f,y)); float ramp_mix=ramp*ext_factor; theta=theta_interp*(1.f-ramp_mix)+theta_extrap*ramp_mix; mscale*=1.f+0.1f*log(1.f/freq_scale); }\n"
+"        float c=cos(theta)*mscale, s=sin(theta)*mscale; float x0=buf[n_nope+i], x1=buf[n_nope+i+1]; buf[n_nope+i]=x0*c-x1*s; buf[n_nope+i+1]=x0*s+x1*c;\n"
+"      } }\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    if (n_nope>0) { const uint nb=(uint)n_nope;\n"
+"      for (uint off=(uint)tiisg*64u; off+64u<=nb; off+=64u*32u) {\n"
+"        float amax=0.f; for (uint i=0;i<64u;i++){ float av=fabs(buf[off+i]); if(av>amax)amax=av; }\n"
+"        if (amax<1.0e-4f) amax=1.0e-4f; float scale=exp2(ceil(log2(amax/448.f)));\n"
+"        for (uint i=0;i<64u;i++){ float v=buf[off+i]/scale; if(v>448.f)v=448.f; if(v<-448.f)v=-448.f; float a=fabs(v); if(a>448.f)a=448.f; float am=a<1.953125e-3f?1.953125e-3f:a; int e=(int)floor(log2(am)); int ste=e-3; if(ste<-9)ste=-9; float stp=exp2((float)ste); float q=rint(a/stp)*stp; if(q>448.f)q=448.f; buf[off+i]=(v<0.f?-q:q)*scale; }\n"
+"      } }\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    for (uint d=tiisg; d<hd; d+=32u) OUT[d]=(float)((half)buf[d]);\n"
+"}\n"
 "kernel void dsv4_rope_ev(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], constant float* CF [[buffer(2)]],\n"
 "    uint2 tg [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]]) {\n"
 "    const int n_rot = (int)P[0], head_dim = (int)P[1], pos = (int)(P[2] + tg.y * P[4]); const uint nh = P[3];\n"
@@ -1359,7 +1402,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
     id<MTLComputePipelineState> pso_mmp_q8, pso_mmp_iq2, pso_mmp_q2k, pso_mmp_q4k, pso_mmp_iq2a, pso_mmp_q2ka, pso_mmp_q4ka;   /* MPP (nil se non disponibile) */
-    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_rope_rows_inv, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_rope_ev, pso_iscore_t, pso_iscore_t_mma, pso_itopk_t, pso_apart_t, pso_apart_mma, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
+    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_rope_rows_inv, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_comp_chain, pso_rope_ev, pso_iscore_t, pso_iscore_t_mma, pso_itopk_t, pso_apart_t, pso_apart_mma, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
@@ -1531,7 +1574,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
             { "dsv4_hcb_sinkhorn", &b->pso_hcb_sink }, { "dsv4_hcb_norm", &b->pso_hcb_norm }, { "dsv4_hcb_post", &b->pso_hcb_post }, { "kernel_mul_mm_id_iq2_xxs_addr_f32", &b->pso_mm_iq2a },
             { "kernel_mul_mm_id_q2_K_addr_f32", &b->pso_mm_q2ka }, { "kernel_mul_mm_id_q4_K_addr_f32", &b->pso_mm_q4ka }, { "kernel_mul_mv_slots6_q4_K_pair_swiglu_f32", &b->pso_q4_pair },
             { "kernel_mul_mv_slots6_q4_K_sum6_f32", &b->pso_q4_sum6 }, { "dsv4_rms_w_rows", &b->pso_rms_rows },
-            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_comp_fp8_rows", &b->pso_fp8_rows }, { "dsv4_comp_pool_ev", &b->pso_pool_ev }, { "dsv4_rope_ev", &b->pso_rope_ev }, { "dsv4_indexer_scores_t", &b->pso_iscore_t }, { "dsv4_indexer_scores_t_mma", &b->pso_iscore_t_mma }, { "dsv4_indexer_topk_t", &b->pso_itopk_t }, { "dsv4_attn_part_t", &b->pso_apart_t }, { "dsv4_attn_part_mma", &b->pso_apart_mma }, { "dsv4_attn_merge_t", &b->pso_amerge_t }, { "dsv4_ape_rows", &b->pso_ape_rows }, { "dsv4_rope_rows", &b->pso_rope_rows }, { "dsv4_rope_rows_inv", &b->pso_rope_rows_inv },
+            { "dsv4_head_rms_rows", &b->pso_head_rms_rows }, { "dsv4_comp_fp8_rows", &b->pso_fp8_rows }, { "dsv4_comp_pool_ev", &b->pso_pool_ev }, { "dsv4_comp_chain", &b->pso_comp_chain }, { "dsv4_rope_ev", &b->pso_rope_ev }, { "dsv4_indexer_scores_t", &b->pso_iscore_t }, { "dsv4_indexer_scores_t_mma", &b->pso_iscore_t_mma }, { "dsv4_indexer_topk_t", &b->pso_itopk_t }, { "dsv4_attn_part_t", &b->pso_apart_t }, { "dsv4_attn_part_mma", &b->pso_apart_mma }, { "dsv4_attn_merge_t", &b->pso_amerge_t }, { "dsv4_ape_rows", &b->pso_ape_rows }, { "dsv4_rope_rows", &b->pso_rope_rows }, { "dsv4_rope_rows_inv", &b->pso_rope_rows_inv },
             { "kernel_mul_mm_id_map0_ne20_8", &b->pso_mm_map8 }, { "kernel_mul_mm_id_q8_0_f32", &b->pso_mm_q8 }, { "kernel_mul_mm_id_iq2_xxs_f32", &b->pso_mm_iq2 },
             { "kernel_mul_mm_id_q2_K_f32", &b->pso_mm_q2k }, { "kernel_mul_mm_id_q4_K_f32", &b->pso_mm_q4k },
             { "dsv4_swiglu_w", &b->pso_swiglu_w }, { "dsv4_sum_slots6", &b->pso_sum_slots6 } };
@@ -3147,6 +3190,17 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
                 const NSUInteger coff = (NSUInteger)((size_t)(pass == 0 ? ps[evf].acomp_off : ps[evf].icomp_off) * 4);
                 const int idx_first = S0 + (ps[evf].pos - p0->pos);
                 const int row0 = idx_first - (co * ratio - 1);
+                /* Catena compressore FUSA (opt-in dsv4_comp_fuse): pool+rms+rope+fp8+f16 in 1 dispatch. */
+                int fuse_ok = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_comp_fuse", &v) == 0) fuse_ok = v; }   /* default ON: bit-exact +12..29% @16k */
+                if (fuse_ok) fuse_ok = (pass == 0) && (b->pso_comp_chain != nil) && ((hdd - p0->n_rot) % 64 == 0);
+                if (fuse_ok) {
+                    [e setComputePipelineState:b->pso_comp_chain];
+                    [e setBuffer:XK offset:0 atIndex:0]; [e setBuffer:XS offset:0 atIndex:1]; [e setBuffer:cB offset:coff atIndex:2];
+                    [e setBuffer:(id<MTLBuffer>)p0->w_cnorm offset:0 atIndex:3];
+                    { uint32_t P_[7] = { (uint32_t)hdd, (uint32_t)ratio, (uint32_t)co, (uint32_t)row0, (uint32_t)(hdd - p0->n_rot), (uint32_t)p0->n_rot, (uint32_t)(ps[evf].pos + 1 - ratio) }; [e setBytes:P_ length:sizeof(P_) atIndex:4]; }
+                    { float cf[8] = { p0->rms_eps, p0->rope_cfg[0], p0->rope_cfg[1], p0->rope_cfg[2], p0->rope_cfg[3], p0->rope_cfg[4], p0->rope_cfg[5], p0->rope_cfg[6] }; [e setBytes:cf length:sizeof(cf) atIndex:5]; }
+                    [e dispatchThreadgroups:MTLSizeMake((NSUInteger)evn, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                } else {
                 [e setComputePipelineState:b->pso_pool_ev];
                 [e setBuffer:XK offset:0 atIndex:0]; [e setBuffer:XS offset:0 atIndex:1]; [e setBuffer:cB offset:coff atIndex:2];
                 { uint32_t P_[5] = { (uint32_t)hdd, (uint32_t)ratio, (uint32_t)co, (uint32_t)row0, (uint32_t)evn }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; }
@@ -3175,6 +3229,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
                 [e setBuffer:cB offset:coff atIndex:0];
                 { uint32_t P_[1] = { (uint32_t)((size_t)evn * hdd) }; [e setBytes:P_ length:sizeof(P_) atIndex:1]; }
                 [e dispatchThreads:MTLSizeMake((NSUInteger)evn * hdd, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+                }
             }
             if (keep > 0) {
                 COPYF(XK, (NSUInteger)((size_t)(S0 + nt - keep) * w_ * 4), stk, 0, (size_t)keep * w_);

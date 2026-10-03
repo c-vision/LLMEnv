@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
     if (argc > 10) llm_ai_mlx_opt_set("dsv4_hotlist_in", argv[10]);    /* hotlist I/O: carica profilo + seed top-K */
     if (argc > 11) llm_ai_mlx_opt_set("dsv4_hotlist_topk", argv[11]);  /* K esperti/layer da seedare */
     if (argc > 12) llm_ai_mlx_opt_set("dsv4_indexer_mma", argv[12]);   /* indexer scores MMA (0=scalare, 1=MMA) */
+    if (argc > 13) llm_ai_mlx_opt_set("dsv4_comp_fuse", argv[13]);     /* catena compressore fusa (0=off, 1=on) */
     LlmDsv4Engine* e = llm_dsv4_engine_load_swap(path, n + 64, 3000);
     if (!e) { fprintf(stderr, "load fallita\n"); return 1; }
     const LlmDsv4Config* c = &e->w.cfg;
