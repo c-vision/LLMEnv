@@ -280,6 +280,7 @@ static int llmcodec_gguf_read_meta_mlx(const char* dir, LlmCodecGgufMetaKVOwned*
             t->ggml_type = ggml_type_of_dtype(ti[i].dtype);
             t->ndim = ti[i].ndim; for (int d = 0; d < t->ndim && d < 8; d++) t->dims[d] = ti[i].shape[d];
             t->offset = 0;
+            t->size_bytes = (ti[i].end > ti[i].begin) ? (ti[i].end - ti[i].begin) : 0;  /* REALE (packed) */
         }
         llmcodec_safetensors_info_free(ti);
     }

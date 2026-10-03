@@ -45,7 +45,17 @@ typedef struct {
     uint64_t dims[8];
     int      ndim;
     uint64_t offset;   /* relativo alla data section */
+    uint64_t size_bytes; /* dimensione REALE in byte (0 = usa ggml_type×numel). Per le dir MLX e'
+                          * popolata dall'header safetensors (i pesi quantizzati sono impacchettati
+                          * in U32 + scales/biases: numel×ggml_type li sbaglierebbe). */
 } LlmCodecGgufTensorInfo;
+
+/* Dimensione in byte di un tensore: `size_bytes` se noto, altrimenti ggml_type×numel. */
+static inline uint64_t llmcodec_gguf_tensor_bytes(const LlmCodecGgufTensorInfo* t) {
+    if (t->size_bytes) return t->size_bytes;
+    uint64_t numel = 1; for (int d = 0; d < t->ndim; d++) numel *= t->dims[d];
+    uint64_t b = 0; llmcodec_ggml_type_bytes(t->ggml_type, numel, &b); return b;
+}
 
 typedef struct {
     uint32_t version;
