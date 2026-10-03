@@ -133,6 +133,11 @@ add_executable(test_moe_sim tests/test_moe_sim.c)
 target_link_libraries(test_moe_sim PRIVATE llmengine_moe)
 target_compile_options(test_moe_sim PRIVATE -Wall -Wextra -Wpedantic)
 
+# K7: il loader rifiuta esplicitamente i file corrotti (tassonomia codec + mapping ERR_FORMAT).
+add_executable(test_moe_gguf_corrupt tests/test_moe_gguf_corrupt.c)
+target_link_libraries(test_moe_gguf_corrupt PRIVATE llmengine_moe)
+target_compile_options(test_moe_gguf_corrupt PRIVATE -Wall -Wextra -Wpedantic)
+
 # [GGUF DEPRECATO] target test_moe_provider rimosso
 
 # [GGUF DEPRECATO] target test_moe_qwen3 rimosso
