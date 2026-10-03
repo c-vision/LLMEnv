@@ -158,6 +158,7 @@ bool llm_mlx_load_generic_gguf(const char* gguf_path, LlmMlxModel* m, const char
       if (mlx_set_default_device(chosen) != 0) { mlx_device_free(chosen); llm_gguf_close_file(&g, map, maplen); return false; }
       mlx_device_free(m->device); m->device = chosen;
       if (mlx_get_default_stream(&m->stream, m->device) != 0) { llm_gguf_close_file(&g, map, maplen); return false; }
+      (void)mlx_set_default_stream(m->stream);   /* registra il default del thread (2026-10-03) */
     }
     ModelConfig* c = &m->cfg;
     memset(c, 0, sizeof *c);

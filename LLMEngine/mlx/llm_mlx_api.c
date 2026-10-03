@@ -16,6 +16,36 @@
 #include <stdint.h>
 #include <math.h>
 
+/* MLX: device e stream di default sono PER-THREAD. I thread di lavoro dei chiamanti (es. il
+ * worker `RunBigStack` lato C#, o un thread GCD) NON ereditano il default impostato dal thread
+ * di load -> la prima `mlx_array_new`/op fallisce con "There is no Stream(gpu, 0) in current
+ * thread" e il processo aborta. Questa funzione garantisce (una volta per thread, idempotente)
+ * device+stream di default sul thread corrente: va chiamata all'ingresso dei worker dei
+ * chiamanti. Ritorna 0 ok, -1 errore. */
+int llm_ai_mlx_thread_init(void) {
+    static _Thread_local int done = 0;
+    if (done) return 0;
+    /* Preferisci GPU (i modelli del motore girano su Metal): NON usare `mlx_device_is_available`
+     * su un thread nuovo — può risultare falsa/errata lì e far scegliere CPU, poi l'eval di
+     * array GPU aborta con "no Stream(gpu,0)". `mlx_default_gpu_stream_new` REGISTRA lo stream
+     * (la sola `mlx_get_default_stream` non basta). Fallback CPU solo se il device GPU manca. */
+    mlx_device gpu = mlx_device_new_type(MLX_GPU, 0);
+    if (gpu.ctx != NULL) {
+        if (mlx_set_default_device(gpu) == 0) {
+            mlx_stream s = mlx_default_gpu_stream_new();
+            if (s.ctx != NULL && mlx_set_default_stream(s) == 0) { done = 1; return 0; }
+        }
+        mlx_device_free(gpu);
+    }
+    mlx_device cpu = mlx_device_new_type(MLX_CPU, 0);
+    if (cpu.ctx == NULL) return -1;
+    if (mlx_set_default_device(cpu) != 0) { mlx_device_free(cpu); return -1; }
+    mlx_stream sc = mlx_default_cpu_stream_new();
+    if (sc.ctx == NULL || mlx_set_default_stream(sc) != 0) { mlx_device_free(cpu); return -1; }
+    done = 1;
+    return 0;
+}
+
 /* A/B: forza il verify per-sessione di DFlash2 (opzione di registro `df2_seq_verify`, niente env). */
 static bool df2_seq_verify_on(void) {
     int b = 0;
@@ -933,6 +963,14 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
     LlmMlxSession* s = (LlmMlxSession*)sess_handle;
     LlmMlxModel* m = rt->target;
     if (!s->has_pending) return -1;
+
+    /* FIX cross-thread (2026-10-03): MLX device/stream di default sono PER-THREAD. Il worker
+     * del chiamante (es. `RunBigStack` lato C#) esegue qui ma può non avere il default del
+     * thread che ha caricato il modello -> ogni eval aborta con "There is no Stream(gpu, 0) in
+     * current thread" (repro: worker .NET, `tools/gmb_dfl2_driver.c pthread`). Allinea il
+     * default del thread corrente allo stream/device del target (creati al load). Idempotente. */
+    if (m->device.ctx != NULL) mlx_set_default_device(m->device);
+    if (m->stream.ctx != NULL) mlx_set_default_stream(m->stream);
     const int ncap = rt->draft->cfg.dflash_n_ctx_layers;
     if (ncap <= 0 || ncap > 8) return -1;
     int caplayers[8];

@@ -123,6 +123,11 @@ typedef void* llm_ai_mlx_model_handle;
  * inatteso, shard mancante). */
 llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir);
 
+/* MLX: device/stream di default PER-THREAD. Va chiamata all'ingresso di ogni thread di lavoro che
+ * usa l'API del motore (es. worker C# o thread GCD): senza, `mlx_array_new` aborta con
+ * "There is no Stream(gpu, 0) in current thread". Idempotente (una volta per thread). 0 ok. */
+int llm_ai_mlx_thread_init(void);
+
 /* Offload esperti MoE da disco (streaming): `dir` è la directory del modello da cui leggere solo i
  * k esperti attivi per step invece di materializzare tutti gli esperti. Va chiamata PRIMA di
  * `llm_ai_mlx_load_model` (la dir coincide con quella del load). `NULL`/"" disattiva. Nessun env. */

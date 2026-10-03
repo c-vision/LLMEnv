@@ -291,6 +291,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                             fprintf(stderr, "llm_ai_mlx_load_model: deepseek_v41 stream fallito\n");
                             llm_mlx_model_destroy(m); free(m); return NULL;
                         }
+                        (void)mlx_set_default_stream(m->stream);   /* default del thread (2026-10-03) */
                         m->arch = find_arch_ops("deepseek_v41");
                         m->dsv41 = llm_dsv41_engine_load(model_dir, m->stream);
                         if (m->dsv41 == NULL) {
@@ -575,6 +576,11 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
         free(m);
         return NULL;
     }
+    /* REGISTRA lo stream come default del thread (2026-10-03): la sola
+     * `mlx_get_default_stream` restituisce lo stream ma NON garantisce che resti il default
+     * del thread per le successive eval (es. su un worker `RunBigStack` lato C#: senza questa
+     * riga, `mlx_array_new`/eval aborta con "no Stream(gpu,0) in current thread"). */
+    (void)mlx_set_default_stream(m->stream);
     /* Limite alla cache buffer MLX. PROMOSSO a 8 GiB (2026-09-12): con 2 GiB il modello
      * piu' esigente in buffer temporanei (gpt-oss-120b, 128 esperti) finiva in churn
      * alloc/free ad ogni eval -> decode ~1,8x piu' lento (misurato: 11,2 -> 20,3 tok/s,
