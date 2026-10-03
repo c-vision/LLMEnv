@@ -14,7 +14,6 @@
 #include <stdio.h>
 #include <string.h>
 
-int g_llm_mlx_train_eager_sdpa = 0;   /* 0 = SDPA fused (default); 1 = eager/composabile */
 /* 1 = modalità TRAINING: il forward deve essere COMPOSABILE (nessun kernel Metal custom, che
  * non ha vjp). Letto dalle ENABLE dei kernel fusi (es. swiglu Metal) per forzare il fallback
  * alle op MLX native differenziabili. Impostato da setup()/set_eager_sdpa(). */
@@ -72,7 +71,7 @@ int llm_ai_mlx_train_set_lora_mlx(llm_ai_mlx_model_handle mh, int layer, const c
     return 0;
 }
 
-void llm_ai_mlx_train_set_eager_sdpa(int on) { g_llm_mlx_train_eager_sdpa = on ? 1 : 0; g_llm_mlx_train_composable = on ? 1 : 0; }
+void llm_ai_mlx_train_set_eager_sdpa(int on) { g_llm_mlx_train_composable = on ? 1 : 0; }
 
 mlx_stream llm_ai_mlx_train_stream(llm_ai_mlx_model_handle mh) {
     LlmMlxModel* m = (LlmMlxModel*)mh;
