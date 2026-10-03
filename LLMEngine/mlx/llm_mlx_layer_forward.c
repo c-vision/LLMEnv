@@ -353,7 +353,15 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
          * LLM_KVQ_DEFER_PREFILL=1 si differisce l'int8 al decode (n_tokens==1): prefill fp16 ->
          * picco ~meta' (65.6GB@257k) MA prefill ~5x piu' lento (2327s vs 486s). Utile solo a
          * contesto estremo (1M/2M) per far entrare il DFlash2. Default = comportamento veloce. */
-        bool defer_ok = (llm_ai_mlx_opt_env("LLM_KVQ_DEFER_PREFILL") == NULL) || (n_tokens == 1);
+        /* W5 FIX (2026-10-03): DIFFERISCI l'attivazione int8 al DECODE (n_tokens==1). Attivarla
+         * durante il prefill CHUNKED la ROMPE: il 2o+ chunk non legge la cold (il read-fused è
+         * n_tokens==1), quindi l'attenzione del prefill vede solo la finestra recente -> output
+         * errato oltre la dimensione del chunk (~8192; misurato: 7800 ok, 8200 rotto). Con il defer
+         * il prefill resta FP16 (corretto) e l'int8 parte al primo decode. Override debug per
+         * l'attivazione immediata: LLM_KVQ_DEFER_PREFILL=0. (Il fix "vero" sarebbe il kernel int8
+         * di PREFILL — vedi W3.) */
+        const char* _dpe = llm_ai_mlx_opt_env("LLM_KVQ_DEFER_PREFILL");
+        bool defer_ok = (n_tokens == 1) || (_dpe != NULL && strcmp(_dpe, "0") == 0);
         if (compat && defer_ok && cache_offset + n_tokens > m->cfg.kv_quantize_auto_trigger) {
             m->cfg.kv_quantize = true;
             m->cfg.kv_quantize_bits = 8;
