@@ -2602,9 +2602,9 @@ int llm_dsv4_metal_attn_proj_mm_batch(LlmDsv4Metal* b, int nt,
     [cb waitUntilCompleted];
     int rc = cb.error ? -3 : 0;
     if (rc == 0) {
-        memcpy(q_out, [QB contents], (size_t)nt*qd*sizeof(float));
-        memcpy(kv_out, [KVR contents], (size_t)nt*hd*sizeof(float));
-        memcpy(qrn_out, [QRN contents], (size_t)nt*lq*sizeof(float));
+        if (q_out)   memcpy(q_out, [QB contents], (size_t)nt*qd*sizeof(float));   /* NULL = resta device (item b) */
+        if (kv_out)  memcpy(kv_out, [KVR contents], (size_t)nt*hd*sizeof(float));
+        if (qrn_out) memcpy(qrn_out, [QRN contents], (size_t)nt*lq*sizeof(float));
     }
     [WQAN release]; [WKAN release];
     return rc;
@@ -2961,10 +2961,12 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
     const int embd = p0->embd, hd = p0->hd, ratio = p0->ratio, co = p0->co;
     if (ratio < 0 || (co != 1 && co != 2)) return -1;   /* ratio 0 = solo finestra raw */
     int max_icomp = 1; for (int t = 0; t < nt; t++) if (ps[t].n_icomp > max_icomp) max_icomp = ps[t].n_icomp;
-    id<MTLBuffer> X   = dsv4_scratch(b, &b->sx[40], &b->sx_cap[40], (size_t)nt * embd * sizeof(float));
-    id<MTLBuffer> KVC = dsv4_scratch(b, &b->sx[41], &b->sx_cap[41], (size_t)nt * hd * sizeof(float));
-    id<MTLBuffer> Q   = dsv4_scratch(b, &b->sx[42], &b->sx_cap[42], (size_t)nt * p0->n_head * hd * sizeof(float));
-    id<MTLBuffer> QRN = dsv4_scratch(b, &b->sx[43], &b->sx_cap[43], (size_t)nt * p0->lq * sizeof(float));
+    /* X/KVC/Q/QRN sono gli STESSI slot (sx[6/8/9/10]) scritti dal project (device-resident, item b):
+     * cosi' il project non scarica su host e il mid non ri-carica. Con dev_in=0 il mid li riempie da host. */
+    id<MTLBuffer> X   = dsv4_scratch(b, &b->sx[6],  &b->sx_cap[6],  (size_t)nt * embd * sizeof(float));
+    id<MTLBuffer> KVC = dsv4_scratch(b, &b->sx[8],  &b->sx_cap[8],  (size_t)nt * hd * sizeof(float));
+    id<MTLBuffer> Q   = dsv4_scratch(b, &b->sx[9],  &b->sx_cap[9],  (size_t)nt * p0->n_head * hd * sizeof(float));
+    id<MTLBuffer> QRN = dsv4_scratch(b, &b->sx[10], &b->sx_cap[10], (size_t)nt * p0->lq * sizeof(float));
     const int W_ = co * hd, IW_ = co * p0->ihd;
     id<MTLBuffer> QI  = dsv4_scratch(b, &b->sx[44], &b->sx_cap[44], (size_t)nt * (p0->has_idx ? p0->qdim : 1) * sizeof(float));
     id<MTLBuffer> WI  = dsv4_scratch(b, &b->sx[45], &b->sx_cap[45], (size_t)nt * (p0->has_idx ? p0->idx_nh : 1) * sizeof(float));
@@ -2975,6 +2977,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
     id<MTLBuffer> SCO = dsv4_scratch(b, &b->sx[46], &b->sx_cap[46], (size_t)max_icomp * sizeof(float));
     id<MTLBuffer> HD  = dsv4_scratch(b, &b->sx[47], &b->sx_cap[47], (size_t)nt * p0->n_head * hd * sizeof(float));
     if (!X || !KVC || !Q || !QRN || !QI || !WI || !SCO || !HD || !PKV || !PSC || !PIKV || !PISC || !b->pso_gemv_nt || !b->pso_state_store) return -2;
+    if (!p0->dev_in)   /* device-resident: i dati sono gia' negli slot sx[6/8/9/10] scritti dal project */
     for (int t = 0; t < nt; t++) {
         const LlmDsv4MidParams* p = &ps[t];
         memcpy((char*)[X contents] + (size_t)t * embd * sizeof(float), p->xn, (size_t)embd * sizeof(float));
@@ -3404,9 +3407,9 @@ int llm_dsv4_metal_attn_proj_fused_batch(LlmDsv4Metal* b, int nt,
         [cb waitUntilCompleted];
         rc = cb.error ? -3 : 0;
         if (rc == 0) {
-            memcpy(q_out,   [QB contents],  (size_t)nt*qd*sizeof(float));
-            memcpy(kv_out,  [KVR contents], (size_t)nt*hd*sizeof(float));
-            memcpy(qrn_out, [QRN contents], (size_t)nt*lq*sizeof(float));
+            if (q_out)   memcpy(q_out,   [QB contents],  (size_t)nt*qd*sizeof(float));   /* NULL = resta device (item b) */
+            if (kv_out)  memcpy(kv_out,  [KVR contents], (size_t)nt*hd*sizeof(float));
+            if (qrn_out) memcpy(qrn_out, [QRN contents], (size_t)nt*lq*sizeof(float));
         }
     }
     if (WQAN) [WQAN release]; if (WKAN) [WKAN release];

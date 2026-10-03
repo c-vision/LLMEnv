@@ -140,6 +140,7 @@ typedef struct {
     const float* xn; const float* qrn; const float* q; const float* kv_cur;
     int n_raw, n_acomp, n_icomp;
     float* heads;
+    int dev_in;   /* 1 = xn/q/kv_cur/qrn sono GIA' nei buffer device del project (sx[6/8/9/10]): niente upload */
 } LlmDsv4MidParams;
 
 int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p);
