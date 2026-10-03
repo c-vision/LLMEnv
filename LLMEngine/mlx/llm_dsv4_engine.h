@@ -12,7 +12,7 @@
 #include "llm_gguf.h"
 #include "llm_engine_opts.h"   /* opzioni dsv4_prefill_chunk / dsv4_prefill_mm (registro, no env) */
 
-#define LLM_DSV4_PREFILL_CHUNK 512   /* default (come ds4: chunk grandi); opzione dsv4_prefill_chunk */
+#define LLM_DSV4_PREFILL_CHUNK 2048   /* default (item C: chunk grandi = meno riletture esperti; 512→2048 su synth 8192: 67.9→105.7 t/s). 4096 via opzione dsv4_prefill_chunk (fino a 150 t/s a 4096 tok; piu' memoria) */
 
 typedef struct {
     LlmDsv4Weights w;

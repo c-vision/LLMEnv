@@ -27,5 +27,23 @@ int main(int argc, char** argv) {
         printf("  %d/%d  %.1fs\n", i + m, n, (b.tv_sec - a.tv_sec) + (b.tv_nsec - a.tv_nsec) * 1e-9); fflush(stdout); }
     double dt = (b.tv_sec - a.tv_sec) + (b.tv_nsec - a.tv_nsec) * 1e-9;
     printf("prefill n=%d chunk=%d: %.1fs = %.1f t/s\n", n, chunk, dt, n / dt);
+    /* decode greedy (opzionale, argv[7] = numero token; default 0 = off). */
+    int ndec = (argc > 7) ? atoi(argv[7]) : 0;
+    if (ndec > 0) {
+        float* logits = (float*)malloc(sizeof(float) * (size_t)c->n_vocab);
+        llm_dsv4_output_logits(c, &e->w, hc, logits);
+        int next = llm_dsv4_argmax(logits, c->n_vocab);
+        int pos = n;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        for (int i = 0; i < ndec; i++) {
+            llm_dsv4_forward_step(c, &e->w, &e->caches, next, pos++, hc);
+            llm_dsv4_output_logits(c, &e->w, hc, logits);
+            next = llm_dsv4_argmax(logits, c->n_vocab);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        double dd = (b.tv_sec - a.tv_sec) + (b.tv_nsec - a.tv_nsec) * 1e-9;
+        printf("decode ctx=%d: %d tok in %.2fs = %.2f t/s\n", n, ndec, dd, ndec / dd);
+        free(logits);
+    }
     llm_dsv4_engine_free(e); return 0;
 }
