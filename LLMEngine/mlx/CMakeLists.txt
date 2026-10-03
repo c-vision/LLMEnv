@@ -297,7 +297,7 @@ FetchContent_MakeAvailable(cjson)
 option(LLM_ENABLE_TRAIN "Includi l'ABI del forward differenziabile (llm_mlx_train.c)" ON)
 set(LLM_MLX_TRAIN_SRC "")
 if(LLM_ENABLE_TRAIN)
-    set(LLM_MLX_TRAIN_SRC llm_mlx_train.c)
+    set(LLM_MLX_TRAIN_SRC llm_mlx_diff_forward.c)
 endif()
 
 add_library(llm_ai_mlx SHARED
