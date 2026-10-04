@@ -95,6 +95,20 @@ static inline int llm_dsv4_engine_q4_ensure_cb(void* s, int layer, const int* ex
     return llm_dsv4_store_q4_ensure((LlmDsv4Store*)s, layer, experts, n);
 }
 
+/* Path della HOTLIST di I/O esperti (come il vendored ds4.c). `dsv4_hotlist` (registro): se
+ * impostata la si usa; "off"/"0"/"none" la disattiva; se NON impostata -> default accanto al
+ * modello, `<modello>.hotlist` (per-modello, non legato alla macchina). Ritorna 1 se attiva. */
+static inline int llm_dsv4_engine_hotlist_path(const LlmDsv4Engine* e, char* buf, size_t cap) {
+    char opt[1024] = {0};
+    if (llm_ai_mlx_opt_get_str("dsv4_hotlist", opt, sizeof opt) == 0 && opt[0]) {
+        if (strcmp(opt, "off") == 0 || strcmp(opt, "0") == 0 || strcmp(opt, "none") == 0) return 0;
+        snprintf(buf, cap, "%s", opt);
+        return 1;
+    }
+    snprintf(buf, cap, "%s.hotlist", e->path);
+    return 1;
+}
+
 /* Abilita lo SWAP degli esperti: store con cache LRU (cap_bundles bundle gate+up+down).
  * Va chiamata dopo il load (usa path+gguf+cfg). Ritorna false su errore. */
 static inline bool llm_dsv4_engine_enable_swap(LlmDsv4Engine* e, int cap_bundles) {
@@ -108,6 +122,21 @@ static inline bool llm_dsv4_engine_enable_swap(LlmDsv4Engine* e, int cap_bundles
         e->w.exps[il].store_madvise = llm_dsv4_engine_store_madvise_cb;
         e->w.exps[il].q4_stacks = llm_dsv4_engine_q4_stacks_cb;
         e->w.exps[il].q4_ensure = llm_dsv4_engine_q4_ensure_cb;
+    }
+    /* HOTLIST: se il file esiste -> carica il profilo di hotness e PRE-CARICA i top-K esperti/layer
+     * (seed, come `ds4_ssd`/ds4.c). Altrimenti predispone il contatore di hotness (registrato durante
+     * l'uso). Il salvataggio avviene in llm_dsv4_engine_free. Default ON, opt-out `dsv4_hotlist=off`. */
+    {
+        char hp[1200];
+        if (llm_dsv4_engine_hotlist_path(e, hp, sizeof hp)) {
+            int topk = 64; (void)llm_ai_mlx_opt_get_int("dsv4_hotlist_topk", &topk);
+            if (llm_dsv4_store_load_hot(e->store, hp) == 0) {
+                if (topk > 0) llm_dsv4_store_seed_hot(e->store, topk);
+                fprintf(stderr, "DSV4 hotlist: caricata %s (seed top-%d/layer)\n", hp, topk);
+            } else {
+                llm_dsv4_store_set_dims(e->store, e->w.cfg.n_layer, e->w.cfg.n_expert);
+            }
+        }
     }
     return true;
 }
@@ -136,6 +165,10 @@ static inline LlmDsv4Engine* llm_dsv4_engine_load_ex(const char* path, int n_ctx
 }
 static inline void llm_dsv4_engine_free(LlmDsv4Engine* e) {
     if (!e) return;
+    /* HOTLIST: salva il profilo di hotness osservato (per il seed delle run successive). */
+    { char hp[1200];
+      if (e->store && llm_dsv4_engine_hotlist_path(e, hp, sizeof hp) && llm_dsv4_store_save_hot(e->store, hp) == 0)
+          fprintf(stderr, "DSV4 hotlist: salvata %s\n", hp); }
     llm_dsv4_gpu_ctx_close();
     free(e->logits);
     llm_dsv4_caches_free(&e->caches);
@@ -177,6 +210,14 @@ static inline void llm_dsv4_engine_append(LlmDsv4Engine* e, const int* ids, int 
         ? llm_dsv4_sample_host(e->logits, e->w.cfg.n_vocab, e->sm_temp, e->sm_top_k, e->sm_top_p, &e->sm_rng)
         : llm_dsv4_argmax(e->logits, e->w.cfg.n_vocab);
     e->has_pending = 1;
+    { int pf = 0; if (e->store && llm_ai_mlx_opt_get_bool("dsv4_profile", &pf) == 0 && pf)
+        fprintf(stderr, "[dsv4-store] bytes_read=%.2fGB hit=%llu miss=%llu evict=%llu\n",
+                (double)e->store->bytes_read / 1073741824.0,
+                (unsigned long long)e->store->hits, (unsigned long long)e->store->misses,
+                (unsigned long long)e->store->evictions); }
+    /* HOTLIST: salva il profilo di hotness dopo il prefill — cosi' vale anche per i processi che
+     * NON liberano il modello (es. `fastllm run` che esce senza free_model). */
+    if (e->store) { char hp[1200]; if (llm_dsv4_engine_hotlist_path(e, hp, sizeof hp)) llm_dsv4_store_save_hot(e->store, hp); }
     free(hc);
 }
 /* Genera greedy fino a max_new (o eos). Ritorna il numero generato. */
