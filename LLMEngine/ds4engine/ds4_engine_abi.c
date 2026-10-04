@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* --- stato --- */
 typedef struct {
@@ -113,7 +114,16 @@ static int ds4_append_ids(LlmEngineLlmSession ss, const int32_t* ids, int n) {
     int i;
     if (!s || n < 0) return -1;
     for (i = 0; i < n; i++) if (ds4_push_tok(s, ids[i]) != 0) return -1;
-    return ds4_sync(s);
+    /* Prefill: cronometra la sync (che processa i token appesi) e stampa i tok/s per N>=32. */
+    { struct timespec t0, t1; int rc;
+      clock_gettime(CLOCK_MONOTONIC, &t0);
+      rc = ds4_sync(s);
+      clock_gettime(CLOCK_MONOTONIC, &t1);
+      if (n >= 32) {
+          double ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+          fprintf(stderr, "[ds4-prefill] N=%d %.3fs %.0f tok/s\n", n, ms / 1000.0, (double)n * 1000.0 / ms);
+      }
+      return rc; }
 }
 
 static int ds4_set_sampling(LlmEngineLlmSession ss, const LlmEngineLlmSampling* sp) {
