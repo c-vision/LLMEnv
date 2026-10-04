@@ -55,9 +55,6 @@
 #include "llm_mlx_flash_decode_kernel.h" /* kernel Metal SDPA decode per head_dim fuori flash MLX (gemma4 hd=512, LLM_GEMMA_FLASH_DECODE) */
 #include "llm_mlx_kv_quant_sdpa_kernel.h" /* kernel Metal dequant-on-read KV-quant decode (LLM_KV_DEQUANT_READ, fase 1) */
 #include "llm_mlx_qwen4exp.h"  /* Qwen4-Exp (Flash-Next): indexer QSA, N-gram/PLE, hyper-connection */
-#include "llm_dsv41_engine.h"  /* DeepSeek V4.1: forward whole-model (mHC/CSA2/Engram) con cache 7 slot */
-#include "llm_dsv4_engine.h"  /* DS4 (DeepSeek V4 Flash): forward whole-model da GGUF singolo */
-#include "llm_dsv4_tokenizer_json.h" /* builder JSON tokenizer DS4 dal GGUF (no llmtoken) */
 #include "llm_kvmetal_bridge.h" /* bridge ABI-C verso KV page-pool Metal reale (LLMMETAL_KVMETAL, sperimentale) */
 #include "llm_gemvq4_bridge.h"  /* bridge ABI-C verso kernel GEMV Q4 Metal reale (LLM_GEMVQ4, sperimentale) */
 #include "llm_mlx_fused_rope_append.h" /* kernel Metal fuso layout+RoPE decode (LLM_FUSE_ROPE, G1) */
