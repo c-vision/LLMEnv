@@ -177,6 +177,7 @@ unsigned llmengine_abi_version(void);
 const LlmEngineLlmEngine* llmengine_llm_engine_mlx(void);      /* llmengine_mlx */
 const LlmEngineLlmEngine* llmengine_llm_engine_ds4(void);      /* ds4engine (motore ds4 vendorizzato) */
 const LlmEngineLlmEngine* llmengine_llm_engine_ds4slow(void);  /* ds4-slow (nostra impl. DS4 nativa) */
+const LlmEngineLlmEngine* llmengine_llm_engine_ds41(void);     /* ds41-native (nostra impl. DS4.1 nativa) */
 const LlmEngineLlmEngine* llmengine_llm_engine_llamacpp(void); /* llm_host_ai */
 const LlmEngineLlmEngine* llmengine_llm_engine_moe(void);      /* llmengine_moe */
 

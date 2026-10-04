@@ -43,6 +43,25 @@ extern void* g_primmlx_norm_h;
  * esplicitamente, non produrre stato corrotto. */
 static const char kMlxMetaMagic[8] = {'G', 'M', 'B', 'M', 'X', '0', '1', '\0'};
 
+#include <dlfcn.h>
+/* Risolve un accessor d'engine (`llmengine_llm_engine_*`) per NOME: nessuna dipendenza di link
+ * (l'engine vendored `ds4engine` e' un target opzionale), e i consumatori scelgono a runtime. */
+static const LlmEngineLlmEngine* llm_mlx_engine_symbol(const char* name) {
+    const LlmEngineLlmEngine* (*fn)(void);
+    *(void**)(&fn) = dlsym(RTLD_DEFAULT, name);
+    return fn ? fn() : NULL;
+}
+/* Engine per un modello DS4: vendored (`ds4`) di default, o il nostro nativo (`ds4slow`) con
+ * `ds4_backend=slow`. Fallback su ds4slow se il vendored non e' nel build. */
+static const LlmEngineLlmEngine* llm_mlx_pick_ds4_engine(void) {
+    char bk[16]; bk[0] = 0;
+    int slow = (llm_ai_mlx_opt_get_str("ds4_backend", bk, sizeof bk) == 0) && strcmp(bk, "slow") == 0;
+    const LlmEngineLlmEngine* e = llm_mlx_engine_symbol(slow ? "llmengine_llm_engine_ds4slow" : "llmengine_llm_engine_ds4");
+    if (e == NULL && !slow) e = llm_mlx_engine_symbol("llmengine_llm_engine_ds4slow");
+    if (e == NULL) e = llm_mlx_engine_symbol("llmengine_llm_engine_ds4slow");
+    return e;
+}
+
 
 bool write_mlx_meta_file(const char* path, const MlxSwapMeta* meta) {
     FILE* f = fopen(path, "wb");
@@ -158,87 +177,30 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
         }
     }
 
-    /* DS4 (DeepSeek V4 Flash): modello in un SINGOLO file GGUF (path passato come model_dir). */
+    /* DS4 (DeepSeek V4 Flash): gestito da un engine AUTONOMO (ABI a 9 metodi), non dal forward
+     * MLX generico. Vendored (`ds4`) o nativo (`ds4slow`) scelti con `ds4_backend`. Se il GGUF
+     * non e' un DS4 il load dell'engine fallisce e si prosegue col GGUF generico. */
     {
         size_t dn = strlen(model_dir);
         if (dn > 5 && strcmp(model_dir + dn - 5, ".gguf") == 0) {
-            LlmDsv4Engine* e = llm_dsv4_engine_load(model_dir, 4096);
-            if (e != NULL) {
-                /* Store/cache esperti DS4 attivato dal PARAMETRO di offload (--offload-experts ->
-                 * set_expert_swap), non da una variabile d'ambiente. LRU di N bundle in RAM. */
-                /* DS4 e' 97.6 GB: lo streaming degli esperti e' il DEFAULT (nessun flag).
-                 * `offload=0` esplicito lo disattiva. La cache usa offload_cache_mb. */
-                int want_swap = llm_mlx_moe_swap_on();
-                if (llm_ai_mlx_opt_is_set("offload") != 1) want_swap = 1;
-                if (want_swap) {
-                    int mb = 0, bundles = LLM_DSV4_STORE_BUNDLES;
-                    if (llm_ai_mlx_opt_is_set("offload_cache_mb") == 1 &&
-                        llm_ai_mlx_opt_get_int("offload_cache_mb", &mb) == 0 && mb > 0) {
-                        bundles = mb / 7;   /* un bundle gate+up+down DS4 ~ 7 MB */
-                    } else {
-                        /* AUTO-SIZING (come ds4 originale): tutta la RAM libera DOPO i pesi
-                         * NON-esperto va alla cache esperti. Prima era fissa a 2048 (~14 GB):
-                         * ogni token rileggeva da SSD -> ~1 tok/s. */
-                        const LlmDsv4Config* cc = &e->w.cfg;
-                        uint64_t eb = 0;
-                        for (int il = 0; il < cc->n_layer && e->w.exps; il++) {
-                            const LlmDsv4PackedExperts* pe = &e->w.exps[il];
-                            uint64_t rg = (uint64_t)llm_ggml_nbytes(pe->gate_type, pe->in_dim);
-                            uint64_t rd = (uint64_t)llm_ggml_nbytes(pe->down_type, pe->ff_dim);
-                            eb += (uint64_t)cc->n_expert *
-                                  ((uint64_t)cc->n_ff_exp * rg * 2ull + (uint64_t)cc->n_embd * rd);
-                        }
-                        uint64_t maplen = (uint64_t)e->maplen;
-                        uint64_t nonexp = (eb > 0 && maplen > eb) ? (maplen - eb) : maplen;
-                        uint64_t ram = 0; size_t sz = sizeof ram;
-                        if (sysctlbyname("hw.memsize", &ram, &sz, NULL, 0) != 0) ram = 0;
-                        uint64_t limit = ram ? (ram / 4ull) * 3ull : 0;
-                        int32_t wired = 0; sz = sizeof wired;
-                        if (sysctlbyname("iogpu.wired_limit_mb", &wired, &sz, NULL, 0) == 0 && wired > 0)
-                            limit = (uint64_t)wired * 1024ull * 1024ull;
-                        LlmMemGov _mg = llm_memgov_from_registry();
-                        uint64_t reserve = _mg.reserve_bytes;   /* B9: dal registro (default 2 GiB) */
-                        uint64_t avail = (limit > nonexp + reserve) ? (limit - nonexp - reserve) : 0;
-                        /* SICUREZZA: la cache non deve superare la memoria REALMENTE disponibile ora (libera + inattiva, meno un margine di
-                         * 12 GiB per il resto del sistema e gli altri processi): sul 128 GB con altri agenti/app attivi il tetto fisso da 86 GB
-                         * ha gia' portato la macchina al riavvio. Opzione `dsv4_cache_mb` (0 = automatico) per fissarla a mano. */
-                        {
-                            vm_statistics64_data_t vs; mach_msg_type_number_t vc = HOST_VM_INFO64_COUNT;
-                            if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vs, &vc) == KERN_SUCCESS) {
-                                uint64_t pg = (uint64_t)vm_page_size;
-                                uint64_t freeish = ((uint64_t)vs.free_count + (uint64_t)vs.inactive_count + (uint64_t)vs.speculative_count) * pg;
-                                uint64_t margin = 12ull << 30;
-                                uint64_t cap_now = freeish > margin ? freeish - margin : 0;
-                                if (avail > cap_now) avail = cap_now;
-                            }
-                            int mb = 0; if (llm_ai_mlx_opt_get_int("dsv4_cache_mb", &mb) == 0 && mb > 0) avail = (uint64_t)mb * 1024ull * 1024ull;
-                        }
-                        int b = (int)(avail / (7ull * 1024 * 1024));
-                        if (b > 256) bundles = b;
-                        fprintf(stderr, "DSV4 cache: esperti=%.1fGB non-esperto=%.1fGB limit=%.1fGB -> %d bundle (~%.1fGB)\n",
-                                eb / 1073741824.0, nonexp / 1073741824.0, limit / 1073741824.0,
-                                bundles, (double)bundles * 7.0 / 1024.0);
-                    }
-                    llm_dsv4_engine_enable_swap(e, bundles);
-                    /* Lo swap (cache esperti) e' ora attivo: re-init GPU per usare la cache. */
-                    llm_dsv4_gpu_ctx_reinit(&e->w.cfg, e->w.exps);
+            const LlmEngineLlmEngine* eng = llm_mlx_pick_ds4_engine();
+            if (eng != NULL && eng->load_model != NULL) {
+                void* dm;
+                /* Store/cache esperti: trigger dal PARAMETRO di offload (--offload-experts ->
+                 * set_expert_swap), mai da env. DS4 (~97 GB) streama gli esperti di default. */
+                {
+                    int want_swap = llm_mlx_moe_swap_on();
+                    if (llm_ai_mlx_opt_is_set("offload") != 1) want_swap = 1;
+                    if (eng->set_expert_swap) eng->set_expert_swap(want_swap ? model_dir : NULL);
                 }
-                m->arch = find_arch_ops("deepseek_v4");
-                m->dsv4 = e;
-                m->gguf_mmap_bytes = (uint64_t)e->maplen;   /* pesi zero-copy: il planner li conti */
-                m->cfg.n_layers = e->w.cfg.n_layer;
-                m->cfg.vocab_size = e->w.cfg.n_vocab;
-                m->cfg.hidden_size = e->w.cfg.n_embd;
-                m->cfg.n_heads = e->w.cfg.n_head;
-                m->cfg.head_dim = e->w.cfg.n_head_dim;
-                m->cfg.n_experts = e->w.cfg.n_expert;
-                m->cfg.top_k = e->w.cfg.n_expert_used;
-                m->cfg.moe_intermediate_size = e->w.cfg.n_ff_exp;
-                m->cfg.intermediate_size = e->w.cfg.n_ff_exp;
-                snprintf(m->cfg.model_type, sizeof m->cfg.model_type, "%s", "deepseek_v4");
-                fprintf(stderr, "llm_ai_mlx_load_model: deepseek_v4 (DS4) caricato (%d layer, vocab %d)\n",
-                        e->w.cfg.n_layer, e->w.cfg.n_vocab);
-                return m;
+                dm = eng->load_model(model_dir);
+                if (dm != NULL) {
+                    m->deleg = eng;
+                    m->deleg_model = dm;
+                    snprintf(m->cfg.model_type, sizeof m->cfg.model_type, "%s", "deepseek_v4");
+                    fprintf(stderr, "llm_ai_mlx_load_model: deepseek_v4 via engine '%s'\n", eng->name);
+                    return m;
+                }
             }
         }
     }
@@ -266,9 +228,9 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
         }
     }
 
-    /* DeepSeek V4.1 (whole-model): il config.json del release e' in formato HF root
-     * (`text_config` annidato) che `load_config` generico non accetta. Rileva PRIMA di
-     * load_config e carica via adattatore (mHC+CSA2+Engram, cache 7 slot). */
+    /* DeepSeek V4.1: gestito dall'engine AUTONOMO `ds41-native` (stessi 9 metodi dell'ABI), non
+     * dal forward MLX generico. Il release ha config.json HF-root; si rileva la firma
+     * `"deepseek_v41"` PRIMA di load_config (che non accetta quel formato). */
     {
         char cpath[4096];
         if ((size_t)snprintf(cpath, sizeof cpath, "%s/config.json", model_dir) < sizeof cpath) {
@@ -282,42 +244,16 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                     free(cb);
                     fclose(cf);
                     if (is_dsv41) {
-                        mlx_device gpu = mlx_device_new_type(MLX_GPU, 0);
-                        bool av = false; mlx_device_is_available(&av, gpu);
-                        mlx_device chosen = av ? gpu : mlx_device_new_type(MLX_CPU, 0);
-                        if (!av) mlx_device_free(gpu);
-                        mlx_set_default_device(chosen);
-                        mlx_device_free(m->device); m->device = chosen;
-                        if (mlx_get_default_stream(&m->stream, m->device) != 0) {
-                            fprintf(stderr, "llm_ai_mlx_load_model: deepseek_v41 stream fallito\n");
-                            llm_mlx_model_destroy(m); free(m); return NULL;
-                        }
-                        (void)mlx_set_default_stream(m->stream);   /* default del thread (2026-10-03) */
-                        m->arch = find_arch_ops("deepseek_v41");
-                        m->dsv41 = llm_dsv41_engine_load(model_dir, m->stream);
-                        if (m->dsv41 == NULL) {
+                        const LlmEngineLlmEngine* eng = llm_mlx_engine_symbol("llmengine_llm_engine_ds41");
+                        void* dm = (eng != NULL && eng->load_model != NULL) ? eng->load_model(model_dir) : NULL;
+                        if (dm == NULL) {
                             fprintf(stderr, "llm_ai_mlx_load_model: deepseek_v41 load fallito (%s)\n", model_dir);
                             llm_mlx_model_destroy(m); free(m); return NULL;
                         }
-                        LlmDsv41Config* dc = &((LlmDsv41Engine*)m->dsv41)->w.cfg;
-                        {
-                            const char* mtp = llm_ai_mlx_opt_env("LLM_DSV41_MTP");
-                            if (mtp && mtp[0] && mtp[0] != '0' && ((LlmDsv41Engine*)m->dsv41)->has_dspark)
-                                ((LlmDsv41Engine*)m->dsv41)->mtp_enabled = true;
-                        }
-                        m->cfg.n_layers = dc->n_layers;
-                        m->cfg.vocab_size = dc->vocab_size;
-                        m->cfg.hidden_size = dc->dim;
-                        m->cfg.n_heads = dc->n_heads;
-                        m->cfg.n_kv_heads = dc->n_heads;   /* dsv41: KV per-testina, non GQA */
-                        m->cfg.head_dim = dc->head_dim;
-                        m->cfg.n_experts = dc->n_routed_experts;
-                        m->cfg.top_k = dc->n_activated_experts;
-                        m->cfg.moe_intermediate_size = dc->moe_inter_dim;
-                        m->cfg.intermediate_size = dc->moe_inter_dim;
+                        m->deleg = eng;
+                        m->deleg_model = dm;
                         snprintf(m->cfg.model_type, sizeof m->cfg.model_type, "%s", "deepseek_v41");
-                        fprintf(stderr, "llm_ai_mlx_load_model: deepseek_v41 whole-model caricato "
-                                        "(%d layer, vocab %d)\n", m->cfg.n_layers, m->cfg.vocab_size);
+                        fprintf(stderr, "llm_ai_mlx_load_model: deepseek_v41 via engine '%s'\n", eng->name);
                         return m;
                     }
                 } else { fclose(cf); }

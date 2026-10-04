@@ -389,7 +389,7 @@ static int llm_mlx_df2_autodetect(LlmMlxModel* m, char* out, int cap) {
  * esegue il prefill e quindi non arma la cattura-ctx del drafter -> draft degenerato (loop).
  * Diagnosi 2026-10-03 (test DFlash2Native: greedy con auto-detect andava in loop `<think>` x40). */
 int llm_mlx_df2_will_use(LlmMlxModel* m) {
-    if (m == NULL || m->dsv4 != NULL || m->dsv41 != NULL) return 0;
+    if (m == NULL || m->deleg != NULL) return 0;
     char path[1024];
     if (llm_ai_mlx_opt_get_str("dflash_model", path, sizeof(path)) == 0 && path[0] != 0) return 1;
     return llm_mlx_df2_autodetect(m, path, sizeof(path));
@@ -440,7 +440,7 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
     /* MTP AUTO (2026-09-21): se il modello ha una head MTP (sidecar MTPLX) e il sampling
      * e' GREEDY, il decode usa il path speculativo (output identico al greedy AR, ~1.4x).
      * `LLM_MTP_AUTO=0` disattiva; `LLM_MTP_DEPTH` sceglie la profondita' (default 1). */
-    if (!m->dsv4 && !m->dsv41 && llm_mlx_mtp_get(m) != NULL) {
+    if (!m->deleg && llm_mlx_mtp_get(m) != NULL) {
         const char* au = llm_ai_mlx_opt_env("LLM_MTP_AUTO");
         llm_mlx_sampling_t sm0 = llm_mlx_session_sampling(s);
         if ((au == NULL || au[0] != '0') && (!sm0.active || sm0.temperature <= 0.0f)) {
@@ -465,7 +465,7 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
         }
     }
     /* DFlash2 (A1) greedy: drafter esterno a contesto PERSISTENTE, streaming buffer come MTP. */
-    if (!m->dsv4 && !m->dsv41) {
+    if (!m->deleg) {
         llm_ai_mlx_dflash2_handle dfh = llm_mlx_df2_for(m);
         if (dfh != NULL) {
             llm_mlx_sampling_t smd = llm_mlx_session_sampling(s);
@@ -491,7 +491,7 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
     /* N-GRAM self-speculative GENERALE (tutti i modelli, greedy): draft dalla tabella n-gram del
      * contesto, verificati dal modello con UN forward batch -> output IDENTICO al greedy AR.
      * Config-driven (opzione di registro `spec_ngram`, nessuna env). Default 8 (built-in). */
-    if (!m->dsv4 && !m->dsv41) {
+    if (!m->deleg) {
         int ord = 2;   /* default built-in (bigram: piu' copertura; l'8 dava nd<2 su code/ripetiz.) */
         if (llm_ai_mlx_opt_get_int("spec_ngram", &ord) != 0) ord = 8;
         /* Modelli IBRIDI con stato ricorrente (GDN qwen3_5, MLA+KDA kimi): lo stato vive in
@@ -545,20 +545,10 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
             }
         }
     }
-    /* DeepSeek V4.1 whole-model: loop sul proprio forward/cache (greedy o sampling). */
-    if (m->dsv4) {
-        int n = llm_dsv4_engine_generate_step((LlmDsv4Engine*)m->dsv4, out_ids, max_new_tokens, eos_token_id);
-        if (n > 0) session_history_append(s, out_ids, n);
-        return n;
-    }
-    if (m->dsv41) {
-        llm_mlx_sampling_t sm0 = llm_mlx_session_sampling(s);
-        LlmDsv41Sampling ds = { sm0.active, sm0.temperature, sm0.top_p, sm0.top_k, sm0.seed,
-                                sm0.repetition_penalty, sm0.frequency_penalty, sm0.presence_penalty,
-                                sm0.hist, sm0.hist_n };
-        int n = llm_dsv41_engine_generate(m->dsv41, &s->dsv41, &s->cache_offset,
-                                          s->pending_next_id, s->has_pending, max_new_tokens,
-                                          eos_token_id, out_ids, &ds, m->stream);
+    /* Modello DELEGATO (DS4/DS4.1): generate via engine autonomo (stessa ABI a 9 metodi). */
+    if (m->deleg) {
+        int n = m->deleg->generate_ids
+                ? m->deleg->generate_ids(s->deleg_sess, max_new_tokens, eos_token_id, out_ids) : -1;
         if (n > 0) session_history_append(s, out_ids, n);
         return n;
     }
@@ -839,25 +829,21 @@ int llm_ai_mlx_session_generate_batch(llm_ai_mlx_session_handle* handles, int n,
      * un draft batchato + un verify batch per round, N*(K+1) token per lettura dei pesi.
      * Con max_new_tokens==1 non conviene (round singolo) -> batch normale. */
     const char* bspec = llm_ai_mlx_opt_env("LLM_BATCH_SPEC");
-    if (bspec != NULL && strcmp(bspec, "0") != 0 && max_new_tokens > 1 && m->dsv41 == NULL) {
+    if (bspec != NULL && strcmp(bspec, "0") != 0 && max_new_tokens > 1 && m->deleg == NULL) {
         int rc = llm_ai_mlx_session_generate_batch_spec(handles, n, max_new_tokens,
                                                        eos_token_id, out_ids);
         if (rc == 0) return 0;
         if (rc == -1) return -1;   /* errore reale; -3 = non eleggibile -> batch normale */
     }
-    /* DeepSeek V4.1 whole-model: batch sequenziale (forward single-row per sessione; layout
-     * out_ids[i*max_new + k]). */
-    if (m->dsv41) {
+    /* Modello DELEGATO (DS4/DS4.1): batch sequenziale (una sessione per volta, stesso engine;
+     * layout out_ids[i*max_new + k]). */
+    if (m->deleg) {
         for (int i = 0; i < n; i++) {
             LlmMlxSession* s = (LlmMlxSession*)handles[i];
-            llm_mlx_sampling_t sm0 = llm_mlx_session_sampling(s);
-            LlmDsv41Sampling ds = { sm0.active, sm0.temperature, sm0.top_p, sm0.top_k, sm0.seed,
-                                    sm0.repetition_penalty, sm0.frequency_penalty, sm0.presence_penalty,
-                                    sm0.hist, sm0.hist_n };
-            int nc = llm_dsv41_engine_generate(m->dsv41, &s->dsv41, &s->cache_offset,
-                                               s->pending_next_id, s->has_pending, max_new_tokens,
-                                               eos_token_id, out_ids + (size_t)i * max_new_tokens,
-                                               &ds, m->stream);
+            int nc = m->deleg->generate_ids
+                     ? m->deleg->generate_ids(s->deleg_sess, max_new_tokens, eos_token_id,
+                                              out_ids + (size_t)i * max_new_tokens)
+                     : -1;
             if (nc < 0) return -1;
             if (nc > 0) session_history_append(s, out_ids + (size_t)i * max_new_tokens, nc);
         }

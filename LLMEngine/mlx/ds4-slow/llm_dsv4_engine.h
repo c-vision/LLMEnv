@@ -6,6 +6,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "llm_dsv4_generate.h"
 #include "llm_dsv4_store.h"
 #include "llm_dsv4_gpu_ctx.h"
@@ -25,7 +26,54 @@ typedef struct {
     int pos;               /* posizione corrente (per append/generate incrementali) */
     int has_pending, pending;
     float* logits;         /* [n_vocab] cache dei logit del prossimo token */
+    /* Sampling (opzionale: temp<=0 = greedy). Impostato dall'ABI (set_sampling). */
+    float sm_temp, sm_top_p;
+    int sm_top_k, sm_active;
+    uint64_t sm_rng;
 } LlmDsv4Engine;
+
+/* Sampler host-side (temp/top-k/top-p), come il resto del motore: nessuna dipendenza env.
+ * temp<=0 -> greedy. Deterministico dato il seed. */
+static inline int llm_dsv4_sample_host(const float* lg, int n, float temp, int top_k, float top_p, uint64_t* rng) {
+    int i, m;
+    if (n <= 0) return 0;
+    if (!(temp > 1e-5f)) { int b = 0; for (i = 1; i < n; i++) if (lg[i] > lg[b]) b = i; return b; }
+    if (top_k <= 0 || top_k > n) top_k = n;
+    if (top_k > 256) top_k = 256;
+    {
+        int idx[256]; float val[256];
+        m = 0;
+        for (i = 0; i < n; i++) {
+            int j;
+            if (m < top_k) { j = m++; }
+            else if (lg[i] > val[m - 1]) { j = m - 1; }
+            else continue;
+            while (j > 0 && val[j - 1] < lg[i]) { val[j] = val[j - 1]; idx[j] = idx[j - 1]; j--; }
+            val[j] = lg[i]; idx[j] = i;
+        }
+        { float mx = val[0], sum = 0.f, p[256];
+          for (i = 0; i < m; i++) if (val[i] > mx) mx = val[i];
+          for (i = 0; i < m; i++) { p[i] = expf((val[i] - mx) / temp); sum += p[i]; }
+          for (i = 0; i < m; i++) p[i] /= sum;
+          if (top_p > 0.f && top_p < 1.f) {
+              float c = 0.f, s2 = 0.f; int k = 0;
+              for (i = 0; i < m; i++) { c += p[i]; k++; if (c >= top_p) break; }
+              m = k; for (i = 0; i < m; i++) s2 += p[i]; for (i = 0; i < m; i++) p[i] /= s2;
+          }
+          { uint64_t r = *rng; float u; float c = 0.f;
+            r ^= r << 13; r ^= r >> 7; r ^= r << 17; *rng = r;
+            u = (float)((r >> 11) * (1.0 / 9007199254740992.0));
+            for (i = 0; i < m; i++) { c += p[i]; if (u <= c) return idx[i]; }
+            return idx[m - 1]; }
+        }
+    }
+}
+static inline void llm_dsv4_engine_set_sampling(LlmDsv4Engine* e, float temp, int top_k, float top_p, int64_t seed) {
+    if (!e) return;
+    e->sm_temp = temp; e->sm_top_k = top_k; e->sm_top_p = top_p;
+    e->sm_active = (temp > 0.0f);
+    e->sm_rng = (uint64_t)(seed ? seed : 0x9e3779b97f4a7c15ULL);
+}
 
 /* Callback per il MoE: legge l'esperto dallo store (residente o swap). */
 static inline const uint8_t* llm_dsv4_engine_store_cb(void* s, int layer, int e,
@@ -125,7 +173,9 @@ static inline void llm_dsv4_engine_append(LlmDsv4Engine* e, const int* ids, int 
     }
     if (!e->logits) e->logits = (float*)malloc(sizeof(float) * (size_t)e->w.cfg.n_vocab);
     llm_dsv4_output_logits(&e->w.cfg, &e->w, hc, e->logits);
-    e->pending = llm_dsv4_argmax(e->logits, e->w.cfg.n_vocab);
+    e->pending = e->sm_active
+        ? llm_dsv4_sample_host(e->logits, e->w.cfg.n_vocab, e->sm_temp, e->sm_top_k, e->sm_top_p, &e->sm_rng)
+        : llm_dsv4_argmax(e->logits, e->w.cfg.n_vocab);
     e->has_pending = 1;
     free(hc);
 }
@@ -141,7 +191,9 @@ static inline int llm_dsv4_engine_generate_step(LlmDsv4Engine* e, int* out, int 
         out[n++] = t;
         llm_dsv4_forward_step(&e->w.cfg, &e->w, &e->caches, t, e->pos++, hc);
         llm_dsv4_output_logits(&e->w.cfg, &e->w, hc, e->logits);
-        e->pending = llm_dsv4_argmax(e->logits, e->w.cfg.n_vocab);
+        e->pending = e->sm_active
+            ? llm_dsv4_sample_host(e->logits, e->w.cfg.n_vocab, e->sm_temp, e->sm_top_k, e->sm_top_p, &e->sm_rng)
+            : llm_dsv4_argmax(e->logits, e->w.cfg.n_vocab);
     }
     free(hc);
     return n;

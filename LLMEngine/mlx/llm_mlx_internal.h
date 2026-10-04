@@ -9,6 +9,7 @@
 #define LLM_MLX_INTERNAL_H
 
 #include "mlx/c/mlx.h"
+#include "llmengine.h"             /* ABI comune: engine esterni DS4/DS4.1 (deleg) */
 #include "llm_mlx_radix.h"
 #include "llm_mlx_kvpage.h"
 #include "llm_mlx_kvdisk.h"
@@ -333,8 +334,8 @@ typedef struct LlmMlxSession {
     mlx_array* ps_mean;       /* §G-bis pagesel: per-layer [1,nkv,cap,hd] FP32 (media di pagina) */
     int* ps_done;             /* §G-bis pagesel: per-layer token gia' riassunti (multiplo di ps_page) */
     int ps_cap;               /* §G-bis pagesel: capacita' pagine allocata */
-    /* DeepSeek V4.1 (whole-model): cache a 7 slot per-sessione (`LlmDsv41Cache*`, lazy). */
-    void* dsv41;
+    /* Sessione dell'engine ESTERNO (modello delegato: DS4/DS4.1). */
+    void* deleg_sess;
 } LlmMlxSession;
 
 typedef struct {
@@ -753,11 +754,12 @@ struct LlmMlxModel {
     ImatrixState im;      /* imatrix collector (attivo solo via API dedicata) */
     int mem_active_limit_mb; /* guardia saturazione: tetto su mlx active (MB; 0 = off = nessun
                               * check, costo zero in normale operazione) */
-    /* DeepSeek V4.1 (whole-model): carrier opaco `LlmDsv41Engine*` (pesi+config), non-NULL se
-     * model_type=="deepseek_v41". Il forward non usa weights/attn/ffn generici. */
-    void* dsv41;
-    /* DS4 / DeepSeek V4 Flash (whole-model): carrier opaco `LlmDsv4Engine*` (GGUF singolo). */
-    void* dsv4;
+    /* Motore ESTERNO (DS4/DS4.1): se non-NULL il modello e' gestito da un engine AUTONOMO
+     * (`llmengine_llm_engine_ds4/ds4slow/ds41`) tramite l'ABI a 9 metodi. Il forward MLX
+     * generico NON e' usato per questo modello. `dsv4`/`dsv41` sono spariti: la logica vive
+     * negli engine (ds4-slow/, ds41-native/, ds4engine/). */
+    const struct LlmEngineLlmEngine* deleg;
+    void* deleg_model;
 };
 
 /* Stato ctx della DRAFT, PER-SESSIONE: kcache/vcache per layer + righe accumulate. Un runtime

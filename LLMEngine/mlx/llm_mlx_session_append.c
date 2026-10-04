@@ -27,29 +27,16 @@ static int llm_ai_mlx_session_append_impl(llm_ai_mlx_session_handle handle, cons
     /* PRECARICA il drafter DFlash2 al PRIMO append (= prima del prefill): il picco del prefill
      * (array vivi fino al primo forward del decode) include allora il drafter, e il primo forward
      * dello streaming drena il picco -> evita l'OOM OS a 1M/2M. */
-    if (m->dsv4 == NULL && m->dsv41 == NULL && s->cache_offset == 0 && s->history_len == 0)
+    if (m->deleg == NULL && s->cache_offset == 0 && s->history_len == 0)
         llm_mlx_df2_preload(m);
     /* Append esterno (nuovo turno/prompt): i token draftati in anticipo e non ancora consumati
      * dallo spec streaming vengono scartati (cache riportata al chunk-start + history troncata). */
     llm_mlx_session_spec_discard(s);
-    /* DeepSeek V4.1 whole-model: prefill/decode del chunk + set del prossimo token (greedy o
-     * sampling secondo la sessione). */
-    if (m->dsv4) {
-        llm_dsv4_engine_append((LlmDsv4Engine*)m->dsv4, token_ids, n_ids);
-        session_history_append(s, token_ids, n_ids);
-        s->has_pending = true;
-        s->pending_next_id = ((LlmDsv4Engine*)m->dsv4)->pending;
-        return 0;
-    }
-    if (m->dsv41) {
-        llm_mlx_sampling_t sm0 = llm_mlx_session_sampling(s);
-        LlmDsv41Sampling ds = { sm0.active, sm0.temperature, sm0.top_p, sm0.top_k, sm0.seed,
-                                sm0.repetition_penalty, sm0.frequency_penalty, sm0.presence_penalty,
-                                sm0.hist, sm0.hist_n };
-        int rc = llm_dsv41_engine_append(m->dsv41, &s->dsv41, token_ids, n_ids,
-                                         &s->cache_offset, &s->pending_next_id, &s->has_pending,
-                                         &ds, m->stream);
+    /* Modello DELEGATO (DS4/DS4.1): prefill/decode via engine autonomo (stessa ABI a 9 metodi). */
+    if (m->deleg) {
+        int rc = m->deleg->append_ids ? m->deleg->append_ids(s->deleg_sess, token_ids, n_ids) : -1;
         if (rc == 0) session_history_append(s, token_ids, n_ids);
+        s->has_pending = true;
         return rc;
     }
     if (s->parked) (void)llm_session_unpark(m, s); /* §G-ter: restore on-demand dell'evict */
@@ -356,7 +343,7 @@ int llm_ai_mlx_session_append(llm_ai_mlx_session_handle handle, const int32_t* t
     }
     LlmPflashConfig cfg;
     if (s == NULL || token_ids == NULL || n_ids <= 0) return llm_ai_mlx_session_append_impl(handle, token_ids, n_ids);
-    if (s->model && s->model->dsv41) return llm_ai_mlx_session_append_impl(handle, token_ids, n_ids); /* niente pflash */
+    if (s->model && s->model->deleg) return llm_ai_mlx_session_append_impl(handle, token_ids, n_ids); /* niente pflash */
     if (!llm_pflash_config_from_env(&cfg)) return llm_ai_mlx_session_append_impl(handle, token_ids, n_ids);
     if (s->cache_offset != 0 || s->history_len != 0) return llm_ai_mlx_session_append_impl(handle, token_ids, n_ids);
     if (!llm_pflash_should_attempt(&cfg, n_ids)) return llm_ai_mlx_session_append_impl(handle, token_ids, n_ids);

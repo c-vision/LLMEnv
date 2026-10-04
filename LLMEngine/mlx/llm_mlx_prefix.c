@@ -333,22 +333,8 @@ int llm_ai_mlx_session_park(llm_ai_mlx_session_handle sh, llm_ai_mlx_model_handl
 
 int llm_session_unpark(LlmMlxModel* m, LlmMlxSession* s) {
     if (!m || !s || !s->parked) return -1;
-    /* DeepSeek V4.1 whole-model: rebuild del cache dalla history. */
-    if (m->dsv41) {
-        if (s->dsv41) { s->parked = false; return 0; }
-        if (!s->history || s->history_len <= 0) return -1;
-        llm_mlx_sampling_t sm0 = llm_mlx_session_sampling(s);
-        LlmDsv41Sampling ds = { sm0.active, sm0.temperature, sm0.top_p, sm0.top_k, sm0.seed,
-                                sm0.repetition_penalty, sm0.frequency_penalty, sm0.presence_penalty,
-                                sm0.hist, sm0.hist_n };
-        int32_t pending = 0;
-        if (!llm_dsv41_engine_prefill((LlmDsv41Engine*)m->dsv41, &s->dsv41, s->history, s->history_len,
-                                      &s->cache_offset, &pending, &s->has_pending, &ds, m->stream))
-            return -1;
-        s->pending_next_id = pending;
-        s->parked = false;
-        return 0;
-    }
+    /* Modello DELEGATO (DS4/DS4.1): unpark non e' nell'ABI a 9 metodi -> non supportato. */
+    if (m->deleg) return -1;
     size_t need = 0;
     if (!llm_kv_disk_has(&m->kvdisk, s->park_key, &need) || need < 20) return -1;
     uint8_t* buf = (uint8_t*)malloc(need);
@@ -451,16 +437,8 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
     if (!s->has_pending) return -1; /* niente da salvare senza prefill */
     if (s->history_len <= 0) return -1; /* D15: non sovrascrivere un prefisso valido con uno vuoto */
 
-    /* DS4 (dsv4): cache per-layer sul device, non c'e' un KV MLX da salvare -> nessun prefix cache. */
-    if (m->dsv4) return -1;
-
-    /* DeepSeek V4.1 whole-model: snapshot del cache 7-slot + history del prefisso. */
-    if (m->dsv41) {
-        LlmDsv41Cache* c = (LlmDsv41Cache*)s->dsv41;
-        if (!c || !s->history || s->history_len <= 0) return -1;
-        return llm_dsv41_engine_save_prefix((LlmDsv41Engine*)m->dsv41, name, c,
-                                            s->history, s->history_len) ? 0 : -1;
-    }
+    /* Modello DELEGATO (DS4/DS4.1): prefix-cache non esposto dall'ABI a 9 metodi -> non supportato. */
+    if (m->deleg) return -1;
 
     int idx = -1;
 
@@ -716,19 +694,8 @@ int llm_ai_mlx_session_append_auto_prefix(llm_ai_mlx_session_handle sh, llm_ai_m
 
     if (min_match < 1) min_match = 8; /* soglia minima di token riusati perche' valga la pena */
 
-    /* DeepSeek V4.1 whole-model: riuso del prefisso salvato piu' lungo. */
-    if (m->dsv41) {
-        LlmMlxSession* s = (LlmMlxSession*)sh;
-        llm_mlx_sampling_t sm0 = llm_mlx_session_sampling(s);
-        LlmDsv41Sampling ds = { sm0.active, sm0.temperature, sm0.top_p, sm0.top_k, sm0.seed,
-                                sm0.repetition_penalty, sm0.frequency_penalty, sm0.presence_penalty,
-                                sm0.hist, sm0.hist_n };
-        int rc = llm_dsv41_engine_append_auto_prefix((LlmDsv41Engine*)m->dsv41, &s->dsv41,
-                                                     token_ids, n_ids, min_match, &s->cache_offset,
-                                                     &s->pending_next_id, &s->has_pending, &ds, m->stream);
-        if (rc == 0) session_history_append(s, token_ids, n_ids);
-        return rc;
-    }
+    /* Modello DELEGATO (DS4/DS4.1): auto-prefix non esposto dall'ABI a 9 metodi -> non supportato. */
+    if (m->deleg) return -1;
 
     /* DFlash2 (drafter esplicito O auto-rilevato): la radix prefix-cache e' INCOMPATIBILE con la
      * cattura-ctx del drafter. `append_reuse_prefix` NON esegue il prefill (riusa la KV salvata),

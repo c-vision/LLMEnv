@@ -45,15 +45,10 @@ int llm_ai_mlx_model_set_kv_max(llm_ai_mlx_model_handle handle, int n) {
     if (handle == NULL) return -1;
     LlmMlxModel* m = (LlmMlxModel*)handle;
     m->cfg.kv_max_tokens = n;
-    /* DS4 (GGUF single-file): il contesto è allocato nel SUO engine -> rialloca le cache di
-     * conseguenza (il KV si azzera: il prossimo turno ri-prefilla la cronologia). */
-    if (m->dsv4 && n > 0) {
-        LlmDsv4Engine* e = (LlmDsv4Engine*)m->dsv4;
-        llm_dsv4_caches_free(&e->caches);
-        int raw_cap = e->w.cfg.n_swa > 0 ? e->w.cfg.n_swa : 128;
-        llm_dsv4_caches_init(&e->caches, &e->w.cfg, raw_cap, n);
-        e->n_ctx = n;
-        e->pos = 0;
+    /* Modello DELEGATO (DS4/DS4.1): il contesto e' allocato nel SUO engine -> delega kv_set_max. */
+    if (m->deleg) {
+        if (m->deleg->kv_set_max && m->deleg_model) (void)m->deleg->kv_set_max(m->deleg_model, n);
+        return 0;
     }
     return 0;
 }

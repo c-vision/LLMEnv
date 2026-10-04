@@ -637,27 +637,9 @@ int llm_ai_mlx_session_truncate(llm_ai_mlx_session_handle handle, int n_tokens) 
     LlmMlxSession* s = (LlmMlxSession*)handle;
     if (n_tokens > s->cache_offset) return -1;
     if (n_tokens == s->cache_offset) return 0;
-    /* DeepSeek V4.1 whole-model: reset + rebuild dalla history (fino a n_tokens). */
-    if (s->model && s->model->dsv41) {
-    LlmMlxModel* m = s->model;
-        if (n_tokens > s->history_len) return -1;
-        if (n_tokens == 0) {
-            if (s->dsv41) { llm_dsv41_cache_free((LlmDsv41Cache*)s->dsv41); free(s->dsv41); s->dsv41 = NULL; }
-            s->cache_offset = 0; s->has_pending = false; s->pending_next_id = 0; s->history_len = 0;
-            return 0;
-        }
-        llm_mlx_sampling_t sm0 = llm_mlx_session_sampling(s);
-        LlmDsv41Sampling ds = { sm0.active, sm0.temperature, sm0.top_p, sm0.top_k, sm0.seed,
-                                sm0.repetition_penalty, sm0.frequency_penalty, sm0.presence_penalty,
-                                sm0.hist, sm0.hist_n };
-        int32_t pending = 0;
-        if (!llm_dsv41_engine_prefill((LlmDsv41Engine*)m->dsv41, &s->dsv41, s->history, n_tokens,
-                                      &s->cache_offset, &pending, &s->has_pending, &ds, m->stream))
-            return -1;
-        s->pending_next_id = pending;
-        s->history_len = n_tokens;
-        return 0;
-    }
+    /* Modello DELEGATO (DS4/DS4.1): la cache vive nell'engine; il truncate non e' nell'ABI a 9
+     * metodi -> non supportato (il consumer ricrea la sessione). */
+    if (s->model && s->model->deleg) return -1;
     if (s->kvq_len != NULL) {
         for (int l = 0; l < s->n_layers; l++)
             if (s->kvq_len[l] > 0) return -1; /* kvq cold non tagliabile: errore esplicito */
@@ -706,17 +688,8 @@ int llm_ai_mlx_session_greedy_prob(llm_ai_mlx_session_handle handle, float* out_
     LlmMlxSession* s = (LlmMlxSession*)handle;
     if (!s->has_pending) return -1;
     LlmMlxModel* m = s->model;
-    if (m->dsv41) {
-        LlmDsv41Cache* c = (LlmDsv41Cache*)s->dsv41;
-        if (!c || !c->last_logits || c->last_logits_n <= 0) return -1;
-        int V = c->last_logits_n;
-        float mxv = c->last_logits[0];
-        for (int i = 1; i < V; i++) if (c->last_logits[i] > mxv) mxv = c->last_logits[i];
-        double sum = 0.0;
-        for (int i = 0; i < V; i++) sum += exp((double)(c->last_logits[i] - mxv));
-        *out_prob = (float)(1.0 / sum);   /* P(argmax) = exp(max-mx)/sum = 1/sum */
-        return 0;
-    }
+    /* Modello DELEGATO (DS4/DS4.1): logprob non esposto dall'ABI a 9 metodi -> non supportato. */
+    if (m->deleg) return -1;
     OutputTensors t;
     if (!load_output_tensors(m, &t)) return -1;
     mlx_array normed = mlx_array_new();
@@ -768,22 +741,8 @@ int llm_ai_mlx_session_generate_constrained(llm_ai_mlx_session_handle handle,
     if (!s->has_pending) return -1;
     LlmMlxModel* m = s->model;
 
-    /* DeepSeek V4.1 whole-model: argmax ristretto ad allowed_ids sulla posizione pending, poi
-     * decode del token scelto e nuovo pending. */
-    if (m->dsv41) {
-        llm_mlx_sampling_t sm0 = llm_mlx_session_sampling(s);
-        LlmDsv41Sampling ds = { sm0.active, sm0.temperature, sm0.top_p, sm0.top_k, sm0.seed,
-                                sm0.repetition_penalty, sm0.frequency_penalty, sm0.presence_penalty,
-                                sm0.hist, sm0.hist_n };
-        int32_t chosen = 0, next = 0;
-        if (!llm_dsv41_engine_constrained(m->dsv41, &s->dsv41, &s->cache_offset,
-                                          allowed_ids, n_allowed, &chosen, &next, &ds, m->stream))
-            return -1;
-        s->pending_next_id = next;
-        s->has_pending = true;
-        *out_token_id = chosen;
-        return 0;
-    }
+    /* Modello DELEGATO (DS4/DS4.1): constrained non esposto dall'ABI a 9 metodi -> non supportato. */
+    if (m->deleg) return -1;
 
     OutputTensors t;
     bool ok = load_output_tensors(m, &t);

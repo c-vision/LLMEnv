@@ -366,6 +366,8 @@ add_library(llm_ai_mlx SHARED
     ds4-slow/llm_dsv4_gpu_ctx.mm
     # Adapter ds4-slow -> ABI LlmEngine (stessa interfaccia del vendored llmengine_llm_engine_ds4).
     ds4-slow/llm_ds4slow_abi.c
+    # Adapter ds41-native -> ABI LlmEngine (stessi 9 metodi di ds4/ds4-slow).
+    ds41-native/llm_ds41_abi.c
     # P10: GEMM int8-activation x Q4/Q5 sui tensor unit M5 (port oMLX; bridge ABI-C, ObjC/Metal)
     ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8/llmmetal_oq_a8_bridge.mm
     # MPP q4 affine (tensor unit Apple): bridge ObjC++ zero-copy sui buffer MLX (metallib build-time).

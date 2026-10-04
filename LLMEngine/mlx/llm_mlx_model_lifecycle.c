@@ -153,9 +153,12 @@ void llm_mlx_model_init(LlmMlxModel* m) {
 void llm_mlx_model_destroy(LlmMlxModel* m) {
     /* Cache pesi FFN MoE: alias delle shard — liberare PRIMA delle shard (i handle tengono vivi
      * gli array finche' la cache esiste). */
-    if (m->dsv41) { llm_dsv41_engine_free((LlmDsv41Engine*)m->dsv41); m->dsv41 = NULL; }
+    /* Modello DELEGATO (DS4/DS4.1): libera via l'engine autonomo. */
+    if (m->deleg) {
+        if (m->deleg->free_model && m->deleg_model) m->deleg->free_model(m->deleg_model);
+        m->deleg_model = NULL; m->deleg = NULL;
+    }
     if (m->bonsai_had) { llm_bonsai_hadamard_free(m->bonsai_had); free(m->bonsai_had); m->bonsai_had = NULL; }
-    if (m->dsv4) { llm_dsv4_engine_free((LlmDsv4Engine*)m->dsv4); m->dsv4 = NULL; }
     if (m->ffn_quant) {
         for (int l = 0; l < m->ffn_quant_n; l++) {
             GmoeFfnQuant* c = &m->ffn_quant[l];

@@ -255,6 +255,11 @@ llm_mlx_sampling_t llm_mlx_session_sampling(const LlmMlxSession* s) {
 LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
     LlmMlxSession* s = (LlmMlxSession*)calloc(1, sizeof(LlmMlxSession));
     s->model = m;
+    /* Modello DELEGATO (DS4/DS4.1): la sessione vive nell'engine autonomo; nessuna cache MLX. */
+    if (m->deleg) {
+        s->deleg_sess = m->deleg->create_session ? m->deleg->create_session(m->deleg_model) : NULL;
+        return s;
+    }
     s->n_layers = m->cfg.n_layers;
     s->k_cache = (mlx_array*)malloc((size_t)m->cfg.n_layers * sizeof(mlx_array));
     s->v_cache = (mlx_array*)malloc((size_t)m->cfg.n_layers * sizeof(mlx_array));
@@ -435,7 +440,11 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
 
 void llm_mlx_session_destroy(LlmMlxSession* s) {
     llm_mlx_session_spec_free(s);   /* spec streaming: libera i checkpoint K/V (alias) */
-    if (s->dsv41) { llm_dsv41_cache_free((LlmDsv41Cache*)s->dsv41); free(s->dsv41); s->dsv41 = NULL; }
+    if (s->deleg_sess) {
+        if (s->model && s->model->deleg && s->model->deleg->destroy_session)
+            s->model->deleg->destroy_session(s->deleg_sess);
+        s->deleg_sess = NULL;
+    }
     if (s->kvmetal_ctx != NULL) {
         if (g_kvmetal_act > 0) g_kvmetal_act--;
         if (g_kvmetal_act == 0) g_kvmetal_disabled = 0;
@@ -492,8 +501,13 @@ void llm_mlx_session_destroy(LlmMlxSession* s) {
 int llm_ai_mlx_session_reset(llm_ai_mlx_session_handle handle) {
     if (handle == NULL) return -1;
     LlmMlxSession* s = (LlmMlxSession*)handle;
-    /* DeepSeek V4.1 whole-model: libera la cache (ricreata lazy al prossimo append/prefill). */
-    if (s->dsv41) { llm_dsv41_cache_free((LlmDsv41Cache*)s->dsv41); free(s->dsv41); s->dsv41 = NULL; }
+    /* Modello DELEGATO (DS4/DS4.1): reset = sessione dell'engine ricreata (fresh). */
+    if (s->deleg_sess) {
+        if (s->model && s->model->deleg && s->model->deleg->destroy_session)
+            s->model->deleg->destroy_session(s->deleg_sess);
+        s->deleg_sess = (s->model && s->model->deleg && s->model->deleg->create_session)
+            ? s->model->deleg->create_session(s->model->deleg_model) : NULL;
+    }
     /* Spec streaming (§8.4): il generate con spec_ngram/DFlash2/MTP bufferizza un chunk in
      * `spec_buf` + checkpoint K/V. reset NON lo azzerava -> l'append successivo chiama
      * `spec_discard`, vede `spec_ckpt_valid` STALE e fa un rollback-riavanzamento FANTASMA su una

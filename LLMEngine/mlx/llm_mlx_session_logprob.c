@@ -25,22 +25,8 @@ static int position_logits_host(LlmMlxSession* s, float** out_logits, double* ou
     if (!s->has_pending) return -1;
     LlmMlxModel* m = s->model;
 
-    /* DeepSeek V4.1 whole-model: i logits della posizione pending sono gia' in host. */
-    if (m->dsv41) {
-        LlmDsv41Cache* c = (LlmDsv41Cache*)s->dsv41;
-        if (!c || !c->last_logits || c->last_logits_n <= 0) return -1;
-        int V = c->last_logits_n;
-        float* lg = (float*)malloc((size_t)V * sizeof(float));
-        if (!lg) return -1;
-        memcpy(lg, c->last_logits, (size_t)V * sizeof(float));
-        double mx = lg[0];
-        for (int i = 1; i < V; i++) if (lg[i] > mx) mx = lg[i];
-        double sum = 0.0;
-        for (int i = 0; i < V; i++) sum += exp((double)lg[i] - mx);
-        *out_logits = lg;
-        *out_logsumexp = mx + log(sum);
-        return V;
-    }
+    /* Modello DELEGATO (DS4/DS4.1): logprob non esposto dall'ABI a 9 metodi -> non supportato. */
+    if (m->deleg) return -1;
 
     OutputTensors t;
     if (!load_output_tensors(m, &t)) return -1;

@@ -23,24 +23,8 @@ int llm_ai_mlx_session_swap_out(llm_ai_mlx_session_handle handle, const char* pa
     if (!s->has_pending) return -1;
     LlmMlxModel* m = s->model;
 
-    /* DeepSeek V4.1 whole-model: park via history (il cache si ricostruisce al restore). */
-    if (m->dsv41) {
-        LlmDsv41Cache* c = (LlmDsv41Cache*)s->dsv41;
-        if (!c || !s->history || s->history_len <= 0) return -1;
-        char path[1100], tmp[1110];
-        snprintf(path, sizeof path, "%s.dsv41meta", path_prefix);
-        snprintf(tmp, sizeof tmp, "%s.tmp", path);
-        FILE* f = fopen(tmp, "wb");
-        if (!f) return -1;
-        int32_t hdr[5] = { (int32_t)0x4D313444, c->offset, s->pending_next_id,
-                           s->has_pending ? 1 : 0, s->history_len };
-        if (fwrite(hdr, 4, 5, f) != 5 || fwrite(s->history, 4, (size_t)s->history_len, f) != (size_t)s->history_len) {
-            fclose(f); remove(tmp); return -1;
-        }
-        if (fclose(f) != 0 || rename(tmp, path) != 0) { remove(tmp); return -1; }
-        llm_dsv41_cache_free(c); free(c); s->dsv41 = NULL; s->parked = true;
-        return 0;
-    }
+    /* Modello DELEGATO (DS4/DS4.1): il park/evict non e' nell'ABI a 9 metodi -> non supportato. */
+    if (m->deleg) return -1;
 
     char kv_tmp[1024], kv_final[1024], meta_tmp[1024], meta_final[1024];
     snprintf(kv_tmp, sizeof(kv_tmp), "%s.mlxkv.tmp", path_prefix);
@@ -110,34 +94,8 @@ llm_ai_mlx_session_handle llm_ai_mlx_session_swap_in(llm_ai_mlx_model_handle mod
     if (model_handle == NULL || path_prefix == NULL) return NULL;
     LlmMlxModel* m = (LlmMlxModel*)model_handle;
 
-    /* DeepSeek V4.1 whole-model: restore da history + rebuild del cache. */
-    if (m->dsv41) {
-        char dpath[1100];
-        snprintf(dpath, sizeof dpath, "%s.dsv41meta", path_prefix);
-        FILE* f = fopen(dpath, "rb");
-        if (!f) return NULL;
-        int32_t hdr[5];
-        if (fread(hdr, 4, 5, f) != 5 || (uint32_t)hdr[0] != 0x4D313444u) { fclose(f); return NULL; }
-        int hn = hdr[4];
-        int32_t* toks = hn > 0 ? (int32_t*)malloc((size_t)hn * 4) : NULL;
-        if (hn > 0 && (!toks || fread(toks, 4, (size_t)hn, f) != (size_t)hn)) { fclose(f); free(toks); return NULL; }
-        fclose(f);
-        LlmMlxSession* s = llm_mlx_session_create(m);
-        if (!s) { free(toks); return NULL; }
-        if (hn > 0) session_history_append(s, toks, hn);
-        llm_mlx_sampling_t sm0 = llm_mlx_session_sampling(s);
-        LlmDsv41Sampling ds = { sm0.active, sm0.temperature, sm0.top_p, sm0.top_k, sm0.seed,
-                                sm0.repetition_penalty, sm0.frequency_penalty, sm0.presence_penalty,
-                                sm0.hist, sm0.hist_n };
-        int32_t pending = 0;
-        if (!llm_dsv41_engine_prefill((LlmDsv41Engine*)m->dsv41, &s->dsv41, toks, hn,
-                                      &s->cache_offset, &pending, &s->has_pending, &ds, m->stream)) {
-            free(toks); llm_mlx_session_destroy(s); return NULL;
-        }
-        s->pending_next_id = pending;
-        free(toks);
-        return s;
-    }
+    /* Modello DELEGATO (DS4/DS4.1): park/restore non e' nell'ABI a 9 metodi -> non supportato. */
+    if (m->deleg) return NULL;
 
     char kv_path[1024], meta_path[1024];
     snprintf(kv_path, sizeof(kv_path), "%s.mlxkv", path_prefix);
