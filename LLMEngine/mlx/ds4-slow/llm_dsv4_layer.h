@@ -121,6 +121,14 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
                 strcmp(ops[4], "moe") == 0 &&
                 strcmp(ops[5], "mhc_post_ffn") == 0;
             if (canonical_tail) {
+                /* Decode device-resident: project+mid+out in UNA catena (un solo wait) via
+                 * llm_dsv4_gpu_attn_batch_try(nt=1); poi mHC post. Gated `dsv4_attn_dev` (default ON). */
+                int dev = 1; { int v = 1; if (llm_ai_mlx_opt_get_bool("dsv4_attn_dev", &v) == 0) dev = v; }
+                if (dev && llm_dsv4_gpu_attn_batch_try(c, L, il, cache->compress_ratio, cache->raw_cap, cache->comp_cap,
+                                                       normed, pos, 1, proj)) {
+                    llm_dsv4_block_post(c, proj, saved, post, comb, out_hc);
+                    tail_done = 1;
+                } else {
                 float* heads = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)c->n_head * c->n_head_dim);
                 if (heads) {
                     if (llm_dsv4_attn_cached_mid(c, L, pe, cache, normed, pos, il, heads)) {
@@ -130,6 +138,7 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
                     }
                 } else {
                     llm_dsv4_attn_cached(c, L, pe, cache, normed, pos, il, proj);
+                }
                 }
             } else {
                 /* DEVICE-RESIDENT per-token (gated `dsv4_attn_dev`): riusa il percorso del batch con

@@ -148,6 +148,10 @@ typedef struct {
 void llm_dsv4_metal_set_op(int op);
 void llm_dsv4_metal_gpu_ms(double* attn, double* moe);
 long llm_dsv4_metal_dispatches(void);   /* TEMP: conteggio dispatch Metal (cumulativo) */
+/* Command buffer CONDIVISO: begin apre, end committa+aspetta UNA volta. Le funzioni attn che trovano
+ * `sactive` encodano nell'encoder condiviso senza commit/wait (fusione per-layer). */
+void llm_dsv4_metal_shared_begin(LlmDsv4Metal* b);
+void llm_dsv4_metal_shared_end(LlmDsv4Metal* b);
 int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p);
 /* `nt` token consecutivi (stesso layer, params in ordine di posizione) in UNA command buffer. */
 int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, int nt, void** heads_dev_out);

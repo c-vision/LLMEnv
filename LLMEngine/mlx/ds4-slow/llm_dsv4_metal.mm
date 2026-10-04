@@ -1595,6 +1595,11 @@ struct LlmDsv4Metal {
     id<MTLArgumentEncoder> enc_pair, enc_down;
     id<MTLResidencySet> residency;  /* CONDIVISO da tutti gli argbuf (limite 32 set/coda) */
     int res_dirty;                  /* allocazioni aggiunte al set e non ancora committate */
+    /* Command buffer CONDIVISO (fusione per-layer): piu' funzioni attn encodano qui e si
+     * committa/aspetta UNA volta sola (riduce i round-trip CPU<->GPU per layer). */
+    id<MTLCommandBuffer> scb;
+    id<MTLComputeCommandEncoder> se;
+    int sactive;
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[96], so[64], spb[64];
     /* Cache PERSISTENTE delle view no-copy (base pagina -> MTLBuffer): creare una view costa decine
@@ -1612,6 +1617,23 @@ static id<MTLBuffer> dsv4_scratch(LlmDsv4Metal* b, id<MTLBuffer>* slot, size_t* 
         if (*slot) *cap = need;
     }
     return *slot;
+}
+
+static void dsv4_res_commit(LlmDsv4Metal* b);   /* definita piu' sotto */
+/* Apre/chiude il command buffer CONDIVISO: le funzioni attn che trovano `sactive` encodano nel suo
+ * encoder e NON committano/attendono; il chiamante fa begin/end attorno alla catena. */
+void llm_dsv4_metal_shared_begin(LlmDsv4Metal* b) {
+    if (!b || b->sactive) return;
+    b->scb = [b->queue commandBuffer];
+    b->se = [b->scb computeCommandEncoder];
+    b->sactive = 1;
+}
+void llm_dsv4_metal_shared_end(LlmDsv4Metal* b) {
+    if (!b || !b->sactive) return;
+    [b->se endEncoding];
+    dsv4_res_commit(b); [b->scb commit];
+    [b->scb waitUntilCompleted]; dsv4_gpu_acct(b->scb);
+    b->scb = nil; b->se = nil; b->sactive = 0;
 }
 
 /* Aggiunge un'allocazione al residency set CONDIVISO (creato al bisogno): le view no-copy dei pesi restano
@@ -3311,8 +3333,8 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         memcpy((char*)[KVC contents] + (size_t)t * hd * sizeof(float), p->kv_cur, (size_t)hd * sizeof(float));
         if (p->has_idx) memcpy((char*)[QRN contents] + (size_t)t * p->lq * sizeof(float), p->qrn, (size_t)p->lq * sizeof(float));
     }
-    id<MTLCommandBuffer> cb = [b->queue commandBuffer];
-    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+    id<MTLCommandBuffer> cb = b->sactive ? b->scb : [b->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = b->sactive ? b->se : [cb computeCommandEncoder];
     /* FASE A — proiezioni f32 indipendenti per TUTTI i token (pesi letti una volta per tile di 16 token invece che per token) */
     if (ratio > 0) {
         #define GEMV_NT(W_BUF, XBUF, OBUF, NIN, NOUT) do { g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_nt]; \
@@ -3662,12 +3684,15 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         { uint32_t P[1] = { (uint32_t)((size_t)keep * hd) }; [e setBytes:P length:sizeof(P) atIndex:2]; }
         [e dispatchThreads:MTLSizeMake((NSUInteger)keep * hd, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     }
-    [e endEncoding];
-    dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
-    if (cb.error) return -3;
+    if (!b->sactive) {
+        [e endEncoding];
+        dsv4_res_commit(b); [cb commit];
+        [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
+        if (cb.error) return -3;
+    }
     if (heads_dev_out) *heads_dev_out = NULL;
     if (p0->dev_heads) { if (heads_dev_out) *heads_dev_out = (void*)HD; return 0; }   /* heads restano device (item b) */
+    if (!b->sactive)
     for (int t = 0; t < nt; t++)
         memcpy(ps[t].heads, (const char*)[HD contents] + (size_t)t * p0->n_head * hd * sizeof(float), (size_t)p0->n_head * hd * sizeof(float));
     return 0;
@@ -3704,8 +3729,8 @@ int llm_dsv4_metal_attn_proj_fused_batch(LlmDsv4Metal* b, int nt,
     if (rc == 0) memcpy([X contents], xn, (size_t)nt*embd*sizeof(float));
     if (rc == 0) {
         const uint32_t hdim = (uint32_t)(qd / (uint32_t)n_head);
-        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
-        id<MTLComputeCommandEncoder> en = [cb computeCommandEncoder];
+        id<MTLCommandBuffer> cb = b->sactive ? b->scb : [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> en = b->sactive ? b->se : [cb computeCommandEncoder];
         for (int t = 0; t < nt; t++) {
             const NSUInteger xo = (NSUInteger)((size_t)t*embd*sizeof(float)), ko = (NSUInteger)((size_t)t*hd*sizeof(float));
             const NSUInteger qo = (NSUInteger)((size_t)t*qd*sizeof(float)),   no = (NSUInteger)((size_t)t*lq*sizeof(float));
@@ -3752,14 +3777,16 @@ int llm_dsv4_metal_attn_proj_fused_batch(LlmDsv4Metal* b, int nt,
             [en setBytes:rope_cfg length:7*sizeof(float) atIndex:2];
             [en dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
         }
-        [en endEncoding];
-        dsv4_res_commit(b); [cb commit];
-        [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
-        rc = cb.error ? -3 : 0;
-        if (rc == 0) {
-            if (q_out)   memcpy(q_out,   [QB contents],  (size_t)nt*qd*sizeof(float));   /* NULL = resta device (item b) */
-            if (kv_out)  memcpy(kv_out,  [KVR contents], (size_t)nt*hd*sizeof(float));
-            if (qrn_out) memcpy(qrn_out, [QRN contents], (size_t)nt*lq*sizeof(float));
+        if (!b->sactive) {
+            [en endEncoding];
+            dsv4_res_commit(b); [cb commit];
+            [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
+            rc = cb.error ? -3 : 0;
+            if (rc == 0) {
+                if (q_out)   memcpy(q_out,   [QB contents],  (size_t)nt*qd*sizeof(float));   /* NULL = resta device (item b) */
+                if (kv_out)  memcpy(kv_out,  [KVR contents], (size_t)nt*hd*sizeof(float));
+                if (qrn_out) memcpy(qrn_out, [QRN contents], (size_t)nt*lq*sizeof(float));
+            }
         }
     }
     if (WQAN) [WQAN release]; if (WKAN) [WKAN release];

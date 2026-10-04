@@ -250,6 +250,8 @@ int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeight
     if ((size_t)nt > ps_cap) { free(ps); ps = (LlmDsv4MidParams*)malloc(sizeof(LlmDsv4MidParams) * (size_t)nt); ps_cap = (size_t)nt; }
     void* heads_dev = NULL;
     int ok = hds && ps;
+    const int use_shared = (nt == 1);   /* decode: project+mid in UNA cb (un solo wait) */
+    if (use_shared && ok) llm_dsv4_metal_shared_begin(g_be);
     if (ok) ok = llm_dsv4_gpu_attn_project_batch(&g_attn, c, L, il, xn, pos0, nt, NULL, NULL, NULL);
     int nr = m->n_raw, na = m->n_acomp, ni = m->n_icomp;
     if (ok) {
@@ -265,6 +267,7 @@ int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeight
         if (!ok) heads_dev = NULL;
         if (ok) { m->n_raw = nr; m->n_acomp = na; m->n_icomp = ni; }
     }
+    if (use_shared) llm_dsv4_metal_shared_end(g_be);
     if (ok) ok = llm_dsv4_gpu_attn_finish_batch(&g_attn, c, L, il, hds, pos0, nt, out, heads_dev);
     return ok ? 1 : 0;
 }
