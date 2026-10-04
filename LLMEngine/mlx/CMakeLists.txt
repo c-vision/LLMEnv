@@ -360,10 +360,10 @@ add_library(llm_ai_mlx SHARED
     llm_kvmetal_bridge.m
     llm_gemvq4_bridge.m
     # Backend Metal DS4 (F1/F2/F3): GEMV zero-copy su mmap per esperti IQ2_XXS/Q2_K e
-    # proiezioni attn Q8_0. Tabelle IQ2 generate da tools/gen_dsv4_metal_tables.py.
-    llm_dsv4_metal.mm
+    # proiezioni attn Q8_0. Tabelle IQ2 generate da ds4-slow/tools/gen_dsv4_metal_tables.py.
+    ds4-slow/llm_dsv4_metal.mm
     # Contesto GPU DS4 (F4): singleton + hook moe/attn usati dal layer/engine (opt-in LLM_DSV4_GPU).
-    llm_dsv4_gpu_ctx.mm
+    ds4-slow/llm_dsv4_gpu_ctx.mm
     # P10: GEMM int8-activation x Q4/Q5 sui tensor unit M5 (port oMLX; bridge ABI-C, ObjC/Metal)
     ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8/llmmetal_oq_a8_bridge.mm
     # MPP q4 affine (tensor unit Apple): bridge ObjC++ zero-copy sui buffer MLX (metallib build-time).
@@ -412,7 +412,7 @@ target_link_libraries(llm_ai_mlx PRIVATE mlxc cjson ${METAL_FRAMEWORK} ${FOUNDAT
 target_include_directories(llm_ai_mlx PRIVATE "${cjson_SOURCE_DIR}")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
-target_include_directories(llm_ai_mlx PUBLIC . ../Options)
+target_include_directories(llm_ai_mlx PUBLIC . ds4-slow ../Options)
 
 # ENGINE container reader (llm_engine_container.c): include + link del container runtime (GGUF) e del
 # codec (dequant di formato). Modifica di infrastruttura autorizzata dall'utente 2026-09-24.
@@ -458,14 +458,15 @@ set_target_properties(llm_ai_mlx PROPERTIES
 option(LLM_BUILD_DSV4_TESTS "Compila i test/bench DS4 come target CMake (dipendenze tracciate, niente stale)" OFF)
 if(LLM_BUILD_DSV4_TESTS)
     file(GLOB DSV4_TEST_SRCS CONFIGURE_DEPENDS
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/llm_dsv4_*_test.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/llm_dsv4_prefill_bench.c)
+        ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow/tests/llm_dsv4_*_test.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow/tests/llm_dsv4_prefill_bench.c)
     foreach(_src ${DSV4_TEST_SRCS})
         get_filename_component(_t ${_src} NAME_WE)
         add_executable(${_t} ${_src})
         target_link_libraries(${_t} PRIVATE llm_ai_mlx llmcodec_ggml)
         target_include_directories(${_t} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow
             ${CMAKE_CURRENT_SOURCE_DIR}/../Options
             ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include)
         set_target_properties(${_t} PROPERTIES LINKER_LANGUAGE CXX)
