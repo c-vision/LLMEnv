@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <dlfcn.h>   /* dladdr: per risolvere ABI/ dalla directory della dylib (CWD-indipendente) */
 
 static char* slurp(const char* p) {
     FILE* f = fopen(p, "rb"); if (!f) return NULL;
@@ -271,20 +272,13 @@ int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out
 }
 /* Cartella ABI/ canonica: risale dal cwd cercando una dir `ABI` (dove vivono le descrizioni).
  * Ritorna 1 e scrive il path in `out` se trovata. Usata da LLM ARCH LIST e dal resolve. */
-int llmdesc_abi_dir(char* out, size_t cap) {
-    /* (0) Override esplicito (installazioni fuori dall'albero sorgente). */
-    const char* env = getenv("LLMDESC_ABI_DIR");
-    if (env != NULL && *env != '\0') { if (out && cap) snprintf(out, cap, "%s", env); return 1; }
-    char cwd[2048];
-    if (getcwd(cwd, sizeof cwd) == NULL) return 0;
-    char dir[2048]; snprintf(dir, sizeof dir, "%s", cwd);
-    for (int up = 0; up < 12 && dir[0]; ++up) {
-        /* (a) <dir>/ABI
-         * (b) <dir>/LLMEnv/ABI e (c) <dir>/../LLMEnv/ABI: l'engine vive DENTRO LLMEnv, ma i
-         *     consumatori (FastLLM, GMBasic) sono progetti FRATELLI -> l'ABI non e' un semplice
-         *     ANTENATO della cwd. Senza (b)/(c) la role map .llmarch non si carica e il loader
-         *     GGUF generico cerca i nomi HF (lm_head/embed_tokens/norm) che il store GGUF non
-         *     ha -> "lookup fallito" (es. olmoe). */
+/* Risale da `start` (dir o file) cercando <dir>/ABI | <dir>/LLMEnv/ABI | <dir>/../LLMEnv/ABI.
+ * (b)/(c): l'engine vive DENTRO LLMEnv ma i consumatori (FastLLM/GMBasic) sono progetti fratelli.
+ * Senza la role map .llmarch il loader GGUF generico cerca i nomi HF (lm_head/embed_tokens/norm)
+ * che il GGUF non ha -> "lookup fallito". 1 se trovata (path in `out`). */
+static int abi_search_up(const char* start, char* out, size_t cap) {
+    char dir[2048]; snprintf(dir, sizeof dir, "%s", start ? start : "");
+    for (int up = 0; up < 16 && dir[0]; ++up) {
         char path[4096];
         static const char* tails[] = { "/ABI", "/LLMEnv/ABI", "/../LLMEnv/ABI" };
         for (int t = 0; t < 3; ++t) {
@@ -296,6 +290,20 @@ int llmdesc_abi_dir(char* out, size_t cap) {
         if (sl == NULL) break;
         if (sl == dir) { dir[1] = 0; } else *sl = 0;
     }
+    return 0;
+}
+int llmdesc_abi_dir(char* out, size_t cap) {
+    /* (0) Override esplicito (installazioni fuori dall'albero sorgente). */
+    const char* env = getenv("LLMDESC_ABI_DIR");
+    if (env != NULL && *env != '\0') { if (out && cap) snprintf(out, cap, "%s", env); return 1; }
+    /* (1) dalla CWD risalendo. */
+    char cwd[2048];
+    if (getcwd(cwd, sizeof cwd) != NULL && abi_search_up(cwd, out, cap)) return 1;
+    /* (2) CWD-INDIPENDENTE: risali dalla directory di QUESTA dylib (es. Resources/libs/<rid>/ ->
+     *     .../ABI). Cosi' il loader funziona anche se il processo gira con una CWD fuori dal repo
+     *     (es. test/REPL lanciati da /tmp). */
+    { Dl_info info; if (dladdr((void*)(uintptr_t)&llmdesc_abi_dir, &info) != 0 && info.dli_fname != NULL
+                       && abi_search_up(info.dli_fname, out, cap)) return 1; }
     return 0;
 }
 
