@@ -432,6 +432,8 @@ target_include_directories(llm_ai_mlx PUBLIC . ${GMB_DS4SLOW_INC} tokenizers ds4
 # engine e slow via la STESSA dylib. Se ds4engine non c'è, resta solo `..._ds4slow` (adapter nativo).
 if(TARGET ds4engine)
   target_link_libraries(llm_ai_mlx PRIVATE ds4engine)
+  # Riferimento diretto all'accessor vendored (default DS4): porta il simbolo DENTRO libllm_ai_mlx.
+  target_compile_definitions(llm_ai_mlx PRIVATE LLM_HAVE_DS4ENGINE=1)
 endif()
 
 # ENGINE container reader (llm_engine_container.c): include + link del container runtime (GGUF) e del

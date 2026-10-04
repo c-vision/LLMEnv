@@ -52,10 +52,19 @@ static const LlmEngineLlmEngine* llm_mlx_engine_symbol(const char* name) {
 static const LlmEngineLlmEngine* llm_mlx_pick_ds4_engine(void) {
     char bk[16]; bk[0] = 0;
     int slow = (llm_ai_mlx_opt_get_str("ds4_backend", bk, sizeof bk) == 0) && strcmp(bk, "slow") == 0;
-    const LlmEngineLlmEngine* e = llm_mlx_engine_symbol(slow ? "llmengine_llm_engine_ds4slow" : "llmengine_llm_engine_ds4");
-    if (e == NULL && !slow) e = llm_mlx_engine_symbol("llmengine_llm_engine_ds4slow");
-    if (e == NULL) e = llm_mlx_engine_symbol("llmengine_llm_engine_ds4slow");
-    return e;
+#ifdef LLM_HAVE_DS4ENGINE
+    /* Vendored (default, piu' veloce): riferimento DIRETTO -> il linker lo porta DENTRO
+     * libllm_ai_mlx (e quindi e' visibile anche via dlsym ai consumatori, es. GMBasic). */
+    if (!slow) return llmengine_llm_engine_ds4();
+#endif
+    /* Nativo `ds4-slow` (opzionale; dlsym: la cartella resta cancellabile). */
+    {
+        const LlmEngineLlmEngine* e = llm_mlx_engine_symbol("llmengine_llm_engine_ds4slow");
+#ifdef LLM_HAVE_DS4ENGINE
+        if (e == NULL) e = llmengine_llm_engine_ds4();
+#endif
+        return e;
+    }
 }
 
 
