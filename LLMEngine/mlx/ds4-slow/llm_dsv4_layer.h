@@ -128,7 +128,13 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
                     llm_dsv4_attn_cached(c, L, pe, cache, normed, pos, il, proj);
                 }
             } else {
-                llm_dsv4_attn_cached(c, L, pe, cache, normed, pos, il, proj);
+                /* DEVICE-RESIDENT per-token (gated `dsv4_attn_dev`): riusa il percorso del batch con
+                 * nt=1 (project->slot device, mid device, out da device) -> 1 cb invece di 3.
+                 * Verificare con l'oracolo di parita' (ramo dichiarato non-bit-exact). */
+                int dev = 0; { int v = 0; if (llm_ai_mlx_opt_get_bool("dsv4_attn_dev", &v) == 0 && v) dev = 1; }
+                if (!(dev && llm_dsv4_gpu_attn_batch_try(c, L, il, cache->compress_ratio, cache->raw_cap,
+                                                         cache->comp_cap, normed, pos, 1, proj)))
+                    llm_dsv4_attn_cached(c, L, pe, cache, normed, pos, il, proj);
             }
             if (pf) g_pf_d_attn += llm_dsv4_pf_now() - _t;
             if (tail_done) break;
