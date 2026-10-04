@@ -13,8 +13,8 @@
 #include "llm_mlx_kvdisk.h"
 #include "llm_mlx_ngram.h"
 #include "llm_mlx_qwen4exp.h"
-#include "llm_dsv4_engine.h"
-#include "llm_dsv41_engine.h"
+#include "llm_mlx_dsv4_layer_ops.h"   /* pipeline layer DS4 dal `.llmarch` (stato nel motore) */
+#include "llm_gguf.h"                 /* lettura GGUF (rilevazione arch per il routing engine) */
 #include "llm_mlx_which_path.h"
 #include "llm_mlx_dispatch_profile.h"
 #include <cJSON.h>
@@ -27,10 +27,6 @@
 #include <math.h>
 #include <dlfcn.h>
 #include <sys/sysctl.h>
-
-/* Store/cache esperti DS4 (LRU): bundle (gate+up+down) tenuti in RAM quando l'offload esperti è
- * attivo (parametro --offload-experts -> set_expert_swap). Nessuna variabile d'ambiente. */
-#define LLM_DSV4_STORE_BUNDLES 2048
 
 extern const LlmEnginePluginPrimMLX* g_primmlx_norm;
 extern void* g_primmlx_norm_h;

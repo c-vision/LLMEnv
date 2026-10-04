@@ -300,6 +300,19 @@ if(LLM_ENABLE_TRAIN)
     set(LLM_MLX_TRAIN_SRC llm_mlx_diff_forward.c)
 endif()
 
+# ds4-slow (nostro engine DS4 nativo) e' OPZIONALE: se la cartella non c'e', il motore degrada
+# sul vendored `ds4` / su `ds41`, e i consumatori scelgono l'engine via dlsym. Cosi' la cartella
+# e' cancellabile senza errori di configurazione/compilazione.
+set(GMB_DS4SLOW_SRC "")
+set(GMB_DS4SLOW_INC "")
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow)
+  list(APPEND GMB_DS4SLOW_SRC
+       ds4-slow/llm_dsv4_metal.mm
+       ds4-slow/llm_dsv4_gpu_ctx.mm
+       ds4-slow/llm_ds4slow_abi.c)
+  set(GMB_DS4SLOW_INC ds4-slow)
+endif()
+
 add_library(llm_ai_mlx SHARED
     llmengine_mlx.c
     llm_mlx_p4.c
@@ -359,13 +372,9 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_model_lifecycle.c
     llm_kvmetal_bridge.m
     llm_gemvq4_bridge.m
-    # Backend Metal DS4 (F1/F2/F3): GEMV zero-copy su mmap per esperti IQ2_XXS/Q2_K e
-    # proiezioni attn Q8_0. Tabelle IQ2 generate da ds4-slow/tools/gen_dsv4_metal_tables.py.
-    ds4-slow/llm_dsv4_metal.mm
-    # Contesto GPU DS4 (F4): singleton + hook moe/attn usati dal layer/engine (opt-in LLM_DSV4_GPU).
-    ds4-slow/llm_dsv4_gpu_ctx.mm
-    # Adapter ds4-slow -> ABI LlmEngine (stessa interfaccia del vendored llmengine_llm_engine_ds4).
-    ds4-slow/llm_ds4slow_abi.c
+    # ds4-slow (Metal DS4 IQ2/Q8, contesto GPU, adapter ABI): OPZIONALE (vedi GMB_DS4SLOW_SRC).
+    # Se presente: Metal DS4 zero-copy + adapter llmengine_llm_engine_ds4slow.
+    ${GMB_DS4SLOW_SRC}
     # Adapter ds41-native -> ABI LlmEngine (stessi 9 metodi di ds4/ds4-slow).
     ds41-native/llm_ds41_abi.c
     # P10: GEMM int8-activation x Q4/Q5 sui tensor unit M5 (port oMLX; bridge ABI-C, ObjC/Metal)
@@ -416,7 +425,7 @@ target_link_libraries(llm_ai_mlx PRIVATE mlxc cjson ${METAL_FRAMEWORK} ${FOUNDAT
 target_include_directories(llm_ai_mlx PRIVATE "${cjson_SOURCE_DIR}")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
-target_include_directories(llm_ai_mlx PUBLIC . ds4-slow ds41-native ../Options)
+target_include_directories(llm_ai_mlx PUBLIC . ${GMB_DS4SLOW_INC} tokenizers ds41-native ../Options)
 
 # Se il motore ds4 VENDORIZZATO (ds4engine) è nel build, llm_ai_mlx lo linka: la dylib esporta
 # allora anche `llmengine_llm_engine_ds4`, e i consumatori (GMBasic/FastLLM) possono scegliere tra

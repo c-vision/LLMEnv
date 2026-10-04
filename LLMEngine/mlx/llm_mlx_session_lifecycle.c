@@ -10,8 +10,6 @@
 #include "llm_mlx_kvdisk.h"
 #include "llm_mlx_ngram.h"
 #include "llm_mlx_qwen4exp.h"
-#include "llm_dsv4_engine.h"
-#include "llm_dsv41_engine.h"
 #include "llm_pflash.h"
 #include "llm_kvmetal_bridge.h"
 #include "llm_gemvq4_bridge.h"

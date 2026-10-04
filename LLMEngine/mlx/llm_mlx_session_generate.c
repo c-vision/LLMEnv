@@ -8,8 +8,6 @@
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_dispatch_profile.h"
-#include "llm_dsv41_engine.h"
-#include "llm_dsv4_engine.h"
 
 #include <stdio.h>
 #include <stdlib.h>

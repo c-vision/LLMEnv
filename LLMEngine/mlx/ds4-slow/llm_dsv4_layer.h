@@ -41,20 +41,10 @@ static inline void llm_dsv4_layer_forward(const LlmDsv4Config* c, const LlmDsv4L
 
 /* ── COMPOSIZIONE (livello 3): il layer DS4 come PIPELINE di passi dichiarati (`.llmarch`,
  * structure `layer`). Ogni `op` -> la primitiva DS4 corrispondente. Nessuna biforcazione:
- * `llm_dsv4_layer_forward_cached_pe` esegue QUESTA pipeline (ops==NULL -> sequenza canonica). ── */
-#define LLM_DSV4_MAX_OPS 16
-static char g_dsv4_layer_ops_buf[LLM_DSV4_MAX_OPS][24];   /* copia: la LlmDesc e' su stack */
-static const char* g_dsv4_layer_ops[LLM_DSV4_MAX_OPS];
-static int g_dsv4_layer_nops = 0;   /* 0 = usa la sequenza canonica */
-/* Il motore imposta la pipeline dichiarata dal `.llmarch` (structure `layer`). */
-static inline void llm_dsv4_set_layer_ops(const char* const* ops, int n) {
-    if (n < 0) n = 0; if (n > LLM_DSV4_MAX_OPS) n = LLM_DSV4_MAX_OPS;
-    for (int i = 0; i < n; i++) {
-        snprintf(g_dsv4_layer_ops_buf[i], sizeof g_dsv4_layer_ops_buf[i], "%s", ops[i] ? ops[i] : "");
-        g_dsv4_layer_ops[i] = g_dsv4_layer_ops_buf[i];
-    }
-    g_dsv4_layer_nops = n;
-}
+ * `llm_dsv4_layer_forward_cached_pe` esegue QUESTA pipeline (ops==NULL -> sequenza canonica).
+ * Lo stato (globals + setter) vive nel motore (llm_mlx_dsv4_layer_ops.h): il wiring del
+ * `.llmarch` non dipende da questa cartella. ── */
+#include "llm_mlx_dsv4_layer_ops.h"
 
 /* Un layer su un token eseguendo la PIPELINE `ops` (default: canonica mhc/attn/mhc/mhc/moe/mhc). */
 static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,

@@ -11,7 +11,6 @@
 #include "llm_mlx_kvdisk_io.h"
 #include <sys/stat.h>   /* mkdir (D15: dir cache prefix) */
 #include "llm_pflash.h"
-#include "llm_dsv41_engine.h"
 
 /* D15: path EFFETTIVO della prefix-cache persistente (PER-MODELLO, evita collisioni tra modelli):
  *   "off"/"0"/"none" -> "" (nessuna persistenza, in-RAM);  "auto"/""/"1"/"on" -> <base>/prefix_<hash(model_dir)>.cache

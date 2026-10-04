@@ -5,7 +5,6 @@
 #include "llmengine_mlx.h"
 #include "llm_mlx_internal.h"
 #include "llmengine_plugin.h"
-#include "llm_dsv4_engine.h"   /* CAP_KV_MAX: DS4 ha il contesto nel SUO engine */
 
 #include <stdio.h>
 #include <string.h>
