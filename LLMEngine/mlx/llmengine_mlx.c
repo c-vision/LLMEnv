@@ -1521,6 +1521,15 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
             llm_mlx_quant_derive(w, scales, group_size, bits, mode, &e_group, &e_bits, e_mode, sizeof(e_mode));
             mlx_optional_int gsz = {e_group, true};
             mlx_optional_int bts = {e_bits, true};
+            /* QuantIR I11 — attivazioni quantizzate ON-THE-FLY (opzione registro `actquant` =
+             * "mxfp4"|"nvfp4"): `mlx_qqmm` quantizza l'attivazione nel kernel Metal (niente
+             * kernel custom). Default OFF -> path invariato (fp16 att.). */
+            char am[16]; int aq = (llm_ai_mlx_opt_get_str("actquant", am, (int)sizeof am) == 0 && am[0]);
+            if (aq) {
+                mlx_array gx = mlx_array_new();   /* global_scale_x/w: null (non nvfp4) */
+                if (ok) ok = mlx_qqmm(res, xuse, w, scales, gsz, bts, am, gx, gx, stream) == 0;
+                mlx_array_free(gx);
+            } else
             if (ok) ok = mlx_quantized_matmul(res, xuse, w, scales, biases, /*transpose=*/true, gsz, bts, e_mode, stream) == 0;
         }
         mlx_array_free(xb);
