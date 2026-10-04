@@ -414,7 +414,7 @@ target_link_libraries(llm_ai_mlx PRIVATE mlxc cjson ${METAL_FRAMEWORK} ${FOUNDAT
 target_include_directories(llm_ai_mlx PRIVATE "${cjson_SOURCE_DIR}")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
-target_include_directories(llm_ai_mlx PUBLIC . ds4-slow ../Options)
+target_include_directories(llm_ai_mlx PUBLIC . ds4-slow ds41-native ../Options)
 
 # Se il motore ds4 VENDORIZZATO (ds4engine) è nel build, llm_ai_mlx lo linka: la dylib esporta
 # allora anche `llmengine_llm_engine_ds4`, e i consumatori (GMBasic/FastLLM) possono scegliere tra
@@ -468,7 +468,9 @@ option(LLM_BUILD_DSV4_TESTS "Compila i test/bench DS4 come target CMake (dipende
 if(LLM_BUILD_DSV4_TESTS)
     file(GLOB DSV4_TEST_SRCS CONFIGURE_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow/tests/llm_dsv4_*_test.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow/tests/llm_dsv4_prefill_bench.c)
+        ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow/tests/llm_dsv4_prefill_bench.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native/tests/llm_dsv41_*_test.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native/tests/llm_dsv41_*_bench.c)
     foreach(_src ${DSV4_TEST_SRCS})
         get_filename_component(_t ${_src} NAME_WE)
         add_executable(${_t} ${_src})
@@ -476,6 +478,7 @@ if(LLM_BUILD_DSV4_TESTS)
         target_include_directories(${_t} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow
+            ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native
             ${CMAKE_CURRENT_SOURCE_DIR}/../Options
             ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include)
         set_target_properties(${_t} PROPERTIES LINKER_LANGUAGE CXX)
