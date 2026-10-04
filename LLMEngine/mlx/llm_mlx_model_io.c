@@ -625,7 +625,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * attivo di default sui qwen3 come deciso il 2026-09-18. */
     if ((strcmp(m->cfg.model_type, "qwen3") == 0 || strcmp(m->cfg.model_type, "qwen3_5") == 0) && llm_ai_mlx_opt_env("LLMMETAL_OQ_A8") == NULL) {
         llm_engine_opt_auto("LLMMETAL_OQ_A8", "1");
-        fprintf(stderr, "[auto-policy] qwen3 -> LLMMETAL_OQ_A8=1 (misurato +16-28% prefill N>=1024; "
+        fprintf(stderr, "[auto-policy] qwen3 -> LLMMETAL_OQ_A8=1 (misurato +16-28%% prefill N>=1024; "
                         "su llama sarebbe -2/-6x)\n");
     }
     if (strcmp(m->cfg.model_type, "qwen3_next") == 0 && llm_ai_mlx_opt_env("LLM_NO_MXFP4_ACT_F16") == NULL) {
