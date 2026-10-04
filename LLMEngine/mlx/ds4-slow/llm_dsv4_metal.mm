@@ -3162,6 +3162,14 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
     const int embd = p0->embd, hd = p0->hd, ratio = p0->ratio, co = p0->co;
     if (ratio < 0 || (co != 1 && co != 2)) return -1;   /* ratio 0 = solo finestra raw */
     int max_icomp = 1; for (int t = 0; t < nt; t++) if (ps[t].n_icomp > max_icomp) max_icomp = ps[t].n_icomp;
+    /* Il riferimento C (llm_dsv4_indexer_allowed) fa early-return "tutte ammesse" quando
+     * top_k >= n_comp, e in quel caso NON calcola query indexer ne' scores/topk. Replichiamo:
+     * a contesto corto/medio (n_icomp <= idx_top_k) saltiamo QI/WI/scores/topk (bit-exact:
+     * con has_allowed=0 l'attenzione scandisce tutte le compresse come il C). Lo stato
+     * dell'indexer (st_ikv/st_isc) continua ad avanzare come prima. */
+    int idx_scores_need = 1;   /* default 1 = nessuno skip (prefill/batch INVARIATI) */
+    if (nt == 1)
+        idx_scores_need = (ps[0].has_idx && (int)ps[0].n_icomp > (int)p0->idx_top_k) ? 1 : 0;
     /* X/KVC/Q/QRN sono gli STESSI slot (sx[6/8/9/10]) scritti dal project (device-resident, item b):
      * cosi' il project non scarica su host e il mid non ri-carica. Con dev_in=0 il mid li riempie da host. */
     id<MTLBuffer> X   = dsv4_scratch(b, &b->sx[6],  &b->sx_cap[6],  (size_t)nt * embd * sizeof(float));
@@ -3199,8 +3207,10 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         if (p0->has_idx) {
             GEMV_NT(p0->w_ickv, X, PIKV, embd, IW_);
             GEMV_NT(p0->w_icgate, X, PISC, embd, IW_);
-            GEMV_NT(p0->w_iqb, QRN, QI, p0->lq, p0->qdim);
-            GEMV_NT(p0->w_iproj, X, WI, embd, p0->idx_nh);
+            if (idx_scores_need) {
+                GEMV_NT(p0->w_iqb, QRN, QI, p0->lq, p0->qdim);
+                GEMV_NT(p0->w_iproj, X, WI, embd, p0->idx_nh);
+            }
         }
         #undef GEMV_NT
     }
@@ -3231,7 +3241,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         [e setBuffer:KVC offset:0 atIndex:0]; [e setBuffer:RAWX offset:(NSUInteger)((size_t)n_prev * hd * 4) atIndex:1];
         { uint32_t P[1] = { (uint32_t)((size_t)nt * hd) }; [e setBytes:P length:sizeof(P) atIndex:2]; }
         [e dispatchThreads:MTLSizeMake((NSUInteger)nt * hd, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-        if (p0->has_idx) {
+        if (idx_scores_need) {
             g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_rope_rows];
             [e setBuffer:QI offset:0 atIndex:0];
             { uint32_t P[4] = { (uint32_t)p0->n_rot, (uint32_t)p0->idx_hd, (uint32_t)p0->pos, (uint32_t)p0->idx_nh }; [e setBytes:P length:sizeof(P) atIndex:1]; }
@@ -3503,7 +3513,8 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
                     [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((ratio * iwidth + 31) / 32), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
                 }
             }
-            /* scores + top-k */
+            /* scores + top-k (solo se serve: con top_k >= n_comp tutte le compresse sono ammesse) */
+            if (p->has_idx && (int)p->n_icomp > (int)p->idx_top_k) {
             g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_idx_scores];
             [e setBuffer:QI offset:qio atIndex:0]; [e setBuffer:icB offset:0 atIndex:1]; [e setBuffer:WI offset:wio atIndex:2]; [e setBuffer:SCO offset:0 atIndex:3];
             { uint32_t P[3] = { (uint32_t)p->idx_nh, (uint32_t)p->idx_hd, (uint32_t)p->n_icomp }; [e setBytes:P length:sizeof(P) atIndex:4]; }
@@ -3512,10 +3523,12 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             [e setBuffer:SCO offset:0 atIndex:0]; [e setBuffer:allowedB offset:0 atIndex:1];
             { uint32_t P[2] = { (uint32_t)p->n_icomp, (uint32_t)p->idx_top_k }; [e setBytes:P length:sizeof(P) atIndex:2]; }
             [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)p->n_icomp + 63) / 64, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            }
         }
 
         /* 5) attenzione mista (raw + compresse) */
-        dsv4_encode_attn_mixed(b, e, Q, RAWX, aB, allowedB, (id<MTLBuffer>)p->sinks, HD, qo, ho, p->n_head, hd, p->n_raw, p->n_acomp, p->has_idx ? 1 : 0,
+        dsv4_encode_attn_mixed(b, e, Q, RAWX, aB, allowedB, (id<MTLBuffer>)p->sinks, HD, qo, ho, p->n_head, hd, p->n_raw, p->n_acomp,
+                               (p->has_idx && (int)p->n_icomp > (int)p->idx_top_k) ? 1 : 0,
                                (NSUInteger)((size_t)(n_prev + t + 1 - p->n_raw) * hd * 4));
 
         /* PIPELINE CPU/GPU: ogni 16 token chiude e SOTTOMETTE la cb (senza attendere) e ne apre un'altra: la GPU esegue i primi token
