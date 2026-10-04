@@ -112,7 +112,10 @@ int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmC
     long long nkv=jnum(cj,"num_key_value_heads",-1); if (nkv<0) nkv=nh;
     if (nkv>=0) add_u32a(&m,arch,"attention.head_count_kv",(uint32_t)nkv);
     double eps=jflt(cj,"rms_norm_eps",-1.0); if (eps<0) eps=jflt(cj,"layer_norm_eps",-1.0);
-    if (eps>=0) add_f32a(&m,arch,"attention.layer_norm_rms_epsilon",(float)eps);
+    /* Molti checkpoint omettono eps dal config (default RMSNorm 1e-5, come llama.cpp/OLMoE):
+     * senza la chiave il loader llama.cpp rifiuta il modello ("key not found in model"). */
+    if (eps<0) eps=1e-5;
+    add_f32a(&m,arch,"attention.layer_norm_rms_epsilon",(float)eps);
     double rt=jflt(cj,"rope_theta",-1.0); if (rt>=0) add_f32a(&m,arch,"rope.freq_base",(float)rt);
     long long vs=jnum(cj,"vocab_size",-1); if (vs>=0) add_u32a(&m,arch,"vocab_size",(uint32_t)vs);
     long long hd=jnum(cj,"head_dim",-1); if (hd>=0) add_u32a(&m,arch,"attention.key_length",(uint32_t)hd);
@@ -136,6 +139,7 @@ int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmC
                      v=jnum(cj,"q_lora_rank",-1);      if(v>=0) add_u32a(&m,arch,"attention.q_lora_rank",(uint32_t)v); }
     /* special token ids */
     long long bos=jnum(cj,"bos_token_id",-1), eos=jnum(cj,"eos_token_id",-1), pad=jnum(cj,"pad_token_id",-1);
+    if (bos<0) bos=eos;   /* tokenizer senza bos dedicato (OLMoE): llama.cpp usa eos come bos */
     /* tokenizer: dati pre-digeriti dal progetto tokenizer (tm). NON sono nostri:
      * le stringhe appartengono al chiamante -> NON registrarle nel Reg. */
     if (tm && tm->tokens && tm->n_tokens > 0) {
