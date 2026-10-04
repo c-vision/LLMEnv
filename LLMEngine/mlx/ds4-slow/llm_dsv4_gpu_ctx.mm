@@ -395,6 +395,11 @@ void llm_dsv4_gpu_moe_prof(double* io_ms, double* mm_ms) {
     if (io_ms) *io_ms = g_dsv4_moe_io_ms;
     if (mm_ms) *mm_ms = g_dsv4_moe_mm_ms;
 }
+void llm_dsv4_gpu_moe_pt_prof(double* route_ms, double* store_ms, double* metal_ms) {
+    if (route_ms) *route_ms = g_dsv4_pt_route_ms;
+    if (store_ms) *store_ms = g_dsv4_pt_store_ms;
+    if (metal_ms) *metal_ms = g_dsv4_pt_metal_ms;
+}
 
 int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                   const float* xn, int pos, float* q, float* kv, float* qrn) {
