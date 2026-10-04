@@ -416,6 +416,13 @@ target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../..
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
 target_include_directories(llm_ai_mlx PUBLIC . ds4-slow ../Options)
 
+# Se il motore ds4 VENDORIZZATO (ds4engine) è nel build, llm_ai_mlx lo linka: la dylib esporta
+# allora anche `llmengine_llm_engine_ds4`, e i consumatori (GMBasic/FastLLM) possono scegliere tra
+# engine e slow via la STESSA dylib. Se ds4engine non c'è, resta solo `..._ds4slow` (adapter nativo).
+if(TARGET ds4engine)
+  target_link_libraries(llm_ai_mlx PRIVATE ds4engine)
+endif()
+
 # ENGINE container reader (llm_engine_container.c): include + link del container runtime (GGUF) e del
 # codec (dequant di formato). Modifica di infrastruttura autorizzata dall'utente 2026-09-24.
 target_include_directories(llm_ai_mlx PRIVATE
