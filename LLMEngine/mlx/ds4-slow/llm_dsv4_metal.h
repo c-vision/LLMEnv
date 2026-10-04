@@ -144,6 +144,9 @@ typedef struct {
     int dev_heads;/* 1 = NON scaricare heads su host (restano in device, restituiti via heads_dev_out) */
 } LlmDsv4MidParams;
 
+/* TEMP (dsv4_profile): tempo GPU reale per classe di op (attn/moe) dai timestamp del cb. */
+void llm_dsv4_metal_set_op(int op);
+void llm_dsv4_metal_gpu_ms(double* attn, double* moe);
 int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p);
 /* `nt` token consecutivi (stesso layer, params in ordine di posizione) in UNA command buffer. */
 int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, int nt, void** heads_dev_out);

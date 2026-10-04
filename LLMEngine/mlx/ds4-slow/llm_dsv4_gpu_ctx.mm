@@ -221,7 +221,8 @@ int llm_dsv4_gpu_attn_mid_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights*
     if (!m->inited && !dsv4_mid_init(m, c, L, ratio, raw_cap, comp_cap)) return 0;
     LlmDsv4MidParams p; int nr, na, ni;
     dsv4_mid_fill(m, c, ratio, raw_cap, comp_cap, m->n_raw, m->n_acomp, m->n_icomp, q, kv, qrn, xn, pos, heads, &p, &nr, &na, &ni);
-    if (llm_dsv4_metal_attn_mid(g_be, &p) != 0) return 0;
+    llm_dsv4_metal_set_op(1);
+    { int mr = llm_dsv4_metal_attn_mid(g_be, &p); llm_dsv4_metal_set_op(0); if (mr != 0) return 0; }
     m->n_raw = nr; m->n_acomp = na; m->n_icomp = ni;
     { static int logged = 0; if (!logged) { logged = 1; fprintf(stderr, "DSV4 GPU: middle attenzione eseguito su GPU\n"); } }
     return 1;
@@ -353,7 +354,9 @@ int llm_dsv4_gpu_moe_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, i
     static int logged = 0;
     int r;
     if (!g_on) return 0;
+    llm_dsv4_metal_set_op(2);
     r = llm_dsv4_gpu_moe(&g_moe, c, L, il, x, token, out) ? 1 : 0;
+    llm_dsv4_metal_set_op(0);
     if (!logged) { logged = 1; fprintf(stderr, "DSV4 GPU: MoE %s\n",
                                        r ? "eseguito su GPU" : "FALLITO -> fallback CPU"); }
     return r;
@@ -382,7 +385,8 @@ int llm_dsv4_gpu_hc_post_batch_try(const LlmDsv4Config* c, const float* bo, cons
 int llm_dsv4_gpu_moe_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                const float* x, const int* tokens, int nt, float* out) {
     if (!g_on) return 0;
-    return llm_dsv4_gpu_moe_batch(&g_moe, c, L, il, x, tokens, nt, out) ? 1 : 0;
+    llm_dsv4_metal_set_op(2);
+    { int r = llm_dsv4_gpu_moe_batch(&g_moe, c, L, il, x, tokens, nt, out) ? 1 : 0; llm_dsv4_metal_set_op(0); return r; }
 }
 
 /* TEMP (gated ds4_profile): espone gli accumulatori I/O vs GEMM del MoE batched (definiti in
@@ -397,7 +401,9 @@ int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeig
     static int logged = 0;
     int r;
     if (!g_on) return 0;
+    llm_dsv4_metal_set_op(1);
     r = llm_dsv4_gpu_attn_project(&g_attn, c, L, il, xn, pos, q, kv, qrn) ? 1 : 0;
+    llm_dsv4_metal_set_op(0);
     if (!logged) { logged = 1; fprintf(stderr, "DSV4 GPU: attn-proj %s\n",
                                        r ? "eseguita su GPU" : "FALLITA -> fallback CPU"); }
     return r;
@@ -406,5 +412,6 @@ int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeig
 int llm_dsv4_gpu_attn_finish_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                  float* heads, int pos, float* out) {
     if (!g_on) return 0;
-    return llm_dsv4_gpu_attn_finish(&g_attn, c, L, il, heads, pos, out) ? 1 : 0;
+    llm_dsv4_metal_set_op(1);
+    { int r = llm_dsv4_gpu_attn_finish(&g_attn, c, L, il, heads, pos, out) ? 1 : 0; llm_dsv4_metal_set_op(0); return r; }
 }

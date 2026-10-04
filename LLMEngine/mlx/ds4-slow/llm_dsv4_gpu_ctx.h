@@ -33,6 +33,9 @@ int llm_dsv4_gpu_moe_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights
                                const float* x, const int* tokens, int nt, float* out);
 /* TEMP (gated ds4_profile): accumulatori I/O (store esperti) vs GEMM del MoE batched, in ms. */
 void llm_dsv4_gpu_moe_prof(double* io_ms, double* mm_ms);
+/* TEMP (dsv4_profile): tempo GPU reale per classe di op (attn/moe) dai timestamp del command buffer. */
+void llm_dsv4_metal_set_op(int op);
+void llm_dsv4_metal_gpu_ms(double* attn, double* moe);
 int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                   const float* xn, int pos, float* q, float* kv, float* qrn);
 int llm_dsv4_gpu_attn_finish_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,

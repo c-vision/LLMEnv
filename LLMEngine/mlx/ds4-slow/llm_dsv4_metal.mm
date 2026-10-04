@@ -14,6 +14,21 @@
 #include "llm_dsv4_metal_mmid_mpp.h"   /* stessa cosa su tensor ops MPP (Metal 4), libreria separata */
 #include "llm_dsv4_actquant.h"   /* riuso: llm_dsv4_q8_K_quantize_row (metodo ds4) */
 
+/* TEMP (dsv4_profile): tempo GPU REALE (timestamp MSL `GPUStartTime/GPUEndTime` del command
+ * buffer), accumulato per classe di op: [0]=altro, [1]=attn, [2]=MoE. Etichettato dal chiamante
+ * (llm_dsv4_gpu_ctx.mm) prima della call. Immune al carico CPU. */
+static double g_dsv4_mtl_gpu_ms[4] = {0, 0, 0, 0};
+static int    g_dsv4_mtl_op = 0;
+void llm_dsv4_metal_set_op(int op) { g_dsv4_mtl_op = (op >= 0 && op < 4) ? op : 0; }
+void llm_dsv4_metal_gpu_ms(double* attn, double* moe) {
+    if (attn) *attn = g_dsv4_mtl_gpu_ms[1];
+    if (moe)  *moe  = g_dsv4_mtl_gpu_ms[2];
+}
+static void dsv4_gpu_acct(id<MTLCommandBuffer> cb) {
+    double s = (double)cb.GPUStartTime, e = (double)cb.GPUEndTime;
+    if (e > s) g_dsv4_mtl_gpu_ms[g_dsv4_mtl_op] += (e - s) * 1e3;
+}
+
 /* ── sorgente kernel (le tabelle IQ2 vengono anteposte a runtime) ── */
 static const char* const LLM_DSV4_METAL_KERNELS =
 "#include <metal_stdlib>\n"
@@ -1782,7 +1797,7 @@ int llm_dsv4_metal_gemv(LlmDsv4Metal* b, void* handle, size_t view_off, int ggml
     [e dispatchThreadgroups:MTLSizeMake(out_dim, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     memcpy(out, [O contents], (size_t)out_dim * sizeof(float));
     [X release]; [O release]; [PB release];
     return 0;
@@ -1849,7 +1864,7 @@ int llm_dsv4_metal_gemv_batch(LlmDsv4Metal* b, const LlmDsv4GpuJob* jobs, int n_
     }
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     if (cb.error) {
         static int once = 0;
         if (!once) { once = 1; fprintf(stderr, "dsv4_metal: command buffer ERROR: %s\n",
@@ -1902,7 +1917,7 @@ int llm_dsv4_metal_pair_swiglu(LlmDsv4Metal* b, const void* gate, const void* up
      threadsPerThreadgroup:MTLSizeMake(32 * NSG, 1, 1)];
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     int rc = cb.error ? -3 : 0;
     if (rc == 0) memcpy(mid, [MID contents], (size_t)ne0 * sizeof(float));
     [BG release]; [BU release]; [Y release]; [MID release]; [RW release]; [CF release]; [PB release];
@@ -1956,7 +1971,7 @@ int llm_dsv4_metal_pair_swiglu_batch(LlmDsv4Metal* b, const void* const* gates, 
         }
         [e endEncoding];
         dsv4_res_commit(b); [cb commit];
-        [cb waitUntilCompleted];
+        [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         if (cb.error) rc = -3;
         else for (int i = 0; i < n; i++) memcpy(mids[i], [MID[i] contents], (size_t)ne0*sizeof(float));
     }
@@ -2070,7 +2085,7 @@ int llm_dsv4_metal_moe_q4k_batch(LlmDsv4Metal* b, int nt, const void* const* gat
     [e endEncoding];
     if (rc != 0) return rc;
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     rc = cb.error ? -3 : 0;
     if (rc == 0) memcpy(out, [OUT contents], (size_t)nt * embd * sizeof(float));
     return rc;
@@ -2172,7 +2187,7 @@ int llm_dsv4_metal_moe_iq2_q2k_batch(LlmDsv4Metal* b, int nt, const void* const*
     if (rc != 0) return rc;   /* encoder chiuso, cb mai committata (rilasciata da ARC/pool) */
     dsv4_res_commit(b);
     [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     rc = cb.error ? -3 : 0;
     if (rc == 0) memcpy(out, [OUT contents], (size_t)nt * embd * sizeof(float));
     return rc;
@@ -2344,7 +2359,7 @@ int llm_dsv4_metal_moe_mm_batch(LlmDsv4Metal* b, int nt, const void* gate_w, con
     }
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     if (cb.error) return -3;
     memcpy(out, [OUT contents], (size_t)nt * embd * sizeof(float));
     return 0;
@@ -2468,7 +2483,7 @@ int llm_dsv4_metal_moe_mm_addr_batch(LlmDsv4Metal* b, int nt, const void* const*
     }
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     if (cb.error) return -3;
     memcpy(out, [OUT contents], (size_t)nt * embd * sizeof(float));
     return 0;
@@ -2519,7 +2534,7 @@ int llm_dsv4_metal_attn_out_mm_batch(LlmDsv4Metal* b, int nt, const void* outa_w
     dsv4_encode_mm_id_full(e, b->pso_mm_map1, dsv4_pso_q8(b), &mb, &ab, IDB, MB, WB, lb, LOW, 0, OUT);
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     if (cb.error) return -3;
     memcpy(out, [OUT contents], (size_t)nt * embd * sizeof(float));
     return 0;
@@ -2563,7 +2578,7 @@ int llm_dsv4_metal_hc_pre_batch(LlmDsv4Metal* b, int nt, int HC, int D, int iter
     [e dispatchThreadgroups:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     int rc = cb.error ? -3 : 0;
     if (rc == 0) { memcpy(normed, [NM contents], (size_t)nt * D * 4); memcpy(sp, [SP contents], (size_t)nt * size * 4); }
     [FNb release]; [SCb release]; [BSb release]; [NWb release];
@@ -2588,7 +2603,7 @@ int llm_dsv4_metal_hc_post_batch(LlmDsv4Metal* b, int nt, int HC, int D, const f
     [e dispatchThreads:MTLSizeMake(hcd, nt, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     if (cb.error) return -3;
     memcpy(out, [O contents], (size_t)nt * hcd * 4);
     return 0;
@@ -2622,7 +2637,7 @@ int llm_dsv4_metal_route_batch(LlmDsv4Metal* b, int nt, int n_expert, int embd, 
     [e dispatchThreads:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     if (cb.error) return -3;
     memcpy(sel, [SL contents], (size_t)nt * used * 4); memcpy(wt, [WT contents], (size_t)nt * used * 4);
     return 0;
@@ -2693,7 +2708,7 @@ int llm_dsv4_metal_attn_proj_mm_batch(LlmDsv4Metal* b, int nt,
     [e dispatchThreadgroups:MTLSizeMake(1, nt, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     int rc = cb.error ? -3 : 0;
     if (rc == 0) {
         if (q_out)   memcpy(q_out, [QB contents], (size_t)nt*qd*sizeof(float));   /* NULL = resta device (item b) */
@@ -2755,7 +2770,7 @@ int llm_dsv4_metal_attn_out_fused_batch(LlmDsv4Metal* b, int nt,
         }
         [e endEncoding];
         dsv4_res_commit(b); [cb commit];
-        [cb waitUntilCompleted];
+        [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(out, [OUT contents], (size_t)nt * embd * sizeof(float));
     }
@@ -2824,7 +2839,7 @@ int llm_dsv4_metal_attention_mixed(LlmDsv4Metal* b, const float* q, int n_head, 
         dsv4_encode_attn_mixed(b, e, BQ, BR, BC, BA, BS, BO, 0, 0, n_head, hd, n_raw, n_comp, BA ? 1 : 0);
         [e endEncoding];
         dsv4_res_commit(b); [cb commit];
-        [cb waitUntilCompleted];
+        [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(out, [BO contents], (size_t)n_head * (size_t)hd * sizeof(float));
     }
@@ -2854,7 +2869,7 @@ int llm_dsv4_metal_comp_pool(LlmDsv4Metal* b, const float* state_kv, const float
         [e setBuffer:SKV offset:0 atIndex:0]; [e setBuffer:SSC offset:0 atIndex:1]; [e setBuffer:OUT offset:0 atIndex:2];
         uint32_t P[3] = { (uint32_t)hd, (uint32_t)ratio, (uint32_t)co }; [e setBytes:P length:sizeof(P) atIndex:3];
         [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)hd + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted];
+        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(pooled, [OUT contents], (size_t)hd * sizeof(float));
     }
@@ -2876,7 +2891,7 @@ int llm_dsv4_metal_comp_fp8(LlmDsv4Metal* b, float* x, int hd, int n_rot) {
         [e setBuffer:X offset:0 atIndex:0];
         uint32_t P[1] = { (uint32_t)n_nope }; [e setBytes:P length:sizeof(P) atIndex:1];
         [e dispatchThreadgroups:MTLSizeMake((NSUInteger)(n_nope / 64), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted];
+        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(x, [X contents], (size_t)hd * sizeof(float));
     }
@@ -2897,7 +2912,7 @@ int llm_dsv4_metal_indexer_qat(LlmDsv4Metal* b, float* x, int n_rows, int hd) {
         [e setBuffer:X offset:0 atIndex:0];
         uint32_t P[2] = { (uint32_t)n_rows, 128u }; [e setBytes:P length:sizeof(P) atIndex:1];
         [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)n_rows + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted];
+        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(x, [X contents], (size_t)n_rows * 128u * sizeof(float));
     }
@@ -2922,7 +2937,7 @@ int llm_dsv4_metal_indexer_scores(LlmDsv4Metal* b, const float* q, int nh, int h
         [e setBuffer:BQ offset:0 atIndex:0]; [e setBuffer:BK offset:0 atIndex:1]; [e setBuffer:BW offset:0 atIndex:2]; [e setBuffer:BS offset:0 atIndex:3];
         uint32_t P[3] = { (uint32_t)nh, (uint32_t)hd, (uint32_t)n_comp }; [e setBytes:P length:sizeof(P) atIndex:4];
         [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_comp, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted];
+        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(scores, [BS contents], (size_t)n_comp*sizeof(float));
     }
@@ -2954,7 +2969,7 @@ int llm_dsv4_metal_indexer_scores_t(LlmDsv4Metal* b, const float* q, int nh, int
         uint32_t P[3] = { (uint32_t)nh, (uint32_t)hd, (uint32_t)max_comp }; [e setBytes:P length:sizeof(P) atIndex:4];
         [e setBuffer:BN offset:0 atIndex:5];
         [e dispatchThreadgroups:MTLSizeMake((NSUInteger)max_comp, (NSUInteger)n_tokens, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted];
+        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(scores, [BS contents], (size_t)n_tokens*max_comp*sizeof(float));
     }
@@ -2978,7 +2993,7 @@ int llm_dsv4_metal_indexer_topk(LlmDsv4Metal* b, const float* scores, int n_comp
         [e setBuffer:BS offset:0 atIndex:0]; [e setBuffer:BA offset:0 atIndex:1];
         uint32_t P[2] = { (uint32_t)n_comp, (uint32_t)top_k }; [e setBytes:P length:sizeof(P) atIndex:2];
         [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)n_comp + 63) / 64, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted];
+        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(allowed, [BA contents], (size_t)n_comp*sizeof(int));
     }
@@ -3008,7 +3023,7 @@ int llm_dsv4_metal_indexer_topk_t(LlmDsv4Metal* b, const float* scores, int n_to
         uint32_t P[3] = { (uint32_t)max_comp, (uint32_t)top_k, 256u }; [e setBytes:P length:sizeof(P) atIndex:2];
         [e setBuffer:BN offset:0 atIndex:3];
         [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_tokens, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted];
+        [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         rc = cb.error ? -3 : 0;
         if (rc == 0) memcpy(allowed, [BA contents], (size_t)n_tokens * max_comp * sizeof(int));
     }
@@ -3042,7 +3057,7 @@ int llm_dsv4_metal_comp_shift(LlmDsv4Metal* b, void* h, int n, int src) {
     [e setBuffer:buf offset:0 atIndex:0];
     uint32_t P[2] = { (uint32_t)n, (uint32_t)src }; [e setBytes:P length:sizeof(P) atIndex:1];
     [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)n + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
-    [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted];
+    [e endEncoding]; dsv4_res_commit(b); [cb commit]; [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     return cb.error ? -3 : 0;
 }
 
@@ -3427,7 +3442,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
     }
     [e endEncoding];
     dsv4_res_commit(b); [cb commit];
-    [cb waitUntilCompleted];
+    [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
     if (cb.error) return -3;
     if (heads_dev_out) *heads_dev_out = NULL;
     if (p0->dev_heads) { if (heads_dev_out) *heads_dev_out = (void*)HD; return 0; }   /* heads restano device (item b) */
@@ -3517,7 +3532,7 @@ int llm_dsv4_metal_attn_proj_fused_batch(LlmDsv4Metal* b, int nt,
         }
         [en endEncoding];
         dsv4_res_commit(b); [cb commit];
-        [cb waitUntilCompleted];
+        [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         rc = cb.error ? -3 : 0;
         if (rc == 0) {
             if (q_out)   memcpy(q_out,   [QB contents],  (size_t)nt*qd*sizeof(float));   /* NULL = resta device (item b) */
@@ -3851,7 +3866,7 @@ int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
         [e dispatchThreadgroups:MTLSizeMake((HC*D+63)/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
         [e endEncoding];
         dsv4_res_commit(b); [cb commit];
-        [cb waitUntilCompleted];
+        [cb waitUntilCompleted]; dsv4_gpu_acct(cb);
         rc = cb.error ? -3 : 0;
         if (rc == 0) {
             memcpy(q->out_hc, [OUTC contents], (size_t)HC*D*sizeof(float));
