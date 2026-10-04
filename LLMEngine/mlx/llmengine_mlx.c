@@ -1527,7 +1527,11 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
             char am[16]; int aq = (llm_ai_mlx_opt_get_str("actquant", am, (int)sizeof am) == 0 && am[0]);
             if (aq) {
                 mlx_array gx = mlx_array_new();   /* global_scale_x/w: null (non nvfp4) */
-                if (ok) ok = mlx_qqmm(res, xuse, w, scales, gsz, bts, am, gx, gx, stream) == 0;
+                /* mxfp8 richiede group_size 32 (i kernel Metal sono gs_32); l'attivazione e' bf16
+                 * e il qqmm la quantizza on-the-fly. */
+                mlx_optional_int ags = {32, true};
+                mlx_optional_int abt = {8, true};
+                if (ok) ok = mlx_qqmm(res, xuse, w, scales, ags, abt, am, gx, gx, stream) == 0;
                 mlx_array_free(gx);
             } else
             if (ok) ok = mlx_quantized_matmul(res, xuse, w, scales, biases, /*transpose=*/true, gsz, bts, e_mode, stream) == 0;
