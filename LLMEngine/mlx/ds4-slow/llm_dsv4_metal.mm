@@ -3014,7 +3014,7 @@ static void dsv4_encode_attn_mixed(LlmDsv4Metal* b, id<MTLComputeCommandEncoder>
         id<MTLBuffer> SINKS, id<MTLBuffer> OUT, NSUInteger qoff, NSUInteger ooff,
         int n_head, int hd, int n_raw, int n_comp, int has_allowed, NSUInteger raw_boff = 0) {
     /* Percorso packed8 (port vendored): 1 TG/head, 8 simdgroup, reduce in-TG. Solo DS4 (hd=512, 64 head). */
-    { int use_p8 = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_attn_p8", &v) == 0) use_p8 = v; }
+    { int use_p8 = 0; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_attn_p8", &v) == 0) use_p8 = v; }   /* default OFF (bit-exact): packed8 opt-in */
       if (use_p8 && b->pso_attn_p8 && hd == 512 && n_head == 64) {
           g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_attn_p8];
           [e setBuffer:Q offset:qoff atIndex:0]; [e setBuffer:RAWK offset:raw_boff atIndex:1]; [e setBuffer:COMPK offset:0 atIndex:2];
