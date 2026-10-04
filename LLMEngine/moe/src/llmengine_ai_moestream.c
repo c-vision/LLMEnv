@@ -189,10 +189,6 @@ const char* llmengine_ai_moestream_status_str(int status) {
     return llmengine_moe_status_str((LlmEngineMoeStatus)status);
 }
 
-static uint32_t ms_u32(const uint8_t* p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
 /* Generazione greedy (token-id → token-id) via l'adapter reale del modello (M15.5).
  * Ritorna il numero di token generati, o <0 (LlmEngineMoeStatus). */
 int llmengine_ai_moestream_generate(LlmEngineMoeProvider* p, const char* name,
@@ -202,12 +198,10 @@ int llmengine_ai_moestream_generate(LlmEngineMoeProvider* p, const char* name,
     LlmEngineMoeRuntime* rt = llmengine_moe_provider_get(p, name);
     if (rt == NULL) return LLMENGINE_MOE_ERR_MODEL_NOT_FOUND;
     llmengine_moe_provider_mark_used(p, name);   /* M21: uso → LRU */
-    uint8_t cb[96]; size_t got = 0;
-    if (llmengine_moe_get_tensor(rt, "__config__", cb, sizeof(cb), &got) != LLMENGINE_MOE_OK || got < 48)
-        return LLMENGINE_MOE_ERR_FORMAT;
-    if (ms_u32(cb) != 0x44414D47u) return LLMENGINE_MOE_ERR_FORMAT;  /* 'GMAD' */
-    uint32_t vocab = ms_u32(cb + 44);
-    if (vocab == 0) return LLMENGINE_MOE_ERR_FORMAT;
+    /* Il vocabolario viene dai METADATI del modello (adapter). Niente blob GMAD `__config__`. */
+    const LlmEngineMoeModelMeta* m = llmengine_moe_meta(rt);
+    if (m == NULL || m->vocab == 0) return LLMENGINE_MOE_ERR_FORMAT;
+    uint32_t vocab = m->vocab;
 
     float* in = (float*)malloc((size_t)(n_prompt ? n_prompt : 1) * sizeof(float));
     float* logits = (float*)malloc((size_t)vocab * sizeof(float));

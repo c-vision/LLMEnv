@@ -1,6 +1,6 @@
 /* llmengine_moe_discover.h — Auto-Discovery dell'architettura da un modello su disco.
  *
- * Deriva un `LlmEngineMoeArchDesc` (GMAD v2) e un name-map strutturale da `config.json` + index
+ * Deriva un `LlmEngineMoeArchDesc` e un name-map strutturale da `config.json` + index
  * safetensors (o header `model.safetensors`), SENZA convertire il modello. La parte strutturale
  * (~80-90%) è deterministica; le varianti semantiche (RoPE/attention/router/shared-expert)
  * possono essere corrette con override espliciti e restano soggette a verifica vs oracolo.
@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 typedef struct {
-    LlmEngineMoeArchDesc desc;                       /* descriptor derivato (GMAD-compatibile) */
+    LlmEngineMoeArchDesc desc;                       /* descriptor derivato (geometria numerica) */
     uint32_t       n_tensors;                  /* tensori visti nell'index/header */
     uint32_t       role_counts[LLMENGINE_MOE_ROLE_COUNT];
     uint32_t       experts_per_layer;          /* rilevato dai nomi degli esperti (0 = non visto) */

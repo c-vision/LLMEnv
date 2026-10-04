@@ -36,8 +36,22 @@ typedef struct {
     int  mm_present;              /* runtime.multimodal.present */
     int  mm_mtp;                  /* runtime.decode.mtp */
     int  mm_dspark;               /* runtime.decode.dspark */
+    /* geometry: geometria NUMERICA del modello (derivata da config.json), scritta nel `.gmbarch`
+     * automaticamente alla costruzione. Sostituisce il blob GMAD (eliminato): il runtime MoE legge
+     * questi valori dal `.gmbarch` invece che dal `__config__`. `geometry.present`=1 se la sezione c'e'. */
+    struct {
+        unsigned hidden, n_layers, n_heads, n_kv_heads, head_dim;
+        unsigned n_experts, topk, inter, vocab, ctx;
+        unsigned rope_variant, router_kind, norm_kind, flags;   /* vedi enum LLMENGINE_MOE_* */
+        float    eps, rope_theta;
+        int      present;
+    } geometry;
 } LlmDesc;
 int llmdesc_load(const char* path, LlmDesc* out);
+/* Costruisce (se assente) il `.gmbarch` PER-MODEL da `config.json`: deriva la `geometry` numerica e
+ * la fonde col template d'arch (ABI/<arch>.gmbarch) -> scrive <model_dir>/arch/<arch>.gmbarch.
+ * Ritorna 1 se scritto, 0 se gia' presente/inutile, -1 su errore. `out_path` (opz.) = path scritto. */
+int llmdesc_autobuild(const char* model_dir, char* out_path, size_t out_cap);
 /* Risolve la descrizione per un modello: legge `architectures`/`model_type` dal config.json, cerca
  * `<arch>.llmarch` in LLMDESC_ARCH_DIR (o `<hf_dir>/arch/`, o `<cwd>/arch/`, o accanto all'eseguibile),
  * la carica. Ritorna 0 e scrive `out`; `out_path` (opz.) riceve il percorso trovato. */

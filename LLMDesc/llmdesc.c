@@ -5,7 +5,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
-#include <dlfcn.h>   /* dladdr: per risolvere ABI/ dalla directory della dylib (CWD-indipendente) */
+#include <dlfcn.h>     /* dladdr: per risolvere ABI/ dalla directory della dylib (CWD-indipendente) */
+#include <sys/stat.h>  /* mkdir: per l'auto-build del `.gmbarch` in <model>/arch/ */
 
 static char* slurp(const char* p) {
     FILE* f = fopen(p, "rb"); if (!f) return NULL;
@@ -33,6 +34,12 @@ static const char* jv(const char* j, const char* key) {
     while ((p=strstr(p,pat))) { const char* c=p+strlen(pat); while(*c==' '||*c=='\t')c++; if(*c==':'){c++;while(*c==' '||*c=='\t')c++;return c;} p++; }
     return NULL;
 }
+static long jnum(const char* j, const char* key, long def) {
+    const char* v = jv(j, key); if (!v) return def; char* e; long r = strtol(v, &e, 10); return (e==v) ? def : r;
+}
+static double jflt2(const char* j, const char* key, double def) {
+    const char* v = jv(j, key); if (!v) return def; char* e; double r = strtod(v, &e); return (e==v) ? def : r;
+}
 int llmdesc_load(const char* path, LlmDesc* out) {
     if (!path||!out) return -1;
     memset(out,0,sizeof *out);
@@ -41,6 +48,26 @@ int llmdesc_load(const char* path, LlmDesc* out) {
     jcopy_str(jv(j,"scale_suffix"), out->scale_suffix, sizeof out->scale_suffix);
     jcopy_str(jv(j,"recipe"), out->recipe, sizeof out->recipe);
     jcopy_str(jv(j,"recipe_boost_fmt"), out->boost_fmt, sizeof out->boost_fmt);
+    /* geometry: geometria numerica (auto-costruita nel `.gmbarch`; sostituisce il GMAD). */
+    { const char* g=jv(j,"geometry"); if (g && *g=='{') {
+        out->geometry.present = 1;
+        out->geometry.hidden      = (unsigned)jnum(g,"hidden",0);
+        out->geometry.n_layers    = (unsigned)jnum(g,"n_layers",0);
+        out->geometry.n_heads     = (unsigned)jnum(g,"n_heads",0);
+        out->geometry.n_kv_heads  = (unsigned)jnum(g,"n_kv_heads",out->geometry.n_heads);
+        out->geometry.head_dim    = (unsigned)jnum(g,"head_dim",0);
+        out->geometry.n_experts   = (unsigned)jnum(g,"n_experts",0);
+        out->geometry.topk        = (unsigned)jnum(g,"topk",0);
+        out->geometry.inter       = (unsigned)jnum(g,"inter",0);
+        out->geometry.vocab       = (unsigned)jnum(g,"vocab",0);
+        out->geometry.ctx         = (unsigned)jnum(g,"ctx",0);
+        out->geometry.rope_variant= (unsigned)jnum(g,"rope_variant",0);
+        out->geometry.router_kind = (unsigned)jnum(g,"router_kind",0);
+        out->geometry.norm_kind   = (unsigned)jnum(g,"norm_kind",0);
+        out->geometry.flags       = (unsigned)jnum(g,"flags",0);
+        out->geometry.eps         = (float)jflt2(g,"eps",1e-5);
+        out->geometry.rope_theta  = (float)jflt2(g,"rope_theta",10000.0);
+    } }
     /* roles: [{ "match":"..","role":"..","submodel":".." }, ...] */
     { const char* r=jv(j,"roles"); if (r && *r=='[') { const char* p=r+1;
         while (*p && *p!=']' && out->n_roles<128) {
@@ -183,7 +210,34 @@ static void arch_slug(const char* arch, char* out, size_t cap) {
     while (o && out[o-1] == '_') o--;
     out[o] = 0;
 }
+/* Deriva la `geometry` numerica da config.json (auto-build / overlay su template d'arch). */
+static void derive_geom(const char* hf_dir, LlmDesc* out) {
+    char cfgp[2048]; snprintf(cfgp, sizeof cfgp, "%s/config.json", hf_dir);
+    char* cj = slurp(cfgp); if (!cj) return;
+    long hidden = jnum(cj,"hidden_size",0), layers = jnum(cj,"num_hidden_layers",0);
+    long heads  = jnum(cj,"num_attention_heads",0), kvh = jnum(cj,"num_key_value_heads",heads);
+    long hd = jnum(cj,"head_dim", (heads>0 && hidden>0) ? hidden/heads : 0);
+    long nexp = jnum(cj,"num_experts", jnum(cj,"num_local_experts",0));
+    long topk = jnum(cj,"num_experts_per_tok", nexp>0 ? 1 : 0);
+    long inter = jnum(cj,"moe_intermediate_size", jnum(cj,"intermediate_size",0));
+    long vocab = jnum(cj,"vocab_size",0), ctx = jnum(cj,"max_position_embeddings",0);
+    out->geometry.hidden=hidden; out->geometry.n_layers=layers; out->geometry.n_heads=heads;
+    out->geometry.n_kv_heads=kvh; out->geometry.head_dim=hd; out->geometry.n_experts=nexp;
+    out->geometry.topk=topk; out->geometry.inter=inter; out->geometry.vocab=vocab; out->geometry.ctx=ctx;
+    out->geometry.eps=(float)jflt2(cj,"rms_norm_eps", jflt2(cj,"layer_norm_eps",1e-5));
+    out->geometry.rope_theta=(float)jflt2(cj,"rope_theta",10000.0);
+    out->geometry.flags=(nexp>0)?8u:0u;   /* MOE; gli altri flag li deriva il runtime */
+    out->geometry.present=1;
+    free(cj);
+}
+static int llmdesc_resolve_core(const char* hf_dir, LlmDesc* out, char* out_path, size_t out_path_cap);
+/* Wrapper: risolve + garantisce la `geometry` (dal `.gmbarch` o derivata da config.json). GMAD eliminato. */
 int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out_path_cap) {
+    int rc = llmdesc_resolve_core(hf_dir, out, out_path, out_path_cap);
+    if (rc == 0 && out && !out->geometry.present) derive_geom(hf_dir, out);
+    return rc;
+}
+static int llmdesc_resolve_core(const char* hf_dir, LlmDesc* out, char* out_path, size_t out_path_cap) {
     if (!hf_dir || !out) return -1;
     char cfg[2048]; snprintf(cfg, sizeof cfg, "%s/config.json", hf_dir);
     char* j = slurp(cfg); if (!j) return -1;
@@ -235,6 +289,10 @@ int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out
             if (sl == dir) { dir[1] = 0; } else *sl = 0;
         }
     }
+    /* AUTO-BUILD (2026-10-04): nessun `.gmbarch` trovato -> COSTRUISCILO (geometry numerica da
+     * config.json + template ABI) in <model>/arch/<arch>.gmbarch, poi caricalo. GMAD eliminato. */
+    { char ap[2400]; if (llmdesc_autobuild(hf_dir, ap, sizeof ap) == 1 && llmdesc_load(ap, out) == 0) {
+          if (out_path) snprintf(out_path, out_path_cap, "%s", ap); return 0; } }
     /* FALLBACK GENERICO (2026-10-03): nessun `.gmbarch` per questo modello -> desc MINIMALE
      * (arch = model_type) e role map GENERICO dedotto dalla convenzione HF/GGUF (llmcodec_
      * rolemap_generic). Cosi' un modello a decoder standard si carica/convertе SENZA file arch;
@@ -269,6 +327,49 @@ int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out
     }
     if (out_path) out_path[0] = 0;
     return -1;
+}
+/* Costruisce il `.gmbarch` PER-MODEL: deriva la `geometry` numerica da config.json e la fonde col
+ * template d'arch (ABI/<arch>.gmbarch), scrivendo <model_dir>/arch/<arch>.gmbarch. Sostituisce il
+ * GMAD: il runtime legge la geometria dal `.gmbarch`. Ritorna 1 se scritto, -1 su errore. */
+int llmdesc_autobuild(const char* model_dir, char* out_path, size_t out_cap) {
+    if (!model_dir || !*model_dir) return -1;
+    char cfgp[2048]; snprintf(cfgp, sizeof cfgp, "%s/config.json", model_dir);
+    char* cj = slurp(cfgp); if (!cj) return -1;
+    char arch[96] = ""; jcopy_str(jv(cj, "model_type"), arch, sizeof arch);
+    if (!arch[0]) { const char* a = jv(cj, "architectures"); if (a && *a == '[') jcopy_str(a, arch, sizeof arch); }
+    if (!arch[0]) { free(cj); return -1; }
+    long hidden = jnum(cj,"hidden_size",0), layers = jnum(cj,"num_hidden_layers",0);
+    long heads  = jnum(cj,"num_attention_heads",0), kvh = jnum(cj,"num_key_value_heads",heads);
+    long hd = jnum(cj,"head_dim", (heads>0 && hidden>0) ? hidden/heads : 0);
+    long nexp = jnum(cj,"num_experts", jnum(cj,"num_local_experts",0));
+    long topk = jnum(cj,"num_experts_per_tok", nexp>0 ? 1 : 0);
+    long inter = jnum(cj,"moe_intermediate_size", jnum(cj,"intermediate_size",0));
+    long vocab = jnum(cj,"vocab_size",0), ctx = jnum(cj,"max_position_embeddings",0);
+    double eps = jflt2(cj,"rms_norm_eps", jflt2(cj,"layer_norm_eps", 1e-5));
+    double rtheta = jflt2(cj,"rope_theta", 10000.0);
+    int flags = (nexp > 0) ? 8u /* MOE */ : 0;   /* flag geometrici: MOE; gli altri li deriva il runtime */
+    free(cj);
+    char adir[2200]; snprintf(adir, sizeof adir, "%s/arch", model_dir);
+    mkdir(adir, 0777);   /* se esiste, EEXIST: ok */
+    char ap[2400]; snprintf(ap, sizeof ap, "%s/%s.gmbarch", adir, arch);
+    char tmpl[8192]; tmpl[0] = 0;
+    { char abi[2048]; if (llmdesc_abi_dir(abi, sizeof abi)) { char tp[2400]; snprintf(tp, sizeof tp, "%s/%s.gmbarch", abi, arch); char* t = slurp(tp); if (t) { snprintf(tmpl, sizeof tmpl, "%s", t); free(t); } } }
+    FILE* f = fopen(ap, "wb"); if (!f) return -1;
+    if (tmpl[0] && strchr(tmpl, '}')) {
+        char* last = strrchr(tmpl, '}'); *last = 0;   /* togli la '}' finale: appendiamo geometry */
+        fprintf(f, "%s,\n  \"geometry\": {\"hidden\":%ld,\"n_layers\":%ld,\"n_heads\":%ld,\"n_kv_heads\":%ld,\"head_dim\":%ld,"
+                   "\"n_experts\":%ld,\"topk\":%ld,\"inter\":%ld,\"vocab\":%ld,\"ctx\":%ld,\"rope_variant\":0,\"router_kind\":0,"
+                   "\"norm_kind\":0,\"flags\":%d,\"eps\":%g,\"rope_theta\":%g}\n}\n",
+                tmpl, hidden, layers, heads, kvh, hd, nexp, topk, inter, vocab, ctx, flags, eps, rtheta);
+    } else {
+        fprintf(f, "{\n  \"arch\": \"%s\",\n  \"geometry\": {\"hidden\":%ld,\"n_layers\":%ld,\"n_heads\":%ld,\"n_kv_heads\":%ld,\"head_dim\":%ld,"
+                   "\"n_experts\":%ld,\"topk\":%ld,\"inter\":%ld,\"vocab\":%ld,\"ctx\":%ld,\"rope_variant\":0,\"router_kind\":0,"
+                   "\"norm_kind\":0,\"flags\":%d,\"eps\":%g,\"rope_theta\":%g}\n}\n",
+                arch, hidden, layers, heads, kvh, hd, nexp, topk, inter, vocab, ctx, flags, eps, rtheta);
+    }
+    fclose(f);
+    if (out_path && out_cap) snprintf(out_path, out_cap, "%s", ap);
+    return 1;
 }
 /* Cartella ABI/ canonica: risale dal cwd cercando una dir `ABI` (dove vivono le descrizioni).
  * Ritorna 1 e scrive il path in `out` se trovata. Usata da LLM ARCH LIST e dal resolve. */

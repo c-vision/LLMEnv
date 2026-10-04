@@ -46,6 +46,7 @@ typedef struct {
     uint32_t expert_count;       /* esperti per layer */
     uint32_t experts_per_tok;    /* top-k del router */
     uint32_t hidden_size;
+    uint32_t vocab;              /* dimensione vocabolario (logits); sostituisce il vocab dal GMAD __config__ */
 } LlmEngineMoeModelMeta;
 
 #endif /* LLMENGINE_MOE_TYPES_H */

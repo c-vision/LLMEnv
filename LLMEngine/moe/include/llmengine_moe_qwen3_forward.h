@@ -16,7 +16,7 @@ extern "C" {
 typedef struct {
     uint32_t hidden, n_heads, n_kv_heads, head_dim, n_layers, n_experts, topk, inter, vocab, ctx;
     float eps, rope_theta;
-    /* varianti (descriptor generico GMAD v2) */
+    /* varianti (descriptor generico d'architettura) */
     uint32_t rope_variant;   /* 0 = half-split (Qwen/Llama), 1 = interleaved (GPT-NeoX) */
     uint32_t router_kind;    /* 0 = softmax sui top-k, 1 = sigmoid + renormalizzazione */
     uint32_t norm_kind;      /* 0 = RMSNorm, 1 = LayerNorm */

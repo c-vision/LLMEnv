@@ -1,16 +1,7 @@
-/* llmengine_moe_arch.c — implementazione del descriptor generico `GMAD` v2 e del name-map ruoli.
- * Vedi include/llmengine_moe_arch.h per il contratto. */
+/* llmengine_moe_arch.c — nome famiglia d'architettura e name-map ruoli dei tensori.
+ * Vedi include/llmengine_moe_arch.h per il contratto. Niente più blob `GMAD`. */
 #include "llmengine_moe_arch.h"
 #include <string.h>
-
-/* ── lettura/scrittura little-endian esplicita (indipendente dall'host) ── */
-static void put_u32(uint8_t* p, uint32_t v) {
-    p[0] = (uint8_t)(v & 0xff); p[1] = (uint8_t)((v >> 8) & 0xff);
-    p[2] = (uint8_t)((v >> 16) & 0xff); p[3] = (uint8_t)((v >> 24) & 0xff);
-}
-static uint32_t rd_u32(const uint8_t* p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
 
 const char* llmengine_moe_arch_family_name(uint32_t family) {
     switch (family) {
@@ -86,71 +77,4 @@ int llmengine_moe_role_of_tensor(const char* name) {
         return LLMENGINE_MOE_ROLE_FINAL_NORM;
 
     return LLMENGINE_MOE_ROLE_UNKNOWN;
-}
-
-void llmengine_moe_arch_encode(const LlmEngineMoeArchDesc* d, uint8_t out[LLMENGINE_MOE_GMAD_SIZE]) {
-    memset(out, 0, LLMENGINE_MOE_GMAD_SIZE);
-    put_u32(out + 0,  LLMENGINE_MOE_GMAD_MAGIC);
-    put_u32(out + 4,  LLMENGINE_MOE_GMAD_VERSION);
-    put_u32(out + 8,  d->arch_family);
-    put_u32(out + 12, d->hidden);
-    put_u32(out + 16, d->n_layers);
-    put_u32(out + 20, d->n_heads);
-    put_u32(out + 24, d->n_kv_heads);
-    put_u32(out + 28, d->head_dim);
-    put_u32(out + 32, d->n_experts);
-    put_u32(out + 36, d->topk);
-    put_u32(out + 40, d->inter);
-    put_u32(out + 44, d->vocab);
-    put_u32(out + 48, d->ctx);
-    put_u32(out + 52, d->rope_variant);
-    put_u32(out + 56, d->router_kind);
-    put_u32(out + 60, d->norm_kind);
-    put_u32(out + 64, d->flags);
-    memcpy(out + 68, &d->eps, 4);
-    memcpy(out + 72, &d->rope_theta, 4);
-}
-
-int llmengine_moe_arch_decode(const uint8_t* buf, size_t n, LlmEngineMoeArchDesc* out) {
-    if (buf == NULL || out == NULL || n < 48) return -1;
-    memset(out, 0, sizeof(*out));
-    uint32_t magic = rd_u32(buf);
-    if (magic == LLMENGINE_MOE_GMAD_MAGIC && n >= LLMENGINE_MOE_GMAD_USED) {   /* GMAD v2 */
-        out->arch_family  = rd_u32(buf + 8);
-        out->hidden       = rd_u32(buf + 12);
-        out->n_layers     = rd_u32(buf + 16);
-        out->n_heads      = rd_u32(buf + 20);
-        out->n_kv_heads   = rd_u32(buf + 24);
-        out->head_dim     = rd_u32(buf + 28);
-        out->n_experts    = rd_u32(buf + 32);
-        out->topk         = rd_u32(buf + 36);
-        out->inter        = rd_u32(buf + 40);
-        out->vocab        = rd_u32(buf + 44);
-        out->ctx          = rd_u32(buf + 48);
-        out->rope_variant = rd_u32(buf + 52);
-        out->router_kind  = rd_u32(buf + 56);
-        out->norm_kind    = rd_u32(buf + 60);
-        out->flags        = rd_u32(buf + 64);
-        memcpy(&out->eps, buf + 68, 4);
-        memcpy(&out->rope_theta, buf + 72, 4);
-        return 0;
-    }
-    if (magic == 0x46433351u) {                                    /* 'Q3CF' v1 (retro-compat) */
-        out->arch_family  = LLMENGINE_MOE_ARCH_QWEN3_MOE;
-        out->hidden       = rd_u32(buf + 8);
-        out->n_heads      = rd_u32(buf + 12);
-        out->n_kv_heads   = rd_u32(buf + 16);
-        out->head_dim     = rd_u32(buf + 20);
-        out->n_layers     = rd_u32(buf + 24);
-        out->n_experts    = rd_u32(buf + 28);
-        out->topk         = rd_u32(buf + 32);
-        out->inter        = rd_u32(buf + 36);
-        out->vocab        = rd_u32(buf + 40);
-        out->ctx          = rd_u32(buf + 44);
-        memcpy(&out->eps, buf + 48, 4);
-        memcpy(&out->rope_theta, buf + 52, 4);
-        out->flags = LLMENGINE_MOE_FLAG_QK_NORM | LLMENGINE_MOE_FLAG_MOE;
-        return 0;
-    }
-    return -1;
 }

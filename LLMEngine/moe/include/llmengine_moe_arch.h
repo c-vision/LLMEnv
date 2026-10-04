@@ -1,13 +1,8 @@
-/* llmengine_moe_arch.h — descriptor GENERICO di architettura (blob `GMAD` v2) + ruoli dei tensori.
+/* llmengine_moe_arch.h — descriptor GENERICO di architettura + ruoli dei tensori.
  *
- * UNICO posto che conosce il layout byte del blob `GMAD`: encode/decode. Usato da:
- *   - l'adattatore del runtime (`llmengine_moe_adapter_qwen3.c`) che lo LEGGE;
- *   - il tool di discovery (`tools/llm-discover.c`) che lo produce da un modello su disco.
- * Prima il layout era duplicato (scrittura nel converter, lettura nell'adapter): qui è unico.
- *
- * Obiettivo del filone Auto-Discovery: ridurre il costo per-modello. Il descriptor + il
- * name-map derivano da `config.json`/index safetensors (struttura, ~80-90%); le varianti
- * semantiche (RoPE/attention/router/shared-expert) sono override verificati contro un oracolo.
+ * Il descriptor (geometria numerica) non ha più un blob `GMAD` proprietario: la geometria è
+ * fornita dal `.gmbarch` (llmdesc) oppure derivata dal discovery (KV GGUF / config.json). Qui
+ * restano solo la struct `LlmEngineMoeArchDesc`, gli enum e la name-map dei ruoli.
  * Vedi `Todo/(open) - Model-Architecture-Auto-Discovery.md`. */
 #ifndef LLMENGINE_MOE_ARCH_H
 #define LLMENGINE_MOE_ARCH_H
@@ -19,12 +14,7 @@
 extern "C" {
 #endif
 
-#define LLMENGINE_MOE_GMAD_MAGIC    0x44414D47u   /* 'GMAD' (LE) */
-#define LLMENGINE_MOE_GMAD_VERSION  2
-#define LLMENGINE_MOE_GMAD_SIZE     96            /* byte allocati del blob __config__ */
-#define LLMENGINE_MOE_GMAD_USED     76            /* byte effettivamente usati (v2) */
-
-/* arch_family (campo cb+8). 0 = unknown -> adapter di fallback "container". */
+/* arch_family. 0 = unknown -> adapter di fallback "container". */
 enum {
     LLMENGINE_MOE_ARCH_UNKNOWN    = 0,
     LLMENGINE_MOE_ARCH_QWEN3_MOE  = 1,   /* Qwen3-MoE (riferimento bit-exact) */
@@ -80,12 +70,6 @@ const char* llmengine_moe_role_name(int role);
 /* Classifica il nome di UN tensore in un ruolo (struttura, dai suffissi noti).
  * Ritorna LLMENGINE_MOE_ROLE_UNKNOWN se non riconosciuto. */
 int llmengine_moe_role_of_tensor(const char* name);
-
-/* ── encode/decode ──
- * encode: riempie `out` (LLMENGINE_MOE_GMAD_SIZE byte, zero-padded) col blob GMAD v2.
- * decode: accetta GMAD v2 (>=76B) o retro-compat Q3CF v1 (64B). Ritorna 0 su successo. */
-void llmengine_moe_arch_encode(const LlmEngineMoeArchDesc* d, uint8_t out[LLMENGINE_MOE_GMAD_SIZE]);
-int  llmengine_moe_arch_decode(const uint8_t* buf, size_t n, LlmEngineMoeArchDesc* out);
 
 #ifdef __cplusplus
 }

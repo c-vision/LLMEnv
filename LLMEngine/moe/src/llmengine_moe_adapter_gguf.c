@@ -348,6 +348,7 @@ static LlmEngineMoeStatus gguf_load(void* self, const char* path, LlmEngineMoeMo
     if (meta != NULL) {
         meta->layer_count = s->cfg.n_layers; meta->expert_count = s->cfg.n_experts;
         meta->experts_per_tok = s->cfg.topk; meta->hidden_size = s->cfg.hidden;
+        meta->vocab = s->cfg.vocab;
         /* K1: byte totali degli esperti routed (per l'header del trace: byte/esperto =
          * routed_bytes / (layer*expert)); somma dei bundle gate+up+down per layer. */
         uint64_t routed = 0;

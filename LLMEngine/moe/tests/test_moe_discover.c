@@ -1,4 +1,4 @@
-/* test_moe_discover.c — test del descriptor generico (GMAD v2) e dell'auto-discovery.
+/* test_moe_discover.c — test del descriptor generico d'architettura e dell'auto-discovery.
  * Crea una directory temporanea con config.json + index safetensors minimi e verifica che il
  * discovery derivi i campi attesi; verifica role-map, round-trip encode/decode e override. */
 #include "llmengine_moe_discover.h"
@@ -113,21 +113,6 @@ int main(void) {
     CHECK(llmengine_moe_role_of_tensor("model.norm.weight") == LLMENGINE_MOE_ROLE_FINAL_NORM);
     CHECK(llmengine_moe_role_of_tensor("blk.0.ffn_gate_exps.weight") == LLMENGINE_MOE_ROLE_EXPERT_GATE);
     CHECK(llmengine_moe_role_of_tensor("model.layers.0.mlp.experts.3.down_proj.weight") == LLMENGINE_MOE_ROLE_EXPERT_DOWN);
-
-    /* ── encode/decode round-trip ── */
-    LlmEngineMoeArchDesc d; memset(&d, 0, sizeof(d));
-    d.arch_family = LLMENGINE_MOE_ARCH_QWEN3_MOE; d.hidden = 16; d.n_layers = 1;
-    d.n_heads = 2; d.n_kv_heads = 1; d.head_dim = 8; d.n_experts = 2; d.topk = 1;
-    d.inter = 8; d.vocab = 32; d.ctx = 512; d.eps = 1e-6f; d.rope_theta = 1e7f;
-    d.flags = LLMENGINE_MOE_FLAG_QK_NORM | LLMENGINE_MOE_FLAG_MOE;
-    uint8_t blob[LLMENGINE_MOE_GMAD_SIZE];
-    llmengine_moe_arch_encode(&d, blob);
-    LlmEngineMoeArchDesc r;
-    CHECK(llmengine_moe_arch_decode(blob, sizeof(blob), &r) == 0);
-    CHECK(r.arch_family == d.arch_family && r.hidden == 16 && r.n_layers == 1 && r.n_experts == 2);
-    CHECK(r.head_dim == 8 && r.ctx == 512 && r.flags == d.flags);
-    /* blob troncato/estraneo → errore */
-    CHECK(llmengine_moe_arch_decode(blob, 10, &r) != 0);
 
     /* ── discovery su dir temporanea ── */
     char tmpl[] = "/tmp/llm-discover-XXXXXX";
