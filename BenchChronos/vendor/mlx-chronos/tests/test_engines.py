@@ -1,0 +1,1544 @@
+from contextlib import contextmanager
+import json
+import time
+from unittest.mock import MagicMock, patch
+
+import httpx
+import pytest
+
+from mlx_chronos.constants import (
+    BENCHMARK_REQUEST_TEMPERATURE,
+    BENCHMARK_REQUEST_TOP_P,
+    VALID_ENGINE_NAMES,
+)
+from mlx_chronos.engines import (
+    LMStudioEngine,
+    ENGINES,
+    OMLXEngine,
+    MLXLMEngine,
+    RapidMLXEngine,
+    VLLMMLXEngine,
+    OllamaEngine,
+    get_engine,
+)
+from mlx_chronos.measurements import ThroughputMeasurement
+
+def http_error_response(method: str, url: str, status_code: int, text: str) -> httpx.Response:
+    return httpx.Response(
+        status_code,
+        text=text,
+        request=httpx.Request(method, url),
+    )
+
+class MockStreamResponse:
+    def __init__(
+        self,
+        lines: list[str] | None = None,
+        status_code: int = 200,
+        text: str = "",
+    ):
+        self.lines = lines or []
+        self.status_code = status_code
+        self.response = http_error_response(
+            "POST",
+            "http://localhost:8000/v1/chat/completions",
+            status_code,
+            text,
+        )
+
+    def raise_for_status(self):
+        self.response.raise_for_status()
+
+    def iter_lines(self):
+        yield from self.lines
+
+
+class MockStreamContext:
+    def __init__(self, response: MockStreamResponse):
+        self.response = response
+
+    def __enter__(self):
+        return self.response
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class SlowCloseStreamContext(MockStreamContext):
+    def __exit__(self, exc_type, exc, tb):
+        time.perf_counter()
+        return False
+
+
+def stream_response(lines: list[str], status_code: int = 200, text: str = ""):
+    return MockStreamContext(MockStreamResponse(lines, status_code, text))
+
+
+def completion_stream(
+    content: str = "hello",
+    completion_tokens: int | None = 100,
+) -> list[str]:
+    lines = [
+        'data: {"choices": [{"delta": {"role": "assistant"}}]}',
+        f'data: {json.dumps({"choices": [{"delta": {"content": content}}]})}',
+    ]
+    if completion_tokens is not None:
+        lines.append(
+            "data: "
+            + json.dumps(
+                {
+                    "choices": [],
+                    "usage": {"completion_tokens": completion_tokens},
+                }
+            )
+        )
+    lines.append("data: [DONE]")
+    return lines
+
+
+def test_stream_chunk_role_is_not_counted_as_content():
+    engine = OMLXEngine()
+    chunk = {"choices": [{"delta": {"role": "assistant"}}]}
+    assert engine._stream_chunk_has_content(chunk) is False
+
+def test_stream_chunk_whitespace_is_counted_as_content():
+    engine = OMLXEngine()
+    chunk = {"choices": [{"delta": {"content": "   "}}]}
+    assert engine._stream_chunk_has_content(chunk) is True
+
+def test_stream_chunk_text_content_is_counted():
+    engine = OMLXEngine()
+    chunk = {"choices": [{"delta": {"content": "Hello"}}]}
+    assert engine._stream_chunk_has_content(chunk) is True
+
+def test_stream_chunk_invalid_choice_shape_is_ignored():
+    engine = OMLXEngine()
+    chunk = {"choices": ["not-a-dict"]}
+    assert engine._stream_chunk_has_content(chunk) is False
+
+
+@pytest.mark.parametrize("value", [True, 100.0, 3.5, float("inf"), float("nan")])
+def test_stream_usage_only_accepts_exact_positive_integer_counts(value):
+    engine = OMLXEngine()
+
+    assert engine._extract_stream_usage_tokens(
+        {"usage": {"completion_tokens": value}}
+    ) is None
+    assert engine._extract_stream_usage_tokens(
+        {"usage": {"completion_tokens": 100}}
+    ) == 100
+
+def test_mlx_lm_install_check_does_not_import_mlx_lm(monkeypatch):
+    called = {}
+    def fake_find_spec(name):
+        called["name"] = name
+        return None
+    monkeypatch.setattr("importlib.util.find_spec", fake_find_spec)
+    assert MLXLMEngine().is_installed() is False
+    assert called.get("name") == "mlx_lm"
+
+def test_vllm_mlx_install_check_accepts_cli(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/vllm-mlx")
+
+    assert VLLMMLXEngine().is_installed() is True
+
+def test_vllm_mlx_install_check_accepts_package(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda command: None)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+
+    assert VLLMMLXEngine().is_installed() is True
+
+def test_get_engine():
+    assert isinstance(get_engine("omlx"), OMLXEngine)
+    assert isinstance(get_engine("vllm-mlx"), VLLMMLXEngine)
+    with pytest.raises(ValueError, match="Unknown engine: 'fake'"):
+        get_engine("fake")
+
+def test_engine_registry_matches_schema_constants():
+    assert set(ENGINES) == VALID_ENGINE_NAMES
+
+
+def test_process_match_rejects_generic_python_process(monkeypatch):
+    fake_process = MagicMock()
+    fake_process.name.return_value = "python"
+    fake_process.cmdline.return_value = ["python", "-m", "jupyter"]
+    monkeypatch.setattr("mlx_chronos.engines.psutil.Process", lambda _pid: fake_process)
+
+    assert OMLXEngine()._process_matches_engine(12345) is False
+
+
+def test_process_match_accepts_engine_specific_python_module(monkeypatch):
+    fake_process = MagicMock()
+    fake_process.name.return_value = "python"
+    fake_process.cmdline.return_value = ["python", "-m", "rapid_mlx.server"]
+    monkeypatch.setattr("mlx_chronos.engines.psutil.Process", lambda _pid: fake_process)
+
+    assert RapidMLXEngine()._process_matches_engine(12345) is True
+
+def test_process_match_accepts_vllm_mlx_python_module(monkeypatch):
+    fake_process = MagicMock()
+    fake_process.name.return_value = "python"
+    fake_process.cmdline.return_value = ["python", "-m", "vllm_mlx.cli", "serve"]
+    monkeypatch.setattr("mlx_chronos.engines.psutil.Process", lambda _pid: fake_process)
+
+    assert VLLMMLXEngine()._process_matches_engine(12345) is True
+
+
+def test_process_match_accepts_omlx_server_entrypoint(monkeypatch):
+    fake_process = MagicMock()
+    fake_process.name.return_value = "python3.11"
+    fake_process.cmdline.return_value = ["omlx-server", "", "", "", "", ""]
+    monkeypatch.setattr("mlx_chronos.engines.psutil.Process", lambda _pid: fake_process)
+
+    assert OMLXEngine()._process_matches_engine(12345) is True
+
+
+def test_process_match_rejects_engine_name_only_in_path(monkeypatch):
+    fake_process = MagicMock()
+    fake_process.name.return_value = "python"
+    fake_process.cmdline.return_value = ["python", "/tmp/omlx-benchmarks/test.py"]
+    monkeypatch.setattr("mlx_chronos.engines.psutil.Process", lambda _pid: fake_process)
+
+    assert OMLXEngine()._process_matches_engine(12345) is False
+
+
+@patch("httpx.stream")
+def test_measure_tokens_per_second(mock_stream):
+    mock_stream.return_value = stream_response(
+        completion_stream(content="hello", completion_tokens=150)
+    )
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.5, 1.5]):
+        tps = engine.measure_tokens_per_second("test prompt", "default", 100)
+        assert tps == 100.0  # 150 tokens / 1.5s = 100.0
+
+@patch("httpx.stream")
+def test_measure_throughput_returns_structured_measurement(mock_stream):
+    mock_stream.return_value = stream_response(
+        completion_stream(content="hello", completion_tokens=150)
+    )
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.5, 1.5]):
+        measurement = engine.measure_throughput("test prompt", "default", 100)
+
+    assert isinstance(measurement, ThroughputMeasurement)
+    assert measurement.request_tokens_per_second == 100.0
+    assert measurement.completion_tokens == 150
+    assert measurement.token_count_source == "usage.completion_tokens"
+    assert measurement.elapsed_seconds == 1.5
+    assert measurement.decode_tokens_per_second == 149.0
+
+
+@patch("httpx.stream")
+def test_measure_throughput_records_terminal_finish_reason(mock_stream):
+    lines = completion_stream(content="hello", completion_tokens=100)
+    lines.insert(
+        -1,
+        'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
+    )
+    mock_stream.return_value = stream_response(lines)
+
+    with patch("time.perf_counter", side_effect=[0.0, 0.5, 1.4, 1.5]):
+        measurement = OMLXEngine().measure_throughput("test prompt")
+
+    assert measurement.finish_reason == "stop"
+    assert measurement.decode_timing_source == "client_stream"
+
+
+@patch("httpx.stream")
+def test_measure_throughput_uses_provided_http_client(mock_stream):
+    client = MagicMock()
+    client.stream.return_value = stream_response(
+        completion_stream(content="hello", completion_tokens=100)
+    )
+    engine = OMLXEngine()
+
+    with patch("time.perf_counter", side_effect=[0.0, 0.5, 1.5]):
+        measurement = engine.measure_throughput(
+            "test prompt",
+            "default",
+            100,
+            client=client,
+        )
+
+    assert measurement.request_tokens_per_second == pytest.approx(66.67, abs=0.001)
+    client.stream.assert_called_once()
+    mock_stream.assert_not_called()
+
+
+@patch("httpx.stream")
+def test_measure_throughput_uses_client_stream_decode_timing(mock_stream):
+    mock_stream.return_value = stream_response(
+        completion_stream(content="hello", completion_tokens=100)
+    )
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.5, 5.5]):
+        measurement = engine.measure_throughput("test prompt", "default", 100)
+
+    assert measurement.request_tokens_per_second == pytest.approx(18.18, abs=0.001)
+    assert measurement.decode_tokens_per_second == pytest.approx(19.8, abs=0.001)
+    assert measurement.decode_timing_source == "client_stream"
+
+
+@patch("httpx.stream")
+def test_measure_throughput_uses_stored_elapsed_for_request_tps(mock_stream):
+    mock_stream.return_value = stream_response(
+        completion_stream(content="hello", completion_tokens=100)
+    )
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.1, 0.4995]):
+        measurement = engine.measure_throughput("test prompt", "default", 100)
+
+    rounded_elapsed = round(0.4995, 3)
+    assert measurement.elapsed_seconds == rounded_elapsed
+    assert measurement.request_tokens_per_second == round(100 / rounded_elapsed, 2)
+
+
+@patch("httpx.stream")
+def test_measure_throughput_uses_done_time_not_stream_close(mock_stream):
+    mock_stream.return_value = SlowCloseStreamContext(
+        MockStreamResponse(
+            completion_stream(content="hello", completion_tokens=100)
+        )
+    )
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.1, 1.0, 10.0]):
+        measurement = engine.measure_throughput("test prompt", "default", 100)
+
+    assert measurement.elapsed_seconds == 1.0
+    assert measurement.request_tokens_per_second == 100.0
+
+
+@patch("httpx.stream")
+def test_measure_throughput_records_progress_samples(mock_stream):
+    content = " ".join(["token"] * 120)
+    mock_stream.return_value = stream_response(
+        completion_stream(content=content, completion_tokens=120)
+    )
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.5, 1.0, 2.0]):
+        measurement = engine.measure_throughput(
+            "test prompt",
+            "default",
+            120,
+            progress_sample_interval_tokens=100,
+        )
+
+    assert measurement.request_tokens_per_second == 60.0
+    assert measurement.progress_samples == (
+        {
+            "completion_tokens": 100,
+            "elapsed_seconds": 1.0,
+            "tokens_per_second": 100.0,
+            "token_count_source": "word_fallback",
+        },
+        {
+            "completion_tokens": 120,
+            "elapsed_seconds": 2.0,
+            "tokens_per_second": 60.0,
+            "token_count_source": "usage.completion_tokens",
+        },
+    )
+
+
+@patch("httpx.stream")
+def test_measure_throughput_deduplicates_burst_progress_samples(mock_stream):
+    content = " ".join(["token"] * 900)
+    mock_stream.return_value = stream_response(
+        completion_stream(content=content, completion_tokens=None)
+    )
+    engine = OMLXEngine()
+    with patch(
+        "time.perf_counter",
+        side_effect=[0.0, 0.5, *([32.7324] * 9), 32.733],
+    ):
+        measurement = engine.measure_throughput(
+            "test prompt",
+            "default",
+            900,
+            progress_sample_interval_tokens=100,
+        )
+
+    assert measurement.progress_samples == (
+        {
+            "completion_tokens": 900,
+            "elapsed_seconds": 32.732,
+            "tokens_per_second": round(900 / 32.732, 2),
+            "token_count_source": "word_fallback",
+        },
+    )
+
+
+def test_append_progress_sample_uses_rounded_elapsed_for_tps():
+    engine = OMLXEngine()
+    samples = []
+    elapsed_seconds = 0.4995
+
+    engine._append_progress_sample(
+        samples,
+        completion_tokens=100,
+        elapsed_seconds=elapsed_seconds,
+        token_count_source="usage.completion_tokens",
+    )
+
+    rounded_elapsed_seconds = round(elapsed_seconds, 3)
+    assert samples == [
+        {
+            "completion_tokens": 100,
+            "elapsed_seconds": rounded_elapsed_seconds,
+            "tokens_per_second": round(100 / rounded_elapsed_seconds, 2),
+            "token_count_source": "usage.completion_tokens",
+        }
+    ]
+
+
+def test_append_progress_sample_skips_elapsed_that_rounds_to_zero():
+    engine = OMLXEngine()
+    samples = []
+
+    engine._append_progress_sample(
+        samples,
+        completion_tokens=100,
+        elapsed_seconds=0.0004,
+        token_count_source="usage.completion_tokens",
+    )
+
+    assert samples == []
+
+
+def test_append_progress_sample_replaces_duplicate_elapsed_for_same_source():
+    engine = OMLXEngine()
+    samples = []
+
+    engine._append_progress_sample(
+        samples,
+        completion_tokens=100,
+        elapsed_seconds=1.2344,
+        token_count_source="word_fallback",
+    )
+    engine._append_progress_sample(
+        samples,
+        completion_tokens=200,
+        elapsed_seconds=1.2344,
+        token_count_source="word_fallback",
+    )
+
+    assert samples == [
+        {
+            "completion_tokens": 200,
+            "elapsed_seconds": 1.234,
+            "tokens_per_second": round(200 / 1.234, 2),
+            "token_count_source": "word_fallback",
+        }
+    ]
+
+
+def test_append_progress_sample_keeps_same_elapsed_when_source_changes():
+    engine = OMLXEngine()
+    samples = []
+
+    engine._append_progress_sample(
+        samples,
+        completion_tokens=100,
+        elapsed_seconds=1.2344,
+        token_count_source="word_fallback",
+    )
+    engine._append_progress_sample(
+        samples,
+        completion_tokens=120,
+        elapsed_seconds=1.2344,
+        token_count_source="usage.completion_tokens",
+    )
+
+    assert len(samples) == 2
+
+
+@patch("httpx.stream")
+def test_measure_throughput_scales_timeout_for_long_outputs(mock_stream):
+    mock_stream.return_value = stream_response(
+        completion_stream(content="hello", completion_tokens=1000)
+    )
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.5, 2.0]):
+        engine.measure_throughput("test prompt", "default", 1000)
+
+    assert mock_stream.call_args.kwargs["timeout"] == 500.0
+
+@patch("httpx.stream")
+def test_measure_tokens_per_second_marks_word_fallback(mock_stream):
+    mock_stream.return_value = stream_response(
+        completion_stream(content="one two three four", completion_tokens=None)
+    )
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.5, 2.0]):
+        tps = engine.measure_tokens_per_second("test prompt", "default", 100)
+        assert tps == 2.0
+
+@patch("httpx.stream")
+def test_measure_tokens_per_second_includes_optional_min_tokens(mock_stream):
+    mock_stream.return_value = stream_response(completion_stream())
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.5, 1.0]):
+        engine.measure_tokens_per_second(
+            "test prompt",
+            "default",
+            max_tokens=100,
+            min_tokens=80,
+        )
+
+    payload = mock_stream.call_args.kwargs["json"]
+    assert payload["max_tokens"] == 100
+    assert payload["min_tokens"] == 80
+    assert payload["stream"] is True
+    assert payload["temperature"] == BENCHMARK_REQUEST_TEMPERATURE
+    assert payload["top_p"] == BENCHMARK_REQUEST_TOP_P
+    assert payload["stream_options"] == {"include_usage": True}
+
+
+@patch("httpx.stream")
+def test_measure_tokens_per_second_can_skip_stream_usage(mock_stream):
+    mock_stream.return_value = stream_response(completion_stream())
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.5, 1.0]):
+        engine.measure_tokens_per_second(
+            "test prompt",
+            "default",
+            max_tokens=100,
+            request_stream_usage=False,
+        )
+
+    payload = mock_stream.call_args.kwargs["json"]
+    assert "stream_options" not in payload
+
+
+@patch("httpx.stream")
+def test_measure_throughput_retries_without_stream_usage_when_unsupported(mock_stream):
+    mock_stream.side_effect = [
+        stream_response(
+            [],
+            status_code=400,
+            text='{"error":"stream_options include_usage is not supported"}',
+        ),
+        stream_response(
+            completion_stream(content="one two", completion_tokens=None),
+        ),
+    ]
+
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 1.0, 1.5, 2.0]):
+        measurement = engine.measure_throughput("test prompt", "default", 100)
+
+    first_payload = mock_stream.call_args_list[0].kwargs["json"]
+    retry_payload = mock_stream.call_args_list[1].kwargs["json"]
+    assert first_payload["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in retry_payload
+    assert measurement.token_count_source == "word_fallback"
+    assert measurement.decode_tokens_per_second is None
+    assert measurement.decode_timing_source == "unavailable"
+
+
+@patch("httpx.stream")
+def test_measure_throughput_can_forbid_a_hidden_retry_without_stream_usage(mock_stream):
+    mock_stream.return_value = stream_response(
+        [], status_code=400,
+        text='{"error":"stream_options include_usage is not supported"}',
+    )
+    with pytest.raises(RuntimeError, match="measure throughput"):
+        OMLXEngine().measure_throughput(
+            "test prompt", "default", 100,
+            allow_stream_usage_fallback=False,
+        )
+    assert mock_stream.call_count == 1
+
+@patch("httpx.stream", side_effect=httpx.TimeoutException("timed out"))
+def test_measure_tokens_per_second_wraps_http_errors(mock_stream):
+    engine = OMLXEngine()
+    with patch("mlx_chronos.http_retry.time.sleep"):
+        with pytest.raises(RuntimeError, match="engine=omlx; action=measure throughput"):
+            engine.measure_tokens_per_second("test prompt", "default", 100)
+    assert mock_stream.call_count == 1
+
+
+@patch("httpx.stream")
+def test_measure_tokens_per_second_does_not_retry_stream_setup_failure(mock_stream):
+    mock_stream.side_effect = [
+        httpx.ConnectError("connection reset"),
+        stream_response(completion_stream(content="hello", completion_tokens=150)),
+    ]
+
+    engine = OMLXEngine()
+    with patch("mlx_chronos.http_retry.time.sleep") as mock_sleep:
+        with pytest.raises(RuntimeError, match="connection reset"):
+            engine.measure_throughput("test prompt", "default", 100)
+
+    assert mock_stream.call_count == 1
+    mock_sleep.assert_not_called()
+
+@patch("httpx.stream")
+def test_measure_tokens_per_second_reports_status_model_and_body(mock_stream):
+    mock_stream.return_value = stream_response(
+        [],
+        status_code=404,
+        text='{"error":"model not found"}',
+    )
+
+    engine = OMLXEngine()
+    with pytest.raises(RuntimeError) as exc:
+        engine.measure_tokens_per_second("test prompt", "missing-model", 100)
+
+    message = str(exc.value)
+    assert "engine=omlx" in message
+    assert "action=measure throughput" in message
+    assert "url=http://localhost:8000/v1/chat/completions" in message
+    assert "model='missing-model'" in message
+    assert "request_model='missing-model'" in message
+    assert "status=404" in message
+    assert "model not found" in message
+
+@patch("httpx.stream")
+def test_measure_tokens_per_second_rejects_empty_stream(mock_stream):
+    mock_stream.return_value = stream_response(["data: []", "data: [DONE]"])
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 1.0]):
+        with pytest.raises(RuntimeError, match="stream ended before"):
+            engine.measure_tokens_per_second("test prompt", "default", 100)
+
+@patch("httpx.get")
+def test_list_model_ids(mock_get):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "data": [
+            {"id": "org/test-model"},
+            {"id": ""},
+            {"object": "model"},
+        ]
+    }
+    mock_get.return_value = mock_response
+
+    assert OMLXEngine().list_model_ids() == ["org/test-model"]
+
+
+@patch("httpx.get")
+def test_list_model_ids_retries_transient_failure(mock_get):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"data": [{"id": "org/test-model"}]}
+    mock_get.side_effect = [
+        httpx.ConnectError("connection reset"),
+        mock_response,
+    ]
+
+    with patch("mlx_chronos.http_retry.time.sleep") as mock_sleep:
+        assert OMLXEngine().list_model_ids() == ["org/test-model"]
+
+    assert mock_get.call_count == 2
+    mock_sleep.assert_called_once()
+
+@patch("httpx.get")
+def test_list_model_ids_reports_status_url_and_body(mock_get):
+    mock_get.return_value = http_error_response(
+        "GET",
+        "http://localhost:8000/v1/models",
+        500,
+        "server exploded",
+    )
+
+    with pytest.raises(RuntimeError) as exc:
+        OMLXEngine().list_model_ids()
+
+    message = str(exc.value)
+    assert "engine=omlx" in message
+    assert "action=list models" in message
+    assert "url=http://localhost:8000/v1/models" in message
+    assert "status=500" in message
+    assert "server exploded" in message
+
+@patch("httpx.get")
+def test_list_model_ids_rejects_invalid_shape(mock_get):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"data": {"id": "org/test-model"}}
+    mock_get.return_value = mock_response
+
+    with pytest.raises(RuntimeError, match="invalid model list"):
+        OMLXEngine().list_model_ids()
+
+def test_resolve_listed_model_id_matches_suffix():
+    engine = OMLXEngine()
+    resolved = engine.resolve_listed_model_id(
+        "test-model",
+        ["org/test-model"],
+    )
+    assert resolved == "org/test-model"
+
+@patch("httpx.post")
+def test_validate_completion_request(mock_post):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+    mock_post.return_value = mock_response
+
+    request_model = OMLXEngine().validate_completion_request("org/test-model")
+
+    assert request_model == "org/test-model"
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["model"] == "org/test-model"
+    assert payload["max_tokens"] == 1
+    assert payload["stream"] is False
+    assert payload["temperature"] == BENCHMARK_REQUEST_TEMPERATURE
+    assert payload["top_p"] == BENCHMARK_REQUEST_TOP_P
+
+@patch("httpx.post")
+def test_validate_completion_request_reports_status_model_and_body(mock_post):
+    mock_post.return_value = http_error_response(
+        "POST",
+        "http://localhost:8000/v1/chat/completions",
+        400,
+        '{"error":"unknown model"}',
+    )
+
+    with pytest.raises(RuntimeError) as exc:
+        OMLXEngine().validate_completion_request("missing-model")
+
+    message = str(exc.value)
+    assert "engine=omlx" in message
+    assert "action=validate completion" in message
+    assert "model='missing-model'" in message
+    assert "request_model='missing-model'" in message
+    assert "status=400" in message
+    assert "unknown model" in message
+
+@patch("httpx.post")
+def test_validate_completion_request_rejects_invalid_shape(mock_post):
+    mock_response = MagicMock()
+    mock_response.json.return_value = []
+    mock_post.return_value = mock_response
+
+    with pytest.raises(RuntimeError, match="invalid completion response"):
+        OMLXEngine().validate_completion_request("org/test-model")
+
+
+@patch("httpx.get")
+@patch.object(OMLXEngine, "get_server_pid", return_value=12345)
+def test_omlx_server_running_requires_matching_listener_pid(mock_pid, mock_get):
+    models_response = MagicMock(status_code=200)
+    mock_get.return_value = models_response
+
+    assert OMLXEngine().is_server_running() is True
+    mock_pid.assert_called_once()
+
+
+@patch("httpx.get")
+@patch.object(OMLXEngine, "get_server_pid", return_value=None)
+def test_omlx_server_running_rejects_wrong_server_on_port(mock_pid, mock_get):
+    models_response = MagicMock(status_code=200)
+    mock_get.return_value = models_response
+
+    assert OMLXEngine().is_server_running() is False
+    mock_pid.assert_called_once()
+
+
+@patch("httpx.get")
+def test_server_running_suppresses_retry_warnings_for_passive_checks(mock_get, caplog):
+    mock_get.side_effect = httpx.ConnectError("connection refused")
+    caplog.set_level("WARNING", logger="mlx_chronos")
+
+    assert OMLXEngine().is_server_running() is False
+    assert mock_get.call_count == 3
+    assert "server check failed with transient HTTP error" not in caplog.text
+
+
+@patch("httpx.get")
+def test_ollama_server_running_requires_ollama_identity(mock_get):
+    models_response = MagicMock(status_code=200)
+    version_response = MagicMock(status_code=200)
+    version_response.json.return_value = {"version": "0.24.0"}
+    mock_get.side_effect = [models_response, version_response]
+
+    assert OllamaEngine().is_server_running() is True
+
+
+@patch("httpx.get")
+def test_ollama_server_running_rejects_wrong_server_on_port(mock_get):
+    models_response = MagicMock(status_code=200)
+    version_response = MagicMock(status_code=404)
+    mock_get.side_effect = [models_response, version_response]
+
+    assert OllamaEngine().is_server_running() is False
+
+
+@patch("httpx.post")
+def test_ollama_validate_model_backend_accepts_safetensors(mock_post):
+    response = MagicMock()
+    response.json.return_value = {
+        "details": {
+            "format": "safetensors",
+            "quantization_level": "nvfp4",
+            "family": "qwen3",
+            "parameter_size": "4.0B",
+        }
+    }
+    mock_post.return_value = response
+
+    metadata = OllamaEngine().validate_model_backend("qwen3.5:4b-mlx")
+
+    assert metadata == {
+        "format": "safetensors",
+        "quantization": "nvfp4",
+    }
+    assert mock_post.call_args.args[0] == "http://localhost:11434/api/show"
+    assert mock_post.call_args.kwargs["json"] == {"model": "qwen3.5:4b-mlx"}
+
+
+@patch("httpx.post")
+def test_ollama_validate_model_backend_rejects_gguf(mock_post):
+    response = MagicMock()
+    response.json.return_value = {
+        "details": {
+            "format": "gguf",
+            "quantization_level": "Q4_0",
+        }
+    }
+    mock_post.return_value = response
+
+    with pytest.raises(RuntimeError, match="GGUF"):
+        OllamaEngine().validate_model_backend("qwen3.5:4b")
+
+
+@patch("httpx.post")
+def test_ollama_validate_model_backend_rejects_unknown_format(mock_post):
+    response = MagicMock()
+    response.json.return_value = {"details": {"format": "mystery"}}
+    mock_post.return_value = response
+
+    with pytest.raises(RuntimeError, match="unsupported Ollama model format"):
+        OllamaEngine().validate_model_backend("qwen3.5:4b-mlx")
+
+
+@patch("httpx.post")
+def test_ollama_validate_model_backend_requires_details_format(mock_post):
+    response = MagicMock()
+    response.json.return_value = {"details": {}}
+    mock_post.return_value = response
+
+    with pytest.raises(RuntimeError, match="details.format is missing"):
+        OllamaEngine().validate_model_backend("qwen3.5:4b-mlx")
+
+
+@patch("httpx.post")
+def test_ollama_validate_model_backend_requires_quantization(mock_post):
+    response = MagicMock()
+    response.json.return_value = {"details": {"format": "safetensors"}}
+    mock_post.return_value = response
+
+    with pytest.raises(RuntimeError, match="quantization_level is missing"):
+        OllamaEngine().validate_model_backend("qwen3.5:4b-mlx")
+
+
+@patch("httpx.get")
+def test_vllm_mlx_server_running_requires_health_identity(mock_get):
+    models_response = MagicMock(status_code=200)
+    health_response = MagicMock(status_code=200)
+    health_response.json.return_value = {
+        "status": "healthy",
+        "model_loaded": True,
+        "available_models": ["org/test-model"],
+        "model_type": "llm",
+    }
+    mock_get.side_effect = [models_response, health_response]
+
+    assert VLLMMLXEngine().is_server_running() is True
+
+
+@patch("httpx.get")
+def test_vllm_mlx_server_running_accepts_ready_health_identity(mock_get):
+    models_response = MagicMock(status_code=200)
+    health_response = MagicMock(status_code=200)
+    health_response.json.return_value = {
+        "status": "healthy",
+        "ready": True,
+        "model_loaded": True,
+        "model_name": "Qwen3.5-4B-nvfp4",
+        "model_type": "llm",
+        "engine_type": "batched",
+    }
+    mock_get.side_effect = [models_response, health_response]
+
+    assert VLLMMLXEngine().is_server_running() is True
+
+
+@patch("httpx.get")
+def test_vllm_mlx_server_running_rejects_wrong_server_on_port(mock_get):
+    models_response = MagicMock(status_code=200)
+    health_response = MagicMock(status_code=200)
+    health_response.json.return_value = {"status": "healthy"}
+    mock_get.side_effect = [models_response, health_response]
+
+    assert VLLMMLXEngine().is_server_running() is False
+
+
+def test_engine_port_env_override(monkeypatch):
+    monkeypatch.setenv("MLX_CHRONOS_MLX_LM_PORT", "8090")
+    assert MLXLMEngine().port == 8090
+
+def test_vllm_mlx_port_env_override(monkeypatch):
+    monkeypatch.setenv("MLX_CHRONOS_VLLM_MLX_PORT", "8004")
+    assert VLLMMLXEngine().port == 8004
+
+def test_engine_invalid_port_env_uses_default(monkeypatch):
+    monkeypatch.setenv("MLX_CHRONOS_MLX_LM_PORT", "invalid")
+    assert MLXLMEngine().port == 8080
+
+@patch("subprocess.run")
+@patch("mlx_chronos.engines.psutil.Process")
+def test_get_server_pid_filters_listening_process(mock_process_cls, mock_run):
+    mock_result = MagicMock()
+    mock_result.stdout = "123\n"
+    mock_run.return_value = mock_result
+
+    mock_process = MagicMock()
+    mock_process.name.return_value = "python"
+    mock_process.cmdline.return_value = ["omlx", "serve"]
+    mock_process_cls.return_value = mock_process
+
+    assert OMLXEngine().get_server_pid() == 123
+    assert "-sTCP:LISTEN" in mock_run.call_args.args[0]
+
+@patch("subprocess.run")
+def test_omlx_get_version_uses_cli_version_flag(mock_run):
+    mock_result = MagicMock()
+    mock_result.stdout = "omlx 0.4.1\n"
+    mock_result.stderr = ""
+    mock_result.returncode = 0
+    mock_run.return_value = mock_result
+
+    assert OMLXEngine().get_version() == "0.4.1"
+    assert mock_run.call_args.args[0] == ["omlx", "--version"]
+    assert mock_run.call_args.kwargs["timeout"] == 3
+
+@patch("subprocess.run")
+def test_omlx_get_version_falls_back_to_serve_help(mock_run):
+    empty_result = MagicMock()
+    empty_result.stdout = ""
+    empty_result.stderr = ""
+    empty_result.returncode = 2
+    help_result = MagicMock()
+    help_result.stdout = "Usage: omlx serve\nVersion: 0.3.9\n"
+    help_result.stderr = ""
+    help_result.returncode = 0
+    mock_run.side_effect = [empty_result, help_result]
+
+    assert OMLXEngine().get_version() == "0.3.9"
+    assert [call.args[0] for call in mock_run.call_args_list] == [
+        ["omlx", "--version"],
+        ["omlx", "serve", "--help"],
+    ]
+
+@patch("httpx.get")
+@patch("subprocess.run")
+def test_omlx_get_version_falls_back_to_models_metadata(mock_run, mock_get):
+    failed_result = MagicMock()
+    failed_result.stdout = ""
+    failed_result.stderr = ""
+    failed_result.returncode = 2
+    mock_run.return_value = failed_result
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"engine_version": "0.5.1"}
+    mock_get.return_value = mock_response
+
+    assert OMLXEngine().get_version() == "0.5.1"
+    assert mock_get.call_args.args[0] == "http://localhost:8000/v1/models"
+
+@patch("subprocess.run")
+def test_ollama_get_version(mock_run):
+    mock_result = MagicMock()
+    mock_result.stdout = "ollama version is 0.24.0\n"
+    mock_result.returncode = 0
+    mock_run.return_value = mock_result
+
+    engine = OllamaEngine()
+    with patch.object(engine, "_server_version", return_value=None):
+        assert engine.get_version() == "0.24.0"
+
+
+@patch("httpx.get")
+def test_ollama_get_version_prefers_server_version(mock_get):
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"version": "0.30.5"}
+    mock_get.return_value = response
+
+    with patch("subprocess.run") as mock_run:
+        assert OllamaEngine().get_version() == "0.30.5"
+    mock_run.assert_not_called()
+
+
+@patch("subprocess.run")
+def test_ollama_get_version_ignores_failed_command_output(mock_run):
+    mock_result = MagicMock()
+    mock_result.stdout = "Error: could not connect to ollama app, is it running?\n"
+    mock_result.returncode = 1
+    mock_run.return_value = mock_result
+
+    engine = OllamaEngine()
+    with patch.object(engine, "_server_version", return_value=None):
+        assert engine.get_version() == "unknown"
+
+@patch("importlib.metadata.version", return_value="0.4.0rc1")
+def test_vllm_mlx_get_version_uses_package_metadata(mock_version):
+    assert VLLMMLXEngine().get_version() == "0.4.0rc1"
+    mock_version.assert_called_once_with("vllm-mlx")
+
+@patch("httpx.get")
+@patch("importlib.metadata.version", side_effect=Exception("missing"))
+def test_vllm_mlx_get_version_falls_back_to_models_metadata(
+    mock_version,
+    mock_get,
+    monkeypatch,
+):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "vllm_mlx", None)
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "data": [{"metadata": {"vllm_mlx_version": "0.4.1"}}]
+    }
+    mock_get.return_value = mock_response
+
+    assert VLLMMLXEngine().get_version() == "0.4.1"
+    mock_version.assert_called_once_with("vllm-mlx")
+
+@patch("subprocess.run")
+def test_rapid_mlx_get_version_uses_timeout(mock_run):
+    mock_result = MagicMock()
+    mock_result.stdout = "rapid-mlx 0.6.68\n"
+    mock_result.stderr = ""
+    mock_result.returncode = 0
+    mock_run.return_value = mock_result
+
+    assert RapidMLXEngine().get_version() == "0.6.68"
+    assert mock_run.call_args.kwargs["timeout"] == 3
+
+
+@patch("subprocess.run")
+def test_rapid_mlx_get_version_accepts_plain_version(mock_run):
+    mock_result = MagicMock()
+    mock_result.stdout = "0.6.68\n"
+    mock_result.stderr = ""
+    mock_result.returncode = 0
+    mock_run.return_value = mock_result
+
+    assert RapidMLXEngine().get_version() == "0.6.68"
+
+
+@patch("subprocess.run")
+def test_rapid_mlx_get_version_ignores_failed_command_output(mock_run):
+    mock_result = MagicMock()
+    mock_result.stdout = "Error: rapid-mlx not initialized\n"
+    mock_result.stderr = ""
+    mock_result.returncode = 1
+    mock_run.return_value = mock_result
+
+    assert RapidMLXEngine().get_version() == "unknown"
+
+
+def test_parse_version_output_strips_trailing_punctuation():
+    assert OMLXEngine()._parse_version_output("version 0.4.3.") == "0.4.3"
+    assert (
+        OMLXEngine()._parse_version_output("version 0.7.3-beta.1+build.2026")
+        == "0.7.3-beta.1+build.2026"
+    )
+
+@patch("httpx.get")
+def test_rapid_mlx_resolve_model_id(mock_get):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "data": [{"id": "local/model/test"}]
+    }
+    mock_get.return_value = mock_response
+
+    engine = RapidMLXEngine()
+    resolved = engine._resolve_model_id("test")
+    assert resolved is None
+    assert engine._model_id_cache == {}
+
+
+@patch("httpx.get")
+def test_rapid_mlx_resolve_model_id_requires_exact_server_id(mock_get):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "data": [{"id": "local/model/test"}]
+    }
+    mock_get.return_value = mock_response
+
+    engine = RapidMLXEngine()
+
+    assert engine._resolve_model_id("local/model/test") == "local/model/test"
+    assert engine._model_id_cache == {"local/model/test": "local/model/test"}
+
+
+def test_rapid_mlx_resolve_listed_model_id_rejects_ambiguous_suffix():
+    engine = RapidMLXEngine()
+    model_ids = ["org-a/model", "org-b/model"]
+
+    assert engine.resolve_listed_model_id("model", model_ids) is None
+    assert engine.resolve_listed_model_id("org-a/model", model_ids) == "org-a/model"
+
+
+def _json_response(payload):
+    response = MagicMock()
+    response.json.return_value = payload
+    return response
+
+
+def test_rapid_mlx_clears_cache_only_when_server_confirms_prefix_cache_clear():
+    client = MagicMock()
+    client.request.return_value = _json_response(
+        {"status": "ok", "scheduler_cache_cleared": True}
+    )
+
+    assert RapidMLXEngine().clear_cache_for_benchmark(client) is True
+    client.request.assert_called_once_with(
+        "POST", "http://localhost:8001/v1/cache/clear", timeout=3.0
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"status": "cleared", "rewarm_scheduled": False}, True),
+        ({"status": "cleared", "rewarm_scheduled": True}, False),
+        ({"status": "cleared"}, False),
+        ({"status": "error", "rewarm_scheduled": False}, False),
+    ],
+)
+def test_vllm_mlx_cache_clear_requires_confirmation_and_no_rewarm(payload, expected):
+    client = MagicMock()
+    client.request.return_value = _json_response(payload)
+    assert VLLMMLXEngine().clear_cache_for_benchmark(client) is expected
+    client.request.assert_called_once_with(
+        "DELETE", "http://localhost:8000/v1/cache/prefix", timeout=3.0
+    )
+
+
+def test_rapid_mlx_does_not_treat_image_cache_hits_as_prefix_cache_hits():
+    assert RapidMLXEngine._prefix_cache_hits_from_payload(
+        {"multimodal_kv_cache": {"hits": 9}}
+    ) is None
+    assert RapidMLXEngine._prefix_cache_hits_from_payload({"hits": 9}) is None
+
+
+def test_rapid_mlx_reads_prefix_cache_hits_from_status_when_stats_lack_them():
+    client = MagicMock()
+    client.request.side_effect = [
+        _json_response({"model_type": "llm"}),
+        _json_response({"cache": {"hits": 7}}),
+    ]
+
+    assert RapidMLXEngine().prefix_cache_hit_count(client) == 7
+    assert client.request.call_args_list[0].args[:2] == (
+        "GET",
+        "http://localhost:8001/v1/cache/stats",
+    )
+    assert client.request.call_args_list[1].args[:2] == (
+        "GET",
+        "http://localhost:8001/v1/status",
+    )
+
+@patch("httpx.get")
+def test_rapid_mlx_model_id_cache_is_instance_scoped(mock_get):
+    shared_cache = {"test": "local/model/test"}
+
+    cached_engine = RapidMLXEngine(model_id_cache=shared_cache)
+    assert cached_engine._resolve_model_id("test") == "local/model/test"
+    mock_get.assert_not_called()
+
+    fresh_engine = RapidMLXEngine()
+    assert fresh_engine._model_id_cache == {}
+
+@patch("mlx_chronos.engines.os.path.exists", return_value=True)
+def test_rapid_mlx_request_model_name_caches_local_path_checks(mock_exists):
+    engine = RapidMLXEngine()
+    engine._resolve_model_id = MagicMock()
+
+    assert engine._request_model_name("/models/test") == "/models/test"
+    assert engine._request_model_name("/models/test") == "/models/test"
+
+    mock_exists.assert_called_once_with("/models/test")
+    engine._resolve_model_id.assert_not_called()
+
+def test_rapid_mlx_request_model_name_caches_expanded_local_paths(monkeypatch):
+    mock_exists = MagicMock(return_value=True)
+    mock_expanduser = MagicMock(
+        side_effect=lambda value: value.replace("~", "/Users/igor", 1)
+    )
+    monkeypatch.setattr("mlx_chronos.engines.os.path.exists", mock_exists)
+    monkeypatch.setattr("mlx_chronos.engines.os.path.expanduser", mock_expanduser)
+
+    engine = RapidMLXEngine()
+    engine._resolve_model_id = MagicMock()
+
+    assert engine._request_model_name("~/models/test") == "/Users/igor/models/test"
+    assert (
+        engine._request_model_name("/Users/igor/models/test")
+        == "/Users/igor/models/test"
+    )
+
+    mock_exists.assert_called_once_with("/Users/igor/models/test")
+    engine._resolve_model_id.assert_not_called()
+
+
+def test_mlx_lm_request_model_name_uses_default_for_listed_local_model(monkeypatch):
+    local_model = "/Users/igor/.lmstudio/models/mlx-community/Qwen3.5-4B-nvfp4"
+    monkeypatch.setattr(
+        "mlx_chronos.engines.os.path.exists",
+        lambda value: value == local_model,
+    )
+
+    engine = MLXLMEngine()
+    engine.list_model_ids = MagicMock(return_value=[local_model])
+
+    assert engine._request_model_name("Qwen3.5-4B-nvfp4") == "default_model"
+    assert engine._model_id_cache["Qwen3.5-4B-nvfp4"] == local_model
+
+
+def test_mlx_lm_request_model_name_falls_back_for_unknown_model(monkeypatch):
+    monkeypatch.setattr("mlx_chronos.engines.os.path.exists", lambda _value: False)
+
+    engine = MLXLMEngine()
+    engine.list_model_ids = MagicMock(return_value=["/Users/igor/models/other"])
+
+    assert engine._request_model_name("missing-model") == "missing-model"
+
+
+@contextmanager
+def mock_stream_response(*args, **kwargs):
+    class MockResponse:
+        def raise_for_status(self):
+            pass
+        def iter_lines(self):
+            yield 'data: {"choices": [{"delta": {"role": "assistant"}}]}'
+            yield 'data: {"choices": [{"delta": {"content": "Hello"}}]}'
+            yield 'data: [DONE]'
+    yield MockResponse()
+
+@patch("httpx.stream", side_effect=mock_stream_response)
+def test_measure_ttft_success(mock_stream):
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.5]):
+        ttft = engine.measure_ttft("hello")
+        assert ttft == 0.5
+
+
+@patch("httpx.stream")
+def test_measure_ttft_uses_provided_http_client(mock_stream):
+    client = MagicMock()
+    client.stream.side_effect = mock_stream_response
+    engine = OMLXEngine()
+
+    with patch("time.perf_counter", side_effect=[0.0, 0.5]):
+        ttft = engine.measure_ttft("hello", client=client)
+
+    assert ttft == 0.5
+    client.stream.assert_called_once()
+    mock_stream.assert_not_called()
+
+
+@contextmanager
+def mock_stream_response_reasoning_only_length(*args, **kwargs):
+    class MockResponse:
+        def raise_for_status(self):
+            pass
+        def iter_lines(self):
+            yield 'data: {"choices": [{"delta": {"role": "assistant"}}]}'
+            yield 'data: {"choices": [{"delta": {"content": ""}, "finish_reason": "length"}]}'
+            yield 'data: [DONE]'
+    yield MockResponse()
+
+@patch("httpx.stream", side_effect=mock_stream_response_reasoning_only_length)
+def test_measure_ttft_reasoning_only_length_succeeds(mock_stream):
+    """A reasoning model can spend the only max_tokens=1 token on hidden
+    reasoning; Ollama then reports empty content with finish_reason=length
+    instead of visible text. This should still yield a TTFT rather than
+    raising, since the terminal chunk marks the moment that one token was
+    produced regardless of whether its text was surfaced (see issue #37).
+    """
+    engine = OMLXEngine()
+    with patch("time.perf_counter", side_effect=[0.0, 0.5]):
+        ttft = engine.measure_ttft("hello")
+        assert ttft == 0.5
+
+
+@pytest.mark.parametrize(
+    "chunk",
+    [
+        {},
+        {"choices": []},
+        {"choices": [None]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        {"choices": [{"delta": {}, "finish_reason": None}]},
+    ],
+)
+def test_stream_chunk_has_terminal_token_false_cases(chunk):
+    engine = OMLXEngine()
+    assert engine._stream_chunk_has_terminal_token(chunk) is False
+
+
+def test_stream_chunk_has_terminal_token_true_for_length():
+    engine = OMLXEngine()
+    chunk = {"choices": [{"delta": {"content": ""}, "finish_reason": "length"}]}
+    assert engine._stream_chunk_has_terminal_token(chunk) is True
+
+
+@contextmanager
+def mock_stream_response_empty(*args, **kwargs):
+    class MockResponse:
+        def raise_for_status(self):
+            pass
+        def iter_lines(self):
+            yield 'data: {"choices": [{"delta": {"role": "assistant"}}]}'
+            yield 'data: [DONE]'
+    yield MockResponse()
+
+@patch("httpx.stream", side_effect=mock_stream_response_empty)
+def test_measure_ttft_no_content_raises(mock_stream):
+    engine = OMLXEngine()
+    with pytest.raises(
+        RuntimeError,
+        match="stream ended before a valid content token was received",
+    ):
+        engine.measure_ttft("hello")
+
+
+def _lmstudio_model_payload(**overrides):
+    payload = {
+        "id": "qwen3.5-4b-nvfp4",
+        "object": "model",
+        "type": "llm",
+        "publisher": "mlx-community",
+        "arch": "qwen3",
+        "compatibility_type": "mlx",
+        "quantization": "4bit",
+        "state": "loaded",
+        "max_context_length": 32768,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _lmstudio_runtime(**overrides):
+    runtime = {
+        "name": "mlx-mac-arm64-apple-metal",
+        "version": "0.9.1",
+        "supported_formats": ["mlx"],
+    }
+    runtime.update(overrides)
+    return runtime
+
+
+def test_lmstudio_accepts_an_mlx_model_served_by_the_mlx_runtime():
+    engine = LMStudioEngine()
+
+    with patch.object(
+        LMStudioEngine, "_native_model_payload", return_value=_lmstudio_model_payload()
+    ), patch.object(LMStudioEngine, "_runtime_probe", return_value=_lmstudio_runtime()):
+        metadata = engine.validate_model_backend("qwen3.5-4b-nvfp4")
+
+    assert metadata == {"format": "mlx", "quantization": "4bit"}
+    # The runtime version is what determines performance, so it becomes the
+    # recorded engine version instead of "unknown".
+    assert engine.get_version() == "0.9.1"
+
+
+def test_ollama_serving_config_uses_allocated_context_not_model_capacity():
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "models": [{"name": "qwen:mlx", "context_length": 8192}],
+    }
+    with patch.object(OllamaEngine, "_http_get", return_value=response) as get:
+        observed = OllamaEngine().observed_serving_configuration("qwen:mlx")
+    assert observed == {"allocated_context_length": 8192}
+    assert get.call_args.args[0].endswith("/api/ps")
+
+
+def test_ollama_serving_config_does_not_guess_an_unmatched_model():
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "models": [{"name": "different:mlx", "context_length": 8192}],
+    }
+    with patch.object(OllamaEngine, "_http_get", return_value=response):
+        assert OllamaEngine().observed_serving_configuration("qwen:mlx") == {}
+
+
+def test_lmstudio_serving_config_requires_one_loaded_mlx_instance():
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"models": [{
+        "key": "org/model", "format": "mlx", "max_context_length": 131072,
+        "loaded_instances": [{"id": "active", "config": {
+            "context_length": 8192, "eval_batch_size": 256,
+            "parallel": 2, "flash_attention": True,
+        }}],
+    }]}
+    with patch.object(LMStudioEngine, "_http_get", return_value=response) as get:
+        observed = LMStudioEngine().observed_serving_configuration("active")
+    assert observed == {
+        "context_length": 8192, "eval_batch_size": 256,
+        "parallel": 2, "flash_attention": True,
+    }
+    assert get.call_args.args[0].endswith("/api/v1/models")
+    response.json.return_value["models"][0]["loaded_instances"].append(
+        {"id": "other", "config": {"context_length": 4096}}
+    )
+    with patch.object(LMStudioEngine, "_http_get", return_value=response):
+        assert LMStudioEngine().observed_serving_configuration("org/model") == {}
+
+
+def test_lmstudio_serving_config_does_not_mislabel_model_capacity():
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"models": [{
+        "key": "org/model", "format": "mlx", "max_context_length": 131072,
+        "loaded_instances": [],
+    }]}
+    with patch.object(LMStudioEngine, "_http_get", return_value=response):
+        assert LMStudioEngine().observed_serving_configuration("org/model") == {}
+
+
+def test_lmstudio_accepts_mlx_runtime_reporting_safetensors():
+    engine = LMStudioEngine()
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "model": "qwen3.5-4b-optiq",
+        "model_info": {"format": "mlx"},
+        "runtime": {
+            "name": "mlx-llm-mac-arm64-apple-metal-advsimd",
+            "version": "1.11.0",
+            "supported_formats": ["safetensors"],
+        },
+    }
+
+    with patch.object(
+        LMStudioEngine,
+        "_native_model_payload",
+        return_value=_lmstudio_model_payload(id="qwen3.5-4b-optiq"),
+    ), patch.object(LMStudioEngine, "_http_post", return_value=response):
+        metadata = engine.validate_model_backend("qwen3.5-4b-optiq")
+
+    assert metadata == {"format": "mlx", "quantization": "4bit"}
+    assert engine.get_version() == "1.11.0"
+
+
+def test_lmstudio_rejects_a_gguf_model():
+    engine = LMStudioEngine()
+
+    with patch.object(
+        LMStudioEngine,
+        "_native_model_payload",
+        return_value=_lmstudio_model_payload(compatibility_type="gguf"),
+    ), patch.object(LMStudioEngine, "_runtime_probe") as mock_probe:
+        with pytest.raises(RuntimeError, match="llama.cpp backend"):
+            engine.validate_model_backend("meta-llama-3.1-8b-instruct")
+
+    # The model check fails before any generation request is made.
+    mock_probe.assert_not_called()
+
+
+def test_lmstudio_rejects_an_mlx_model_served_by_the_llama_cpp_runtime():
+    # compatibility_type describes the weights, not which runtime answered, so
+    # an MLX build served through llama.cpp must still be refused.
+    engine = LMStudioEngine()
+    llama_runtime = _lmstudio_runtime(
+        name="llama.cpp-mac-arm64-apple-metal-advsimd",
+        supported_formats=["gguf"],
+    )
+
+    with patch.object(
+        LMStudioEngine, "_native_model_payload", return_value=_lmstudio_model_payload()
+    ), patch.object(LMStudioEngine, "_runtime_probe", return_value=llama_runtime):
+        with pytest.raises(RuntimeError, match="does not support MLX"):
+            engine.validate_model_backend("qwen3.5-4b-nvfp4")
+
+    assert engine.get_version() == "unknown"
+
+
+def test_lmstudio_rejects_a_response_without_runtime_evidence():
+    engine = LMStudioEngine()
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+
+    with patch.object(LMStudioEngine, "_http_post", return_value=response):
+        with pytest.raises(RuntimeError, match="no evidence that MLX served"):
+            engine._runtime_probe("qwen3.5-4b-nvfp4")
+
+
+def test_lmstudio_rejects_a_probe_for_a_different_model():
+    engine = LMStudioEngine()
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "model": "another-model",
+        "model_info": {"format": "mlx"},
+        "runtime": _lmstudio_runtime(),
+    }
+
+    with patch.object(LMStudioEngine, "_http_post", return_value=response):
+        with pytest.raises(RuntimeError, match="different model"):
+            engine._runtime_probe("qwen3.5-4b-nvfp4")
+
+
+def test_lmstudio_rejects_a_probe_reporting_gguf_weights():
+    engine = LMStudioEngine()
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "model": "qwen3.5-4b-nvfp4",
+        "model_info": {"format": "gguf"},
+        "runtime": _lmstudio_runtime(),
+    }
+
+    with patch.object(LMStudioEngine, "_http_post", return_value=response):
+        with pytest.raises(RuntimeError, match="did not identify MLX model weights"):
+            engine._runtime_probe("qwen3.5-4b-nvfp4")
+
+
+def test_lmstudio_rejects_a_model_without_a_compatibility_type():
+    engine = LMStudioEngine()
+    payload = _lmstudio_model_payload()
+    payload.pop("compatibility_type")
+
+    with patch.object(LMStudioEngine, "_native_model_payload", return_value=payload):
+        with pytest.raises(RuntimeError, match="compatibility_type is missing"):
+            engine.validate_model_backend("qwen3.5-4b-nvfp4")
+
+
+@pytest.mark.parametrize(
+    ("runtime", "expected"),
+    [
+        ({"name": "mlx-mac-arm64", "supported_formats": ["safetensors"]}, True),
+        ({"name": "mlx-mac-arm64", "supported_formats": ["mlx"]}, True),
+        ({"name": "mlx-mac-arm64"}, True),
+        ({"name": "mlx-mac-arm64", "supported_formats": ["gguf"]}, False),
+        ({"name": "mlx-mac-arm64", "supported_formats": ["unknown"]}, False),
+        ({"name": "llama.cpp-mac", "supported_formats": ["safetensors"]}, False),
+        ({"name": "llama.cpp-mac", "supported_formats": ["mlx"]}, False),
+        ({"name": "not-mlx-runtime", "supported_formats": ["mlx"]}, False),
+        ({"supported_formats": ["safetensors"]}, False),
+        ({}, False),
+    ],
+)
+def test_lmstudio_runtime_requires_mlx_identity_and_compatible_format(runtime, expected):
+    assert LMStudioEngine._runtime_supports_mlx(runtime) is expected
+
+
+def test_lmstudio_identity_requires_the_native_api_namespace():
+    engine = LMStudioEngine()
+
+    with patch.object(
+        LMStudioEngine, "_native_models_payload", return_value={"data": []}
+    ):
+        assert engine._server_identity_matches() is True
+
+    # Another OpenAI-compatible server on port 1234 must not be labelled as
+    # The native API check reduces false positives from other /v1 servers.
+    with patch.object(LMStudioEngine, "_native_models_payload", return_value=None):
+        assert engine._server_identity_matches() is False
+
+
+def test_lmstudio_uses_its_own_port_environment_variable(monkeypatch):
+    assert LMStudioEngine().port == 1234
+    monkeypatch.setenv("MLX_CHRONOS_LMSTUDIO_PORT", "1235")
+    assert LMStudioEngine().port == 1235

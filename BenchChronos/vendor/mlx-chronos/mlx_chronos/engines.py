@@ -1,0 +1,2014 @@
+import time
+import subprocess
+import shutil
+import json
+import logging
+import os
+import re
+import importlib.metadata
+import importlib.util
+from collections.abc import Iterator
+import httpx
+import psutil
+from abc import ABC, abstractmethod
+
+from urllib.parse import quote
+
+from mlx_chronos.constants import (
+    BENCHMARK_REQUEST_TEMPERATURE,
+    BENCHMARK_REQUEST_TOP_P,
+    ENGINE_NAME_DS4,
+    ENGINE_NAME_FMLX,
+    ENGINE_NAME_LM_STUDIO,
+    ENGINE_NAME_MLX_LM,
+    ENGINE_NAME_OLLAMA,
+    ENGINE_NAME_OMLX,
+    ENGINE_NAME_RAPID_MLX,
+    ENGINE_NAME_VLLM_MLX,
+    ERROR_RESPONSE_BODY_LIMIT,
+    LM_STUDIO_MLX_COMPATIBILITY_TYPE,
+    LM_STUDIO_REJECTED_COMPATIBILITY_TYPES,
+    OLLAMA_MLX_MODEL_FORMATS,
+    OLLAMA_REJECTED_MODEL_FORMATS,
+    TOKEN_COUNT_SOURCE_USAGE,
+    TOKEN_COUNT_SOURCE_WORD_FALLBACK,
+)
+from mlx_chronos.measurements import (
+    DECODE_TIMING_CLIENT_STREAM,
+    DECODE_TIMING_UNAVAILABLE,
+    INPUT_TOKEN_COUNT_ENGINE,
+    INPUT_TOKEN_COUNT_UNAVAILABLE,
+    TTFTMeasurement,
+    ThroughputMeasurement,
+)
+from mlx_chronos.http_retry import request_with_retry, stream_with_retry
+from mlx_chronos.numeric import require_finite_non_negative
+
+logger = logging.getLogger("mlx_chronos")
+
+THROUGHPUT_STREAM_TIMEOUT_SECONDS = 60.0
+THROUGHPUT_TIMEOUT_SECONDS_PER_TOKEN = 0.5
+
+
+# ─── Base class ───────────────────────────────────────────────────────────────
+
+class BaseEngine(ABC):
+    """Abstract base class for inference engine integrations."""
+
+    name: str
+    default_port: int
+    expected_process_names: tuple[str, ...] = ()
+    requires_model_backend_validation = False
+
+    def __init__(self, port: int | None = None):
+        self.port = port if port is not None else self._configured_port()
+
+    def port_env_var(self) -> str:
+        normalized_name = self.name.upper().replace("-", "_")
+        return f"MLX_CHRONOS_{normalized_name}_PORT"
+
+    def _configured_port(self) -> int:
+        raw_port = os.getenv(self.port_env_var())
+        if raw_port is None:
+            return self.default_port
+
+        try:
+            port = int(raw_port)
+            if 1 <= port <= 65535:
+                return port
+        except ValueError:
+            pass
+
+        logger.warning(
+            "Invalid %s=%r; using default port %s.",
+            self.port_env_var(),
+            raw_port,
+            self.default_port,
+        )
+        return self.default_port
+
+    def base_url(self) -> str:
+        return f"http://localhost:{self.port}/v1"
+
+    def root_url(self) -> str:
+        return f"http://localhost:{self.port}"
+
+    def http_client(self, *, max_keepalive_connections: int | None = None) -> httpx.Client:
+        """Return a reusable HTTP client for benchmark request loops."""
+        if max_keepalive_connections is None:
+            return httpx.Client()
+        return httpx.Client(
+            limits=httpx.Limits(
+                max_connections=max(100, max_keepalive_connections),
+                max_keepalive_connections=max_keepalive_connections,
+            )
+        )
+
+    def _http_get(
+        self,
+        url: str,
+        *,
+        timeout: float,
+        action: str,
+        log_retries: bool = True,
+    ) -> httpx.Response:
+        return request_with_retry(
+            lambda: httpx.get(url, timeout=timeout),
+            action=f"{self.name} {action}",
+            logger=logger if log_retries else None,
+        )
+
+    def _http_post(
+        self,
+        url: str,
+        *,
+        json_payload: dict,
+        timeout: float,
+        action: str,
+    ) -> httpx.Response:
+        return request_with_retry(
+            lambda: httpx.post(url, json=json_payload, timeout=timeout),
+            action=f"{self.name} {action}",
+            logger=logger,
+        )
+
+    def endpoint(self) -> str:
+        """API endpoint used by the engine."""
+        return "/chat/completions"
+
+    def uses_chat_api(self) -> bool:
+        """Whether the engine uses OpenAI chat format."""
+        return True
+
+    def build_payload(
+        self,
+        prompt: str,
+        model: str,
+        max_tokens: int,
+        stream: bool,
+        min_tokens: int | None = None,
+    ) -> dict:
+        payload = {
+            "model": self._request_model_name(model),
+            "max_tokens": max_tokens,
+            "stream": stream,
+            "temperature": BENCHMARK_REQUEST_TEMPERATURE,
+            "top_p": BENCHMARK_REQUEST_TOP_P,
+        }
+        if min_tokens is not None:
+            payload["min_tokens"] = min_tokens
+        if self.uses_chat_api():
+            payload["messages"] = [{"role": "user", "content": prompt}]
+        else:
+            payload["prompt"] = prompt
+        return payload
+
+    def _request_model_name(self, model: str) -> str:
+        return model.strip() or "default"
+
+    def clear_cache_for_benchmark(self, client: httpx.Client | None = None) -> bool:
+        """Clear an engine cache before cold trials when the engine supports it.
+
+        ``False`` means that no cache-control capability is available.  The
+        default deliberately makes no HTTP request so engines without a
+        documented control-plane API retain the established benchmark flow.
+        """
+        del client
+        return False
+
+    def prefix_cache_hit_count(self, client: httpx.Client | None = None) -> int | None:
+        """Return a documented prefix-cache hit counter, when available."""
+        del client
+        return None
+
+    def _request_context(
+        self,
+        action: str,
+        url: str,
+        model: str | None = None,
+        request_model: str | None = None,
+    ) -> str:
+        parts = [f"engine={self.name}", f"action={action}", f"url={url}"]
+        if model is not None:
+            parts.append(f"model={model!r}")
+        if request_model is not None:
+            parts.append(f"request_model={request_model!r}")
+        return "; ".join(parts)
+
+    def _response_body_excerpt(self, response: httpx.Response | None) -> str | None:
+        if response is None:
+            return None
+        try:
+            cached = response.extensions.get("chronos_error_excerpt")
+            body = (cached if cached is not None else response.text).strip()
+        except Exception:
+            return None
+        if not body:
+            return None
+        body = " ".join(body.split())
+        if len(body) > ERROR_RESPONSE_BODY_LIMIT:
+            body = f"{body[:ERROR_RESPONSE_BODY_LIMIT]}..."
+        return body
+
+    def _raise_stream_status(self, response) -> None:
+        """Capture a bounded error body while a real HTTP stream is still open."""
+        if isinstance(response, httpx.Response) and response.status_code >= 400:
+            excerpt = bytearray()
+            for part in response.iter_bytes():
+                excerpt.extend(part[:ERROR_RESPONSE_BODY_LIMIT + 1 - len(excerpt)])
+                if len(excerpt) > ERROR_RESPONSE_BODY_LIMIT:
+                    break
+            response.extensions["chronos_error_excerpt"] = excerpt.decode(
+                response.encoding or "utf-8", errors="replace",
+            )
+        response.raise_for_status()
+
+    def _request_error_message(
+        self,
+        action: str,
+        url: str,
+        exc: httpx.HTTPError,
+        model: str | None = None,
+        request_model: str | None = None,
+    ) -> str:
+        context = self._request_context(
+            action=action,
+            url=url,
+            model=model,
+            request_model=request_model,
+        )
+        response = getattr(exc, "response", None)
+        if response is not None:
+            details = [context, f"status={response.status_code}"]
+            reason = getattr(response, "reason_phrase", "")
+            if reason:
+                details.append(f"reason={reason}")
+            body = self._response_body_excerpt(response)
+            if body:
+                details.append(f"response={body!r}")
+            return "; ".join(details)
+        return f"{context}; error={exc}"
+
+    def _invalid_json_message(
+        self,
+        action: str,
+        url: str,
+        model: str | None = None,
+        request_model: str | None = None,
+    ) -> str:
+        context = self._request_context(
+            action=action,
+            url=url,
+            model=model,
+            request_model=request_model,
+        )
+        return f"{context}; error=invalid JSON response"
+
+    def _invalid_response_message(
+        self,
+        action: str,
+        url: str,
+        reason: str,
+        model: str | None = None,
+        request_model: str | None = None,
+    ) -> str:
+        context = self._request_context(
+            action=action,
+            url=url,
+            model=model,
+            request_model=request_model,
+        )
+        return f"{context}; error={reason}"
+
+    def is_server_running(self) -> bool:
+        try:
+            r = self._http_get(
+                f"{self.base_url()}/models",
+                timeout=2.0,
+                action="server check",
+                log_retries=False,
+            )
+            return r.status_code == 200 and self._server_identity_matches()
+        except Exception:
+            return False
+
+    def _server_identity_matches(self) -> bool:
+        return True
+
+    def list_model_ids(self) -> list[str]:
+        """Return model ids exposed by the OpenAI-compatible /models endpoint."""
+        url = f"{self.base_url()}/models"
+        action = "list models"
+        try:
+            r = self._http_get(url, timeout=5.0, action=action)
+            r.raise_for_status()
+            data = r.json()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(self._request_error_message(action, url, exc)) from exc
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError(self._invalid_json_message(action, url)) from exc
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "invalid model list: response must be a JSON object",
+                )
+            )
+
+        models = []
+        items = data.get("data", [])
+        if not isinstance(items, list):
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "invalid model list: response field 'data' must be a list",
+                )
+            )
+
+        for item in items:
+            if isinstance(item, dict):
+                model_id = item.get("id")
+                if isinstance(model_id, str) and model_id.strip():
+                    models.append(model_id)
+        return models
+
+    def resolve_listed_model_id(self, model: str, model_ids: list[str] | None = None) -> str | None:
+        """Return a matching listed model id for user input when one is available."""
+        requested = model.strip()
+        if not requested:
+            return None
+
+        model_ids = self.list_model_ids() if model_ids is None else model_ids
+        request_model = self._request_model_name(requested)
+        return self._match_listed_model_id(requested, request_model, model_ids)
+
+    def _match_listed_model_id(
+        self,
+        requested: str,
+        request_model: str,
+        model_ids: list[str],
+    ) -> str | None:
+        """Return a model id matching either user input or request payload id."""
+        candidates = {requested, request_model}
+
+        for model_id in model_ids:
+            if model_id in candidates:
+                return model_id
+            if any(model_id.endswith(f"/{candidate}") for candidate in candidates):
+                return model_id
+        return None
+
+    def validate_completion_request(self, model: str) -> str:
+        """Send a tiny non-streaming completion request and return the request model id."""
+        payload = self.build_payload(
+            prompt="Reply with one word: ok",
+            model=model,
+            max_tokens=1,
+            stream=False,
+        )
+        url = f"{self.base_url()}{self.endpoint()}"
+        request_model = str(payload["model"])
+        action = "validate completion"
+        try:
+            r = self._http_post(
+                url,
+                json_payload=payload,
+                timeout=30.0,
+                action=action,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                self._request_error_message(
+                    action,
+                    url,
+                    exc,
+                    model=model,
+                    request_model=request_model,
+                )
+            ) from exc
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError(
+                self._invalid_json_message(
+                    action,
+                    url,
+                    model=model,
+                    request_model=request_model,
+                )
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "invalid completion response: completion response must be a JSON object",
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "invalid completion response: field 'choices' must be a non-empty list",
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+        return request_model
+
+    def validate_model_backend(self, model: str) -> dict[str, str]:
+        """Validate engine-specific model backend requirements."""
+        del model
+        return {}
+
+    def observed_serving_configuration(self, model: str) -> dict[str, object]:
+        """Best-effort settings of a running instance; unsupported means unknown."""
+        del model
+        return {}
+
+    def wait_for_server(self, timeout: int = 60) -> bool:
+        require_finite_non_negative(timeout, name="timeout")
+        start = time.perf_counter()
+        while time.perf_counter() - start < timeout:
+            if self.is_server_running():
+                return True
+            time.sleep(1.0)
+        return False
+
+    def get_server_pid(self) -> int | None:
+        """Return the listening server PID for this engine port when available."""
+        try:
+            result = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{self.port}", "-sTCP:LISTEN", "-t"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            pids = result.stdout.strip().split()
+            for pid_text in pids:
+                try:
+                    pid = int(pid_text)
+                except ValueError:
+                    continue
+                if self._process_matches_engine(pid):
+                    return pid
+        except Exception:
+            pass
+        return None
+
+    def _process_matches_engine(self, pid: int) -> bool:
+        if not self.expected_process_names:
+            return True
+
+        try:
+            process = psutil.Process(pid)
+            process_tokens = [
+                os.path.basename(token).lower()
+                for token in [process.name(), *process.cmdline()]
+                if token
+            ]
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            return False
+
+        for name in self.expected_process_names:
+            normalized_names = {
+                name.lower(),
+                name.lower().replace("-", "_"),
+                name.lower().replace("_", "-"),
+            }
+            for token in process_tokens:
+                if any(
+                    token == expected or token.startswith(f"{expected}.")
+                    for expected in normalized_names
+                ):
+                    return True
+        return False
+
+    def _parse_version_output(self, output: str) -> str | None:
+        match = re.search(r"\bv?(\d+(?:\.\d+)+(?:[-+._a-zA-Z0-9]*)?)\b", output)
+        if match is None:
+            return None
+        version = match.group(1).rstrip("._-+")
+        return version or None
+
+    def _stream_chunk_has_content(self, chunk: dict) -> bool:
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return False
+
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return False
+        delta = choice.get("delta", {})
+        if not isinstance(delta, dict):
+            delta = {}
+
+        for key in ("content", "reasoning", "reasoning_content"):
+            value = delta.get(key)
+            if isinstance(value, str) and value:
+                return True
+
+        if delta.get("tool_calls"):
+            return True
+
+        text = choice.get("text")
+        if isinstance(text, str) and text:
+            return True
+
+        return False
+
+    def _stream_chunk_has_terminal_token(self, chunk: dict) -> bool:
+        """Return whether a capped stream generated a token without visible text.
+
+        Reasoning models can spend the only requested token on hidden reasoning,
+        so Ollama may return an empty content delta together with length.
+        """
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            return False
+        return choices[0].get("finish_reason") == "length"
+
+    def _extract_stream_finish_reason(self, chunk: dict) -> str | None:
+        """Return the terminal reason supplied by an OpenAI-style stream."""
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            return None
+        reason = choices[0].get("finish_reason")
+        if not isinstance(reason, str):
+            return None
+        normalized = reason.strip()
+        return normalized or None
+
+    def _extract_stream_text(self, chunk: dict) -> str:
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return ""
+        delta = choice.get("delta", {})
+        if not isinstance(delta, dict):
+            delta = {}
+
+        parts = []
+        for key in ("content", "reasoning", "reasoning_content"):
+            value = delta.get(key)
+            if isinstance(value, str) and value:
+                parts.append(value)
+
+        text = choice.get("text")
+        if isinstance(text, str) and text:
+            parts.append(text)
+        return "".join(parts)
+
+    def _extract_stream_usage_tokens(self, chunk: dict) -> int | None:
+        usage = chunk.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        tokens = usage.get("completion_tokens")
+        # Usage is an exact token count only when the server supplies a JSON
+        # integer. Booleans and floats must not acquire public-comparable
+        # provenance through Python's bool-is-int or float-to-int coercion.
+        if type(tokens) is int and tokens > 0:
+            return tokens
+        return None
+
+    def _completion_events(
+        self, response, *, timeout: float, context: str,
+    ) -> Iterator[dict | None]:
+        """Drain to HTTP EOF, yielding None at DONE, and reject failed streams.
+
+        A finish_reason also permits engines that end at HTTP EOF without DONE.
+        The read timeout bounds blocking reads; the deadline additionally bounds
+        streams that keep sending heartbeats without ever finishing.
+        """
+        deadline = time.monotonic() + timeout
+        done = False
+        terminal = False
+        for line in response.iter_lines():
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{context}; completion stream deadline exceeded")
+            if isinstance(line, bytes):
+                line = line.decode("utf-8", errors="strict")
+            if not line or not line.startswith("data:"):
+                continue
+            raw = line.removeprefix("data:").strip()
+            if not raw:
+                continue
+            if done:
+                raise RuntimeError(f"{context}; data received after stream completion")
+            if raw == "[DONE]":
+                done = terminal = True
+                yield None
+                continue
+            try:
+                chunk = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"{context}; malformed completion stream JSON") from exc
+            if not isinstance(chunk, dict):
+                continue
+            if "error" in chunk:
+                detail = str(chunk["error"])[:ERROR_RESPONSE_BODY_LIMIT]
+                raise RuntimeError(f"{context}; completion stream error: {detail}")
+            reason = self._extract_stream_finish_reason(chunk)
+            if reason is not None:
+                if reason not in {"stop", "length", "tool_calls", "function_call", "content_filter"}:
+                    raise RuntimeError(f"{context}; unsupported finish_reason: {reason!r}")
+                terminal = True
+            yield chunk
+        if not terminal:
+            raise RuntimeError(f"{context}; stream ended without a completion marker")
+
+    def _append_progress_sample(
+        self,
+        samples: list[dict],
+        completion_tokens: int,
+        elapsed_seconds: float,
+        token_count_source: str,
+    ) -> None:
+        if completion_tokens <= 0 or elapsed_seconds <= 0:
+            return
+        rounded_elapsed_seconds = round(elapsed_seconds, 3)
+        if rounded_elapsed_seconds <= 0:
+            return
+        sample = {
+            "completion_tokens": completion_tokens,
+            "elapsed_seconds": rounded_elapsed_seconds,
+            "tokens_per_second": round(completion_tokens / rounded_elapsed_seconds, 2),
+            "token_count_source": token_count_source,
+        }
+        if (
+            samples
+            and samples[-1]["elapsed_seconds"] == rounded_elapsed_seconds
+            and samples[-1]["token_count_source"] == token_count_source
+        ):
+            samples[-1] = sample
+            return
+        samples.append(sample)
+
+    def _version_from_mapping(
+        self,
+        mapping: dict,
+        version_keys: tuple[str, ...],
+    ) -> str | None:
+        for key in version_keys:
+            value = mapping.get(key)
+            if isinstance(value, (str, int, float)):
+                version = str(value).strip()
+                if version:
+                    return version
+
+        for nested_key in ("metadata", "meta"):
+            nested = mapping.get(nested_key)
+            if isinstance(nested, dict):
+                nested_version = self._version_from_mapping(nested, version_keys)
+                if nested_version:
+                    return nested_version
+        return None
+
+    def _get_version_from_models_endpoint(
+        self,
+        version_keys: tuple[str, ...] = (
+            "engine_version",
+            "server_version",
+            "omlx_version",
+            "version",
+        ),
+    ) -> str | None:
+        """Try to read an engine/server version from /v1/models metadata."""
+        url = f"{self.base_url()}/models"
+        try:
+            response = self._http_get(
+                url,
+                timeout=2.0,
+                action="version lookup",
+                log_retries=False,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception:
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        version = self._version_from_mapping(data, version_keys)
+        if version:
+            return version
+
+        items = data.get("data")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    version = self._version_from_mapping(item, version_keys)
+                    if version:
+                        return version
+        return None
+
+    def _should_retry_without_stream_usage(self, exc: httpx.HTTPError) -> bool:
+        response = getattr(exc, "response", None)
+        if response is None or response.status_code not in {400, 422}:
+            return False
+        body = self._response_body_excerpt(response) or ""
+        body = body.lower()
+        return "stream_options" in body or "include_usage" in body
+
+    def _throughput_timeout(self, max_tokens: int) -> float:
+        return max(
+            THROUGHPUT_STREAM_TIMEOUT_SECONDS,
+            max_tokens * THROUGHPUT_TIMEOUT_SECONDS_PER_TOKEN,
+        )
+
+    def _stream_request(
+        self,
+        client: httpx.Client | None,
+        method: str,
+        url: str,
+        **kwargs,
+    ):
+        return stream_with_retry(
+            lambda: (
+                client.stream(method, url, **kwargs)
+                if client is not None
+                else httpx.stream(method, url, **kwargs)
+            ),
+            action=f"{self.name} stream {method} {url}",
+            attempts=1,
+            logger=logger,
+        )
+
+    def measure_ttft(
+        self,
+        prompt: str,
+        model: str = "default",
+        client: httpx.Client | None = None,
+    ) -> float:
+        """Measure Time To First Token."""
+        payload = self.build_payload(prompt=prompt, model=model, max_tokens=1, stream=True)
+        start = time.perf_counter()
+
+        url = f"{self.base_url()}{self.endpoint()}"
+        request_model = str(payload["model"])
+        action = "measure TTFT"
+        try:
+            with self._stream_request(
+                client,
+                "POST",
+                url,
+                json=payload,
+                timeout=30.0,
+            ) as r:
+                self._raise_stream_status(r)
+                ttft = None
+                for chunk in self._completion_events(
+                    r, timeout=30.0,
+                    context=self._request_context(action, url, model, request_model),
+                ):
+                    if chunk is not None and ttft is None and (
+                        self._stream_chunk_has_content(chunk)
+                        or self._stream_chunk_has_terminal_token(chunk)
+                    ):
+                        ttft = round(time.perf_counter() - start, 3)
+                if ttft is not None:
+                    return ttft
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                self._request_error_message(
+                    action,
+                    url,
+                    exc,
+                    model=model,
+                    request_model=request_model,
+                )
+            ) from exc
+
+        raise RuntimeError(
+            self._invalid_response_message(
+                action,
+                url,
+                "stream ended before a valid content token was received",
+                model=model,
+                request_model=request_model,
+            )
+        )
+
+    def measure_ttft_with_input_tokens(
+        self,
+        prompt: str,
+        model: str = "default",
+        client: httpx.Client | None = None,
+        timeout_seconds: float = 120.0,
+    ) -> TTFTMeasurement:
+        """Stop the TTFT clock at first content, then read optional usage."""
+        payload_base = self.build_payload(
+            prompt=prompt, model=model, max_tokens=1, stream=True,
+        )
+        url = f"{self.base_url()}{self.endpoint()}"
+        request_model = str(payload_base["model"])
+        action = "measure context TTFT"
+        for include_usage in (True, False):
+            payload = dict(payload_base)
+            if include_usage:
+                payload["stream_options"] = {"include_usage": True}
+            started = time.perf_counter()
+            ttft: float | None = None
+            input_tokens: int | None = None
+            try:
+                with self._stream_request(
+                    client, "POST", url, json=payload, timeout=timeout_seconds,
+                ) as response:
+                    self._raise_stream_status(response)
+                    for chunk in self._completion_events(
+                        response, timeout=timeout_seconds,
+                        context=self._request_context(action, url, model, request_model),
+                    ):
+                        if chunk is None:
+                            continue
+                        if ttft is None and (
+                            self._stream_chunk_has_content(chunk)
+                            or self._stream_chunk_has_terminal_token(chunk)
+                        ):
+                            ttft = round(max(time.perf_counter() - started, 0.001), 3)
+                        usage = chunk.get("usage")
+                        if isinstance(usage, dict):
+                            count = usage.get("prompt_tokens")
+                            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                                input_tokens = count
+            except httpx.HTTPError as exc:
+                if include_usage and self._should_retry_without_stream_usage(exc):
+                    continue
+                raise RuntimeError(
+                    self._request_error_message(
+                        action, url, exc, model=model, request_model=request_model,
+                    )
+                ) from exc
+            if ttft is None:
+                raise RuntimeError(
+                    self._invalid_response_message(
+                        action, url,
+                        "stream ended before a valid content token was received",
+                        model=model, request_model=request_model,
+                    )
+                )
+            return TTFTMeasurement(
+                ttft_seconds=ttft,
+                input_tokens=input_tokens,
+                input_token_count_source=(
+                    INPUT_TOKEN_COUNT_ENGINE
+                    if input_tokens is not None else INPUT_TOKEN_COUNT_UNAVAILABLE
+                ),
+            )
+        raise RuntimeError("unreachable context TTFT retry state")
+
+    def measure_throughput(
+        self,
+        prompt: str,
+        model: str = "default",
+        max_tokens: int = 100,
+        min_tokens: int | None = None,
+        progress_sample_interval_tokens: int | None = None,
+        client: httpx.Client | None = None,
+        request_stream_usage: bool = True,
+        allow_stream_usage_fallback: bool = True,
+    ) -> ThroughputMeasurement:
+        """Measure request throughput and client-observed decode throughput."""
+        if (
+            progress_sample_interval_tokens is not None
+            and progress_sample_interval_tokens <= 0
+        ):
+            raise ValueError("progress_sample_interval_tokens must be greater than 0")
+
+        base_payload = self.build_payload(
+            prompt=prompt,
+            model=model,
+            max_tokens=max_tokens,
+            min_tokens=min_tokens,
+            stream=True,
+        )
+
+        url = f"{self.base_url()}{self.endpoint()}"
+        request_model = str(base_payload["model"])
+        action = "measure throughput"
+        usage_attempts = (
+            (True, False)
+            if request_stream_usage and allow_stream_usage_fallback
+            else (request_stream_usage,)
+        )
+        for include_usage in usage_attempts:
+            payload = dict(base_payload)
+            if include_usage:
+                payload["stream_options"] = {"include_usage": True}
+            start = time.perf_counter()
+            first_token_at = None
+            stream_finished_at = None
+            completion_text_parts: list[str] = []
+            estimated_words = 0
+            in_word = False
+            terminal_at = None
+            completion_tokens = None
+            finish_reason = None
+            progress_samples: list[dict] = []
+            next_progress_sample_at = progress_sample_interval_tokens
+
+            try:
+                with self._stream_request(
+                    client,
+                    "POST",
+                    url,
+                    json=payload,
+                    timeout=self._throughput_timeout(max_tokens),
+                ) as r:
+                    self._raise_stream_status(r)
+                    for chunk in self._completion_events(
+                        r, timeout=self._throughput_timeout(max_tokens),
+                        context=self._request_context(action, url, model, request_model),
+                    ):
+                        if chunk is None:
+                            stream_finished_at = time.perf_counter()
+                            continue
+                        usage_tokens = self._extract_stream_usage_tokens(chunk)
+                        if usage_tokens is not None:
+                            completion_tokens = usage_tokens
+
+                        chunk_finish_reason = self._extract_stream_finish_reason(chunk)
+                        if chunk_finish_reason is not None:
+                            finish_reason = chunk_finish_reason
+                            terminal_at = time.perf_counter()
+
+                        if self._stream_chunk_has_content(chunk):
+                            if first_token_at is None:
+                                first_token_at = time.perf_counter()
+                            text = self._extract_stream_text(chunk)
+                            if text:
+                                if next_progress_sample_at is None:
+                                    completion_text_parts.append(text)
+                                else:
+                                    words = text.split()
+                                    estimated_words += len(words) - int(bool(words) and in_word and not text[0].isspace())
+                                    in_word = not text[-1].isspace()
+                                    estimated_tokens = estimated_words
+                                    while estimated_tokens >= next_progress_sample_at:
+                                        assert progress_sample_interval_tokens is not None
+                                        self._append_progress_sample(
+                                            progress_samples,
+                                            next_progress_sample_at,
+                                            time.perf_counter() - start,
+                                            TOKEN_COUNT_SOURCE_WORD_FALLBACK,
+                                        )
+                                        next_progress_sample_at += (
+                                            progress_sample_interval_tokens
+                                        )
+                break
+            except httpx.HTTPError as exc:
+                if (
+                    include_usage
+                    and allow_stream_usage_fallback
+                    and self._should_retry_without_stream_usage(exc)
+                ):
+                    continue
+                raise RuntimeError(
+                    self._request_error_message(
+                        action,
+                        url,
+                        exc,
+                        model=model,
+                        request_model=request_model,
+                    )
+                ) from exc
+
+        ended_at = stream_finished_at if stream_finished_at is not None else terminal_at
+        if ended_at is None:
+            raise RuntimeError("completion stream has no terminal timestamp")
+        elapsed = ended_at - start
+        rounded_elapsed = round(max(elapsed, 0.0), 3)
+        if rounded_elapsed <= 0:
+            rounded_elapsed = 0.001
+
+        if first_token_at is None:
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "stream ended before a valid content token was received",
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+
+        if completion_tokens is not None:
+            token_count_source = TOKEN_COUNT_SOURCE_USAGE
+        else:
+            if progress_sample_interval_tokens is None:
+                estimated_words = len("".join(completion_text_parts).split())
+            completion_tokens = max(1, estimated_words)
+            token_count_source = TOKEN_COUNT_SOURCE_WORD_FALLBACK
+
+        request_tps = round(completion_tokens / rounded_elapsed, 2)
+        decode_tps = None
+        rounded_decode_elapsed = None
+        decode_source = DECODE_TIMING_UNAVAILABLE
+        decode_elapsed = elapsed - (first_token_at - start)
+        if (
+            token_count_source == TOKEN_COUNT_SOURCE_USAGE
+            and completion_tokens > 1
+            and decode_elapsed > 0
+        ):
+            rounded_decode_elapsed = round(decode_elapsed, 3)
+            if rounded_decode_elapsed <= 0:
+                rounded_decode_elapsed = 0.001
+            decode_tps = round(
+                (completion_tokens - 1) / rounded_decode_elapsed,
+                2,
+            )
+            decode_source = DECODE_TIMING_CLIENT_STREAM
+        finalized_progress_samples = []
+        if progress_sample_interval_tokens is not None:
+            finalized_progress_samples = list(progress_samples)
+            if token_count_source == TOKEN_COUNT_SOURCE_USAGE:
+                finalized_progress_samples = [
+                    sample
+                    for sample in finalized_progress_samples
+                    if sample["completion_tokens"] < completion_tokens
+                ]
+            if (
+                not finalized_progress_samples
+                or finalized_progress_samples[-1]["completion_tokens"]
+                != completion_tokens
+            ):
+                self._append_progress_sample(
+                    finalized_progress_samples,
+                    completion_tokens,
+                    max(elapsed, 0.0),
+                    token_count_source,
+                )
+        return ThroughputMeasurement(
+            request_tokens_per_second=request_tps,
+            completion_tokens=completion_tokens,
+            token_count_source=token_count_source,
+            elapsed_seconds=rounded_elapsed,
+            decode_tokens_per_second=decode_tps,
+            decode_elapsed_seconds=rounded_decode_elapsed,
+            decode_timing_source=decode_source,
+            progress_samples=tuple(finalized_progress_samples),
+            finish_reason=finish_reason,
+        )
+
+    def measure_tokens_per_second(
+        self,
+        prompt: str,
+        model: str = "default",
+        max_tokens: int = 100,
+        min_tokens: int | None = None,
+        client: httpx.Client | None = None,
+        request_stream_usage: bool = True,
+    ) -> float:
+        """Measure client-observed total request throughput."""
+        return self.measure_throughput(
+            prompt=prompt,
+            model=model,
+            max_tokens=max_tokens,
+            min_tokens=min_tokens,
+            client=client,
+            request_stream_usage=request_stream_usage,
+        ).request_tokens_per_second
+
+    @abstractmethod
+    def is_installed(self) -> bool:
+        pass
+
+    @abstractmethod
+    def get_version(self) -> str:
+        pass
+
+
+# ─── oMLX ─────────────────────────────────────────────────────────────────────
+
+class OMLXEngine(BaseEngine):
+    name = ENGINE_NAME_OMLX
+    default_port = 8000
+    expected_process_names = ("omlx", "omlx-server")
+
+    def is_installed(self) -> bool:
+        return shutil.which("omlx") is not None
+
+    def _server_identity_matches(self) -> bool:
+        return self.get_server_pid() is not None
+
+    def get_version(self) -> str:
+        version_commands = [
+            ["omlx", "--version"],
+            ["omlx", "serve", "--help"],
+        ]
+        for command in version_commands:
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+            except Exception:
+                continue
+
+            if result.returncode != 0:
+                continue
+
+            output = f"{result.stdout}\n{result.stderr}"
+            parsed = self._parse_version_output(output)
+            if parsed:
+                return parsed
+
+            for line in output.splitlines():
+                if "Version:" in line:
+                    version = line.split("Version:")[-1].strip()
+                    if version:
+                        return version
+        http_version = self._get_version_from_models_endpoint()
+        if http_version:
+            return http_version
+        return "unknown"
+
+
+# ─── Rapid-MLX ────────────────────────────────────────────────────────────────
+
+class RapidMLXEngine(BaseEngine):
+    name = ENGINE_NAME_RAPID_MLX
+    default_port = 8001
+    expected_process_names = ("rapid-mlx", "rapid_mlx")
+
+    def __init__(
+        self,
+        port: int | None = None,
+        model_id_cache: dict[str, str] | None = None,
+    ):
+        super().__init__(port=port)
+        self._model_id_cache = model_id_cache if model_id_cache is not None else {}
+        self._request_model_cache: dict[str, str] = {}
+
+    def _resolve_model_id(self, model: str) -> str | None:
+        if model in self._model_id_cache:
+            return self._model_id_cache[model]
+
+        try:
+            model_ids = self.list_model_ids()
+        except RuntimeError:
+            return None
+        if model not in model_ids:
+            return None
+        self._model_id_cache[model] = model
+        return model
+
+    def resolve_listed_model_id(
+        self,
+        model: str,
+        model_ids: list[str] | None = None,
+    ) -> str | None:
+        """Resolve Rapid-MLX models only by exact server-advertised ID.
+
+        Rapid-MLX can advertise both a serving alias and a resolved ID.  A
+        suffix is therefore not a stable identity in a multi-model server.
+        Callers can still use any ID that the server advertises, but a manual
+        shorthand is never silently mapped to the first suffix match.
+        """
+        requested = model.strip()
+        if not requested:
+            return None
+        model_ids = self.list_model_ids() if model_ids is None else model_ids
+        return requested if requested in model_ids else None
+
+    def _cache_management_json(
+        self,
+        client: httpx.Client | None,
+        method: str,
+        path: str,
+    ) -> dict | None:
+        """Best-effort read/control call for Rapid-MLX's optional cache API."""
+        url = f"{self.base_url()}{path}"
+        try:
+            request = client.request if client is not None else httpx.request
+            response = request(method, url, timeout=3.0)
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.debug("Rapid-MLX cache API unavailable at %s: %s", url, exc)
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _prefix_cache_hits_from_payload(payload: dict) -> int | None:
+        """Extract only an explicitly labelled prefix-cache hit counter.
+
+        Do not traverse arbitrary nested values: `/v1/cache/stats` may expose
+        image-cache counters, which would not validate text prefix reuse.
+        """
+        top_level_hits = payload.get("prefix_cache_hits")
+        if (
+            isinstance(top_level_hits, int)
+            and not isinstance(top_level_hits, bool)
+            and top_level_hits >= 0
+        ):
+            return top_level_hits
+
+        candidates = []
+        for key in ("prefix_cache", "memory_aware_cache", "paged_cache", "cache"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
+        for candidate in candidates:
+            for key in ("prefix_cache_hits", "cache_hits", "hits", "hit_count"):
+                value = candidate.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    return value
+        return None
+
+    def clear_cache_for_benchmark(self, client: httpx.Client | None = None) -> bool:
+        payload = self._cache_management_json(client, "POST", "/cache/clear")
+        return payload is not None and payload.get("scheduler_cache_cleared") is True
+
+    def prefix_cache_hit_count(self, client: httpx.Client | None = None) -> int | None:
+        # Older Rapid-MLX releases documented this endpoint; newer releases
+        # can surface text prefix-cache counters through `/v1/status` instead.
+        for path in ("/cache/stats", "/status"):
+            payload = self._cache_management_json(client, "GET", path)
+            if payload is None:
+                continue
+            hits = self._prefix_cache_hits_from_payload(payload)
+            if hits is not None:
+                return hits
+        return None
+
+    def _request_model_name(self, model: str) -> str:
+        model_name = os.path.expanduser(super()._request_model_name(model))
+        cache_key = model_name
+        if cache_key in self._request_model_cache:
+            return self._request_model_cache[cache_key]
+
+        if "/" in model_name and os.path.exists(model_name):
+            request_model = model_name
+        else:
+            resolved = self._resolve_model_id(model_name)
+            request_model = resolved or model_name
+
+        self._request_model_cache[cache_key] = request_model
+        return request_model
+
+    def is_installed(self) -> bool:
+        return shutil.which("rapid-mlx") is not None
+
+    def get_version(self) -> str:
+        try:
+            result = subprocess.run(
+                ["rapid-mlx", "version"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if result.returncode != 0:
+                return "unknown"
+            output = f"{result.stdout}\n{result.stderr}"
+            return self._parse_version_output(output) or "unknown"
+        except Exception:
+            return "unknown"
+
+
+# ─── vLLM-MLX ────────────────────────────────────────────────────────────────
+
+class VLLMMLXEngine(BaseEngine):
+    name = ENGINE_NAME_VLLM_MLX
+    default_port = 8000
+    expected_process_names = ("vllm-mlx", "vllm_mlx")
+
+    def clear_cache_for_benchmark(self, client: httpx.Client | None = None) -> bool:
+        """Confirm a prefix-cache clear only when no background re-warm is queued.
+
+        vllm-mlx documents DELETE /v1/cache/prefix. A server configured with
+        warm prompts may re-populate the cache immediately after that response;
+        that case cannot be reported as a confirmed cold-cache preparation.
+        """
+        url = f"{self.base_url()}/cache/prefix"
+        try:
+            request = client.request if client is not None else httpx.request
+            response = request("DELETE", url, timeout=3.0)
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.debug("vllm-mlx prefix-cache clear unavailable at %s: %s", url, exc)
+            return False
+        return (
+            isinstance(payload, dict)
+            and payload.get("status") == "cleared"
+            and payload.get("rewarm_scheduled") is False
+        )
+
+    def is_installed(self) -> bool:
+        return (
+            shutil.which("vllm-mlx") is not None
+            or importlib.util.find_spec("vllm_mlx") is not None
+        )
+
+    def _server_identity_matches(self) -> bool:
+        try:
+            response = self._http_get(
+                f"{self.root_url()}/health",
+                timeout=2.0,
+                action="health identity check",
+                log_retries=False,
+            )
+            if response.status_code != 200:
+                return False
+            data = response.json()
+        except Exception:
+            return False
+
+        if not isinstance(data, dict):
+            return False
+        if data.get("model_loaded") is not True:
+            return False
+        if data.get("model_type") not in {"llm", "mllm"}:
+            return False
+        if isinstance(data.get("available_models"), list):
+            return True
+        return (
+            data.get("status") == "healthy"
+            and data.get("ready") is True
+            and isinstance(data.get("model_name"), str)
+            and bool(data["model_name"].strip())
+        )
+
+    def get_version(self) -> str:
+        try:
+            return importlib.metadata.version("vllm-mlx")
+        except Exception:
+            pass
+
+        try:
+            import vllm_mlx
+
+            version = getattr(vllm_mlx, "__version__", None)
+            if isinstance(version, str) and version.strip():
+                return version.strip()
+        except Exception:
+            pass
+
+        http_version = self._get_version_from_models_endpoint(
+            version_keys=(
+                "vllm_mlx_version",
+                "engine_version",
+                "server_version",
+                "version",
+            )
+        )
+        if http_version:
+            return self._parse_version_output(http_version) or http_version
+        return "unknown"
+
+
+# ─── mlx-lm ───────────────────────────────────────────────────────────────────
+
+class MLXLMEngine(BaseEngine):
+    name = ENGINE_NAME_MLX_LM
+    default_port = 8080
+    expected_process_names = ("mlx_lm", "mlx-lm")
+
+    def __init__(
+        self,
+        port: int | None = None,
+        model_id_cache: dict[str, str] | None = None,
+    ):
+        super().__init__(port=port)
+        self._model_id_cache = model_id_cache if model_id_cache is not None else {}
+        self._request_model_cache: dict[str, str] = {}
+
+    def _resolve_model_id(self, model: str) -> str | None:
+        if model in self._model_id_cache:
+            return self._model_id_cache[model]
+
+        try:
+            model_ids = self.list_model_ids()
+        except RuntimeError:
+            return None
+
+        matches = [
+            model_id
+            for model_id in model_ids
+            if model_id == model
+            or model_id.endswith(f"/{model}")
+            or os.path.basename(model_id.rstrip("/")) == model
+        ]
+        if len(matches) != 1:
+            return None
+
+        resolved = matches[0]
+        self._model_id_cache[model] = resolved
+        return resolved
+
+    def _request_model_name(self, model: str) -> str:
+        model_name = os.path.expanduser(super()._request_model_name(model))
+        if model_name in self._request_model_cache:
+            return self._request_model_cache[model_name]
+
+        if model_name == "default_model" or os.path.exists(model_name):
+            request_model = model_name
+        else:
+            resolved = self._resolve_model_id(model_name)
+            request_model = (
+                "default_model"
+                if resolved and os.path.exists(os.path.expanduser(resolved))
+                else resolved or model_name
+            )
+
+        self._request_model_cache[model_name] = request_model
+        return request_model
+
+    def is_installed(self) -> bool:
+        return importlib.util.find_spec("mlx_lm") is not None
+
+    def get_version(self) -> str:
+        try:
+            return importlib.metadata.version("mlx-lm")
+        except Exception:
+            return "unknown"
+
+
+# ─── Ollama ───────────────────────────────────────────────────────────────────
+
+class OllamaEngine(BaseEngine):
+    name = ENGINE_NAME_OLLAMA
+    default_port = 11434
+    expected_process_names = ("ollama",)
+    requires_model_backend_validation = True
+
+    def is_installed(self) -> bool:
+        return shutil.which("ollama") is not None
+
+    def _server_version(self) -> str | None:
+        try:
+            response = self._http_get(
+                f"{self.root_url()}/api/version",
+                timeout=2.0,
+                action="version identity check",
+                log_retries=False,
+            )
+            if response.status_code != 200:
+                return None
+            data = response.json()
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        version = data.get("version")
+        if not isinstance(version, str) or not version.strip():
+            return None
+        return version.strip()
+
+    def _server_identity_matches(self) -> bool:
+        return self._server_version() is not None
+
+    def validate_model_backend(self, model: str) -> dict[str, str]:
+        """Require Ollama MLX models to use safetensors, not GGUF."""
+        request_model = self._request_model_name(model)
+        url = f"{self.root_url()}/api/show"
+        action = "verify model backend"
+        try:
+            response = self._http_post(
+                url,
+                json_payload={"model": request_model},
+                timeout=10.0,
+                action=action,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                self._request_error_message(
+                    action,
+                    url,
+                    exc,
+                    model=model,
+                    request_model=request_model,
+                )
+            ) from exc
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError(
+                self._invalid_json_message(
+                    action,
+                    url,
+                    model=model,
+                    request_model=request_model,
+                )
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "invalid show response: response must be a JSON object",
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+        details = data.get("details")
+        if not isinstance(details, dict):
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "invalid show response: field 'details' must be a JSON object",
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+
+        raw_format = details.get("format")
+        if not isinstance(raw_format, str) or not raw_format.strip():
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "could not verify Ollama MLX backend: details.format is missing",
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+
+        model_format = raw_format.strip().lower()
+        if model_format in OLLAMA_REJECTED_MODEL_FORMATS:
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    (
+                        "Ollama model uses GGUF weights; public Ollama results "
+                        "must use MLX safetensors models"
+                    ),
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+        if model_format not in OLLAMA_MLX_MODEL_FORMATS:
+            allowed = ", ".join(sorted(OLLAMA_MLX_MODEL_FORMATS))
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    (
+                        "unsupported Ollama model format "
+                        f"{model_format!r}; expected one of: {allowed}"
+                    ),
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+
+        raw_quantization = details.get("quantization_level")
+        if not isinstance(raw_quantization, str) or not raw_quantization.strip():
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "could not verify Ollama model quantization: "
+                    "details.quantization_level is missing",
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+
+        metadata = {
+            "format": model_format,
+            "quantization": raw_quantization.strip(),
+        }
+        return metadata
+
+    def observed_serving_configuration(self, model: str) -> dict[str, object]:
+        # /api/show's model_info context length is model capacity, not the
+        # context allocated to this running instance. /api/ps reports the latter.
+        try:
+            response = self._http_get(
+                f"{self.root_url()}/api/ps", timeout=2.0,
+                action="running model configuration", log_retries=False,
+            )
+            if response.status_code != 200:
+                return {}
+            payload = response.json()
+        except Exception:
+            return {}
+        entries = payload.get("models") if isinstance(payload, dict) else None
+        if not isinstance(entries, list):
+            return {}
+        request_model = self._request_model_name(model)
+        matches = [
+            entry for entry in entries
+            if isinstance(entry, dict)
+            and request_model in (entry.get("name"), entry.get("model"))
+        ]
+        if len(matches) != 1:
+            return {}
+        length = matches[0].get("context_length")
+        return (
+            {"allocated_context_length": length}
+            if type(length) is int and length > 0 else {}
+        )
+
+    def get_version(self) -> str:
+        server_version = self._server_version()
+        if server_version is not None:
+            return server_version
+        try:
+            result = subprocess.run(
+                ["ollama", "--version"], capture_output=True, text=True, timeout=3
+            )
+            if result.returncode != 0:
+                return "unknown"
+            version_str = result.stdout.strip()
+            return version_str.split()[-1] if version_str else "unknown"
+        except Exception:
+            return "unknown"
+
+
+# ─── LM Studio ────────────────────────────────────────────────────────────────
+
+class LMStudioEngine(BaseEngine):
+    """LM Studio, restricted to its MLX runtime.
+
+    LM Studio ships two runtimes on Apple Silicon: llama.cpp for GGUF weights and
+    MLX for MLX weights. Only the MLX one is in scope here, so acceptance is
+    gated twice:
+
+    1. ``GET /api/v0/models/{model}`` must report ``compatibility_type: "mlx"``,
+       which says the weights are an MLX build.
+    2. A tiny non-streaming completion through ``/api/v0/chat/completions`` must
+       come back from an MLX-named runtime. Its ``supported_formats`` may list
+       ``safetensors`` (the weight format) rather than ``mlx``.
+
+    The first check alone is not sufficient: it describes the model, not the
+    runtime that answered. The probe also yields the runtime version, which is
+    what ``engine.version`` records — more specific than the LM Studio app
+    version, and the thing that actually determines performance.
+    """
+
+    name = ENGINE_NAME_LM_STUDIO
+    default_port = 1234
+    expected_process_names = ("lm studio", "lms", "llmster", "lm-studio")
+    requires_model_backend_validation = True
+
+    def __init__(self, port: int | None = None):
+        super().__init__(port=port)
+        self._runtime_version: str | None = None
+
+    def port_env_var(self) -> str:
+        return "MLX_CHRONOS_LMSTUDIO_PORT"
+
+    def native_url(self) -> str:
+        return f"{self.root_url()}/api/v0"
+
+    def is_installed(self) -> bool:
+        # LM Studio is a desktop app; the headless daemon ships the `lms` CLI.
+        # Neither is required to be on PATH when the server is already running,
+        # so a reachable native endpoint also counts as installed.
+        if shutil.which("lms") is not None or shutil.which("llmster") is not None:
+            return True
+        return self._native_models_payload() is not None
+
+    def _native_models_payload(self) -> dict | None:
+        try:
+            response = self._http_get(
+                f"{self.native_url()}/models",
+                timeout=2.0,
+                action="native model list",
+                log_retries=False,
+            )
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _server_identity_matches(self) -> bool:
+        # The native namespace and expected payload reduce false identification.
+        payload = self._native_models_payload()
+        return isinstance(payload, dict) and isinstance(payload.get("data"), list)
+
+    def _native_model_payload(self, model: str) -> dict:
+        request_model = self._request_model_name(model)
+        url = f"{self.native_url()}/models/{quote(request_model, safe='')}"
+        action = "verify model backend"
+        try:
+            response = self._http_get(url, timeout=10.0, action=action)
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                self._request_error_message(
+                    action, url, exc, model=model, request_model=request_model
+                )
+            ) from exc
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError(
+                self._invalid_json_message(
+                    action, url, model=model, request_model=request_model
+                )
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "invalid model response: response must be a JSON object",
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+        return data
+
+    def _runtime_probe(self, model: str) -> dict:
+        """Run a one-token native completion to learn which runtime answered."""
+        request_model = self._request_model_name(model)
+        url = f"{self.native_url()}/chat/completions"
+        action = "verify active runtime"
+        payload = {
+            "model": request_model,
+            "messages": [{"role": "user", "content": "Reply with one word: ok"}],
+            "max_tokens": 1,
+            "stream": False,
+            "temperature": BENCHMARK_REQUEST_TEMPERATURE,
+            "top_p": BENCHMARK_REQUEST_TOP_P,
+        }
+        try:
+            response = self._http_post(
+                url, json_payload=payload, timeout=60.0, action=action
+            )
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                self._request_error_message(
+                    action, url, exc, model=model, request_model=request_model
+                )
+            ) from exc
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError(
+                self._invalid_json_message(
+                    action, url, model=model, request_model=request_model
+                )
+            ) from exc
+
+        if isinstance(data, dict) and isinstance(data.get("model"), str):
+            if data["model"] != request_model:
+                raise RuntimeError(
+                    self._invalid_response_message(
+                        action,
+                        url,
+                        f"probe returned a different model {data['model']!r}",
+                        model=model,
+                        request_model=request_model,
+                    )
+                )
+        model_info = data.get("model_info") if isinstance(data, dict) else None
+        if isinstance(model_info, dict) and isinstance(model_info.get("format"), str):
+            if model_info["format"].strip().lower() != LM_STUDIO_MLX_COMPATIBILITY_TYPE:
+                raise RuntimeError(
+                    self._invalid_response_message(
+                        action,
+                        url,
+                        "probe response did not identify MLX model weights",
+                        model=model,
+                        request_model=request_model,
+                    )
+                )
+        runtime = data.get("runtime") if isinstance(data, dict) else None
+        if not isinstance(runtime, dict):
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    (
+                        "could not verify the active LM Studio runtime: the "
+                        "response carried no 'runtime' block, so there is no "
+                        "evidence that MLX served the request"
+                    ),
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+        return runtime
+
+    @staticmethod
+    def _runtime_supports_mlx(runtime: dict) -> bool:
+        name = runtime.get("name")
+        if not isinstance(name, str):
+            return False
+        normalized_name = name.strip().lower()
+        if normalized_name != "mlx" and not normalized_name.startswith("mlx-"):
+            return False
+
+        formats = runtime.get("supported_formats")
+        if isinstance(formats, list) and formats:
+            return any(
+                isinstance(entry, str)
+                and entry.strip().lower() in {"mlx", "safetensors"}
+                for entry in formats
+            )
+        # Older runtime responses may omit supported_formats entirely.
+        return True
+
+    def validate_model_backend(self, model: str) -> dict[str, str]:
+        request_model = self._request_model_name(model)
+        url = f"{self.native_url()}/models"
+        action = "verify model backend"
+        data = self._native_model_payload(model)
+
+        raw_type = data.get("compatibility_type")
+        if not isinstance(raw_type, str) or not raw_type.strip():
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "could not verify the LM Studio backend: compatibility_type "
+                    "is missing",
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+        compatibility_type = raw_type.strip().lower()
+        if compatibility_type in LM_STUDIO_REJECTED_COMPATIBILITY_TYPES:
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    (
+                        "LM Studio model uses the llama.cpp backend; this "
+                        "project only benchmarks MLX engines, so only models "
+                        "with compatibility_type='mlx' are accepted"
+                    ),
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+        if compatibility_type != LM_STUDIO_MLX_COMPATIBILITY_TYPE:
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    url,
+                    "unsupported LM Studio compatibility_type "
+                    f"{compatibility_type!r}; expected "
+                    f"{LM_STUDIO_MLX_COMPATIBILITY_TYPE!r}",
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+
+        runtime = self._runtime_probe(model)
+        if not self._runtime_supports_mlx(runtime):
+            runtime_name = runtime.get("name")
+            raise RuntimeError(
+                self._invalid_response_message(
+                    action,
+                    f"{self.native_url()}/chat/completions",
+                    (
+                        "the LM Studio runtime that served the request does not "
+                        f"support MLX (runtime={runtime_name!r}); switch the "
+                        "model's runtime to MLX in LM Studio and retry"
+                    ),
+                    model=model,
+                    request_model=request_model,
+                )
+            )
+
+        runtime_version = runtime.get("version")
+        self._runtime_version = (
+            runtime_version.strip()
+            if isinstance(runtime_version, str) and runtime_version.strip()
+            else None
+        )
+
+        metadata = {"format": compatibility_type}
+        quantization = data.get("quantization")
+        if isinstance(quantization, str) and quantization.strip():
+            metadata["quantization"] = quantization.strip()
+        return metadata
+
+    def get_version(self) -> str:
+        # The MLX runtime version is what determines performance, and it is
+        # captured by the backend check that must run before any measurement.
+        if self._runtime_version:
+            return self._runtime_version
+        return "unknown"
+
+    def observed_serving_configuration(self, model: str) -> dict[str, object]:
+        # The v0 max_context_length describes model capacity. v1 reports the
+        # load configuration of a specific instance. This optional read does
+        # not replace the v0 MLX runtime proof used by validate_model_backend.
+        try:
+            response = self._http_get(
+                f"{self.root_url()}/api/v1/models", timeout=2.0,
+                action="loaded model configuration", log_retries=False,
+            )
+            if response.status_code != 200:
+                return {}
+            payload = response.json()
+        except Exception:
+            return {}
+        models = payload.get("models") if isinstance(payload, dict) else None
+        if not isinstance(models, list):
+            return {}
+        request_model = self._request_model_name(model)
+        candidates: list[dict] = []
+        for entry in models:
+            if not isinstance(entry, dict) or entry.get("format") != "mlx":
+                continue
+            instances = entry.get("loaded_instances")
+            if not isinstance(instances, list):
+                continue
+            exact = [
+                instance for instance in instances
+                if isinstance(instance, dict) and instance.get("id") == request_model
+            ]
+            if exact:
+                candidates.extend(exact)
+            elif entry.get("key") == request_model:
+                candidates.extend(
+                    instance for instance in instances if isinstance(instance, dict)
+                )
+        if len(candidates) != 1:
+            return {}
+        config = candidates[0].get("config")
+        if not isinstance(config, dict):
+            return {}
+        observed: dict[str, object] = {}
+        for key in ("context_length", "eval_batch_size", "parallel"):
+            value = config.get(key)
+            if type(value) is int and value > 0:
+                observed[key] = value
+        for key in ("flash_attention", "offload_kv_cache_to_gpu"):
+            value = config.get(key)
+            if type(value) is bool:
+                observed[key] = value
+        return observed
+
+
+# ─── Registry ─────────────────────────────────────────────────────────────────
+
+# ─── BenchChronos: ds4 (vendored) + FastLLM ───────────────────────────────────
+
+class DS4ServerEngine(BaseEngine):
+    """ds4-server (motore ds4 vendorizzato), HTTP OpenAI-compatibile."""
+
+    name = ENGINE_NAME_DS4
+    default_port = 8101
+    expected_process_names = ("ds4-server", "ds4")
+
+    def is_installed(self) -> bool:
+        return True
+
+    def get_version(self) -> str:
+        return "ds4-vendored"
+
+    def _server_identity_matches(self) -> bool:
+        return self.get_server_pid() is not None
+
+
+class FMLXEngine(BaseEngine):
+    """FastLLM `fastllm serve`, HTTP OpenAI-compatibile."""
+
+    name = ENGINE_NAME_FMLX
+    default_port = 8102
+    expected_process_names = ("fastllm", "fmlx")
+
+    def is_installed(self) -> bool:
+        return True
+
+    def get_version(self) -> str:
+        return "fastllm"
+
+    def _server_identity_matches(self) -> bool:
+        return self.get_server_pid() is not None
+
+
+ENGINES = {
+    ENGINE_NAME_OMLX: OMLXEngine,
+    ENGINE_NAME_RAPID_MLX: RapidMLXEngine,
+    ENGINE_NAME_VLLM_MLX: VLLMMLXEngine,
+    ENGINE_NAME_MLX_LM: MLXLMEngine,
+    ENGINE_NAME_OLLAMA: OllamaEngine,
+    ENGINE_NAME_LM_STUDIO: LMStudioEngine,
+    ENGINE_NAME_DS4: DS4ServerEngine,
+    ENGINE_NAME_FMLX: FMLXEngine,
+}
+
+def get_engine(name: str) -> BaseEngine:
+    if name not in ENGINES:
+        raise ValueError(f"Unknown engine: '{name}'. Available: {list(ENGINES.keys())}")
+    return ENGINES[name]()

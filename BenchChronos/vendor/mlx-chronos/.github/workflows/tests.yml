@@ -1,0 +1,127 @@
+name: Tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/*.yml'
+      - '.github/scripts/**'
+      - 'README.md'
+      - 'docs/index.html'
+      - 'docs/leaderboard.css'
+      - 'docs/results_index.json'
+      - 'mlx_chronos/**'
+      - 'results/submitted/*.json'
+      - 'results/submitted/**/*.json'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'MANIFEST.in'
+      - 'docs/app-runtime.json'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/*.yml'
+      - '.github/scripts/**'
+      - 'README.md'
+      - 'docs/index.html'
+      - 'docs/leaderboard.css'
+      - 'docs/results_index.json'
+      - 'mlx_chronos/**'
+      - 'results/submitted/*.json'
+      - 'results/submitted/**/*.json'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'MANIFEST.in'
+      - 'docs/app-runtime.json'
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: pip install -e ".[test]"
+
+      - name: Show runner
+        run: |
+          sw_vers
+          uname -m
+
+      - name: Run CLI smoke checks
+        run: |
+          python -m mlx_chronos.cli --help
+          python -m mlx_chronos.cli --version
+          python -m mlx_chronos.cli validate --help
+          python -m mlx_chronos.cli models --help
+          python -m mlx_chronos.cli engines
+          python -c "from mlx_chronos.detect import detect_hardware; print(detect_hardware())"
+
+      - name: Validate leaderboard JavaScript syntax
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const html = fs.readFileSync('docs/index.html', 'utf8');
+          const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+            .map(match => match[1]);
+          for (const script of scripts) new Function(script);
+          NODE
+
+      - name: Run frontend behavior and security tests
+        run: node --test tests/frontend.test.cjs
+
+      - name: Run tests
+        run: pytest
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install package
+        run: pip install -e ".[test]"
+
+      - name: Verify checked-in leaderboard index is current
+        run: python -m mlx_chronos.leaderboard --check
+
+      - name: Lint
+        run: ruff check mlx_chronos tests
+
+      - name: Type check
+        run: mypy
+
+      - name: Enforce coverage
+        run: pytest --cov --cov-report=term-missing
+
+  packaging:
+    name: Wheel and source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Build and check distributions
+        run: |
+          python -m pip install build twine
+          python -m build
+          python -m twine check --strict dist/*
