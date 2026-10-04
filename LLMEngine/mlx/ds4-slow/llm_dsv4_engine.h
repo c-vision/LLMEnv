@@ -237,6 +237,7 @@ static inline int llm_dsv4_engine_generate_step(LlmDsv4Engine* e, int* out, int 
             ? llm_dsv4_sample_host(e->logits, e->w.cfg.n_vocab, e->sm_temp, e->sm_top_k, e->sm_top_p, &e->sm_rng)
             : llm_dsv4_argmax(e->logits, e->w.cfg.n_vocab);
     }
+    llm_dsv4_pf_decode_dump(n);   /* TEMP: profilo decode (attn vs MoE) */
     free(hc);
     return n;
 }

@@ -19,6 +19,7 @@
 static long g_pf_hc_gpu = 0, g_pf_hc_cpu = 0, g_pf_attn_gpu = 0, g_pf_attn_cpu = 0;
 static long g_pf_moe_batch = 0, g_pf_moe_cpu = 0, g_pf_layers = 0;
 static double g_pf_t1 = 0, g_pf_tmoe = 0, g_pf_t3 = 0;
+static double g_pf_d_attn = 0, g_pf_d_moe = 0;   /* DECODE: attn vs MoE per-token */
 static int g_pf_on = -1;
 static inline int llm_dsv4_pf_on(void) {
     if (g_pf_on < 0) { int v = 0; g_pf_on = (llm_ai_mlx_opt_get_bool("dsv4_profile", &v) == 0) ? v : 0; }
@@ -35,6 +36,12 @@ static inline void llm_dsv4_pf_dump(const char* tag) {
             "fase3(mHC)=%.1fms | hc gpu/cpu=%ld/%ld attn gpu/cpu=%ld/%ld moe batch/pertok=%ld/%ld\n",
             tag, g_pf_layers, g_pf_t1, g_pf_tmoe, _io, _mm, g_pf_t3,
             g_pf_hc_gpu, g_pf_hc_cpu, g_pf_attn_gpu, g_pf_attn_cpu, g_pf_moe_batch, g_pf_moe_cpu);
+}
+static inline void llm_dsv4_pf_decode_dump(int ntok) {
+    if (!llm_dsv4_pf_on() || ntok <= 0) return;
+    fprintf(stderr, "[dsv4-decode] attn=%.1fms moe=%.1fms (n=%d tok, %.1f ms/tok)\n",
+            g_pf_d_attn, g_pf_d_moe, ntok, (g_pf_d_attn + g_pf_d_moe) / (double)ntok);
+    g_pf_d_attn = 0; g_pf_d_moe = 0;   /* per-token: azzera per il prossimo dump */
 }
 
 /* Un layer su un token. hc [n_hc*embd] in ingresso, out_hc [n_hc*embd] in uscita.
@@ -77,6 +84,7 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
         const LlmDsv4PackedExperts* pe, LlmDsv4LayerCache* cache, const float* hc, int token, int pos, int il,
         float* out_hc, const char* const* ops, int n_ops) {
     int HC = c->n_hc, D = c->n_embd;
+    int pf = llm_dsv4_pf_on(); double _t = 0;   /* TEMP: profilo decode (attn vs MoE) */
     static const char* def_ops[] = { "mhc_pre_attn", "attention", "mhc_post_attn",
                                      "mhc_pre_ffn", "moe", "mhc_post_ffn" };
     if (ops == NULL || n_ops <= 0) { ops = def_ops; n_ops = 6; }
@@ -97,6 +105,7 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
             memcpy(saved, cur, sizeof(float) * (size_t)HC * D);
             llm_dsv4_block_pre(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, cur, normed, post, comb);
         } else if (strcmp(op, "attention") == 0) {
+            if (pf) _t = llm_dsv4_pf_now();
             /* La tabella completa registra 256 esperti per layer: sullo store
              * streaming il path selected-slots rimane il ramo efficiente (verificato:
              * il tail con store e' ~9.5ms/layer per l'I/O di 256 esperti). */
@@ -121,12 +130,15 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
             } else {
                 llm_dsv4_attn_cached(c, L, pe, cache, normed, pos, il, proj);
             }
+            if (pf) g_pf_d_attn += llm_dsv4_pf_now() - _t;
             if (tail_done) break;
         } else if (strcmp(op, "moe") == 0) {
+            if (pf) _t = llm_dsv4_pf_now();
             if (!llm_dsv4_gpu_moe_try(c, L, il, normed, token, proj)) {
                 if (pe && pe->gate) llm_dsv4_moe_forward_packed(c, L, pe, normed, il, token, proj);
                 else                llm_dsv4_moe_forward(c, L, normed, il, token, proj);
             }
+            if (pf) g_pf_d_moe += llm_dsv4_pf_now() - _t;
         } else if (strcmp(op, "mhc_post_attn") == 0 || strcmp(op, "mhc_post_ffn") == 0) {
             llm_dsv4_block_post(c, proj, saved, post, comb, nxt);
             memcpy(cur, nxt, sizeof(float) * (size_t)HC * D);
