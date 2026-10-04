@@ -15,6 +15,15 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ds4engine (motore ds4 VENDORIZZATO) come subdirectory SOLO quando mlx e' il progetto TOP-LEVEL
+# (build standalone, es. GMBasic `build-gmbasic`): i consumer che lo aggiungono da soli (FastLLM)
+# non lo duplicano. Se il target esiste, in fondo `llm_ai_mlx` lo linka + `LLM_HAVE_DS4ENGINE`,
+# cosi' un DS4 caricato via `llmengine_llm_engine_mlx` usa il VENDORED (piu' veloce), non ds4-slow.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../ds4engine/CMakeLists.txt")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ds4engine" "${CMAKE_BINARY_DIR}/ds4engine")
+endif()
+
 # Vendoring mlx-c via FetchContent -- stesso approccio "no submodule, nessun
 # checkout manuale" già usato per llama.cpp in native/llm_host_ai/. Pin a un
 # tag di release, mai a `master`, per build riproducibili.

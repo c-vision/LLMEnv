@@ -193,12 +193,23 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                 void* dm;
                 /* Store/cache esperti: trigger dal PARAMETRO di offload (--offload-experts ->
                  * set_expert_swap), mai da env. DS4 (~97 GB) streama gli esperti di default. */
-                {
-                    int want_swap = llm_mlx_moe_swap_on();
-                    if (llm_ai_mlx_opt_is_set("offload") != 1) want_swap = 1;
-                    if (eng->set_expert_swap) eng->set_expert_swap(want_swap ? model_dir : NULL);
-                }
+                int want_swap = llm_mlx_moe_swap_on();
+                if (llm_ai_mlx_opt_is_set("offload") != 1) want_swap = 1;
+                if (eng->set_expert_swap) eng->set_expert_swap(want_swap ? model_dir : NULL);
                 dm = eng->load_model(model_dir);
+                if (dm == NULL) {
+                    /* FALLBACK: se il motore scelto non carica (es. il VENDORED senza la cartella
+                     * `metal/` accanto all'eseguibile), prova l'altro DS4 (nativo) prima di
+                     * arrendersi: un DS4 non deve fallire per un artefatto di deploy mancante. */
+                    const LlmEngineLlmEngine* alt = llm_mlx_engine_symbol("llmengine_llm_engine_ds4slow");
+                    if (alt != NULL && alt != eng && alt->load_model != NULL) {
+                        fprintf(stderr, "llm_ai_mlx_load_model: engine '%s' non carica -> fallback '%s'\n",
+                                eng->name, alt->name);
+                        eng = alt;
+                        if (eng->set_expert_swap) eng->set_expert_swap(want_swap ? model_dir : NULL);
+                        dm = eng->load_model(model_dir);
+                    }
+                }
                 if (dm != NULL) {
                     m->deleg = eng;
                     m->deleg_model = dm;
