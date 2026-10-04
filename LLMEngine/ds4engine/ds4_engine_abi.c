@@ -137,21 +137,26 @@ static int ds4_set_sampling(LlmEngineLlmSession ss, const LlmEngineLlmSampling* 
 
 static int ds4_generate_ids(LlmEngineLlmSession ss, int max_new, int32_t eos, int32_t* out) {
     Ds4Sess* s = (Ds4Sess*)ss;
-    int i;
+    int i; double dec_ms = 0.0;
     if (!s) return -1;
     for (i = 0; i < max_new; i++) {
-        int id;
+        int id; struct timespec t0, t1;
         if (s->has_sp && s->sp.temperature > 0.f)
             id = ds4_session_sample(s->s, s->sp.temperature, s->sp.top_k, s->sp.top_p, 0.f, &s->rng);
         else
             id = ds4_session_argmax(s->s);
-        if (id < 0) return i;
+        if (id < 0) break;
         if (out) out[i] = (int32_t)id;
-        if (ds4_push_tok(s, (int32_t)id) != 0) return i;
-        if (ds4_sync(s) != 0) return i;
-        if (eos >= 0 && id == (int)eos) return i + 1;
+        if (ds4_push_tok(s, (int32_t)id) != 0) break;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        if (ds4_sync(s) != 0) break;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        dec_ms += (double)(t1.tv_sec - t0.tv_sec) * 1e3 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+        if (eos >= 0 && id == (int)eos) { i++; break; }
     }
-    return max_new;
+    if (i > 0) fprintf(stderr, "[ds4-decode] %d tok, %.1f ms/tok (%.1f tok/s)\n",
+                       i, dec_ms / i, (double)i * 1000.0 / dec_ms);
+    return i;
 }
 
 static const LlmEngineLlmEngine DS4_ENGINE = {
