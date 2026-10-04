@@ -6,7 +6,12 @@
  * config_map (chiavi del config.json), roles (match->ruolo, prima che combacia vince), quant (formato
  * per ruolo + la ricetta), structures (le primitive: attention/moe/compression/indexer/engram/vision). */
 typedef struct { char match[96]; char role[32]; char submodel[32]; } LlmDescRole;
-typedef struct { char role[32]; char fmt[16]; } LlmDescQuant;
+/* Quant IR (I11): 4 precisioni per RUOLO/OP. `fmt`=pesi (storage, retro-compatibile); gli altri tre
+ * sono la precisione del CALCOLO a runtime (actquant/accum/output). Vuoti => default (f16/f32/fmt). */
+typedef struct { char role[32]; char fmt[16];
+                 char activation[16];   /* attivazione a runtime: f16|fp8|int8|q8_0|... */
+                 char accum[16];        /* accumulatore: f32|f16 */
+                 char output[16]; } LlmDescQuant;
 /* Una struttura puo' essere una PIPELINE ORDINATA di primitive (`steps`: [{op, prim}]). E' la
  * "composizione" (livello 3): una struttura nuova = una lista di primitive esistenti, non codice. */
 typedef struct { char op[24]; char prim[32]; } LlmDescStep;
@@ -60,6 +65,11 @@ int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out
 const char* llmdesc_role(const LlmDesc* a, const char* tensor_name);
 /* Formato per ruolo (da `quant`), o NULL. */
 const char* llmdesc_fmt(const LlmDesc* a, const char* role);
+/* Quant IR (I11): le 4 precisioni per ruolo (pesi/activation/accum/output). Ritornano il default
+ * (f16/f32/fmt) se non dichiarate. Mai NULL per un ruolo noto. */
+const char* llmdesc_activation(const LlmDesc* a, const char* role);
+const char* llmdesc_accum(const LlmDesc* a, const char* role);
+const char* llmdesc_output(const LlmDesc* a, const char* role);
 /* Tipo dichiarato di una struttura (es. "attention" -> "mla"), o NULL. */
 const char* llmdesc_struct_type(const LlmDesc* a, const char* key);
 /* Nome del plugin PRIMITIVA dichiarato per una struttura (campo "prim"), o NULL. */

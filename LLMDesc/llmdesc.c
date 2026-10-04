@@ -76,18 +76,35 @@ int llmdesc_load(const char* path, LlmDesc* out) {
             LlmDescRole* R=&out->roles[out->n_roles];
             if (jcopy_str(jv(obj,"match"),R->match,sizeof R->match)) { jcopy_str(jv(obj,"role"),R->role,sizeof R->role); jcopy_str(jv(obj,"submodel"),R->submodel,sizeof R->submodel); out->n_roles++; }
             p=cb+1; } } }
-    /* quant: { "ROLE":"fmt", ..., "recipe":"_M", "recipe_boost_fmt":"..." } */
+    /* quant: { "ROLE":"fmt" | "ROLE":{weights,activation,accum,output}, "recipe":"_M", ... }.
+     * QuantIR I11: 4 assi per RUOLO/OP — pesi (storage) + activation/accum/output (precisione del
+     * CALCOLO). Forma stringa = solo pesi (retro-compatibile). */
     { const char* q=jv(j,"quant"); if (q && *q=='{') { const char* p=q+1;
         while (*p && *p!='}' && out->n_quant<128) {
             while(*p==' '||*p==',')p++; if(*p=='}'||!*p)break;
             if (*p!='"'){p++;continue;}
             char key[32]; p++; size_t k=0; while(*p&&*p!='"'&&k<31)key[k++]=*p++; key[k]=0; if(*p=='"')p++;
             while(*p==' '||*p=='\t')p++; if(*p==':')p++;
-            char val[16]; if (jcopy_str(p,val,sizeof val)) {
-                if (strcmp(key,"recipe")==0) { /* gia' letto */ }
-                else { LlmDescQuant* Q=&out->quant[out->n_quant]; snprintf(Q->role,sizeof Q->role,"%s",key); snprintf(Q->fmt,sizeof Q->fmt,"%s",val); out->n_quant++; }
-            }
-            while(*p && *p!=','){ if(*p=='}')break; p++; } } } }
+            while(*p==' '||*p=='\t')p++;
+            if (*p=='{') {
+                const char* eo=p; int dd=0; do { if(*eo=='{')dd++; else if(*eo=='}'){dd--; if(!dd)break;} eo++; } while(*eo);
+                if (strcmp(key,"recipe")!=0 && strcmp(key,"recipe_boost_fmt")!=0) {
+                    LlmDescQuant* Q=&out->quant[out->n_quant]; snprintf(Q->role,sizeof Q->role,"%s",key);
+                    { const char* v=jv(p,"weights");    if (v && v<eo) jcopy_str(v,Q->fmt,sizeof Q->fmt); }
+                    { const char* v=jv(p,"activation"); if (v && v<eo) jcopy_str(v,Q->activation,sizeof Q->activation); }
+                    { const char* v=jv(p,"accum");      if (v && v<eo) jcopy_str(v,Q->accum,sizeof Q->accum); }
+                    { const char* v=jv(p,"output");     if (v && v<eo) jcopy_str(v,Q->output,sizeof Q->output); }
+                    if (!Q->fmt[0]) snprintf(Q->fmt,sizeof Q->fmt,"%s","f16");
+                    out->n_quant++;
+                }
+                p=eo; if(*p=='}')p++;
+            } else {
+                char val[16]; if (jcopy_str(p,val,sizeof val)) {
+                    if (strcmp(key,"recipe")==0 || strcmp(key,"recipe_boost_fmt")==0) { /* gia' letti sopra */ }
+                    else { LlmDescQuant* Q=&out->quant[out->n_quant]; snprintf(Q->role,sizeof Q->role,"%s",key); snprintf(Q->fmt,sizeof Q->fmt,"%s",val); out->n_quant++; }
+                }
+                while(*p && *p!=','){ if(*p=='}')break; p++; }
+            } } } }
     /* codecs: { "f16": "llmcodec_f16", ... } -> plugin che implementa il formato */
     { const char* cd=jv(j,"codecs");
       if (cd && *cd=='{') { const char* p=cd+1;
@@ -459,6 +476,27 @@ const char* llmdesc_struct_type(const LlmDesc* a, const char* key) {
 const char* llmdesc_fmt(const LlmDesc* a, const char* role) {
     if (!a||!role) return NULL;
     for (int i=0;i<a->n_quant;i++) if (strcmp(a->quant[i].role, role)==0) return a->quant[i].fmt;
+    return NULL;
+}
+
+/* QuantIR I11 — precisione di CALCOLO per ruolo: activation/accum/output (default f16/f32/fmt). */
+const char* llmdesc_activation(const LlmDesc* a, const char* role)
+{
+    if (a && role) for (int i=0;i<a->n_quant;i++)
+        if (strcmp(a->quant[i].role, role)==0 && a->quant[i].activation[0]) return a->quant[i].activation;
+    return "f16";
+}
+const char* llmdesc_accum(const LlmDesc* a, const char* role)
+{
+    if (a && role) for (int i=0;i<a->n_quant;i++)
+        if (strcmp(a->quant[i].role, role)==0 && a->quant[i].accum[0]) return a->quant[i].accum;
+    return "f32";
+}
+const char* llmdesc_output(const LlmDesc* a, const char* role)
+{
+    if (a && role) for (int i=0;i<a->n_quant;i++)
+        if (strcmp(a->quant[i].role, role)==0 && a->quant[i].output[0]) return a->quant[i].output;
+    { const char* f = llmdesc_fmt(a, role); return f ? f : "f16"; }
     return NULL;
 }
 
