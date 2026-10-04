@@ -197,7 +197,9 @@ int llmdesc_load(const char* path, LlmDesc* out) {
       } }
     free(j);
 
-    return out->n_roles>0 ? 0 : -1;
+    /* Valido se ha una name-map (role map `.llmarch`) OPPURE una geometria (`.gmbarch` auto-costruito)
+     * OPPURE almeno un arch: un `.gmbarch` geometry-only (senza ruoli) è un descrittore valido. */
+    return (out->n_roles > 0 || out->geometry.present || out->arch[0]) ? 0 : -1;
 }
 /* dall'arch (es. "DeepseekV41ForCausalLM" o "deepseek_v41_text") al nome file .llmarch */
 static void arch_slug(const char* arch, char* out, size_t cap) {
@@ -262,7 +264,10 @@ static int llmdesc_resolve_core(const char* hf_dir, LlmDesc* out, char* out_path
     (void)d3;
     for (int i = 0; i < 3; i++) {
         if (!dirs[i]) continue;
-        char path[4096]; snprintf(path, sizeof path, "%s/%s.llmarch", dirs[i], slug);
+        char path[4096];
+        snprintf(path, sizeof path, "%s/%s.llmarch", dirs[i], slug);
+        if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
+        snprintf(path, sizeof path, "%s/%s.gmbarch", dirs[i], slug);
         if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
     }
     /* ABI/ canonica (anche FRATELLO LLMEnv/ABI via llmdesc_abi_dir; .llmarch O .gmbarch). */
