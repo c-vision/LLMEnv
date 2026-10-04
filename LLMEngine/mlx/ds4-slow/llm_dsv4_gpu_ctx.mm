@@ -349,6 +349,8 @@ void llm_dsv4_gpu_ctx_close(void) {
     g_be = NULL; g_on = 0; g_ref = 0;
 }
 
+int g_dsv4_prof_global = -1;   /* TEMP: flag di profilazione condiviso (v. gpu_ctx.h) */
+
 int llm_dsv4_gpu_moe_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                          const float* x, int token, float* out) {
     static int logged = 0;

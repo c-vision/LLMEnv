@@ -38,6 +38,10 @@ void llm_dsv4_gpu_moe_pt_prof(double* route_ms, double* store_ms, double* metal_
 /* TEMP (dsv4_profile): tempo GPU reale per classe di op (attn/moe) dai timestamp del command buffer. */
 void llm_dsv4_metal_set_op(int op);
 void llm_dsv4_metal_gpu_ms(double* attn, double* moe);
+long llm_dsv4_metal_dispatches(void);   /* TEMP: conteggio dispatch Metal (cumulativo) */
+/* TEMP: flag di profilazione CONDIVISO (il registro opzioni e' per-TU: il TU del motore imposta
+ * questo, gli altri lo leggono). 0=off, 1=on, -1=non ancora risolto. */
+extern int g_dsv4_prof_global;
 int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                   const float* xn, int pos, float* q, float* kv, float* qrn);
 int llm_dsv4_gpu_attn_finish_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,

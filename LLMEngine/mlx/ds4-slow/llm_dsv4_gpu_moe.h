@@ -32,6 +32,7 @@ static double g_dsv4_moe_io_ms = 0, g_dsv4_moe_mm_ms = 0;
 /* TEMP (dsv4_profile): sotto-timer della glue HOST del MoE per-token: route (CPU) / store_get /
  * call Metal (setup+dispatch+wait). */
 static double g_dsv4_pt_route_ms = 0, g_dsv4_pt_store_ms = 0, g_dsv4_pt_metal_ms = 0;
+extern int g_dsv4_prof_global;   /* flag condiviso (il registro opzioni e' per-TU) */
 static inline double llm_dsv4_gm_now(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
@@ -91,7 +92,7 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
     const int streaming = (pe->store && pe->store_get) != 0;
     int selected[LLM_DSV4_MAX_EXPERT_USED];
     float weight[LLM_DSV4_MAX_EXPERT_USED];
-    int pf_g = 0; { int v = 0; if (llm_ai_mlx_opt_get_bool("ds4_profile", &v) == 0) pf_g = v; }
+    int pf_g = (g_dsv4_prof_global > 0) ? 1 : 0;   /* flag condiviso (registro opzioni per-TU) */
     double _pt = pf_g ? llm_dsv4_gm_now() : 0;
     llm_dsv4_moe_route(c, L, x, il, token, selected, weight);   /* riuso C */
     if (pf_g) { g_dsv4_pt_route_ms += llm_dsv4_gm_now() - _pt; _pt = llm_dsv4_gm_now(); }

@@ -147,6 +147,7 @@ typedef struct {
 /* TEMP (dsv4_profile): tempo GPU reale per classe di op (attn/moe) dai timestamp del cb. */
 void llm_dsv4_metal_set_op(int op);
 void llm_dsv4_metal_gpu_ms(double* attn, double* moe);
+long llm_dsv4_metal_dispatches(void);   /* TEMP: conteggio dispatch Metal (cumulativo) */
 int llm_dsv4_metal_attn_mid(LlmDsv4Metal* b, const LlmDsv4MidParams* p);
 /* `nt` token consecutivi (stesso layer, params in ordine di posizione) in UNA command buffer. */
 int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, int nt, void** heads_dev_out);

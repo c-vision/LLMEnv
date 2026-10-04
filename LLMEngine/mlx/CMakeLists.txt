@@ -438,6 +438,15 @@ target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../..
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
 target_include_directories(llm_ai_mlx PUBLIC . ${GMB_DS4SLOW_INC} tokenizers ds41-native ../Options)
 
+# FIX dipendenze: gli header ds4-slow/ds41-native sono header-only (NON sono sorgenti) e il tracking
+# automatico non li vede -> una modifica a *.h NON ricompila i TU consumatori (build "verde" ma binario
+# STALE, molto insidioso). Aggiungendoli come SOURCES del target, CMake li traccia come dipendenze.
+file(GLOB LLM_DS4SLOW_HDRS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow/*.h)
+file(GLOB LLM_DS41_HDRS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native/*.h)
+if(LLM_DS4SLOW_HDRS OR LLM_DS41_HDRS)
+  target_sources(llm_ai_mlx PRIVATE ${LLM_DS4SLOW_HDRS} ${LLM_DS41_HDRS})
+endif()
+
 # Se il motore ds4 VENDORIZZATO (ds4engine) è nel build, llm_ai_mlx lo linka: la dylib esporta
 # allora anche `llmengine_llm_engine_ds4`, e i consumatori (GMBasic/FastLLM) possono scegliere tra
 # engine e slow via la STESSA dylib. Se ds4engine non c'è, resta solo `..._ds4slow` (adapter nativo).
