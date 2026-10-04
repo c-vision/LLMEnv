@@ -28,6 +28,7 @@ typedef struct {
     int         n;
     char        scale_suffix[16];  /* default ".scales"; es. ".scale" per DS4.1 */
     char        bias_suffix[16];   /* default ".biases" */
+    char        tokenizer_pre[24]; /* pre-tokenizer llama.cpp (es. "olmo","qwen2","llama-bpe"); "" = ometti */
     LlmCodecRoleFmt  q[128];  int n_q;  /* sezione `quant`: ruolo -> formato (es. NORM->f32, OUTPUT->q6_k) */
     LlmCodecRoleStruct st[16]; int n_st;  /* sezione `structures`: chiave -> tipo (attention:mla, engram, vision:vit, ...) */
     int         expert_axis;         /* dalla struttura `moe` (default 3, come da .llmarch DS4.1) */

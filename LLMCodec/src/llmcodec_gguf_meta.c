@@ -82,6 +82,7 @@ static void add_f32(ML* m, const char* key, float v){ LlmCodecGgufMetaKV* k=ml_a
 static void add_bool(ML* m, const char* key, int v){ LlmCodecGgufMetaKV* k=ml_add(m,key); k->type=LLMCODEC_GGUF_MT_BOOL; k->b=v; }
 static void add_str(ML* m, const char* key, const char* v){ if(!v)return; LlmCodecGgufMetaKV* k=ml_add(m,key); k->type=LLMCODEC_GGUF_MT_STRING; char* d=strdup(v); reg(&m->reg,d); k->str=d; }
 static void add_arr_str(ML* m, const char* key, char** arr, int n){ LlmCodecGgufMetaKV* k=ml_add(m,key); k->type=LLMCODEC_GGUF_MT_ARRAY; k->arr=(const char* const*)arr; k->arr_n=n; k->arr_count=(uint64_t)n; }
+static void add_arr_i32(ML* m, const char* key, const int32_t* a, int n){ LlmCodecGgufMetaKV* k=ml_add(m,key); k->type=LLMCODEC_GGUF_MT_ARRAY; k->arr_type=LLMCODEC_GGUF_MT_I32; k->arr_raw=a; k->arr_count=(uint64_t)n; k->arr_raw_bytes=(uint64_t)n*4; }
 
 /* chiave "<arch>.<suffix>" */
 static void add_u32a(ML* m, const char* arch, const char* suf, uint32_t v){ char b[96]; snprintf(b,sizeof b,"%s.%s",arch,suf); add_u32(m,b,v); }
@@ -90,7 +91,7 @@ static void add_boola(ML* m, const char* arch, const char* suf, int v){ char b[9
 static void add_arra(ML* m, const char* arch, const char* suf, char** a, int n){ char b[96]; snprintf(b,sizeof b,"%s.%s",arch,suf); add_arr_str(m,b,a,n); }
 
 
-int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmCodecTokenizerMeta* tm, LlmCodecGgufMetaKV** out_kv, int* out_n) {
+int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmCodecTokenizerMeta* tm, const char* tokenizer_pre, LlmCodecGgufMetaKV** out_kv, int* out_n) {
     if (!model_dir || !arch || !out_kv || !out_n) return -1;
     *out_kv=NULL; *out_n=0;
     char p[1300]; snprintf(p,sizeof p,"%s/config.json",model_dir); char* cj=mslurp(p);
@@ -152,7 +153,11 @@ int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmC
         if (vs > 0 && (long long)ntok < vs) {
             char** pad = (char**)malloc((size_t)vs * sizeof(char*));
             for (int i = 0; i < ntok; i++) pad[i] = (char*)toks[i];
-            for (long long i = ntok; i < vs; i++) pad[i] = (char*)"";
+            for (long long i = ntok; i < vs; i++) {
+                /* padding come llama.cpp: "[PAD<id>]" (NON stringa vuota -> niente warning "empty token") */
+                char b[32]; snprintf(b, sizeof b, "[PAD%lld]", i);
+                char* s = strdup(b); reg(&m.reg, s); pad[i] = s;
+            }
             reg(&m.reg, pad);
             toks = (const char* const*)pad; ntok = (int)vs;
         }
@@ -160,6 +165,21 @@ int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmC
         if (tm->merges && tm->n_merges > 0)
             add_arra(&m,"tokenizer.ggml","merges",(char**)tm->merges,tm->n_merges);
     }
+    /* token_type (llama.cpp lo richiede: 1 normal,2 unknown,3 control,4 user_defined,5 unused,6 byte).
+     * Derivato dal progetto tokenizer (added_tokens). Lunghezza = vocab_size; l'eventuale padding
+     * oltre il vocabolario reale (fino a vs) e' UNUSED=5. */
+    if (tm && tm->token_types && tm->n_token_types > 0 && vs > 0) {
+        int n = (int)vs;
+        int32_t* tt = (int32_t*)malloc((size_t)n * sizeof(int32_t));
+        if (tt) {
+            for (int i = 0; i < n; i++) tt[i] = (i < tm->n_token_types) ? tm->token_types[i] : 5;
+            reg(&m.reg, tt);
+            add_arr_i32(&m, "tokenizer.ggml.token_type", tt, n);
+        }
+    }
+    /* pre-tokenizer (llama.cpp: senza, "missing pre-tokenizer... GENERATION QUALITY DEGRADED").
+     * Valore per-arch dichiarato nella `.gmbarch` (`tokenizer_pre`). */
+    if (tokenizer_pre && tokenizer_pre[0]) add_str(&m, "tokenizer.ggml.pre", tokenizer_pre);
     if (bos>=0) add_u32(&m,"tokenizer.ggml.bos_token_id",(uint32_t)bos);
     if (eos>=0) add_u32(&m,"tokenizer.ggml.eos_token_id",(uint32_t)eos);
     if (pad>=0) add_u32(&m,"tokenizer.ggml.padding_token_id",(uint32_t)pad);

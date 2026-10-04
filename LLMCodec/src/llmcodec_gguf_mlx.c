@@ -377,7 +377,7 @@ int llmcodec_mlx_to_gguf_ex(const char* mlx_dir, const char* out_path, int ggml_
     free(pend);
     const char* arch = (rm && rm->arch[0]) ? rm->arch : "llm";
     LlmCodecGgufMetaKV* kv = NULL; int nkv = 0;
-    if (llmcodec_gguf_meta_build(mlx_dir, arch, tm, &kv, &nkv) != 0 || nkv == 0) {
+    if (llmcodec_gguf_meta_build(mlx_dir, arch, tm, (rm && rm->tokenizer_pre[0]) ? rm->tokenizer_pre : NULL, &kv, &nkv) != 0 || nkv == 0) {
         kv = (LlmCodecGgufMetaKV*)calloc(1, sizeof(LlmCodecGgufMetaKV)); if (kv) { kv[0].key="general.architecture"; kv[0].type=LLMCODEC_GGUF_MT_STRING; kv[0].str=arch; nkv=1; }
     }
     if (nskip > 0) fprintf(stderr, "[mlx->gguf] ATTENZIONE: %d tensori saltati (dtype non mappato)\n", nskip);

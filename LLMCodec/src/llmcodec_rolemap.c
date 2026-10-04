@@ -150,6 +150,7 @@ int llmcodec_rolemap_load(const char* llmarch_path, LlmCodecRoleMap* out) {
 
     jstr(jval(j, "arch"), out->arch, sizeof out->arch);
     jstr(jval(j, "scale_suffix"), out->scale_suffix, sizeof out->scale_suffix);
+    { const char* tpv = jval(j, "tokenizer_pre"); if (tpv) jstr(tpv, out->tokenizer_pre, sizeof out->tokenizer_pre); }
     jstr(jval(j, "bias_suffix"),  out->bias_suffix,  sizeof out->bias_suffix);
 
     /* quant: { "NORM":"f32", "OUTPUT":"q6_k", ..., "recipe":"_M", "recipe_boost":[...] } */

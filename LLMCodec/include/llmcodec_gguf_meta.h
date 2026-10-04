@@ -14,12 +14,15 @@ typedef struct {
     int                n_tokens;
     const char* const* merges;     /* merge in ordine di rango ("left right") */
     int                n_merges;
+    const int32_t*     token_types;/* id -> tipo GGUF (1 normal,3 control,4 user_defined); opzionale */
+    int                n_token_types;
 } LlmCodecTokenizerMeta;
 
 /* Riempie *out_kv (malloc, *out_n elementi) coi KV: general.architecture, <arch>.<hyperparam>,
  * tokenizer.ggml.*. `tm` puo' essere NULL (nessun KV tokenizer). 0 ok / -1.
  * Liberare con llmcodec_gguf_meta_free_built. */
 int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmCodecTokenizerMeta* tm,
+                        const char* tokenizer_pre,
                         LlmCodecGgufMetaKV** out_kv, int* out_n);
 void llmcodec_gguf_meta_free_built(LlmCodecGgufMetaKV* kv, int n);
 

@@ -61,6 +61,9 @@ void llmtoken_free(llmtoken_handle handle);
  * added_tokens gia' riempiti. Ritornano NULL se l'handle e' invalido. */
 const char* const* llmtoken_export_tokens(llmtoken_handle handle, size_t* out_n);
 const char* const* llmtoken_export_merges(llmtoken_handle handle, size_t* out_n);
+/* id -> tipo token GGUF (`tokenizer.ggml.token_type`): 1=NORMAL, 3=CONTROL, 4=USER_DEFINED.
+ * Puntatore posseduto dall'handle (valido fino a llmtoken_free). */
+const int32_t* llmtoken_export_token_types(llmtoken_handle handle, size_t* out_n);
 /* "gpt2" (byte-level) | "llama" (metaspace/SentencePiece) per tokenizer.ggml.model. */
 const char* llmtoken_gguf_model(llmtoken_handle handle);
 

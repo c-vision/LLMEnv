@@ -221,6 +221,7 @@ static size_t make_pair_key(char* buf, size_t buf_cap, const char* a, size_t ale
 typedef struct {
     sds content;
     int32_t id;
+    int special;   /* 1 = token speciale (GGUF token_type CONTROL), 0 = aggiunto utente (USER_DEFINED) */
 } SpecialToken;
 
 /* Passo di normalizzazione dichiarato dal file (sezione "normalizer"). Qui
@@ -256,6 +257,8 @@ typedef struct {
     int32_t* special_ids;
     sds* special_contents;
     size_t special_id_map_len;
+    int32_t* token_types;        /* id -> tipo GGUF (1 normal,3 control,4 user_defined), lazy per l'export */
+    size_t token_types_len;
     pcre2_code* pre_re[4];       /* regex Split del pre-tokenizer, in ordine (Sequence) */
     size_t pre_re_len;
     /* --- encoder metaspace/SentencePiece (Llama-1/2, Mistral/Mixtral) vs
@@ -659,9 +662,12 @@ static llmtoken_handle llmtoken_build_json(const char* json, size_t len) {
             const char* content = cJSON_IsString(content_j) ? content_j->valuestring : "";
             int32_t id = cJSON_IsNumber(id_j) ? (int32_t)id_j->valuedouble : -1;
             if (content[0] == '\0' || id < 0) continue;
+            cJSON* sp_j = cJSON_GetObjectItemCaseSensitive(at, "special");
+            int is_special = cJSON_IsTrue(sp_j) ? 1 : 0;
             sds content_sds = sdsnew(content);
             t->special_tokens[n_special].content = content_sds;
             t->special_tokens[n_special].id = id;
+            t->special_tokens[n_special].special = is_special;
             t->special_ids[n_special] = id;
             t->special_contents[n_special] = sdsdup(content_sds);
             n_special++;
@@ -1037,6 +1043,7 @@ static llmtoken_handle llmtoken_build_tiktoken(const char* model_path, const cha
                         sds content_sds = sdsnew(content_j->valuestring);
                         t->special_tokens[n_special].content = content_sds;
                         t->special_tokens[n_special].id = id;
+                        t->special_tokens[n_special].special = 1;   /* added_tokens_decoder = speciali */
                         t->special_ids[n_special] = id;
                         t->special_contents[n_special] = sdsdup(content_sds);
                         n_special++;
@@ -1118,6 +1125,7 @@ extern void llmtoken_free(llmtoken_handle handle) {
     for (size_t i = 0; i < t->special_id_map_len; i++) sdsfree(t->special_contents[i]);
     free(t->special_ids);
     free(t->special_contents);
+    free(t->token_types);
     if (t->unk_token) sdsfree(t->unk_token);
     free(t);
 }
@@ -1148,6 +1156,28 @@ extern const char* const* llmtoken_export_merges(llmtoken_handle handle, size_t*
     if (!t) { if (out_n) *out_n = 0; return NULL; }
     if (out_n) *out_n = t->merges_len;
     return (const char* const*)t->merges;
+}
+/* id -> tipo token GGUF (`tokenizer.ggml.token_type`): NORMAL=1, CONTROL=3, USER_DEFINED=4.
+ * Derivato da `added_tokens` (special -> CONTROL, altrimenti USER_DEFINED); il resto NORMAL.
+ * Il padding oltre il vocabolario lo aggiunge il converter (UNUSED=5). Puntatore posseduto. */
+extern const int32_t* llmtoken_export_token_types(llmtoken_handle handle, size_t* out_n) {
+    LlmTokenizer* t = (LlmTokenizer*)handle;
+    if (!t) { if (out_n) *out_n = 0; return NULL; }
+    if (!t->token_types) {
+        size_t n = t->id_to_token_len;
+        if (n == 0) { if (out_n) *out_n = 0; return NULL; }
+        int32_t* tt = (int32_t*)malloc(n * sizeof(int32_t));
+        if (!tt) { if (out_n) *out_n = 0; return NULL; }
+        for (size_t i = 0; i < n; i++) tt[i] = 1;   /* NORMAL */
+        for (size_t k = 0; k < t->special_tokens_len; k++) {
+            int32_t id = t->special_tokens[k].id;
+            if (id >= 0 && (size_t)id < n) tt[id] = t->special_tokens[k].special ? 3 : 4;
+        }
+        t->token_types = tt;
+        t->token_types_len = n;
+    }
+    if (out_n) *out_n = t->token_types_len;
+    return t->token_types;
 }
 extern const char* llmtoken_gguf_model(llmtoken_handle handle) {
     LlmTokenizer* t = (LlmTokenizer*)handle;
