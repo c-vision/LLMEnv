@@ -21,14 +21,6 @@ static long g_pf_moe_batch = 0, g_pf_moe_cpu = 0, g_pf_layers = 0;
 static double g_pf_t1 = 0, g_pf_tmoe = 0, g_pf_t3 = 0;
 static double g_pf_d_attn = 0, g_pf_d_moe = 0;   /* DECODE: attn vs MoE per-token */
 static int g_pf_on = -1;
-/* Scratch PERSISTENTE grow-only (per-TU) per il hot path del decode: elimina i malloc/free
- * per-layer (erano ~8 malloc + 7 free × layer × token = churn + first-touch). §0septies. */
-static inline float* llm_dsv4_slot(int i, size_t n) {
-    static float* p[24]; static size_t cap[24];
-    if (i < 0 || i >= 24) return NULL;
-    if (n > cap[i]) { free(p[i]); p[i] = (float*)malloc(n * sizeof(float)); cap[i] = p[i] ? n : 0; }
-    return p[i];
-}
 static inline int llm_dsv4_pf_on(void) {
     if (g_pf_on < 0) { int v = 0; g_pf_on = (llm_ai_mlx_opt_get_bool("dsv4_profile", &v) == 0) ? v : 0; g_dsv4_prof_global = g_pf_on; }
     return g_pf_on;
@@ -60,13 +52,14 @@ static inline void llm_dsv4_pf_decode_dump(int ntok) {
 static inline void llm_dsv4_layer_forward(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
         const float* hc, int token, int pos, int il, const float* kv, int n_kv, float* out_hc) {
     int HC = c->n_hc, D = c->n_embd;
-    float* attn_x = (float*)malloc(sizeof(float) * (size_t)D);
-    float* attn_out = (float*)malloc(sizeof(float) * (size_t)D);
-    float* after = (float*)malloc(sizeof(float) * (size_t)HC * D);
-    float* ffn_x = (float*)malloc(sizeof(float) * (size_t)D);
-    float* ffn_out = (float*)malloc(sizeof(float) * (size_t)D);
-    float* post = (float*)malloc(sizeof(float) * (size_t)HC);
-    float* comb = (float*)malloc(sizeof(float) * (size_t)HC * HC);
+    llm_dsv4_arena_reset();
+    float* attn_x = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D);
+    float* attn_out = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D);
+    float* after = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)HC * D);
+    float* ffn_x = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D);
+    float* ffn_out = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D);
+    float* post = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)HC);
+    float* comb = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)HC * HC);
 
     /* attenzione */
     llm_dsv4_block_pre(c, L->hc_attn_fn, L->hc_attn_scale, L->hc_attn_base, L->attn_norm,
@@ -80,7 +73,7 @@ static inline void llm_dsv4_layer_forward(const LlmDsv4Config* c, const LlmDsv4L
     llm_dsv4_moe_forward(c, L, ffn_x, il, token, ffn_out);
     llm_dsv4_block_post(c, ffn_out, after, post, comb, out_hc);
 
-    free(comb); free(post); free(ffn_out); free(ffn_x); free(after); free(attn_out); free(attn_x);
+    /* arena: nessun free */
 }
 
 /* ── COMPOSIZIONE (livello 3): il layer DS4 come PIPELINE di passi dichiarati (`.llmarch`,
@@ -99,13 +92,14 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
     static const char* def_ops[] = { "mhc_pre_attn", "attention", "mhc_post_attn",
                                      "mhc_pre_ffn", "moe", "mhc_post_ffn" };
     if (ops == NULL || n_ops <= 0) { ops = def_ops; n_ops = 6; }
-    float* cur    = llm_dsv4_slot(0, (size_t)HC * D); memcpy(cur, hc, sizeof(float) * (size_t)HC * D);
-    float* normed = llm_dsv4_slot(1, (size_t)D);
-    float* proj   = llm_dsv4_slot(2, (size_t)D);
-    float* saved  = llm_dsv4_slot(3, (size_t)HC * D);
-    float* nxt    = llm_dsv4_slot(4, (size_t)HC * D);
-    float* post   = llm_dsv4_slot(5, (size_t)HC);
-    float* comb   = llm_dsv4_slot(6, (size_t)HC * HC);
+    llm_dsv4_arena_reset();   /* arena azzerata a ogni layer: nessun malloc/free intra-layer */
+    float* cur    = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)HC * D); memcpy(cur, hc, sizeof(float) * (size_t)HC * D);
+    float* normed = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D);
+    float* proj   = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D);
+    float* saved  = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)HC * D);
+    float* nxt    = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)HC * D);
+    float* post   = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)HC);
+    float* comb   = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)HC * HC);
     int tail_done = 0;
     for (int k = 0; k < n_ops; k++) {
         const char* op = ops[k];
@@ -127,7 +121,7 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
                 strcmp(ops[4], "moe") == 0 &&
                 strcmp(ops[5], "mhc_post_ffn") == 0;
             if (canonical_tail) {
-                float* heads = llm_dsv4_slot(7, (size_t)c->n_head * c->n_head_dim);
+                float* heads = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)c->n_head * c->n_head_dim);
                 if (heads) {
                     if (llm_dsv4_attn_cached_mid(c, L, pe, cache, normed, pos, il, heads)) {
                         tail_done = llm_dsv4_gpu_attn_tail_try(c, L, pe, il, heads, saved, post, comb, pos, out_hc);
@@ -187,17 +181,18 @@ static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const Ll
         const LlmDsv4PackedExperts* pe, LlmDsv4LayerCache* cache, const float* hc_in, const int* tokens,
         int pos0, int N, int il, float* hc_out) {
     const int HC = c->n_hc, D = c->n_embd; const size_t hcn = (size_t)HC * D; const int SZ = (2 + HC) * HC;
+    llm_dsv4_arena_reset();   /* arena azzerata a ogni layer batch */
     int pf = llm_dsv4_pf_on(); double _t0 = 0; if (pf) { _t0 = llm_dsv4_pf_now(); g_pf_layers++; }
     /* mHC su GPU (opzione di registro dsv4_gpu_hc, default 1; 0 = percorso CPU bit-exact col token-per-token). Layout `sp` per token:
      * pre[HC] | post[HC] | comb[HC*HC]; il percorso CPU lo riempie nello stesso layout (post/comb) cosi' i due si alternano. */
     int gpu_hc = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_gpu_hc", &v) == 0) gpu_hc = v; }   /* default ON (verificato); 0 = CPU bit-exact */
-    float* after  = (float*)malloc(sizeof(float) * hcn * (size_t)N);
-    float* ffn_x  = (float*)malloc(sizeof(float) * (size_t)D * N);
-    float* ffn_o  = (float*)malloc(sizeof(float) * (size_t)D * N);
-    float* sp_f   = (float*)malloc(sizeof(float) * (size_t)SZ * N);
-    float* sp_a   = (float*)malloc(sizeof(float) * (size_t)SZ * N);
-    float* normed_all = (float*)malloc(sizeof(float) * (size_t)D * N);
-    float* attn_all   = (float*)malloc(sizeof(float) * (size_t)D * N);
+    float* after  = (float*)llm_dsv4_arena_alloc(sizeof(float) * hcn * (size_t)N);
+    float* ffn_x  = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D * N);
+    float* ffn_o  = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D * N);
+    float* sp_f   = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)SZ * N);
+    float* sp_a   = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)SZ * N);
+    float* normed_all = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D * N);
+    float* attn_all   = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D * N);
     #define SP_POST(sp, t) ((sp) + (size_t)SZ * (t) + HC)
     #define SP_COMB(sp, t) ((sp) + (size_t)SZ * (t) + 2 * HC)
     /* fase 1: mHC pre attn (tutti i token) -> attenzione (chunk su GPU, o per-token) -> mHC post attn + mHC pre ffn */
@@ -218,7 +213,7 @@ static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const Ll
     for (int t = 0; !hc_f && t < N; t++)
         llm_dsv4_block_pre(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, after + hcn * t,
                            ffn_x + (size_t)D * t, SP_POST(sp_f, t), SP_COMB(sp_f, t));
-    free(sp_a); free(attn_all); free(normed_all);
+    /* sp_a/attn_all/normed_all: arena (nessun free) */
     if (pf) { double _n = llm_dsv4_pf_now(); g_pf_t1 += _n - _t0; _t0 = _n;
               g_pf_hc_gpu += (hc_a?1:0)+(post_a_gpu?1:0)+(hc_f?1:0);
               g_pf_hc_cpu += (!hc_a)+(!post_a_gpu)+(!hc_f);
@@ -242,22 +237,22 @@ static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const Ll
               g_pf_hc_gpu += post_f_gpu?1:0; g_pf_hc_cpu += post_f_gpu?0:1; }
     #undef SP_POST
     #undef SP_COMB
-    free(sp_f); free(ffn_o); free(ffn_x); free(after);
+    /* sp_f/ffn_o/ffn_x/after: arena (nessun free) */
 }
 
 /* Tutti i layer su un token (nessuna cache: attenzione solo sul token corrente). */
 static inline void llm_dsv4_forward_token(const LlmDsv4Config* c, const LlmDsv4Weights* w,
         const float* token_emb, int token, int pos, float* out_hc) {
     int HC = c->n_hc, D = c->n_embd;
-    float* cur = (float*)malloc(sizeof(float) * (size_t)HC * D);
-    float* nxt = (float*)malloc(sizeof(float) * (size_t)HC * D);
+    float* cur = llm_dsv4_slot(6, (size_t)HC * D);
+    float* nxt = llm_dsv4_slot(7, (size_t)HC * D);
     llm_dsv4_hc_from_embedding(c, token_emb, cur);
     for (int il = 0; il < c->n_layer; il++) {
         llm_dsv4_layer_forward(c, &w->layers[il], cur, token, pos, il, NULL, 0, nxt);
         float* t = cur; cur = nxt; nxt = t;
     }
     if (out_hc) memcpy(out_hc, cur, sizeof(float) * (size_t)HC * D);
-    free(nxt); free(cur);
+    /* slot: persistente, nessun free */
 }
 
 #endif /* LLM_DSV4_LAYER_H */

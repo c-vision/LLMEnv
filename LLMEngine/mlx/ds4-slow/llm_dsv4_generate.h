@@ -32,8 +32,8 @@ static inline void llm_dsv4_caches_free(LlmDsv4Caches* cs) {
 static inline void llm_dsv4_forward_step(const LlmDsv4Config* c, const LlmDsv4Weights* w,
         LlmDsv4Caches* cs, int token, int pos, float* out_hc) {
     int HC = c->n_hc, D = c->n_embd;
-    float* cur = (float*)malloc(sizeof(float) * (size_t)HC * D);
-    float* nxt = (float*)malloc(sizeof(float) * (size_t)HC * D);
+    float* cur = llm_dsv4_slot(0, (size_t)HC * D);   /* persistente: sopravvive ai layer */
+    float* nxt = llm_dsv4_slot(1, (size_t)HC * D);
     llm_dsv4_hc_from_embedding(c, w->token_embd + (long)token * D, cur);
     for (int il = 0; il < c->n_layer; il++) {
         const LlmDsv4PackedExperts* pe = w->exps ? &w->exps[il] : NULL;
@@ -41,7 +41,7 @@ static inline void llm_dsv4_forward_step(const LlmDsv4Config* c, const LlmDsv4We
         float* t = cur; cur = nxt; nxt = t;
     }
     memcpy(out_hc, cur, sizeof(float) * (size_t)HC * D);
-    free(nxt); free(cur);
+    /* slot: persistente, nessun free */
 }
 
 /* Prefill a CHUNK layer-major: N token consecutivi (pos0..) attraversano il layer l prima del layer l+1.
@@ -56,8 +56,8 @@ static inline void llm_dsv4_forward_batch(const LlmDsv4Config* c, const LlmDsv4W
         for (int t = 0; t < N; t++) llm_dsv4_forward_step(c, w, cs, tokens[t], pos0 + t, out_hc_last);
         return;
     }
-    float* cur = (float*)malloc(sizeof(float) * hcn * (size_t)N);
-    float* nxt = (float*)malloc(sizeof(float) * hcn * (size_t)N);
+    float* cur = llm_dsv4_slot(4, hcn * (size_t)N);
+    float* nxt = llm_dsv4_slot(5, hcn * (size_t)N);
     for (int t = 0; t < N; t++) llm_dsv4_hc_from_embedding(c, w->token_embd + (long)tokens[t] * D, cur + hcn * t);
     int pf_hot = 0; { int v; if (llm_ai_mlx_opt_get_int("dsv4_prefetch_hot", &v) == 0) pf_hot = v; }
     for (int il = 0; il < c->n_layer; il++) {
@@ -72,7 +72,7 @@ static inline void llm_dsv4_forward_batch(const LlmDsv4Config* c, const LlmDsv4W
     }
     llm_dsv4_pf_dump("prefill");   /* TEMP: profiler per-fase (no-op se dsv4_profile=0) */
     memcpy(out_hc_last, cur + hcn * (size_t)(N - 1), sizeof(float) * hcn);
-    free(nxt); free(cur);
+    /* slot: persistente, nessun free */
 }
 
 /* Genera n_new token da un prompt di token ids (greedy). out_tokens [pos0+n_new].
@@ -80,8 +80,8 @@ static inline void llm_dsv4_forward_batch(const LlmDsv4Config* c, const LlmDsv4W
 static inline void llm_dsv4_generate(const LlmDsv4Config* c, const LlmDsv4Weights* w,
         LlmDsv4Caches* cs, int* tokens, int n_prompt, int n_new, float* logits_out) {
     int HC = c->n_hc, D = c->n_embd;
-    float* hc = (float*)malloc(sizeof(float) * (size_t)HC * D);
-    float* logits = (float*)malloc(sizeof(float) * (size_t)c->n_vocab);
+    float* hc = llm_dsv4_slot(2, (size_t)HC * D);
+    float* logits = llm_dsv4_slot(3, (size_t)c->n_vocab);
     int pos = 0;
     for (int i = 0; i < n_prompt; i++, pos++) llm_dsv4_forward_step(c, w, cs, tokens[i], pos, hc);
     for (int i = 0; i < n_new; i++) {
@@ -91,7 +91,7 @@ static inline void llm_dsv4_generate(const LlmDsv4Config* c, const LlmDsv4Weight
         llm_dsv4_forward_step(c, w, cs, nt, pos, hc); pos++;
     }
     if (logits_out) llm_dsv4_output_logits(c, w, hc, logits_out);
-    free(logits); free(hc);
+    /* slot: persistente, nessun free */
 }
 
 #endif /* LLM_DSV4_GENERATE_H */

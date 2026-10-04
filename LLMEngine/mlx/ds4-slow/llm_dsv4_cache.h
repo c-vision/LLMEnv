@@ -107,16 +107,16 @@ static inline int llm_dsv4_compressor_decode(const LlmDsv4Config* c, float* out_
     int pos_mod = pos % ratio;
     int row = (ratio == 4) ? ratio + pos_mod : pos_mod;
     int should = ((pos + 1) % ratio) == 0;
-    float* kv_cur = (float*)malloc(sizeof(float) * (size_t)width);
-    float* sc_cur = (float*)malloc(sizeof(float) * (size_t)width);
+    float* kv_cur = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)width);
+    float* sc_cur = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)width);
     llm_dsv4_linear(kv_cur, wkv, width, embd, x);
     llm_dsv4_linear(sc_cur, wgate, width, embd, x);
     for (int j = 0; j < width; j++) sc_cur[j] += ape[(long)pos_mod * width + j];
     memcpy(state_kv + (long)row * width, kv_cur, sizeof(float) * (size_t)width);
     memcpy(state_score + (long)row * width, sc_cur, sizeof(float) * (size_t)width);
-    free(sc_cur); free(kv_cur);
+    /* arena: nessun free */
     if (!should) return 0;
-    float* pooled = (float*)malloc(sizeof(float) * (size_t)head_dim);
+    float* pooled = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)head_dim);
     llm_dsv4_compressor_pool_state(pooled, state_kv, state_score, head_dim, ratio);
     double ss = 0.0;
     for (int i = 0; i < head_dim; i++) ss += (double)pooled[i] * pooled[i];
@@ -132,7 +132,7 @@ static inline int llm_dsv4_compressor_decode(const LlmDsv4Config* c, float* out_
             memcpy(state_score + (long)r * width, state_score + (long)(ratio + r) * width, sizeof(float) * (size_t)width);
         }
     }
-    free(pooled);
+    /* arena: nessun free */
     return 1;
 }
 
@@ -142,7 +142,7 @@ static inline void llm_dsv4_attention_mixed(float* out_heads, const LlmDsv4Confi
         const float* sinks, int n_head, int head_dim) {
     float kq = 1.0f / sqrtf((float)head_dim);
     int n_tot = n_raw + n_comp;
-    float* score = (float*)malloc(sizeof(float) * (size_t)(n_tot > 0 ? n_tot : 1));
+    float* score = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)(n_tot > 0 ? n_tot : 1));
     for (int h = 0; h < n_head; h++) {
         const float* qh = q + (long)h * head_dim;
         float mx = sinks[h]; int idx = 0;
@@ -170,21 +170,21 @@ static inline void llm_dsv4_attention_mixed(float* out_heads, const LlmDsv4Confi
         float inv = 1.0f / den;
         for (int e = 0; e < head_dim; e++) oh[e] *= inv;
     }
-    free(score);
+    /* arena: nessun free */
 }
 
 /* Indexer: allowed[c] per le righe compresse (top-k per score). Ritorna array [n_comp] (caller free). */
 static inline int* llm_dsv4_indexer_allowed(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
         const float* cur, const float* qr_norm, const float* index_comp, int n_comp, int il, int pos) {
     if (n_comp == 0) return NULL;
-    int* allowed = (int*)calloc((size_t)n_comp, sizeof(int));
+    int* allowed = (int*)llm_dsv4_arena_alloc0((size_t)n_comp * sizeof(int));
     int top_k = c->n_indexer_top_k < n_comp ? c->n_indexer_top_k : n_comp;
     if (top_k == n_comp) { for (int i = 0; i < n_comp; i++) allowed[i] = 1; return allowed; }
     int hd = c->n_indexer_head_dim, nh = c->n_indexer_head;
     int qdim = hd * nh;
-    float* q = (float*)malloc(sizeof(float) * (size_t)qdim);
-    float* weights = (float*)malloc(sizeof(float) * (size_t)nh);
-    float* scores = (float*)malloc(sizeof(float) * (size_t)n_comp);
+    float* q = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)qdim);
+    float* weights = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)nh);
+    float* scores = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)n_comp);
     llm_dsv4_linear(q, L->idx_q_b, qdim, c->n_lora_q, qr_norm);
     llm_dsv4_rope_tail_layer_inplace(c, q, nh, hd, c->n_rot, pos, il, 0);
     llm_dsv4_indexer_qat_rows(q, nh, hd);
@@ -207,7 +207,7 @@ static inline int* llm_dsv4_indexer_allowed(const LlmDsv4Config* c, const LlmDsv
         for (int cc = 0; cc < n_comp; cc++) if (!allowed[cc] && scores[cc] > bs) { best = cc; bs = scores[cc]; }
         allowed[best] = 1;
     }
-    free(scores); free(weights); free(q);
+    /* arena: nessun free (allowed inclusa) */
     return allowed;
 }
 
@@ -218,16 +218,16 @@ static inline int llm_dsv4_attn_cached_mid(const LlmDsv4Config* c, const LlmDsv4
         const LlmDsv4PackedExperts* pe, LlmDsv4LayerCache* k, const float* xn, int pos, int il, float* heads) {
     int hd = c->n_head_dim, lq = c->n_lora_q, q_dim = c->n_head * c->n_head_dim;
     (void)q_dim;
-    float* q = (float*)malloc(sizeof(float) * (size_t)(c->n_head * hd));
-    float* kv = (float*)malloc(sizeof(float) * (size_t)hd);
-    float* qrn = (float*)malloc(sizeof(float) * (size_t)lq);
-    if (!q || !kv || !qrn) { free(q); free(kv); free(qrn); return 0; }
+    float* q = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)(c->n_head * hd));
+    float* kv = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)hd);
+    float* qrn = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)lq);
+    if (!q || !kv || !qrn) return 0;
     if (!llm_dsv4_gpu_attn_project_try(c, L, il, xn, pos, q, kv, qrn))
         llm_dsv4_attn_project(c, L, pe, xn, pos, il, q, kv, qrn);
     /* Middle su GPU (compressor+indexer+attn) con KV/stato su device: se riesce, salta il path C. */
     if (llm_dsv4_gpu_attn_mid_try(c, L, il, k->compress_ratio, k->raw_cap, k->comp_cap,
             q, kv, qrn, xn, pos, heads)) {
-        free(qrn); free(kv); free(q);
+        /* arena: nessun free */
         return 1;
     }
     llm_dsv4_fp8_kv_quantize_row(kv, c->n_head_dim, c->n_rot);
@@ -235,18 +235,18 @@ static inline int llm_dsv4_attn_cached_mid(const LlmDsv4Config* c, const LlmDsv4
     int ratio = k->compress_ratio;
     int* allowed = NULL;
     if (ratio) {
-        float* comp = (float*)malloc(sizeof(float) * (size_t)hd);
+        float* comp = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)hd);
         if (llm_dsv4_compressor_decode(c, comp, L->comp_kv, L->comp_gate, L->comp_ape, L->comp_norm,
                 xn, k->attn_state_kv, k->attn_state_score, c->n_embd, hd, ratio, il, pos))
             llm_dsv4_cache_push_comp(k->attn_comp, &k->n_comp, k->comp_cap, hd, comp);
-        free(comp);
+        /* arena: nessun free */
         if (ratio == 4) {
             int ihd = c->n_indexer_head_dim;
-            float* ic = (float*)malloc(sizeof(float) * (size_t)ihd);
+            float* ic = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ihd);
             if (llm_dsv4_compressor_decode(c, ic, L->idx_c_kv, L->idx_c_gate, L->idx_c_ape, L->idx_c_norm,
                     xn, k->index_state_kv, k->index_state_score, c->n_embd, ihd, ratio, il, pos))
                 llm_dsv4_cache_push_comp(k->index_comp, &k->n_index_comp, k->comp_cap, ihd, ic);
-            free(ic);
+            /* arena: nessun free */
             allowed = llm_dsv4_indexer_allowed(c, L, xn, qrn, k->index_comp, k->n_index_comp, il, pos);
         }
         llm_dsv4_attention_mixed(heads, c, q, k->raw_kv, k->n_raw, k->attn_comp, k->n_comp, allowed,
@@ -254,20 +254,20 @@ static inline int llm_dsv4_attn_cached_mid(const LlmDsv4Config* c, const LlmDsv4
     } else {
         llm_dsv4_attention_rows(heads, q, k->raw_kv, k->n_raw, L->attn_sinks, c->n_head, hd);
     }
-    free(allowed); free(qrn); free(kv); free(q);
+    /* arena: nessun free */
     return 1;
 }
 
 static inline void llm_dsv4_attn_cached(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
         const LlmDsv4PackedExperts* pe, LlmDsv4LayerCache* k, const float* xn, int pos, int il, float* out) {
     int q_dim = c->n_head * c->n_head_dim;
-    float* heads = (float*)malloc(sizeof(float) * (size_t)q_dim);
+    float* heads = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)q_dim);
     if (!heads) return;
     if (llm_dsv4_attn_cached_mid(c, L, pe, k, xn, pos, il, heads)) {
         if (!llm_dsv4_gpu_attn_finish_try(c, L, il, heads, pos, out))
             llm_dsv4_attn_finish(c, L, pe, heads, pos, il, out);
     }
-    free(heads);
+    /* arena: nessun free */
 }
 
 #endif /* LLM_DSV4_CACHE_H */

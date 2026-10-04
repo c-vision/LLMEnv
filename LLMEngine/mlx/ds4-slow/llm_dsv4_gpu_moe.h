@@ -84,6 +84,7 @@ static inline bool llm_dsv4_gpu_moe_init(LlmDsv4MoeGpu* m, LlmDsv4Metal* be, con
 static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
                                     int il, const float* x, int token, float* out) {
     if (!llm_dsv4_gpu_enabled() || !m || !m->inited || il < 0 || il >= c->n_layer) return false;
+    llm_dsv4_arena_reset();   /* .mm TU: l'arena e' per-TU; reset a ogni chiamata (bounded) */
     const int gt = m->gate[il].type, ut = m->up[il].type;
     if (!((gt == 16 && ut == 16) || ((gt == 10 || gt == 12) && (ut == 10 || ut == 12)))) return false;
     const int used = c->n_expert_used, ff = c->n_ff_exp, embd = c->n_embd;
@@ -138,8 +139,8 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
         if (pf_g) { g_dsv4_pt_metal_ms += llm_dsv4_gm_now() - _pt; }
         if (ok && sg) shexp_gpu = 1;
     } else {
-        float* midv  = (float*)malloc(sizeof(float) * (size_t)ff * used);
-        float* downv = (float*)malloc(sizeof(float) * (size_t)embd * used);
+        float* midv  = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff * used);
+        float* downv = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)embd * used);
         ok = midv && downv;
         for (int o = 0; ok && o < embd; o++) out[o] = 0.0f;
         /* batch 1: gate+up (+swiglu). */
@@ -167,8 +168,8 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
                                                            (uint32_t)m->gate[il].row_bytes, (uint32_t)ff) != 0) ok = false;
             } else {
                 /* gate/up Q4_K/Q2_K: niente pair kernel -> gemv Q8_K (x) + swiglu*peso su CPU. */
-                float* gbuf = (float*)malloc(sizeof(float) * (size_t)ff * used);
-                float* ubuf = (float*)malloc(sizeof(float) * (size_t)ff * used);
+                float* gbuf = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff * used);
+                float* ubuf = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff * used);
                 ok = gbuf && ubuf;
                 LlmDsv4GpuJob gj[2 * LLM_DSV4_MAX_EXPERT_USED]; int ng = 0;
                 for (int i = 0; ok && i < used; i++) {
@@ -186,7 +187,7 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
                     for (int j = 0; j < ff; j++) mp[i][j] *= rw[i];
                     for (int j = 0; j < ff; j++) if (!isfinite(mp[i][j])) mp[i][j] = 0.0f;
                 }
-                free(gbuf); free(ubuf);
+                /* arena: nessun free */
             }
         }
         /* batch 2: down dei used esperti in UNA command buffer (stessa cache/streaming). */
@@ -209,14 +210,14 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
         }
         for (int i = 0; ok && i < used; i++)
             for (int o = 0; o < embd; o++) if (isfinite(downv[(size_t)i * embd + o])) out[o] += downv[(size_t)i * embd + o];
-        free(downv); free(midv);
+        /* arena: nessun free */
     }
 
     /* shared expert: Q8_0 packed (dot intero) se disponibile, altrimenti f32. */
     if (ok && !shexp_gpu) {
-        float* g = (float*)malloc(sizeof(float) * (size_t)ff);
-        float* u = (float*)malloc(sizeof(float) * (size_t)ff);
-        float* mid = (float*)malloc(sizeof(float) * (size_t)ff);
+        float* g = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff);
+        float* u = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff);
+        float* mid = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff);
         ok = g && u && mid;
         if (ok) {
             const LlmDsv4PackedExperts* pe = &m->exps[il];
@@ -224,22 +225,22 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
                 /* Q8_0 packed: dot intero NEON (come il path C) — ~5x meno del f32 scalare. */
                 int64_t nb_g = llm_ggml_nbytes(pe->shexp_gate_type, embd);
                 int64_t nb_d = llm_ggml_nbytes(pe->shexp_down_type, ff);
-                int8_t* xq8 = (int8_t*)malloc((size_t)embd);
-                float*  xs8 = (float*)malloc(sizeof(float) * (size_t)((embd + 31) / 32));
+                int8_t* xq8 = (int8_t*)llm_dsv4_arena_alloc((size_t)embd);
+                float*  xs8 = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)((embd + 31) / 32));
                 llm_dsv4_q8_0_quantize_row(x, embd, xq8, xs8);
                 for (int o = 0; o < ff; o++) {
                     g[o] = llm_dsv4_dot_q8_0_prequant(pe->shexp_gate + (int64_t)o * nb_g, embd, xq8, xs8);
                     u[o] = llm_dsv4_dot_q8_0_prequant(pe->shexp_up   + (int64_t)o * nb_g, embd, xq8, xs8);
                 }
                 llm_dsv4_swiglu(mid, g, u, ff, c->swiglu_clamp_exp);
-                int8_t* mq8 = (int8_t*)malloc((size_t)ff);
-                float*  ms8 = (float*)malloc(sizeof(float) * (size_t)((ff + 31) / 32));
+                int8_t* mq8 = (int8_t*)llm_dsv4_arena_alloc((size_t)ff);
+                float*  ms8 = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)((ff + 31) / 32));
                 llm_dsv4_q8_0_quantize_row(mid, ff, mq8, ms8);
                 for (int o = 0; o < embd; o++) {
                     float v = llm_dsv4_dot_q8_0_prequant(pe->shexp_down + (int64_t)o * nb_d, ff, mq8, ms8);
                     if (isfinite(v)) out[o] += v;
                 }
-                free(ms8); free(mq8); free(xs8); free(xq8);
+                /* arena: nessun free */
             } else {
                 llm_dsv4_linear(g, L->ffn_gate_shexp, ff, embd, x);
                 llm_dsv4_linear(u, L->ffn_up_shexp,   ff, embd, x);
@@ -252,7 +253,7 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
                 }
             }
         }
-        free(g); free(u); free(mid);
+        /* arena: nessun free */
     }
     return ok;
 }
@@ -263,6 +264,7 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
 static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
                                           int il, const float* X, const int* tokens, int nt, float* OUT) {
     if (!llm_dsv4_gpu_enabled() || !m || !m->inited || il < 0 || il >= c->n_layer || nt <= 0) return false;
+    llm_dsv4_arena_reset();   /* .mm TU: reset a ogni chiamata (bounded) */
     const int used = c->n_expert_used, ff = c->n_ff_exp, embd = c->n_embd;
     const LlmDsv4PackedExperts* pe = &m->exps[il];
     const int streaming = (pe->store && pe->store_get) != 0;
@@ -274,8 +276,8 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
     /* Layer Q4_K con ARENA (opzione dsv4_q4_arena, SPERIMENTALE) + attivazioni half: mul_mm_id sui tensori impilati. Altrimenti
      * il percorso normale sotto (kernel ds4 slots6 Q4_K, attivazioni f32) con gli esperti dello store. */
     if (is_q4 && f16_ok && pe->q4_stacks && pe->q4_ensure && pe->q4_stacks(pe->store, il, &g, &u, &d) && pe->shexp_gate && pe->shexp_up && pe->shexp_down) {
-        int* sel = (int*)malloc(sizeof(int) * (size_t)nt * used); float* wts = (float*)malloc(sizeof(float) * (size_t)nt * used);
-        if (!sel || !wts) { free(sel); free(wts); return false; }
+        int* sel = (int*)llm_dsv4_arena_alloc(sizeof(int) * (size_t)nt * used); float* wts = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)nt * used);
+        if (!sel || !wts) return false;
         for (int t = 0; t < nt; t++) llm_dsv4_moe_route(c, L, X + (size_t)t * embd, il, tokens[t], sel + (size_t)t * used, wts + (size_t)t * used);
         bool okq = pe->q4_ensure(pe->store, il, sel, nt * used) == 0;
         if (okq) okq = llm_dsv4_metal_moe_mm_batch(m->be, nt, g, u, d, 12, 12, (uint32_t)c->n_expert, (uint32_t)embd, (uint32_t)ff,
@@ -283,17 +285,17 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
                                                    c->swiglu_clamp_exp, pe->shexp_gate, pe->shexp_up, pe->shexp_down,
                                                    (uint32_t)llm_ggml_nbytes(pe->shexp_gate_type, embd),
                                                    (uint32_t)llm_ggml_nbytes(pe->shexp_down_type, ff), OUT) == 0;
-        free(sel); free(wts);
+        /* arena: nessun free */
         return okq;
     }
-    const void** gp = (const void**)malloc(sizeof(void*) * 3 * (size_t)nt * used);
-    float* rw = (float*)malloc(sizeof(float) * (size_t)nt * used);
-    if (!gp || !rw) { free(gp); free(rw); return false; }
+    const void** gp = (const void**)llm_dsv4_arena_alloc(sizeof(void*) * 3 * (size_t)nt * used);
+    float* rw = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)nt * used);
+    if (!gp || !rw) return false;
     const void** upp = gp + (size_t)nt * used; const void** dp = upp + (size_t)nt * used;
     bool ok = true;
-    int* sel_all = (int*)malloc(sizeof(int) * (size_t)nt * used);
-    float* w_all = (float*)malloc(sizeof(float) * (size_t)nt * used);
-    if (!sel_all || !w_all) { free(sel_all); free(w_all); free(gp); free(rw); return false; }
+    int* sel_all = (int*)llm_dsv4_arena_alloc(sizeof(int) * (size_t)nt * used);
+    float* w_all = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)nt * used);
+    if (!sel_all || !w_all) return false;
     { int gpu_rt = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_gpu_hc", &v) == 0) gpu_rt = v; }   /* stessa opzione dell'mHC GPU */
       if (!(gpu_rt && llm_dsv4_gpu_route_batch_try(c, L, il, X, tokens, nt, sel_all, w_all)))
           for (int t = 0; t < nt; t++) llm_dsv4_moe_route(c, L, X + (size_t)t * embd, il, tokens[t], sel_all + (size_t)t * used, w_all + (size_t)t * used); }
@@ -325,8 +327,8 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
     if (ok && streaming && mm_on && f16_ok && nt >= LLM_DSV4_MM_MIN_TOKENS && c->n_expert > 0 && c->n_expert <= 1024 &&
         pe->shexp_gate && pe->shexp_up && pe->shexp_down) {
         const int ne = c->n_expert;
-        const void** ga = (const void**)calloc((size_t)ne, sizeof(void*)); const void** ua = (const void**)calloc((size_t)ne, sizeof(void*));
-        const void** da = (const void**)calloc((size_t)ne, sizeof(void*));
+        const void** ga = (const void**)llm_dsv4_arena_alloc0((size_t)ne * sizeof(void*)); const void** ua = (const void**)llm_dsv4_arena_alloc0((size_t)ne * sizeof(void*));
+        const void** da = (const void**)llm_dsv4_arena_alloc0((size_t)ne * sizeof(void*));
         if (ga && ua && da) {
             for (int k = 0; k < nt * used; k++) { const int ex = sel_all[k]; ga[ex] = gp[k]; ua[ex] = upp[k]; da[ex] = dp[k]; }
             done_mm = llm_dsv4_metal_moe_mm_addr_batch(m->be, nt, ga, ua, da, m->gate[il].type, m->down[il].type, (uint32_t)ne, (uint32_t)embd, (uint32_t)ff,
@@ -334,7 +336,7 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
                                                        pe->shexp_gate, pe->shexp_up, pe->shexp_down, (uint32_t)llm_ggml_nbytes(pe->shexp_gate_type, embd),
                                                        (uint32_t)llm_ggml_nbytes(pe->shexp_down_type, ff), OUT) == 0;
         }
-        free(ga); free(ua); free(da);
+        /* arena: nessun free */
     }
     if (ok && !done_mm) {
         const void* sg = (pe->shexp_gate && pe->shexp_up && pe->shexp_down) ? pe->shexp_gate : NULL;
@@ -347,7 +349,7 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
         if (ok && !sg) ok = false;
     }
     if (pf_m) { double _n = llm_dsv4_gm_now(); g_dsv4_moe_mm_ms += _n - _tm0; }
-    free(sel_all); free(w_all); free(gp); free(rw);
+    /* arena: nessun free */
     return ok;
 }
 

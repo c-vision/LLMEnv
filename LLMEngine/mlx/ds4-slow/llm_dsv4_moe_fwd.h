@@ -75,9 +75,9 @@ static inline void llm_dsv4_moe_forward(const LlmDsv4Config* c, const LlmDsv4Lay
     float weight[LLM_DSV4_MAX_EXPERT_USED];
     llm_dsv4_moe_route(c, L, x, il, token, selected, weight);
 
-    float *gate = (float*)malloc(sizeof(float) * (size_t)ff);
-    float *up = (float*)malloc(sizeof(float) * (size_t)ff);
-    float *mid = (float*)malloc(sizeof(float) * (size_t)ff);
+    float *gate = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff);
+    float *up = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff);
+    float *mid = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff);
     for (int o = 0; o < embd; o++) out[o] = 0.0f;
     for (int i = 0; i < used; i++) {
         int e = selected[i];
@@ -102,7 +102,7 @@ static inline void llm_dsv4_moe_forward(const LlmDsv4Config* c, const LlmDsv4Lay
         for (int j = 0; j < ff; j++) acc += (double)wr[j] * mid[j];
         out[o] += (float)acc;
     }
-    free(mid); free(up); free(gate);
+    /* arena: nessun free */
 }
 
 /* MoE con esperti PACKED (IQ2_XXS/Q2_K) via dot interi Q8_K (parità col path CPU ds4).
@@ -116,13 +116,13 @@ static inline void llm_dsv4_moe_forward_packed(const LlmDsv4Config* c, const Llm
 
     int64_t nb_in = llm_ggml_nbytes(pe->gate_type, pe->in_dim);    /* gate/up ne0 = in_dim */
     int64_t nb_out = llm_ggml_nbytes(pe->down_type, pe->ff_dim);   /* down ne0 = ff_dim */
-    LlmDsv4Q8K* xqk = (LlmDsv4Q8K*)malloc(sizeof(LlmDsv4Q8K) * (size_t)(pe->in_dim / 256));
-    LlmDsv4Q8K* mqk = (LlmDsv4Q8K*)malloc(sizeof(LlmDsv4Q8K) * (size_t)(pe->ff_dim / 256));
+    LlmDsv4Q8K* xqk = (LlmDsv4Q8K*)llm_dsv4_arena_alloc(sizeof(LlmDsv4Q8K) * (size_t)(pe->in_dim / 256));
+    LlmDsv4Q8K* mqk = (LlmDsv4Q8K*)llm_dsv4_arena_alloc(sizeof(LlmDsv4Q8K) * (size_t)(pe->ff_dim / 256));
     llm_dsv4_q8_K_quantize_row(x, pe->in_dim, xqk);
 
-    float *gate = (float*)malloc(sizeof(float) * (size_t)ff);
-    float *up = (float*)malloc(sizeof(float) * (size_t)ff);
-    float *mid = (float*)malloc(sizeof(float) * (size_t)ff);
+    float *gate = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff);
+    float *up = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff);
+    float *mid = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)ff);
     for (int o = 0; o < embd; o++) out[o] = 0.0f;
     for (int i = 0; i < used; i++) {
         int e = selected[i];
@@ -149,26 +149,26 @@ static inline void llm_dsv4_moe_forward_packed(const LlmDsv4Config* c, const Llm
             { float v = llm_dsv4_dot_w_q8_K(pe->down_type, db + (int64_t)o * nb_out, pe->ff_dim, mqk);
               if (isfinite(v)) out[o] += v; }   /* #1025 */
     }
-    free(mqk); free(xqk);
+    /* xqk/mqk: arena (nessun free) */
     /* shared expert: Q8_0 packed se disponibile, altrimenti f32 */
     if (pe->shexp_gate && pe->shexp_down) {
         int64_t nb_g = llm_ggml_nbytes(pe->shexp_gate_type, embd);
         int64_t nb_d = llm_ggml_nbytes(pe->shexp_down_type, ff);
-        int8_t* xq8 = (int8_t*)malloc((size_t)embd);
-        float* xs8 = (float*)malloc(sizeof(float) * (size_t)((embd + 31) / 32));
+        int8_t* xq8 = (int8_t*)llm_dsv4_arena_alloc((size_t)embd);
+        float* xs8 = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)((embd + 31) / 32));
         llm_dsv4_q8_0_quantize_row(x, embd, xq8, xs8);
         for (int o = 0; o < ff; o++) {
             gate[o] = llm_dsv4_dot_q8_0_prequant(pe->shexp_gate + (int64_t)o * nb_g, embd, xq8, xs8);
             up[o]   = llm_dsv4_dot_q8_0_prequant(pe->shexp_up   + (int64_t)o * nb_g, embd, xq8, xs8);
         }
         llm_dsv4_swiglu(mid, gate, up, ff, c->swiglu_clamp_exp);
-        int8_t* mq8 = (int8_t*)malloc((size_t)ff);
-        float* ms8 = (float*)malloc(sizeof(float) * (size_t)((ff + 31) / 32));
+        int8_t* mq8 = (int8_t*)llm_dsv4_arena_alloc((size_t)ff);
+        float* ms8 = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)((ff + 31) / 32));
         llm_dsv4_q8_0_quantize_row(mid, ff, mq8, ms8);
         for (int o = 0; o < embd; o++)
             { float v = llm_dsv4_dot_q8_0_prequant(pe->shexp_down + (int64_t)o * nb_d, ff, mq8, ms8);
               if (isfinite(v)) out[o] += v; }   /* #1025 */
-        free(ms8); free(mq8); free(xs8); free(xq8);
+        /* quant buffers: arena (nessun free) */
     } else {
         llm_dsv4_linear(gate, L->ffn_gate_shexp, ff, embd, x);
         llm_dsv4_linear(up,   L->ffn_up_shexp,   ff, embd, x);
@@ -180,7 +180,7 @@ static inline void llm_dsv4_moe_forward_packed(const LlmDsv4Config* c, const Llm
             out[o] += (float)acc;
         }
     }
-    free(mid); free(up); free(gate);
+    /* arena: nessun free */
 }
 
 #endif /* LLM_DSV4_MOE_FWD_H */

@@ -52,21 +52,20 @@ static inline void llm_dsv4_block_pre(const LlmDsv4Config* c, const float* fn, c
                                       const float* residual_hc, float* out_x,
                                       float* post_out, float* comb_out) {
     const int HC = c->n_hc, D = c->n_embd, SIZE = (2 + HC) * HC, HCD = HC * D;
-    float* flat = (float*)malloc((size_t)HCD * sizeof(float));
-    float* mixes = (float*)malloc((size_t)SIZE * sizeof(float));
+    float* flat = (float*)llm_dsv4_arena_alloc((size_t)HCD * sizeof(float));
+    float* mixes = (float*)llm_dsv4_arena_alloc((size_t)SIZE * sizeof(float));
     llm_dsv4b_rms_no_weight(flat, residual_hc, HCD, c->rms_eps);
     llm_dsv4_linear(mixes, fn, SIZE, HCD, flat);         /* ordine dot_f16 */
-    float* pre = (float*)malloc((size_t)HC * sizeof(float));
-    float* split = (float*)malloc((size_t)SIZE * sizeof(float));
+    float* pre = (float*)llm_dsv4_arena_alloc((size_t)HC * sizeof(float));
+    float* split = (float*)llm_dsv4_arena_alloc((size_t)SIZE * sizeof(float));
     llm_dsv4b_hc_split_sinkhorn(split, mixes, scale, base, HC, c->n_hc_sinkhorn_iter, c->hc_eps);
     for (int i = 0; i < HC; i++) pre[i] = split[i];
     for (int i = 0; i < HC; i++) post_out[i] = split[HC + i];
     for (int i = 0; i < HC * HC; i++) comb_out[i] = split[2 * HC + i];
-    free(split);
-    float* hin = (float*)malloc((size_t)D * sizeof(float));
+    float* hin = (float*)llm_dsv4_arena_alloc((size_t)D * sizeof(float));
     for (int d = 0; d < D; d++) { float a = 0.0f; for (int h = 0; h < HC; h++) a += residual_hc[(long)h * D + d] * pre[h]; hin[d] = a; }
     llm_dsv4b_rms_weight(out_x, hin, norm_w, D, c->rms_eps);
-    free(hin); free(pre); free(mixes); free(flat);
+    /* arena: nessun free */
 }
 
 /* Output di un sublayer: nuovo stato mHC [n_hc*dim]. */
