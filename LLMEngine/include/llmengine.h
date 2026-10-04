@@ -175,6 +175,7 @@ unsigned llmengine_abi_version(void);
 
 /* Accessor per-runner: una vtable per motore (implementata nel progetto del motore). */
 const LlmEngineLlmEngine* llmengine_llm_engine_mlx(void);      /* llmengine_mlx */
+const LlmEngineLlmEngine* llmengine_llm_engine_ds4(void);      /* ds4engine (motore ds4 vendorizzato) */
 const LlmEngineLlmEngine* llmengine_llm_engine_llamacpp(void); /* llm_host_ai */
 const LlmEngineLlmEngine* llmengine_llm_engine_moe(void);      /* llmengine_moe */
 
