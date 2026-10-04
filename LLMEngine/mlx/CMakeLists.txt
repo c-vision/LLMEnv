@@ -309,12 +309,14 @@ if(LLM_ENABLE_TRAIN)
     set(LLM_MLX_TRAIN_SRC llm_mlx_diff_forward.c)
 endif()
 
-# ds4-slow (nostro engine DS4 nativo) e' OPZIONALE: se la cartella non c'e', il motore degrada
-# sul vendored `ds4` / su `ds41`, e i consumatori scelgono l'engine via dlsym. Cosi' la cartella
-# e' cancellabile senza errori di configurazione/compilazione.
+# ds4-slow (nostro engine DS4 nativo) e' OPZIONALE: se disattivato (LLM_WITH_DS4SLOW=OFF) o se la
+# cartella non c'e', il motore degrada sul vendored `ds4` / su `ds41`. Cosi' la cartella e'
+# cancellabile senza errori di configurazione/compilazione, e un consumer che non vuole il nativo
+# (es. GMBasic, che ha il vendored) non lo compila affatto.
+option(LLM_WITH_DS4SLOW "Compila il motore DS4 nativo (ds4-slow) in llm_ai_mlx" ON)
 set(GMB_DS4SLOW_SRC "")
 set(GMB_DS4SLOW_INC "")
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow)
+if(LLM_WITH_DS4SLOW AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow)
   list(APPEND GMB_DS4SLOW_SRC
        ds4-slow/llm_dsv4_metal.mm
        ds4-slow/llm_dsv4_gpu_ctx.mm
