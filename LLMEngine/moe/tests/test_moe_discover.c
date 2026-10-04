@@ -41,10 +41,28 @@ static void write_test_gguf(const char* path) {
     FILE* f = fopen(path, "wb");
     CHECK(f != NULL);
     if (!f) return;
-    const uint32_t kv_count = 11, tensor_count = 6;
+    /* Tensori con OFFSET calcolati (distinti) e sezione DATI presente: il parser canonico del
+     * CODEC rifiuta OVERLAP (offset tutti 0) e DATA_SHORT (dati dichiarati assenti). */
+    struct { const char* name; uint32_t nd; uint64_t dims[3]; uint32_t type; } T[6] = {
+        { "token_embd.weight",        2, { 16, 32, 0 }, 1 },   /* F16, dims[1]=32 → vocab */
+        { "output.weight",            2, { 16, 32, 0 }, 1 },
+        { "output_norm.weight",       1, { 16,  0, 0 }, 0 },   /* F32 */
+        { "blk.0.attn_q_norm.weight", 1, {  8,  0, 0 }, 0 },   /* F32 → flag QK_NORM */
+        { "blk.0.ffn_gate_inp.weight",2, { 16, 32, 0 }, 1 },   /* F16 router */
+        { "blk.0.ffn_gate_exps.weight",3,{ 16,  8, 4 }, 1 },   /* F16, dims[2]=4 → esperti/layer */
+    };
+    const uint32_t nt = 6, align = 32;
+    uint64_t off[6], cur = 0;
+    for (uint32_t i = 0; i < nt; ++i) {
+        uint64_t ne = 1; for (uint32_t d = 0; d < T[i].nd; ++d) ne *= T[i].dims[d];
+        uint64_t esz = (T[i].type == 0) ? 4u : 2u;
+        off[i] = cur; cur += ne * esz;
+        cur = (cur + align - 1) / align * align;
+    }
+    const uint32_t kv_count = 11;
     w_u32(f, 0x46554747u);      /* 'GGUF' */
     w_u32(f, 3);                /* version */
-    w_u64(f, tensor_count);
+    w_u64(f, nt);
     w_u64(f, kv_count);
     w_kv_str(f, "general.architecture", "qwen3moe");
     w_kv_u32(f, "qwen3moe.block_count", 2);
@@ -56,14 +74,11 @@ static void write_test_gguf(const char* path) {
     w_kv_u32(f, "qwen3moe.expert_used_count", 2);
     w_kv_u32(f, "qwen3moe.expert_feed_forward_length", 8);
     w_kv_f32(f, "qwen3moe.rope.freq_base", 1e7f);
-    w_kv_u32(f, "general.alignment", 32);
-    uint64_t e2[2] = { 16, 32 }, e1[1] = { 16 }, qn[1] = { 8 }, e3[3] = { 16, 8, 4 };
-    w_tensor(f, "token_embd.weight", 2, e2, 1, 0);
-    w_tensor(f, "output.weight", 2, e2, 1, 0);
-    w_tensor(f, "output_norm.weight", 1, e1, 0, 0);
-    w_tensor(f, "blk.0.attn_q_norm.weight", 1, qn, 0, 0);
-    w_tensor(f, "blk.0.ffn_gate_inp.weight", 2, e2, 1, 0);
-    w_tensor(f, "blk.0.ffn_gate_exps.weight", 3, e3, 1, 0);
+    w_kv_u32(f, "general.alignment", align);
+    for (uint32_t i = 0; i < nt; ++i) w_tensor(f, T[i].name, T[i].nd, T[i].dims, T[i].type, off[i]);
+    long p = ftell(f); long pad = (long)((align - ((uint64_t)p % align)) % align);
+    for (long i = 0; i < pad; ++i) fputc(0, f);
+    for (uint64_t i = 0; i < cur; ++i) fputc(0, f);   /* dati azzerati (la discovery legge solo la struttura) */
     fclose(f);
 }
 
