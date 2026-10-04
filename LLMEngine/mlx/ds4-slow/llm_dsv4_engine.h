@@ -216,6 +216,9 @@ static inline void llm_dsv4_engine_append(LlmDsv4Engine* e, const int* ids, int 
                 (double)e->store->bytes_read / 1073741824.0,
                 (unsigned long long)e->store->hits, (unsigned long long)e->store->misses,
                 (unsigned long long)e->store->evictions, n, n * 1000.0 / (llm_dsv4_pf_now() - _ap0)); }
+    { double _ga = 0; llm_dsv4_metal_gpu_ms(&_ga, NULL);
+      if (llm_dsv4_pf_on()) fprintf(stderr, "[dsv4-ctr] adapter: dispatch=%ld gpu_attn_ms=%.1f\n",
+                                    llm_dsv4_metal_dispatches(), _ga); }
     /* HOTLIST: salva il profilo di hotness dopo il prefill — cosi' vale anche per i processi che
      * NON liberano il modello (es. `fastllm run` che esce senza free_model). */
     if (e->store) { char hp[1200]; if (llm_dsv4_engine_hotlist_path(e, hp, sizeof hp)) llm_dsv4_store_save_hot(e->store, hp); }
