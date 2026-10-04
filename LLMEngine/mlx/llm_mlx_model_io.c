@@ -188,34 +188,49 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
     {
         size_t dn = strlen(model_dir);
         if (dn > 5 && strcmp(model_dir + dn - 5, ".gguf") == 0) {
-            const LlmEngineLlmEngine* eng = llm_mlx_pick_ds4_engine();
-            if (eng != NULL && eng->load_model != NULL) {
-                void* dm;
-                /* Store/cache esperti: trigger dal PARAMETRO di offload (--offload-experts ->
-                 * set_expert_swap), mai da env. DS4 (~97 GB) streama gli esperti di default. */
-                int want_swap = llm_mlx_moe_swap_on();
-                if (llm_ai_mlx_opt_is_set("offload") != 1) want_swap = 1;
-                if (eng->set_expert_swap) eng->set_expert_swap(want_swap ? model_dir : NULL);
-                dm = eng->load_model(model_dir);
-                if (dm == NULL) {
-                    /* FALLBACK: se il motore scelto non carica (es. il VENDORED senza la cartella
-                     * `metal/` accanto all'eseguibile), prova l'altro DS4 (nativo) prima di
-                     * arrendersi: un DS4 non deve fallire per un artefatto di deploy mancante. */
-                    const LlmEngineLlmEngine* alt = llm_mlx_engine_symbol("llmengine_llm_engine_ds4slow");
-                    if (alt != NULL && alt != eng && alt->load_model != NULL) {
-                        fprintf(stderr, "llm_ai_mlx_load_model: engine '%s' non carica -> fallback '%s'\n",
-                                eng->name, alt->name);
-                        eng = alt;
-                        if (eng->set_expert_swap) eng->set_expert_swap(want_swap ? model_dir : NULL);
-                        dm = eng->load_model(model_dir);
+            /* Il loader vendored `ds4` NON e' sicuro su modelli non-DS4: `ds4.c:required_u32`
+             * fa exit(1) sui metadati mancanti (nessun fallback). Va tentato SOLO se l'arch del
+             * GGUF e' DS4 (`deepseek4`); ogni altro `.gguf` prosegue col ramo generico sotto. */
+            char ds4arch[64] = "";
+            { LlmEngineMoeGguf g; void* gmap = NULL; size_t gmaplen = 0;
+              if (llm_gguf_open_file(model_dir, &g, &gmap, &gmaplen)) {
+                  const LlmGgufVal* v = llm_gguf_find_val(&g, "general.architecture");
+                  if (v != NULL && v->type == GGSTR && v->s != NULL && v->slen > 0) {
+                      int n = (int)v->slen; if (n > 63) n = 63; memcpy(ds4arch, v->s, (size_t)n); ds4arch[n] = 0;
+                  }
+                  llm_gguf_close_file(&g, gmap, gmaplen);
+              }
+            }
+            if (strcmp(ds4arch, "deepseek4") == 0) {
+                const LlmEngineLlmEngine* eng = llm_mlx_pick_ds4_engine();
+                if (eng != NULL && eng->load_model != NULL) {
+                    void* dm;
+                    /* Store/cache esperti: trigger dal PARAMETRO di offload (--offload-experts ->
+                     * set_expert_swap), mai da env. DS4 (~97 GB) streama gli esperti di default. */
+                    int want_swap = llm_mlx_moe_swap_on();
+                    if (llm_ai_mlx_opt_is_set("offload") != 1) want_swap = 1;
+                    if (eng->set_expert_swap) eng->set_expert_swap(want_swap ? model_dir : NULL);
+                    dm = eng->load_model(model_dir);
+                    if (dm == NULL) {
+                        /* FALLBACK: se il motore scelto non carica (es. il VENDORED senza la cartella
+                         * `metal/` accanto all'eseguibile), prova l'altro DS4 (nativo) prima di
+                         * arrendersi: un DS4 non deve fallire per un artefatto di deploy mancante. */
+                        const LlmEngineLlmEngine* alt = llm_mlx_engine_symbol("llmengine_llm_engine_ds4slow");
+                        if (alt != NULL && alt != eng && alt->load_model != NULL) {
+                            fprintf(stderr, "llm_ai_mlx_load_model: engine '%s' non carica -> fallback '%s'\n",
+                                    eng->name, alt->name);
+                            eng = alt;
+                            if (eng->set_expert_swap) eng->set_expert_swap(want_swap ? model_dir : NULL);
+                            dm = eng->load_model(model_dir);
+                        }
                     }
-                }
-                if (dm != NULL) {
-                    m->deleg = eng;
-                    m->deleg_model = dm;
-                    snprintf(m->cfg.model_type, sizeof m->cfg.model_type, "%s", "deepseek_v4");
-                    fprintf(stderr, "llm_ai_mlx_load_model: deepseek_v4 via engine '%s'\n", eng->name);
-                    return m;
+                    if (dm != NULL) {
+                        m->deleg = eng;
+                        m->deleg_model = dm;
+                        snprintf(m->cfg.model_type, sizeof m->cfg.model_type, "%s", "deepseek_v4");
+                        fprintf(stderr, "llm_ai_mlx_load_model: deepseek_v4 via engine '%s'\n", eng->name);
+                        return m;
+                    }
                 }
             }
         }
