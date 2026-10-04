@@ -243,8 +243,11 @@ int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeight
     /* ITEM B device-resident (branch non-bit-exact): il project scrive q/kv/qrn negli slot device sx[6/8/9/10]
      * (out=NULL -> no download); il mid li legge (dev_in=1) e lascia heads in device (dev_heads=1); l'out-batch
      * legge heads da device e applica la RoPE inversa su GPU (dsv4_rope_rows_inv). */
-    float* hds = (float*)malloc(sizeof(float) * (size_t)nt * qd);
-    LlmDsv4MidParams* ps = (LlmDsv4MidParams*)malloc(sizeof(LlmDsv4MidParams) * (size_t)nt);
+    /* Scrath PERSISTENTE (era malloc/free per-chiamata: 128 KB × layer/token = overhead puro §0septies). */
+    static float* hds = NULL; static size_t hds_cap = 0;
+    static LlmDsv4MidParams* ps = NULL; static size_t ps_cap = 0;
+    if ((size_t)nt * (size_t)qd > hds_cap) { free(hds); hds = (float*)malloc(sizeof(float) * (size_t)nt * (size_t)qd); hds_cap = (size_t)nt * (size_t)qd; }
+    if ((size_t)nt > ps_cap) { free(ps); ps = (LlmDsv4MidParams*)malloc(sizeof(LlmDsv4MidParams) * (size_t)nt); ps_cap = (size_t)nt; }
     void* heads_dev = NULL;
     int ok = hds && ps;
     if (ok) ok = llm_dsv4_gpu_attn_project_batch(&g_attn, c, L, il, xn, pos0, nt, NULL, NULL, NULL);
@@ -263,7 +266,6 @@ int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeight
         if (ok) { m->n_raw = nr; m->n_acomp = na; m->n_icomp = ni; }
     }
     if (ok) ok = llm_dsv4_gpu_attn_finish_batch(&g_attn, c, L, il, hds, pos0, nt, out, heads_dev);
-    free(ps); free(hds);
     return ok ? 1 : 0;
 }
 
