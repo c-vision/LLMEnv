@@ -148,6 +148,106 @@ static const char* const LLM_DSV4_METAL_KERNELS =
 "        acc += d * s;\n"
 "    }\n"
 "    float r = simd_sum(acc); if (tid == 0u) OUT[(ulong)out_off + tg] += r;\n"
+"}\n"
+/* ── Attn decode packed8 (PORT del vendored ds4_flash_attn_vec_packed8_reduce_f16_512):
+ * 1 threadgroup/head, 256 thread = 8 simdgroup, time-slice dei 32 split virtuari di 32 chiavi,
+ * online-softmax con simd_max/simd_sum, reduce finale IN-THREADGROUP (nessun buffer parziale su
+ * device, nessuna merge separata). Legge i nostri buffer misti f32 (RAWK finestra + COMPK
+ * compresse) con maschera `allowed`, K=V. hd=512. P={n_raw,n_comp,hd,has_allowed,raw_off}. ── */
+"kernel void dsv4_attn_decode_p8(device const float* Q [[buffer(0)]], device const float* RAWK [[buffer(1)]],\n"
+"    device const float* COMPK [[buffer(2)]], device const int* ALLOWED [[buffer(3)]],\n"
+"    device const float* SINKS [[buffer(4)]], device float* OUT [[buffer(5)]], constant uint* P [[buffer(6)]],\n"
+"    threadgroup char* shmem [[threadgroup(0)]], uint h [[threadgroup_position_in_grid]],\n"
+"    ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) {\n"
+"    const uint n_raw = P[0], n_comp = P[1], hd = P[2], has_allowed = P[3], raw_off = P[4];\n"
+"    const int n_keys = (int)(n_raw + n_comp);\n"
+"    const float scale = 1.f / sqrt((float)hd);\n"
+"    const short NW = 32, C = 32, NSG = 8, NWG = 32, DK4 = 128, DV4 = 128, SH = 128;\n"
+"    threadgroup float4* q_shared = (threadgroup float4*)shmem;\n"
+"    threadgroup half* score_banks = (threadgroup half*)(q_shared + DK4);\n"
+"    threadgroup volatile float* weights = (threadgroup volatile float*)(score_banks + NSG*SH);\n"
+"    threadgroup volatile float* stats = weights + NWG*C;\n"
+"    threadgroup volatile float* sink_scale = stats + 2*NWG;\n"
+"    threadgroup volatile float4* plane = (threadgroup volatile float4*)(sink_scale + NWG);\n"
+"    const short lane = (short)tiisg;\n"
+"    threadgroup half* bank = score_banks + (short)sgitg * SH;\n"
+"    threadgroup float* ss = (threadgroup float*)bank;\n"
+"    threadgroup half* sm = bank + 2*C;\n"
+"    device const float4* q4 = (device const float4*)(Q + (ulong)h * (ulong)hd);\n"
+"    if (sgitg == 0) { for (short i = lane; i < DK4; i += NW) q_shared[i] = q4[i]; }\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    for (short iwg = (short)sgitg; iwg < NWG; iwg += NSG) {\n"
+"        float S = 0.f; float M = -FLT_MAX/2; float oscale = 1.f;\n"
+"        const int ic0 = (int)iwg * C;\n"
+"        weights[(uint)iwg*C + (uint)lane] = 0.f; ss[lane] = 0.f; sm[lane] = (half)0.0h;\n"
+"        simdgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        if (ic0 < n_keys) {\n"
+"            { const int kk = ic0 + (int)lane; int ok = (kk < n_keys);\n"
+"              if (ok && kk >= (int)n_raw && has_allowed && !ALLOWED[kk - (int)n_raw]) ok = 0;\n"
+"              sm[lane] = ok ? (half)0.0h : (half)(-INFINITY); }\n"
+"            if (simd_max(sm[lane]) > (half)(-65504.0f)) {\n"
+"                float lane_mqk = 0.f;\n"
+"                for (short cc = 0; cc < C; ++cc) {\n"
+"                    const int kk = ic0 + cc; if (kk >= n_keys) continue;\n"
+"                    device const float* krow = (kk < (int)n_raw) ? (RAWK + raw_off + (ulong)kk*(ulong)hd) : (COMPK + (ulong)(kk-(int)n_raw)*(ulong)hd);\n"
+"                    device const float4* pk4 = (device const float4*)krow;\n"
+"                    float mqk = 0.f;\n"
+"                    for (short ii = 0; ii < DK4/NW; ++ii) mqk += dot(pk4[ii*NW + lane], q_shared[ii*NW + lane]);\n"
+"                    mqk = simd_sum(mqk);\n"
+"                    if (lane == cc) lane_mqk = mqk;\n"
+"                }\n"
+"                ss[lane] = fma(lane_mqk, scale, (float)sm[lane]);\n"
+"                simdgroup_barrier(mem_flags::mem_threadgroup);\n"
+"                const float old_m = M; const float score = ss[lane];\n"
+"                M = simd_max(max(M, score));\n"
+"                const float ms = exp(old_m - M); const float vs = exp(score - M);\n"
+"                S = S * ms + simd_sum(vs); ss[lane] = vs;\n"
+"                simdgroup_barrier(mem_flags::mem_threadgroup);\n"
+"                weights[(uint)iwg*C + (uint)lane] = ss[lane];\n"
+"            }\n"
+"            if (iwg == 0) {\n"
+"                const float old_m = M; const float sink = lane == 0 ? SINKS[h] : -FLT_MAX/2;\n"
+"                M = simd_max(max(M, sink)); const float ms = exp(old_m - M); const float vs = exp(sink - M);\n"
+"                S = S*ms + simd_sum(vs); oscale = ms;\n"
+"            }\n"
+"        } else if (iwg == 0) {\n"
+"            const float old_m = M; const float sink = lane == 0 ? SINKS[h] : -FLT_MAX/2;\n"
+"            M = simd_max(max(M, sink)); const float ms = exp(old_m - M); const float vs = exp(sink - M);\n"
+"            S = S*ms + simd_sum(vs); oscale = ms;\n"
+"        }\n"
+"        if (lane == 0) { stats[2*(uint)iwg] = S; stats[2*(uint)iwg+1] = M; sink_scale[(uint)iwg] = oscale; }\n"
+"        simdgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    }\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    const short split = lane;\n"
+"    float rS = stats[2*(uint)split]; float rM = stats[2*(uint)split+1];\n"
+"    const float rmax = simd_max(rM); const float rms = exp(rM - rmax);\n"
+"    rS = simd_sum(rS * rms);\n"
+"    const float rinv = rS == 0.f ? 0.f : 1.f/rS;\n"
+"    device float4* dst4 = (device float4*)(OUT + (ulong)h*(ulong)hd);\n"
+"    for (short quad = 0; quad < 4; ++quad) {\n"
+"        for (short iwg = (short)sgitg; iwg < NWG; iwg += NSG) {\n"
+"            float4 lo = float4(0.f); const int ic0 = (int)iwg*C;\n"
+"            if (ic0 < n_keys) {\n"
+"                threadgroup volatile float* sw = weights + (uint)iwg*C;\n"
+"                const short oc = quad*NW + lane;\n"
+"                for (short cc = 0; cc < C; ++cc) {\n"
+"                    const int kk = ic0 + cc; if (kk >= n_keys) continue;\n"
+"                    device const float* vrow = (kk < (int)n_raw) ? (RAWK + raw_off + (ulong)kk*(ulong)hd) : (COMPK + (ulong)(kk-(int)n_raw)*(ulong)hd);\n"
+"                    lo += ((device const float4*)vrow)[oc] * float4(sw[cc]);\n"
+"                }\n"
+"                if (iwg == 0) lo *= sink_scale[0];\n"
+"            }\n"
+"            plane[(uint)iwg*33u + (uint)lane] = lo;\n"
+"        }\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        for (short ol = (short)sgitg; ol < NW; ol += NSG) {\n"
+"            const float4 m = (float4)plane[(uint)lane*33u + (uint)ol];\n"
+"            const float4 red = simd_sum(m * rms);\n"
+"            if (lane == 0) dst4[quad*NW + ol] = red * rinv;\n"
+"        }\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    }\n"
 "}\n";
 
 /* ── Metodo ds4: attivazione Q8_K + integer-dot a blocchi (8 elementi per lookup di griglia).
@@ -1486,6 +1586,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_tbl_pair, pso_tbl_sum6;  /* MoE via argument buffer (ds4 table) */
     id<MTLComputePipelineState> pso_attn_mixed;  /* attn mista raw+comp su device (ds4) */
     id<MTLComputePipelineState> pso_attn_part, pso_attn_merge;  /* attn split (flash-decoding) + merge */
+    id<MTLComputePipelineState> pso_attn_p8;  /* attn decode packed8 (port vendored) */
     id<MTLComputePipelineState> pso_comp_pool, pso_comp_fp8;  /* compressor su device (ds4) */
     id<MTLComputePipelineState> pso_idx_qat, pso_idx_scores, pso_idx_topk;  /* indexer su device (ds4) */
     id<MTLComputePipelineState> pso_comp_shift;  /* shift dello stato compressor (ds4) */
@@ -1695,6 +1796,10 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     id<MTLFunction> f25m = [lib newFunctionWithName:@"dsv4_attn_merge"];
     b->pso_attn_part  = f25p ? [dev newComputePipelineStateWithFunction:f25p error:&err] : nil;
     b->pso_attn_merge = f25m ? [dev newComputePipelineStateWithFunction:f25m error:&err] : nil;
+    { id<MTLFunction> f25x = [lib newFunctionWithName:@"dsv4_attn_decode_p8"];
+      b->pso_attn_p8 = f25x ? [dev newComputePipelineStateWithFunction:f25x error:&err] : nil;
+      if (!f25x) fprintf(stderr, "dsv4_metal: kernel dsv4_attn_decode_p8 NON compilato\n");
+      if (f25x) [f25x release]; }
     if (!f25p || !f25m) fprintf(stderr, "dsv4_metal: kernel attn split NON compilato\n");
     id<MTLFunction> f26 = [lib newFunctionWithName:@"dsv4_comp_pool"];
     id<MTLFunction> f27 = [lib newFunctionWithName:@"dsv4_comp_fp8"];
@@ -2886,6 +2991,18 @@ static void dsv4_encode_attn_mixed(LlmDsv4Metal* b, id<MTLComputeCommandEncoder>
         id<MTLBuffer> Q, id<MTLBuffer> RAWK, id<MTLBuffer> COMPK, id<MTLBuffer> ALLOWED,
         id<MTLBuffer> SINKS, id<MTLBuffer> OUT, NSUInteger qoff, NSUInteger ooff,
         int n_head, int hd, int n_raw, int n_comp, int has_allowed, NSUInteger raw_boff = 0) {
+    /* Percorso packed8 (port vendored): 1 TG/head, 8 simdgroup, reduce in-TG. Solo DS4 (hd=512, 64 head). */
+    { int use_p8 = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_attn_p8", &v) == 0) use_p8 = v; }
+      if (use_p8 && b->pso_attn_p8 && hd == 512 && n_head == 64) {
+          g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_attn_p8];
+          [e setBuffer:Q offset:qoff atIndex:0]; [e setBuffer:RAWK offset:raw_boff atIndex:1]; [e setBuffer:COMPK offset:0 atIndex:2];
+          [e setBuffer:ALLOWED offset:0 atIndex:3]; [e setBuffer:SINKS offset:0 atIndex:4]; [e setBuffer:OUT offset:ooff atIndex:5];
+          { uint32_t P[5] = { (uint32_t)n_raw, (uint32_t)n_comp, (uint32_t)hd, (uint32_t)(has_allowed ? 1u : 0u), (uint32_t)(raw_boff / 4u) }; [e setBytes:P length:sizeof(P) atIndex:6]; }
+          [e setThreadgroupMemoryLength:25472u atIndex:0];
+          [e dispatchThreadgroups:MTLSizeMake((NSUInteger)n_head, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          return;
+      }
+    }
     const uint32_t total = (uint32_t)(n_raw + n_comp);
     id<MTLBuffer> PART = nil;
     uint32_t ns = (total + 63u) / 64u; if (ns < 1u) ns = 1u; if (ns > 16u) ns = 16u;
