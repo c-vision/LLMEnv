@@ -385,6 +385,13 @@ int llm_dsv4_gpu_moe_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights
     return llm_dsv4_gpu_moe_batch(&g_moe, c, L, il, x, tokens, nt, out) ? 1 : 0;
 }
 
+/* TEMP (gated ds4_profile): espone gli accumulatori I/O vs GEMM del MoE batched (definiti in
+ * llm_dsv4_gpu_moe.h, TU di questo .mm). Chiamata dal dump del profiler in llm_dsv4_layer.h. */
+void llm_dsv4_gpu_moe_prof(double* io_ms, double* mm_ms) {
+    if (io_ms) *io_ms = g_dsv4_moe_io_ms;
+    if (mm_ms) *mm_ms = g_dsv4_moe_mm_ms;
+}
+
 int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                   const float* xn, int pos, float* q, float* kv, float* qrn) {
     static int logged = 0;

@@ -70,6 +70,7 @@ static inline void llm_dsv4_forward_batch(const LlmDsv4Config* c, const LlmDsv4W
         llm_dsv4_layer_forward_batch(c, &w->layers[il], pe, &cs->layers[il], cur, tokens, pos0, N, il, nxt);
         float* tmp = cur; cur = nxt; nxt = tmp;
     }
+    llm_dsv4_pf_dump("prefill");   /* TEMP: profiler per-fase (no-op se dsv4_profile=0) */
     memcpy(out_hc_last, cur + hcn * (size_t)(N - 1), sizeof(float) * hcn);
     free(nxt); free(cur);
 }

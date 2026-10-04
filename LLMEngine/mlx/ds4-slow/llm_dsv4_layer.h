@@ -10,6 +10,32 @@
 #include "llm_dsv4_moe_fwd.h"
 #include "llm_dsv4_cache.h"
 #include "llm_engine_opts.h"   /* opzione dsv4_gpu_hc (registro, no env) */
+#include <time.h>
+
+/* ── PROFILER per-fase (TEMPORANEO; gated da opzione registro `dsv4_profile`, default 0). Serve
+ *    a diagnosticare il prefill: DOVE va il tempo (fase1=mHC+attn, MoE, fase3=mHC) e QUALE ramo
+ *    gira (GPU/batched vs CPU). I contatori sono deterministici (validi anche a macchina carica);
+ *    i tempi sono indicativi e vanno letti solo a macchina quieta. ── */
+static long g_pf_hc_gpu = 0, g_pf_hc_cpu = 0, g_pf_attn_gpu = 0, g_pf_attn_cpu = 0;
+static long g_pf_moe_batch = 0, g_pf_moe_cpu = 0, g_pf_layers = 0;
+static double g_pf_t1 = 0, g_pf_tmoe = 0, g_pf_t3 = 0;
+static int g_pf_on = -1;
+static inline int llm_dsv4_pf_on(void) {
+    if (g_pf_on < 0) { int v = 0; g_pf_on = (llm_ai_mlx_opt_get_bool("dsv4_profile", &v) == 0) ? v : 0; }
+    return g_pf_on;
+}
+static inline double llm_dsv4_pf_now(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
+}
+static inline void llm_dsv4_pf_dump(const char* tag) {
+    if (!llm_dsv4_pf_on() || g_pf_layers == 0) return;
+    double _io = 0, _mm = 0; llm_dsv4_gpu_moe_prof(&_io, &_mm);
+    fprintf(stderr, "[dsv4-prof %s] layers=%ld | fase1(mHC+attn)=%.1fms MoE=%.1fms (io=%.1f gemm=%.1f) "
+            "fase3(mHC)=%.1fms | hc gpu/cpu=%ld/%ld attn gpu/cpu=%ld/%ld moe batch/pertok=%ld/%ld\n",
+            tag, g_pf_layers, g_pf_t1, g_pf_tmoe, _io, _mm, g_pf_t3,
+            g_pf_hc_gpu, g_pf_hc_cpu, g_pf_attn_gpu, g_pf_attn_cpu, g_pf_moe_batch, g_pf_moe_cpu);
+}
 
 /* Un layer su un token. hc [n_hc*embd] in ingresso, out_hc [n_hc*embd] in uscita.
  * kv = righe KV (raw+compresse) se presenti, altrimenti NULL (solo kv corrente). */
@@ -133,6 +159,7 @@ static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const Ll
         const LlmDsv4PackedExperts* pe, LlmDsv4LayerCache* cache, const float* hc_in, const int* tokens,
         int pos0, int N, int il, float* hc_out) {
     const int HC = c->n_hc, D = c->n_embd; const size_t hcn = (size_t)HC * D; const int SZ = (2 + HC) * HC;
+    int pf = llm_dsv4_pf_on(); double _t0 = 0; if (pf) { _t0 = llm_dsv4_pf_now(); g_pf_layers++; }
     /* mHC su GPU (opzione di registro dsv4_gpu_hc, default 1; 0 = percorso CPU bit-exact col token-per-token). Layout `sp` per token:
      * pre[HC] | post[HC] | comb[HC*HC]; il percorso CPU lo riempie nello stesso layout (post/comb) cosi' i due si alternano. */
     int gpu_hc = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_gpu_hc", &v) == 0) gpu_hc = v; }   /* default ON (verificato); 0 = CPU bit-exact */
@@ -150,8 +177,9 @@ static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const Ll
     for (int t = 0; !hc_a && t < N; t++)
         llm_dsv4_block_pre(c, L->hc_attn_fn, L->hc_attn_scale, L->hc_attn_base, L->attn_norm, hc_in + hcn * t,
                            normed_all + (size_t)D * t, SP_POST(sp_a, t), SP_COMB(sp_a, t));
-    if (!llm_dsv4_gpu_attn_batch_try(c, L, il, cache->compress_ratio, cache->raw_cap, cache->comp_cap,
-                                     normed_all, pos0, N, attn_all)) {
+    int attn_gpu = llm_dsv4_gpu_attn_batch_try(c, L, il, cache->compress_ratio, cache->raw_cap, cache->comp_cap,
+                                               normed_all, pos0, N, attn_all);
+    if (!attn_gpu) {
         for (int t = 0; t < N; t++)
             llm_dsv4_attn_cached(c, L, pe, cache, normed_all + (size_t)D * t, pos0 + t, il, attn_all + (size_t)D * t);
     }
@@ -163,6 +191,10 @@ static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const Ll
         llm_dsv4_block_pre(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, after + hcn * t,
                            ffn_x + (size_t)D * t, SP_POST(sp_f, t), SP_COMB(sp_f, t));
     free(sp_a); free(attn_all); free(normed_all);
+    if (pf) { double _n = llm_dsv4_pf_now(); g_pf_t1 += _n - _t0; _t0 = _n;
+              g_pf_hc_gpu += (hc_a?1:0)+(post_a_gpu?1:0)+(hc_f?1:0);
+              g_pf_hc_cpu += (!hc_a)+(!post_a_gpu)+(!hc_f);
+              g_pf_attn_gpu += attn_gpu?1:0; g_pf_attn_cpu += attn_gpu?0:1; }
     /* fase 2: MoE su tutti i token */
     const int moe_batched = llm_dsv4_gpu_moe_batch_try(c, L, il, ffn_x, tokens, N, ffn_o);
     for (int t = 0; !moe_batched && t < N; t++) {
@@ -172,10 +204,14 @@ static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const Ll
             else                llm_dsv4_moe_forward(c, L, x, il, tokens[t], o);
         }
     }
+    if (pf) { double _n = llm_dsv4_pf_now(); g_pf_tmoe += _n - _t0; _t0 = _n;
+              g_pf_moe_batch += moe_batched?1:0; g_pf_moe_cpu += moe_batched?0:1; }
     /* fase 3: mHC post ffn */
     int post_f_gpu = gpu_hc && llm_dsv4_gpu_hc_post_batch_try(c, ffn_o, after, sp_f, N, hc_out);
     for (int t = 0; !post_f_gpu && t < N; t++)
         llm_dsv4_block_post(c, ffn_o + (size_t)D * t, after + hcn * t, SP_POST(sp_f, t), SP_COMB(sp_f, t), hc_out + hcn * t);
+    if (pf) { double _n = llm_dsv4_pf_now(); g_pf_t3 += _n - _t0;
+              g_pf_hc_gpu += post_f_gpu?1:0; g_pf_hc_cpu += post_f_gpu?0:1; }
     #undef SP_POST
     #undef SP_COMB
     free(sp_f); free(ffn_o); free(ffn_x); free(after);

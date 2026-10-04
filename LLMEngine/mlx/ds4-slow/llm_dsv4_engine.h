@@ -197,6 +197,7 @@ static inline void llm_dsv4_engine_generate(LlmDsv4Engine* e, int* tokens, int n
 /* Prefilla `n` token (avanza pos) e aggiorna `pending` dall'ultimo. */
 static inline void llm_dsv4_engine_append(LlmDsv4Engine* e, const int* ids, int n) {
     int HC = e->w.cfg.n_hc, D = e->w.cfg.n_embd;
+    double _ap0 = llm_dsv4_pf_now();   /* TEMP: prefill tok/s */
     float* hc = (float*)malloc(sizeof(float) * (size_t)HC * D);
     for (int i = 0; i < n; ) {   /* chunk layer-major (LLM_DSV4_PREFILL_CHUNK token) */
         int chunk = LLM_DSV4_PREFILL_CHUNK; { int v; if (llm_ai_mlx_opt_get_int("dsv4_prefill_chunk", &v) == 0 && v >= 1 && v <= 4096) chunk = v; }
@@ -211,10 +212,10 @@ static inline void llm_dsv4_engine_append(LlmDsv4Engine* e, const int* ids, int 
         : llm_dsv4_argmax(e->logits, e->w.cfg.n_vocab);
     e->has_pending = 1;
     { int pf = 0; if (e->store && llm_ai_mlx_opt_get_bool("dsv4_profile", &pf) == 0 && pf)
-        fprintf(stderr, "[dsv4-store] bytes_read=%.2fGB hit=%llu miss=%llu evict=%llu\n",
+        fprintf(stderr, "[dsv4-store] bytes_read=%.2fGB hit=%llu miss=%llu evict=%llu | PREFILL N=%d %.0f tok/s\n",
                 (double)e->store->bytes_read / 1073741824.0,
                 (unsigned long long)e->store->hits, (unsigned long long)e->store->misses,
-                (unsigned long long)e->store->evictions); }
+                (unsigned long long)e->store->evictions, n, n * 1000.0 / (llm_dsv4_pf_now() - _ap0)); }
     /* HOTLIST: salva il profilo di hotness dopo il prefill — cosi' vale anche per i processi che
      * NON liberano il modello (es. `fastllm run` che esce senza free_model). */
     if (e->store) { char hp[1200]; if (llm_dsv4_engine_hotlist_path(e, hp, sizeof hp)) llm_dsv4_store_save_hot(e->store, hp); }

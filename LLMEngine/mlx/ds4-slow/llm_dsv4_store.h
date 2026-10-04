@@ -216,6 +216,12 @@ static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngin
 }
 static inline void llm_dsv4_store_free(LlmDsv4Store* s) {
     if (!s) return;
+    /* TEMP (gated ds4_profile): statistiche I/O deterministiche (validita' anche a macchina carica). */
+    { int pf = 0; if (llm_ai_mlx_opt_get_bool("dsv4_profile", &pf) == 0 && pf)
+        fprintf(stderr, "[dsv4-store] mode=%s cap=%d | bytes_read=%.2fGB hit=%llu miss=%llu evict=%llu\n",
+                s->mode == LLM_DSV4_STORE_SWAP ? "swap" : "resident", s->cap,
+                (double)s->bytes_read / 1073741824.0,
+                (unsigned long long)s->hits, (unsigned long long)s->misses, (unsigned long long)s->evictions); }
     /* HOTLIST I/O: se richiesto, salva la hotness osservata (profilo) per il seed di run successivi. */
     { char p[1024]; if (s->freq && llm_ai_mlx_opt_get_str("dsv4_hotlist_out", p, sizeof p) == 0 && p[0]) llm_dsv4_store_save_hot(s, p); }
     if (s->ents) { for (int i = 0; i < s->cap; i++) free(s->ents[i].buf); free(s->ents); }

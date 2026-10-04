@@ -31,6 +31,8 @@ int llm_dsv4_gpu_hc_post_batch_try(const LlmDsv4Config* c, const float* bo, cons
 /* MoE di un chunk di `nt` token in UNA command buffer (1 = eseguito; 0 = usare il per-token). */
 int llm_dsv4_gpu_moe_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                const float* x, const int* tokens, int nt, float* out);
+/* TEMP (gated ds4_profile): accumulatori I/O (store esperti) vs GEMM del MoE batched, in ms. */
+void llm_dsv4_gpu_moe_prof(double* io_ms, double* mm_ms);
 int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                   const float* xn, int pos, float* q, float* kv, float* qrn);
 int llm_dsv4_gpu_attn_finish_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,

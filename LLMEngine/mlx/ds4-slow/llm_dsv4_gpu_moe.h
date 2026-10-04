@@ -25,6 +25,15 @@ int llm_dsv4_gpu_route_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeigh
 #endif
 #define LLM_DSV4_MM_MIN_TOKENS 192   /* soglia chunk per mul_mm_id (sotto: kernel per-token) */
 
+/* TEMP (gated ds4_profile): split I/O (store) vs GEMM del MoE batched. Le variabili vivono nel
+ * TU del .mm (dove gira il batch); esposte via llm_dsv4_gpu_moe_prof() definita in gpu_ctx.mm. */
+#include <time.h>
+static double g_dsv4_moe_io_ms = 0, g_dsv4_moe_mm_ms = 0;
+static inline double llm_dsv4_gm_now(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
+}
+
 typedef struct {
     LlmDsv4Metal* be;
     const LlmDsv4PackedExperts* exps;   /* per store_get (cache esperti condivisa) */
@@ -279,6 +288,8 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
     { int gpu_rt = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_gpu_hc", &v) == 0) gpu_rt = v; }   /* stessa opzione dell'mHC GPU */
       if (!(gpu_rt && llm_dsv4_gpu_route_batch_try(c, L, il, X, tokens, nt, sel_all, w_all)))
           for (int t = 0; t < nt; t++) llm_dsv4_moe_route(c, L, X + (size_t)t * embd, il, tokens[t], sel_all + (size_t)t * used, w_all + (size_t)t * used); }
+    int pf_m = 0; { int v = 0; if (llm_ai_mlx_opt_get_bool("dsv4_profile", &v) == 0) pf_m = v; }
+    double _tm0 = 0; if (pf_m) _tm0 = llm_dsv4_gm_now();
     if (streaming && pe->store_prefetch) pe->store_prefetch(pe->store, il, sel_all, nt * used);   /* letture parallele dei mancanti */
     for (int t = 0; ok && t < nt; t++) {
         int* selected = sel_all + (size_t)t * used; float* weight = w_all + (size_t)t * used;
@@ -297,6 +308,7 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
             rw[k] = weight[i];
         }
     }
+    if (pf_m) { double _n = llm_dsv4_gm_now(); g_dsv4_moe_io_ms += _n - _tm0; _tm0 = _n; }
     /* Chunk grande (come ds4: tanti token per esperto): mul_mm_id con tabella di indirizzi degli esperti dello store, shared expert incluso.
      * Sotto la soglia i kernel per-token (slots6) sono piu' veloci. Attivazioni half (opzione dsv4_prefill_f16). */
     int done_mm = 0;
@@ -325,6 +337,7 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
         /* senza shared expert su GPU il path per-token lo aggiunge su CPU: qui non e' coperto -> false */
         if (ok && !sg) ok = false;
     }
+    if (pf_m) { double _n = llm_dsv4_gm_now(); g_dsv4_moe_mm_ms += _n - _tm0; }
     free(sel_all); free(w_all); free(gp); free(rw);
     return ok;
 }
