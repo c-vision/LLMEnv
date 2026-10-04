@@ -21,6 +21,14 @@ static long g_pf_moe_batch = 0, g_pf_moe_cpu = 0, g_pf_layers = 0;
 static double g_pf_t1 = 0, g_pf_tmoe = 0, g_pf_t3 = 0;
 static double g_pf_d_attn = 0, g_pf_d_moe = 0;   /* DECODE: attn vs MoE per-token */
 static int g_pf_on = -1;
+/* Scratch PERSISTENTE grow-only (per-TU) per il hot path del decode: elimina i malloc/free
+ * per-layer (erano ~8 malloc + 7 free × layer × token = churn + first-touch). §0septies. */
+static inline float* llm_dsv4_slot(int i, size_t n) {
+    static float* p[24]; static size_t cap[24];
+    if (i < 0 || i >= 24) return NULL;
+    if (n > cap[i]) { free(p[i]); p[i] = (float*)malloc(n * sizeof(float)); cap[i] = p[i] ? n : 0; }
+    return p[i];
+}
 static inline int llm_dsv4_pf_on(void) {
     if (g_pf_on < 0) { int v = 0; g_pf_on = (llm_ai_mlx_opt_get_bool("dsv4_profile", &v) == 0) ? v : 0; g_dsv4_prof_global = g_pf_on; }
     return g_pf_on;
@@ -91,13 +99,13 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
     static const char* def_ops[] = { "mhc_pre_attn", "attention", "mhc_post_attn",
                                      "mhc_pre_ffn", "moe", "mhc_post_ffn" };
     if (ops == NULL || n_ops <= 0) { ops = def_ops; n_ops = 6; }
-    float* cur    = (float*)malloc(sizeof(float) * (size_t)HC * D); memcpy(cur, hc, sizeof(float) * (size_t)HC * D);
-    float* normed = (float*)malloc(sizeof(float) * (size_t)D);
-    float* proj   = (float*)malloc(sizeof(float) * (size_t)D);
-    float* saved  = (float*)malloc(sizeof(float) * (size_t)HC * D);
-    float* nxt    = (float*)malloc(sizeof(float) * (size_t)HC * D);
-    float* post   = (float*)malloc(sizeof(float) * (size_t)HC);
-    float* comb   = (float*)malloc(sizeof(float) * (size_t)HC * HC);
+    float* cur    = llm_dsv4_slot(0, (size_t)HC * D); memcpy(cur, hc, sizeof(float) * (size_t)HC * D);
+    float* normed = llm_dsv4_slot(1, (size_t)D);
+    float* proj   = llm_dsv4_slot(2, (size_t)D);
+    float* saved  = llm_dsv4_slot(3, (size_t)HC * D);
+    float* nxt    = llm_dsv4_slot(4, (size_t)HC * D);
+    float* post   = llm_dsv4_slot(5, (size_t)HC);
+    float* comb   = llm_dsv4_slot(6, (size_t)HC * HC);
     int tail_done = 0;
     for (int k = 0; k < n_ops; k++) {
         const char* op = ops[k];
@@ -119,14 +127,13 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
                 strcmp(ops[4], "moe") == 0 &&
                 strcmp(ops[5], "mhc_post_ffn") == 0;
             if (canonical_tail) {
-                float* heads = (float*)malloc(sizeof(float) * (size_t)c->n_head * c->n_head_dim);
+                float* heads = llm_dsv4_slot(7, (size_t)c->n_head * c->n_head_dim);
                 if (heads) {
                     if (llm_dsv4_attn_cached_mid(c, L, pe, cache, normed, pos, il, heads)) {
                         tail_done = llm_dsv4_gpu_attn_tail_try(c, L, pe, il, heads, saved, post, comb, pos, out_hc);
                         if (!tail_done && !llm_dsv4_gpu_attn_finish_try(c, L, il, heads, pos, proj))
                             llm_dsv4_attn_finish(c, L, pe, heads, pos, il, proj);
                     }
-                    free(heads);
                 } else {
                     llm_dsv4_attn_cached(c, L, pe, cache, normed, pos, il, proj);
                 }
@@ -155,7 +162,7 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
         /* op sconosciuto: ignorato (il gap e' visibile nel log della pipeline) */
     }
     if (out_hc && !tail_done) memcpy(out_hc, cur, sizeof(float) * (size_t)HC * D);
-    free(comb); free(post); free(nxt); free(saved); free(proj); free(normed); free(cur);
+    /* scratch persistente: NESSUN free (§0septies: niente malloc/churn nel hot path) */
 }
 
 /* Un layer su un token con cache KV. `pe` = esperti packed (NULL -> usa gli esperti f32).
