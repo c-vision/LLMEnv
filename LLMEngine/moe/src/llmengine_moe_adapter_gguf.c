@@ -148,6 +148,14 @@ static LlmEngineMoeStatus gguf_lmhead(GgufSelf* s, const float* xn, float* out) 
 /* M6 v2 + K1/K2: il router del layer notifica gli esperti scelti (feed predittore/prefetch),
  * emette il ROUTER nel trace (confine di step per il replay) e avanza lo step dello store
  * (un hit su un bundle di uno step precedente conta in `resident_hits`). */
+/* M6: prefetch REALE dal predittore cross-layer (route_prob/future) — carica l'esperto nel store
+ * (warm cache) cosi' l'accesso al forward del layer successivo diventa un HIT. */
+static int gguf_prefetch_fn(void* ctx, uint32_t layer, uint32_t expert) {
+    GgufSelf* s = (GgufSelf*)ctx;
+    if (s == NULL || s->store == NULL) return -1;
+    return llmengine_moe_gguf_store_prefetch(s->store, layer, expert);
+}
+
 static void gguf_route_cb(void* ctx, uint32_t layer, const uint32_t* experts, uint32_t n) {
     GgufSelf* s = (GgufSelf*)ctx;
     if (s->store != NULL) {
@@ -197,7 +205,11 @@ static LlmEngineMoeStatus gguf_forward(void* self, LlmEngineMoeRuntime* rt, cons
                 }
             }
         }
-        if (s->store != NULL) s->store->prof = llmengine_moe_profiler(rt);   /* K1: trace */
+        if (s->store != NULL) {
+            s->store->prof = llmengine_moe_profiler(rt);   /* K1: trace */
+            /* M6: collega il prefetch cross-layer (route_prob/future) allo store. */
+            llmengine_moe_set_prefetch_fn(rt, gguf_prefetch_fn, s);
+        }
     }
     Q3KvCache kv; kv.k = s->kv_k; kv.v = s->kv_v;
     float* x = (float*)malloc((size_t)hidden * sizeof(float));

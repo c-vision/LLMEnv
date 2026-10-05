@@ -52,6 +52,10 @@ struct LlmEngineMoeRuntime {
      * llmengine_moe_set_stream_metrics e usate da llmengine_moe_stream_stats quando rt->cache e' assente. */
     LlmEngineMoeStreamStats ext;
     int ext_valid;
+    /* M6: prefetch cross-layer REALE — callback fornita dall'adapter (che possiede lo store).
+     * Il predittore (route_prob/future) la invoca per gli esperti del layer successivo. */
+    int (*prefetch_fn)(void* ctx, uint32_t layer, uint32_t expert);
+    void* prefetch_ctx;
 };
 
 static LlmEngineMoeStatus llmengine_moe_rt_load_expert(void* ctx, LlmEngineMoeExpertKey key,
@@ -286,9 +290,18 @@ LlmEngineMoeStatus llmengine_moe_get_expert(LlmEngineMoeRuntime* rt, LlmEngineMo
     return LLMENGINE_MOE_ERR_NOT_IMPLEMENTED;   /* gli esperti si leggono dal GGUF (llmengine_moe_gguf_expert_f32) */
 }
 
+void llmengine_moe_set_prefetch_fn(LlmEngineMoeRuntime* rt,
+                                   int (*fn)(void* ctx, uint32_t layer, uint32_t expert), void* ctx) {
+    if (rt == NULL) return;
+    rt->prefetch_fn = fn; rt->prefetch_ctx = ctx;
+}
+
 LlmEngineMoeStatus llmengine_moe_prefetch_expert(LlmEngineMoeRuntime* rt, LlmEngineMoeExpertKey key) {
-    (void)rt; (void)key;
-    return LLMENGINE_MOE_OK;   /* no-op: nessun container (gli esperti GGUF li gestisce l'adapter) */
+    if (rt == NULL) return LLMENGINE_MOE_ERR_INVALID;
+    /* M6: prefetch REALE via callback dell'adapter (che possiede lo store); senza callback = no-op
+     * (nessun container: gli esperti GGUF li gestisce l'adapter, che la registra). */
+    if (rt->prefetch_fn != NULL) (void)rt->prefetch_fn(rt->prefetch_ctx, key.layer, key.expert);
+    return LLMENGINE_MOE_OK;
 }
 
 LlmEngineMoeStatus llmengine_moe_notify_routing(LlmEngineMoeRuntime* rt, uint32_t layer,

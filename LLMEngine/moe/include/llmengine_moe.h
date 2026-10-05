@@ -119,6 +119,12 @@ LlmEngineMoeStatus llmengine_moe_get_tensor(const LlmEngineMoeRuntime* rt, const
 LlmEngineMoeStatus llmengine_moe_set_device(LlmEngineMoeRuntime* rt, LlmEngineMoeDevice device);
 LlmEngineMoeStatus llmengine_moe_set_cache_mb(LlmEngineMoeRuntime* rt, uint64_t cache_mb); /* 0 = disabilita */
 LlmEngineMoeStatus llmengine_moe_set_prefetch(LlmEngineMoeRuntime* rt, uint32_t topn, uint32_t coupling_k); /* 0 = off */
+
+/* M6: registra la callback di prefetch REALE (l'adapter, che possiede lo store, la fornisce).
+ * Il predittore cross-layer (route_prob/future) la invoca per gli esperti del layer successivo.
+ * Senza callback il prefetch e' un no-op (nessun container). */
+void llmengine_moe_set_prefetch_fn(LlmEngineMoeRuntime* rt,
+                                   int (*fn)(void* ctx, uint32_t layer, uint32_t expert), void* ctx);
 LlmEngineMoeStatus llmengine_moe_set_async(LlmEngineMoeRuntime* rt, uint32_t workers, uint32_t cap); /* 0 = off */
 
 /* Forward generico: `in` [seq*hidden] -> `out` [seq*hidden]. */

@@ -243,6 +243,14 @@ static inline int gguf_store_find(GgufStore* s, int layer, int e) {
     return -1;
 }
 
+/* M6: PREFETCH REALE — carica l'esperto nello store (warm cache) per il layer successivo, cosi'
+ * l'accesso al forward diventa un HIT. Usato dalla callback di prefetch (route_prob/future).
+ * Ritorna 0 se il record esiste (ora in cache), -1 altrimenti. */
+static inline int llmengine_moe_gguf_store_prefetch(GgufStore* s, uint32_t layer, uint32_t e) {
+    const uint8_t* u; const uint8_t* d;
+    return llmengine_moe_gguf_store_expert(s, layer, e, &u, &d) != NULL ? 0 : -1;
+}
+
 /* Ritorna i puntatori ai tre record-esperto (raw ggml bytes), validi fino alla prossima chiamata.
  * RESIDENT: puntatori nel mmap. SWAP: bundle in cache LRU (pread su miss). NULL su errore. */
 static inline const uint8_t* llmengine_moe_gguf_store_expert(GgufStore* s, uint32_t layer, uint32_t e,
