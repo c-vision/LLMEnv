@@ -182,6 +182,13 @@ void llm_ai_mlx_destroy_session(llm_ai_mlx_session_handle handle);
  * success, -1 on failure (invalid handle, decode failure). */
 int llm_ai_mlx_session_append(llm_ai_mlx_session_handle handle, const int32_t* token_ids, int n_ids);
 
+/* §9.A M10a (azione RUNTIME RECOMPUTE): RICOSTRUISCE il KV del range [from,to) ri-eseguendo il
+ * forward di quel range (ri-prefill) invece di ricaricarlo dal disco: rewind a `from` (mantiene
+ * `from` token) + append dei token [from,to). Compone llm_ai_mlx_session_rewind/append.
+ * Ritorna 0 ok, -1 argomenti invalidi/errore. */
+int llm_ai_mlx_session_recompute_range(llm_ai_mlx_session_handle sh, llm_ai_mlx_model_handle mh,
+                                       const int32_t* tokens, int from, int to);
+
 /* Generates up to max_new_tokens ids continuing from the session's current KV-cache state
  * (i.e. after the most recent llm_ai_mlx_session_append call) -- greedy/argmax, deterministic,
  * same sampling as llm_ai_mlx_generate. Stops early on eos_token_id (ignored if negative).
