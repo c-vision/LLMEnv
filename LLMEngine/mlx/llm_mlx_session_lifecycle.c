@@ -7,6 +7,7 @@
 #include "llm_mlx_internal.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_kvpage.h"
+#include "llm_mlx_kvclasses.h"   /* §9.A M10d: classi KV RUNTIME/PERSISTENT */
 #include "llm_mlx_kvdisk.h"
 #include "llm_mlx_ngram.h"
 #include "llm_mlx_qwen4exp.h"
@@ -272,6 +273,16 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
         s->v_cache[i] = mlx_array_new();
         s->aux_cache[i] = mlx_array_new();
     }
+    /* §9.A M10d: registra il KV di SESSIONE (RAM) come KV_RUNTIME nel manager delle classi KV.
+     * Byte stimati sulla capienza di default (n_layers*kv_heads*head_dim*2(K+V)*2(f16)*ctx). */
+    {
+        int ctx = 4096;
+        unsigned long long kvb = (unsigned long long)m->cfg.n_layers * (unsigned long long)(m->cfg.n_kv_heads > 0 ? m->cfg.n_kv_heads : 1)
+                               * (unsigned long long)(m->cfg.head_dim > 0 ? m->cfg.head_dim : 1) * 2ULL * 2ULL * (unsigned long long)ctx;
+        if (kvb == 0) kvb = 1;
+        char tag[64]; snprintf(tag, sizeof tag, "session.%p", (void*)s);
+        (void)llm_mlx_kvclasses_register(tag, LLM_KVCLASS_RUNTIME, kvb);
+    }
     /* KV quant: alloco per-layer SOLO se kv_quantize attivo (default OFF -> nessun overhead).
      * KV-quant PER-SESSIONE: lo stato kvq_* vive sulla sessione e viene passato esplicitamente
      * a layer_forward (param kvq_sess): piu' sessioni KV-quant possono coesistere senza
@@ -437,6 +448,8 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
 }
 
 void llm_mlx_session_destroy(LlmMlxSession* s) {
+    /* §9.A M10d: deregistra il KV_RUNTIME della sessione dal manager delle classi KV. */
+    { char tag[64]; snprintf(tag, sizeof tag, "session.%p", (void*)s); (void)llm_mlx_kvclasses_unregister(tag); }
     llm_mlx_session_spec_free(s);   /* spec streaming: libera i checkpoint K/V (alias) */
     if (s->deleg_sess) {
         if (s->model && s->model->deleg && s->model->deleg->destroy_session)
