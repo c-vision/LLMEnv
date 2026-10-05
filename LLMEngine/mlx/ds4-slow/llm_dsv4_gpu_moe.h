@@ -15,6 +15,7 @@
 #include "llm_dsv4_gpu.h"       /* backend Metal + llm_dsv4_gpu_enabled */
 #include "llm_dsv4_metal.h"     /* backend Metal (C API) */
 #include "llm_dsv4_moe_fwd.h"   /* router/swiglu/linear riusati */
+#include "llm_dsv4_store.h"     /* capacità dello store (guardia puntatori stabili: cap >= used*nt) */
 #include "llm_engine_opts.h"       /* registro opzioni (dsv4_prefill_f16) */
 #ifdef __cplusplus
 extern "C" {
@@ -268,6 +269,26 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
     const int used = c->n_expert_used, ff = c->n_ff_exp, embd = c->n_embd;
     const LlmDsv4PackedExperts* pe = &m->exps[il];
     const int streaming = (pe->store && pe->store_get) != 0;
+    /* PUNTATORI STABILI: il batch raccoglie i puntatori di TUTTI gli esperti dell'unione PRIMA di
+     * usarli (grandi gp/upp/dp), quindi lo store deve poterli tenere TUTTI senza riusare slot:
+     * serve cap >= used*nt. Se cap e' piu' piccolo (chunk grande, o cap ridotto dalla pressione di
+     * memoria -> bug "garbage a freddo", cfr. Bugs/(open) - DS4-Garbage-Cold-Prefill-Batch-Zeri),
+     * processa il chunk in SUB-CHUNK di cap/used token (l'unione di ognuno entra nella cache). */
+    if (streaming) {
+        int capn = (int)((const LlmDsv4Store*)pe->store)->cap;
+        int used = c->n_expert_used > 0 ? c->n_expert_used : 1;
+        if (capn < nt * used) {
+            int sub = capn / used;
+            if (sub < 1) return false;   /* cap < used: puntatori non garantibili -> fallback per-token */
+            for (int t0 = 0; t0 < nt; t0 += sub) {
+                int m2 = nt - t0 < sub ? nt - t0 : sub;
+                if (!llm_dsv4_gpu_moe_batch(m, c, L, il, X + (size_t)t0 * (size_t)c->n_embd, tokens + t0, m2,
+                                            OUT + (size_t)t0 * (size_t)c->n_embd))
+                    return false;
+            }
+            return true;
+        }
+    }
     const int is_iq2 = m->gate[il].type == 16 && m->up[il].type == 16 && m->down[il].type == 10;
     const int is_q4  = m->gate[il].type == 12 && m->up[il].type == 12 && m->down[il].type == 12;
     if (!(is_iq2 || is_q4) || used != 6) return false;
