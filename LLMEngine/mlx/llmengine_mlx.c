@@ -1718,7 +1718,18 @@ void llm_mlx_quant_derive(mlx_array w, mlx_array scales,
             *out_bits = 2;
             llm_mlx_mode_set(out_mode, mode_cap, "affine");
         } else if (ratio == 16) { *out_group = 64; *out_bits = 8; llm_mlx_mode_set(out_mode, mode_cap, "affine"); }
-        else if (ratio == 8) { *out_group = 64; *out_bits = 4; llm_mlx_mode_set(out_mode, mode_cap, "affine"); }
+        /* BUGFIX (mxfp8): ratio 8 e' AMBIGUO tra affine-g64-b4 e mxfp8 (bits 8, group 32:
+         * wcols=K/4, scols=K/32 -> ratio 8). Prima si forzava affine -> il motore non
+         * caricava pesi mxfp8 ("[dequantize] Biases must be provided for affine"). Il
+         * discriminante e' il DTYPE delle scale: mxfp8 usa scale uint8 (e8m0), affine usa
+         * lo stesso dtype del compute (bf16/f16/f32). */
+        else if (ratio == 8) {
+            if (mlx_array_dtype(scales) == MLX_UINT8) {
+                *out_group = 32; *out_bits = 8; llm_mlx_mode_set(out_mode, mode_cap, "mxfp8");
+            } else {
+                *out_group = 64; *out_bits = 4; llm_mlx_mode_set(out_mode, mode_cap, "affine");
+            }
+        }
         /* BUGFIX (2026-09-19): ratio 4 e' AMBIGUO tra affine-g32-b4 e mxfp4 (entrambi
          * wcols/scols=4). Prima si forzava mxfp4 -> i modelli AFFINE g32 4-bit (es. MTPLX
          * Qwen3.8-27B-Optimized-Speed) fallivano con "[quantized_matmul] Scale type must be
