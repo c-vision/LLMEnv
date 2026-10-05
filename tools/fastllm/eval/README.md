@@ -20,6 +20,10 @@ python3 tools/fastllm/eval/run_eval.py --suite local --backend mock
 python3 tools/fastllm/eval/run_eval.py --suite local --backend http \
     --base-url http://127.0.0.1:8080 --model local --reps 3
 
+# suite lm-eval (lm-evaluation-harness via subprocess; se `lm_eval` manca -> skipped)
+python3 tools/fastllm/eval/run_eval.py --suite lm-eval \
+    --base-url http://127.0.0.1:8080 --model local
+
 # test unitari del harness
 python3 tools/fastllm/eval/tests/test_smoke.py
 ```
@@ -48,6 +52,13 @@ Report JSON + Markdown in `tools/fastllm/eval/reports/` (gitignorati). Esito = P
   supporta `echo`/logprobs del prompt → serve un canale engine-side dedicato).
 - [ ] (todo) HALoGEN (subset, verifier locali) (F3); lm-evaluation-harness (F4).
 - [ ] (todo) verifier esterni opt-in + caching (F5).
+
+## Suite `lm-eval` (F4) — lm-evaluation-harness (accuracy)
+`--suite lm-eval` esegue il CLI **`lm_eval`** come **subprocess** contro l'endpoint OpenAI
+(`--model local-completions --model_args base_url=…,model=…`), legge l'accuracy per task dai risultati.
+Config `lm_eval`: `bin` (default `lm_eval`), `base_url`, `model`, `tasks` (es. `gsm8k`), `limit`,
+`batch_size`, `min_accuracy` (soglia; dict per-task o float; assente = informativo). Se `lm_eval`
+**non è installato** → gate **skipped**. **Tool esterno/offline: nessun impatto sulle prestazioni.**
 
 ## Golden / regressione (F6-lite)
 `--save-golden <file>` salva i valori dei gate come **riferimento**; `--golden <file>` confronta la run

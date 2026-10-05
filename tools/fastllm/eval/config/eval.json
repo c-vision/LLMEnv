@@ -30,5 +30,13 @@
   "parity": {
     "max_tokens": 64,
     "tolerance": 1.0
+  },
+  "lm_eval": {
+    "bin": "lm_eval",
+    "base_url": "http://127.0.0.1:8080",
+    "model": "local",
+    "tasks": ["gsm8k"],
+    "limit": 10,
+    "batch_size": 1
   }
 }

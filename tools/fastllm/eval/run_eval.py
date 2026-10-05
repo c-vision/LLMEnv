@@ -83,7 +83,7 @@ def run_gate(modname, client, cfg, reps, ref_client=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Eval harness (qualita'/fedelta').")
-    ap.add_argument("--suite", default="local", choices=["local"])
+    ap.add_argument("--suite", default="local", choices=["local", "lm-eval"])
     ap.add_argument("--config", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                      "config", "eval.json"))
     ap.add_argument("--report", default=None, help="cartella di output (default: <eval>/reports)")
@@ -103,6 +103,11 @@ def main(argv=None):
         cfg.setdefault("engine", {})["base_url"] = args.base_url
     if args.model:
         cfg.setdefault("engine", {})["model"] = args.model
+    le = cfg.setdefault("lm_eval", {})
+    if args.base_url:
+        le["base_url"] = args.base_url
+    if args.model:
+        le["model"] = args.model
 
     report_dir = args.report or os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
     os.makedirs(report_dir, exist_ok=True)
@@ -118,16 +123,23 @@ def main(argv=None):
     if ref_cfg.get("base_url"):
         ref_client = OpenAIClient(ref_cfg["base_url"], ref_cfg.get("model", "local"), ref_cfg.get("api_key"))
 
-    gates = LOCAL_GATES if args.suite == "local" else []
     report = {"generated": _dt.datetime.now().isoformat(timespec="seconds"),
               "suite": args.suite, "engine": cfg.get("engine", {}), "reps": args.reps,
               "gates": [], "pass": True}
-    for g in gates:
-        r = run_gate(g, client, cfg, args.reps, ref_client)
+
+    def _emit(r):
         report["gates"].append(r)
         report["pass"] = report["pass"] and r["pass"]
-        mark = "PASS" if r["pass"] else "FAIL"
-        print(f"[eval] {r['gate']:12s} {mark}  ({r['metric']}={r['value']})")
+        print(f"[eval] {r['gate']:12s} {'PASS' if r['pass'] else 'FAIL'}  ({r['metric']}={r['value']})")
+
+    if args.suite == "local":
+        for g in LOCAL_GATES:
+            _emit(run_gate(g, client, cfg, args.reps, ref_client))
+    elif args.suite == "lm-eval":
+        from suites.lm_eval import lm_eval_suite
+        rr = lm_eval_suite.run(client, cfg.get("lm_eval", {}))
+        _emit({"gate": "lm_eval", "pass": rr["pass"], "value": rr["value"], "metric": rr["metric"],
+               "threshold": rr["threshold"], "reps": 1, "runs": [rr]})
 
     if args.golden:
         try:

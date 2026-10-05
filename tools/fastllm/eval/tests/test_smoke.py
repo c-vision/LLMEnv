@@ -53,6 +53,30 @@ class Smoke(unittest.TestCase):
         r2 = ppl.run(MockClient(), {"max_tokens": 8, "band": [0.29, 0.30]})
         self.assertTrue(r2["pass"] or r2["value"] > 0.28, f"ppl atteso ~0.288: {r2}")
 
+    def test_lm_eval_wrapper_with_fake(self):
+        from suites.lm_eval import lm_eval_suite
+        with tempfile.TemporaryDirectory() as td:
+            fake = os.path.join(td, "lm_eval")
+            with open(fake, "w") as fh:
+                fh.write("#!/usr/bin/env python3\n"
+                         "import sys, os, json\n"
+                         "a=sys.argv[1:]\n"
+                         "op=a[a.index('--output_path')+1] if '--output_path' in a else '.'\n"
+                         "os.makedirs(op, exist_ok=True)\n"
+                         "open(os.path.join(op,'results.json'),'w').write("
+                         "json.dumps({'results':{'gsm8k':{'acc,none':0.42}}}))\n")
+            os.chmod(fake, 0o755)
+            r = lm_eval_suite.run(None, {"bin": fake, "base_url": "http://x", "tasks": ["gsm8k"],
+                                         "output_dir": os.path.join(td, "out"), "min_accuracy": 0.4})
+            self.assertTrue(r["pass"], r)
+            self.assertEqual(r["value"], {"gsm8k": 0.42})
+            r2 = lm_eval_suite.run(None, {"bin": fake, "base_url": "http://x", "tasks": ["gsm8k"],
+                                          "output_dir": os.path.join(td, "out2"), "min_accuracy": 0.5})
+            self.assertFalse(r2["pass"], r2)
+            r3 = lm_eval_suite.run(None, {"bin": os.path.join(td, "nope")})
+            self.assertTrue(r3["pass"])
+            self.assertIn("unsupported", r3["details"])
+
     def test_golden_roundtrip(self):
         with tempfile.TemporaryDirectory() as td:
             g = os.path.join(td, "golden.json")
