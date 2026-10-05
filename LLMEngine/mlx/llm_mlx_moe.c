@@ -65,7 +65,7 @@ static bool llm_mlx_moe_gateup_fuse_enabled(void) {
 
 /* Guardia NAX #3856 (MLX 0.32.x su M5): gather_qmm(sorted_indices=true) con M>32768 e
  * M%64!=0 corrompe la coda (ultimo blocco parziale di 64 righe). Riprodotto OFFLINE senza
- * modello da `oracoli/llm_gather_qmm_sorted_probe` (forme reali esperti GLM-4.5): M<=32768
+ * modello da `tools/llmengine/oracoli/llm_gather_qmm_sorted_probe` (forme reali esperti GLM-4.5): M<=32768
  * sempre bit-exact; M>32768 bit-exact sse M%64==0; altrimenti un blocco esperto corrotto
  * (max|diff| ~1.5e3, deterministico su piu' seed). Fix locale: segmentare in slice di
  * <=32768 righe (multiplo di 64) e concatenare. Vale per OGNI MoE sorted (GLM/DS/qwen3/
@@ -494,6 +494,13 @@ bool qwen3_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
     if (strcmp(m->cfg.model_type, "mixtral") == 0 && llm_ai_mlx_opt_env("LLMENGINE_MOE_SORT") == NULL) do_sort = false;
     if (llm_ai_mlx_opt_env("LLMENGINE_MOE_NOSORT") != NULL) do_sort = false;
     if (llm_moe_swap_ingest() != NULL) do_sort = false; /* streaming esperti: gather locale (unsorted) */
+    /* Esperti NON quantizzati (GGUF generici F16: quant_bits==0 -> quant_mode ""): il path SORTED
+     * usa mlx_gather_mm(sorted_indices=true), risultato ROTTO in prefill batch (evidenza 2026-10-05:
+     * OLMoE F16, append batch 580 token -> output spazzatura "::::"; stesso modello/seq con append
+     * 1-token -> corretto "Rome"; forcing NOSORT sul batch -> corretto). Il path sorted e' nato per
+     * il gather_qmm QUANTIZZATO (affine), che resta invariato. Sui pesi F16/plain si resta sul path
+     * unsorted, gia' quello usato dal decode e verificato corretto. */
+    if (m->cfg.quant_bits <= 0) do_sort = false;
     mlx_array gate_out = mlx_array_new(), up_out = mlx_array_new();
     mlx_array sig = mlx_array_new(), silu = mlx_array_new(), act = mlx_array_new();
     mlx_array down_out = mlx_array_new();
