@@ -6,6 +6,22 @@
 #include <string.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/task_info.h>
+#endif
+
+/* Footprint RESIDENTE del processo (phys_footprint: pagine realmente residenti + compresse).
+ * Diverso da `mlx_get_active_memory` che conta le ALLOCAZIONI (anche lazy/mmap non toccate).
+ * Per i modelli out-of-core (swap/lazy) il residente e' il costo vero da sottrarre al budget KV. */
+static uint64_t llm_p4_phys_footprint(void) {
+#if defined(__APPLE__)
+    task_vm_info_data_t info; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &cnt) == KERN_SUCCESS)
+        return (uint64_t)info.phys_footprint;
+#endif
+    return 0;
+}
 
 uint64_t llm_p4_sysctl_u64(const char* name) {
     uint64_t v = 0; size_t n = sizeof(v);
@@ -68,6 +84,18 @@ void llm_p4_plan_init(LlmMlxModel* m) {
         m->p4_weights_bytes = m->gguf_mmap_bytes;
         uint64_t exb2 = llm_mlx_moe_swap_expert_bytes();
         if (exb2 > 0 && m->p4_weights_bytes > exb2) m->p4_weights_bytes -= exb2;
+    }
+    /* OUT-OF-CORE: se l'utente ha scelto lo swap/lazy (pretouch OFF) o lo streaming esperti e'
+     * attivo, i pesi NON sono tutti residenti ma `mlx_get_active_memory` conta l'allocazione
+     * INTERA (es. Qwen3.8-Flash-Next 124.6GB vs RSS 74.5GB) -> budget_kv = limit - 124.6 < 0 = 0
+     * -> admission RIFIUTA ogni sessione, bloccando i modelli piu' grandi del limite (nonostante
+     * lo streaming funzioni). In questo caso la stima corretta dei pesi e' il footprint RESIDENTE
+     * (phys_footprint), cosi' il budget KV resta positivo e il SO sfratta i pesi su richiesta.
+     * Il comportamento per i modelli con pretouch (default) resta INVARIATO. */
+    const bool p4_ooc = !llm_mlx_pretouch_weights_enabled() || llm_mlx_moe_swap_active();
+    if (p4_ooc) {
+        uint64_t fp = llm_p4_phys_footprint();
+        if (fp > 0) m->p4_weights_bytes = fp;
     }
     const uint64_t wired = llm_p4_sysctl_u64("iogpu.wired_limit_mb") * 1024ull * 1024ull;
     const uint64_t ram = llm_p4_sysctl_u64("hw.memsize");
