@@ -94,6 +94,9 @@ created: 2026-10-04
 - **`llm_autotune.sh`** — **autotuner (I5)**: decode su una **griglia** di configurazioni (registro).
 - **`llm_plan_gate.sh`** — **plan/quality gate (§4.5)**: decode **EAGER vs opzioni del registro**.
 - **`scale_sweep.sh`** — **scaling**: batch/ampiezza crescente → **cliff non monotoni**.
+- **`arch_lab.c`** / **`arch_lab.sh`** — **A3-lab (OpenArch)**: funzioni reali del motore (ds4-slow/dsv41, C)
+  vs **riferimento CPU double** — 9 moduli: `linear · rms_norm · qk-norm · rope · gqa · swiglu · router ·
+  swa · mla`. Model-free, deterministico.
 - **`oracoli/`** — sonde **model-free** dell'engine (non tracciate). *V. sotto.*
 
 ### `tools/fastllm/` — tool del **SERVER/CLI FastLLM**
@@ -219,6 +222,9 @@ created: 2026-10-04
 - **`dsv41_engine_test.sh`** / `dsv41_engine_mtp_test.sh` / `dsv41_engine_mtp_spec_test.sh` /
   `dsv41_mlx_*_test.sh` — DS4.1: integrazione engine + **MTP spec** + CSA.
 - **`engine_smoke_models.sh`**, **`mlx_domain_split.py`**, **`minitest_census.py`** — smoke / censimenti.
+- **`arch_registry.py`** — **OpenArch (A1–A3)**: `build` (spec+contratto da `config.json`), `validate`
+  (config vs registry), `selftest`, `checks <registry.json>` (A3↔A1: golden del lab per contratto),
+  `invariants`. Registry in `GMBasic/common/Registry/architectures/` (17).
 
 ### Progetti test (`test_*/`)
 - **`test_mlx_bench`** — **harness MLX principale**: `<modelDir> prefill|decode|ctxdecode|rprefill|rdecode|
