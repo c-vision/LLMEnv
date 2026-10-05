@@ -1,7 +1,8 @@
 # LLMEnv — Eval Harness (qualita'/fedelta')
 
-Tool **separato** (fuori dal CMake, nessun import del motore): valuta la **qualita'/**fedelta' di un
-modello/engine, asse **ortogonale** agli [[oracoli]] (che misurano le prestazioni).
+Tool **separato** in `LLMEnv/tools/eval/` (fuori dal CMake, nessun import del motore): valuta la
+**qualita'/fedelta'** di un modello/engine, asse **ortogonale** a `BenchChronos/` e agli [[oracoli]]
+(che misurano le prestazioni).
 
 - **Deterministico** dove possibile: i gate "locali" non usano giudici LLM.
 - **stdlib-only** (urllib/json/argparse): nessuna venv/pacchetto richiesto.
@@ -13,17 +14,21 @@ Doc/piano completo: `01-Projects/LLMEnv/Todo/(open) - LLM-Eval-Harness-Qualita-e
 
 ```bash
 # smoke / CI: nessun motore, backend mock, deterministico
-python3 eval/run_eval.py --suite local --backend mock
+python3 tools/eval/run_eval.py --suite local --backend mock
 
 # contro un server locale OpenAI-compatibile (FastLLM serve / mlx_lm.server)
-python3 eval/run_eval.py --suite local --backend http \
+python3 tools/eval/run_eval.py --suite local --backend http \
     --base-url http://127.0.0.1:8080 --model local --reps 3
 
 # test unitari del harness
-python3 eval/tests/test_smoke.py
+python3 tools/eval/tests/test_smoke.py
 ```
 
-Report JSON + Markdown in `eval/reports/` (gitignorati). Esito = PASS/FAIL complessivo.
+Report JSON + Markdown in `tools/eval/reports/` (gitignorati). Esito = PASS/FAIL complessivo.
+
+> **Relazione con `BenchChronos/`** (l'altro tool Python della repo): `BenchChronos` misura le
+> **prestazioni** (TTFT/throughput/decode/RAM, protocollo mlx-chronos); questo harness misura la
+> **qualita'/fedelta'** (gate deterministici +, in seguito, HALoGEN/lm-eval). Assi **ortogonali**.
 
 ## Suite `local` (gate deterministici)
 
@@ -42,7 +47,7 @@ Report JSON + Markdown in `eval/reports/` (gitignorati). Esito = PASS/FAIL compl
 
 ## Layout
 ```
-eval/
+tools/eval/
 ├── run_eval.py            # CLI
 ├── config/eval.json       # modelli/suite/soglie (NESSUNA chiave qui)
 ├── adapters/engine_server.py  # mock + OpenAI-compatibile (stdlib)
