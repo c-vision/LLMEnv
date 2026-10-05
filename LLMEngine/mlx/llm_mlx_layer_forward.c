@@ -12,6 +12,7 @@
 #include "llm_mlx_kvq_pool.h"     /* page pool int8 (storage primario cold) */
 #include "llm_mlx_flash_decode_kernel.h"
 #include "llm_mlx_fused_rope_append.h"
+#include "llm_mlx_execplan.h"   /* §9.A M10 EXECUTION PLANNER (runtime manager) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -524,6 +525,19 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
     static const char* def_layer_ops[] = { "attention", "ffn" };
     const char* const* LOP = g_mlx_layer_nops > 0 ? (const char* const*)g_mlx_layer_ops : def_layer_ops;
     int NLOP = g_mlx_layer_nops > 0 ? g_mlx_layer_nops : 2;
+    /* §9.A M10 EXECUTION PLANNER (runtime manager): se un piano e' attivo e copre questo layer,
+     * usa la sua pipeline per-layer; SKIP -> identita' (out = x). Piano ingerito da JSON
+     * (compile-time GMBasic/gmbllm EXECPLAN) via llm_mlx_execplan_load. */
+    if (llm_mlx_execplan_active()) {
+        char ep_buf[LLM_MLX_EXECPLAN_MAX_OPS][LLM_MLX_EXECPLAN_OP_LEN];
+        const char* ep_ptrs[LLM_MLX_EXECPLAN_MAX_OPS];
+        int ep_skip = 0;
+        int ep_n = llm_mlx_execplan_layer(layer_idx, ep_buf, LLM_MLX_EXECPLAN_MAX_OPS, &ep_skip);
+        if (ep_n >= 0) {
+            if (ep_skip) { ok = mlx_array_set(out, x) == 0; NLOP = 0; }
+            else if (ep_n > 0) { for (int ei = 0; ei < ep_n; ei++) ep_ptrs[ei] = ep_buf[ei]; LOP = ep_ptrs; NLOP = ep_n; }
+        }
+    }
     for (int lop = 0; lop < NLOP && ok; lop++) {
         const char* lopn = LOP[lop];
         if (strcmp(lopn, "attention") == 0) {

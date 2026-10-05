@@ -365,6 +365,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_gemma_mixtral.c
     llm_mlx_mla_glm4.c
     llm_mlx_layer_forward.c
+    llm_mlx_execplan.c
     llm_mlx_qwen3_attn.c
     llm_mlx_weights_io.c
     llm_mlx_session_append.c
@@ -516,4 +517,11 @@ if(LLM_BUILD_DSV4_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include)
         set_target_properties(${_t} PROPERTIES LINKER_LANGUAGE CXX)
     endforeach()
+
+    # §9.A M10 EXECUTION PLANNER: test model-free (parse + per-layer + skip + reset).
+    add_executable(llm_mlx_execplan_test tests/llm_mlx_execplan_test.c)
+    target_link_libraries(llm_mlx_execplan_test PRIVATE llm_ai_mlx cjson)
+    target_include_directories(llm_mlx_execplan_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} "${cjson_SOURCE_DIR}" ${CMAKE_CURRENT_SOURCE_DIR}/../Options)
+    set_target_properties(llm_mlx_execplan_test PROPERTIES LINKER_LANGUAGE CXX)
 endif()

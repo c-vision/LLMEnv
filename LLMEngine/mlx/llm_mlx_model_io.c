@@ -3,6 +3,7 @@
  * Estratto VERBATIM da llmengine_mlx.c (split).
  * ============================================================================ */
 #include "llm_mlx_memgov.h"      /* B9: budget memoria (reserve/grow_min) */
+#include "llm_mlx_execplan.h"    /* §9.A M10 EXECUTION PLANNER (runtime manager) */
 #include "llmengine_mlx.h"
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llmengine_plugin.h"
@@ -201,6 +202,10 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                   llm_gguf_close_file(&g, gmap, gmaplen);
               }
             }
+            /* §9.A M10 EXECUTION PLANNER: ingerisci il piano esecutivo per-layer se dichiarato
+             * (opzione `execplan` = path del JSON prodotto dal compile-time GMBasic/gmbllm);
+             * altrimenti azzera il piano (default per-layer). Dato PUL letto dall'engine Apache. */
+            { char ep[2048]; if (llm_ai_mlx_opt_get_str("execplan", ep, (int)sizeof ep) == 0 && ep[0]) llm_mlx_execplan_load(ep); else llm_mlx_execplan_reset(); }
             if (strcmp(ds4arch, "deepseek4") == 0) {
                 const LlmEngineLlmEngine* eng = llm_mlx_pick_ds4_engine();
                 if (eng != NULL && eng->load_model != NULL) {
