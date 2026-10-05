@@ -135,15 +135,15 @@ created: 2026-10-04
   `benchchronos/cli.py` + `serve.sh`. Vedi nota `BenchChronos-Benchmark-Coerente.md`.
   **Asse: prestazioni** (TTFT cold/warm, throughput, decode, RAM/swap).
 
-### `tools/fastllm/eval/` — qualità/fedeltà (NUOVO 2026-10-05; F1+F2-parz)
-- Harness Python **stdlib-only** (nessun import del motore; HTTP OpenAI-compatibile o backend `mock`):
-  `run_eval.py` (`--suite local --backend mock|http`), **4 gate deterministici** — `id_parity` (due run
-  greedy → testo identico), `needle` (retrieval), `ppl` (perplexità bits/token via `/v1/completions`
-  logprobs, con **banda pre-registrata**),   `parity` (greedy engine vs **reference**, `reference.base_url`) — report JSON+MD,
-  **golden/regressione** (`--save-golden`/`--golden`), e suite **`--suite lm-eval`** (lm-evaluation-harness
-  via subprocess, F4), `tests/test_smoke.py`.
-  **Asse ortogonale** a `tools/BenchChronos/`. Verifica: `python3 tools/fastllm/eval/run_eval.py --suite local --backend mock`.
-  Rif.: todo `(open) - LLM-Eval-Harness-Qualita-e-Allucinazioni.md`.
+### `tools/fastllm/eval/` — qualità/fedeltà (NUOVO 2026-10-05; F1–F5)
+- Harness Python **stdlib-only** (nessun import del motore; HTTP OpenAI-compatibile o backend `mock`).
+  `run_eval.py` — suite: **`local`** (4 gate **deterministici**: `id_parity` testo greedy identico,
+  `needle` retrieval, `ppl` perplexità bits/token con **banda**, `parity` greedy vs **reference**),
+  **`lm-eval`** (lm-evaluation-harness via subprocess, accuracy, F4), **`halogen`** (factualità:
+  recall atomic-unit con **verifier** locale a regole; `openai` opt-in + caching, F3/F5).
+  **Golden/regressione** (`--save-golden`/`--golden`). Report JSON+MD, `tests/test_smoke.py`.
+  Guida: `Guide/Eval-Harness-Guida.md`. **Asse ortogonale** a `tools/BenchChronos/`.
+  **Nessun impatto sulle prestazioni dell'engine.** Rif.: todo `(open) - LLM-Eval-Harness-...`.
 
 ### `tools/llmengine/oracoli/` — sonde model-free (era `LLMEnv/oracoli/`; NON tracciata)
 

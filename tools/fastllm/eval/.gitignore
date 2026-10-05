@@ -1,4 +1,5 @@
 reports/
 __pycache__/
 config/secrets.yaml
+config/verifier_cache.json
 *.pyc

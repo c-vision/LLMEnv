@@ -83,7 +83,8 @@ def run_gate(modname, client, cfg, reps, ref_client=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Eval harness (qualita'/fedelta').")
-    ap.add_argument("--suite", default="local", choices=["local", "lm-eval"])
+    ap.add_argument("--suite", default="local", choices=["local", "lm-eval", "halogen"])
+    ap.add_argument("--verifier-backend", default=None, help="local|openai (default: da config)")
     ap.add_argument("--config", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                      "config", "eval.json"))
     ap.add_argument("--report", default=None, help="cartella di output (default: <eval>/reports)")
@@ -139,6 +140,13 @@ def main(argv=None):
         from suites.lm_eval import lm_eval_suite
         rr = lm_eval_suite.run(client, cfg.get("lm_eval", {}))
         _emit({"gate": "lm_eval", "pass": rr["pass"], "value": rr["value"], "metric": rr["metric"],
+               "threshold": rr["threshold"], "reps": 1, "runs": [rr]})
+    elif args.suite == "halogen":
+        from suites.halogen import halogen_suite
+        if args.verifier_backend:
+            cfg.setdefault("halogen", {}).setdefault("verifier", {})["backend"] = args.verifier_backend
+        rr = halogen_suite.run(client, cfg.get("halogen", {}))
+        _emit({"gate": "halogen", "pass": rr["pass"], "value": rr["value"], "metric": rr["metric"],
                "threshold": rr["threshold"], "reps": 1, "runs": [rr]})
 
     if args.golden:

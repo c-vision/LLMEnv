@@ -38,5 +38,12 @@
     "tasks": ["gsm8k"],
     "limit": 10,
     "batch_size": 1
+  },
+  "halogen": {
+    "max_tokens": 40,
+    "min_recall": null,
+    "verifier": {
+      "backend": "local"
+    }
   }
 }

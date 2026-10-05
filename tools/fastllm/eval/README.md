@@ -50,8 +50,16 @@ Report JSON + Markdown in `tools/fastllm/eval/reports/` (gitignorati). Esito = P
 - [x] test con mock (id_parity NON-determinismo, needle, ppl banda, parity skip/match/fail, golden roundtrip).
 - [ ] (todo F2) parità **`GEN_IDS`** engine-interna (token-level) e **teacher-forcing** (il server NON
   supporta `echo`/logprobs del prompt → serve un canale engine-side dedicato).
-- [ ] (todo) HALoGEN (subset, verifier locali) (F3); lm-evaluation-harness (F4).
+- [x] **F3 HALoGEN-subset** (factualità, verifier locale) e **F5 verifier+caching** (local/openai).
+- [x] **F4 lm-evaluation-harness** (subprocess).
 - [ ] (todo) verifier esterni opt-in + caching (F5).
+
+## Suite `halogen` (F3) — factualità (verifier locale)
+`--suite halogen` misura la **factualità**: per ogni caso (`prompt` + `facts` = atomic-unit attese) chiede
+la risposta greedy e verifica con il **verifier** quante unità sono supportate → `recall`
+(= 1 − hallucination grezza), `response_ratio`. Gate = `min_recall` (assente = informativo). Verifier
+**default `local`** (regola deterministica, offline); `openai` = opt-in (F5) con caching dei verdetti.
+Config `halogen`: `cases`, `max_tokens`, `min_recall`, `verifier.backend`.
 
 ## Suite `lm-eval` (F4) — lm-evaluation-harness (accuracy)
 `--suite lm-eval` esegue il CLI **`lm_eval`** come **subprocess** contro l'endpoint OpenAI

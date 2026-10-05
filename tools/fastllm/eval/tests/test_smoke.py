@@ -53,6 +53,22 @@ class Smoke(unittest.TestCase):
         r2 = ppl.run(MockClient(), {"max_tokens": 8, "band": [0.29, 0.30]})
         self.assertTrue(r2["pass"] or r2["value"] > 0.28, f"ppl atteso ~0.288: {r2}")
 
+    def test_verifier_local(self):
+        from verifiers.verifier import LocalKeywordVerifier, Cache
+        v = LocalKeywordVerifier({}, Cache(None))
+        self.assertTrue(v.verify("Paris", "the capital of france is Paris"))
+        self.assertFalse(v.verify("London", "the capital of france is Paris"))
+
+    def test_halogen_suite(self):
+        from suites.halogen import halogen_suite
+        r = halogen_suite.run(MockClient(answer="Paris"), {"cases": [{"prompt": "x", "facts": ["Paris"]}],
+                                                           "min_recall": 1.0})
+        self.assertTrue(r["pass"], r)
+        self.assertEqual(r["value"], 1.0)
+        r2 = halogen_suite.run(MockClient(answer="Paris"), {"cases": [{"prompt": "x", "facts": ["Berlin"]}],
+                                                            "min_recall": 1.0})
+        self.assertFalse(r2["pass"], r2)
+
     def test_lm_eval_wrapper_with_fake(self):
         from suites.lm_eval import lm_eval_suite
         with tempfile.TemporaryDirectory() as td:
