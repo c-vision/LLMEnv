@@ -127,7 +127,14 @@ mlx_array llm_ai_mlx_diff_forward_logits(llm_ai_mlx_model_handle mh, const int32
  * ============================================================================ */
 int llm_ai_mlx_diff_num_params(llm_ai_mlx_model_handle mh) {
     LlmMlxModel* m = (LlmMlxModel*)mh;
-    return (m && m->weights.shards) ? m->weights.count : 0;
+    if (!m || !m->weights.shards) return 0;
+    /* NB: `weights.count` e' il numero di SHARD (file), NON di tensori: itera la mappa. */
+    mlx_map_string_to_array_iterator it = mlx_map_string_to_array_iterator_new(*m->weights.shards);
+    const char* key = NULL; mlx_array v = mlx_array_new(); int n = 0;
+    while (mlx_map_string_to_array_iterator_next(&key, &v, it) == 0) n++;
+    mlx_array_free(v);
+    mlx_map_string_to_array_iterator_free(it);
+    return n;
 }
 
 /* Riempie `names[i]` (64 byte) e appende l'array i-esimo (ordine = iterazione della mappa).
