@@ -9,6 +9,7 @@
 #include <string.h>
 #include <math.h>
 #include "llm_mlx_kvdisk_io.h"
+#include "llm_mlx_kvclasses.h"   /* §9.A M10d: classi KV RUNTIME/PERSISTENT */
 #include <sys/stat.h>   /* mkdir (D15: dir cache prefix) */
 #include "llm_pflash.h"
 
@@ -50,6 +51,9 @@ bool llm_kvdisk_enabled(LlmMlxModel* m) {
             m->kvdisk_state = (m->kvdisk.f != NULL && m->kvdisk.e != NULL) ? 1 : 0;
             if (m->kvdisk_state == 1)
                 fprintf(stderr, "[kvdisk] prefix-cache PERSISTENTE: %s\n", kpath);
+            /* §9.A M10d: registra il tier KV PERSISTENTE (disco) nel manager delle classi KV. */
+            { char tkv[96]; snprintf(tkv, sizeof tkv, "kvdisk.%p", (void*)m);
+              (void)llm_mlx_kvclasses_register(tkv, LLM_KVCLASS_PERSISTENT, cap); }
         } else {
         /* Registro opzioni (niente env): `kvdisk` = off|on|<path>, `kvdisk_cap_mb` = budget. */
         char kv[2048];

@@ -367,6 +367,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_layer_forward.c
     llm_mlx_execplan.c
     llm_mlx_expolicy.c
+    llm_mlx_kvclasses.c
     llm_mlx_qwen3_attn.c
     llm_mlx_weights_io.c
     llm_mlx_session_append.c
@@ -532,4 +533,10 @@ if(LLM_BUILD_DSV4_TESTS)
     target_include_directories(llm_mlx_expolicy_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} "${cjson_SOURCE_DIR}" ${CMAKE_CURRENT_SOURCE_DIR}/../Options)
     set_target_properties(llm_mlx_expolicy_test PROPERTIES LINKER_LANGUAGE CXX)
+
+    # §9.A M10d: test model-free delle classi KV (RUNTIME/PERSISTENT).
+    add_executable(llm_mlx_kvclasses_test tests/llm_mlx_kvclasses_test.c)
+    target_link_libraries(llm_mlx_kvclasses_test PRIVATE llm_ai_mlx)
+    target_include_directories(llm_mlx_kvclasses_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    set_target_properties(llm_mlx_kvclasses_test PROPERTIES LINKER_LANGUAGE CXX)
 endif()
