@@ -19,20 +19,30 @@
  *          fino al reset, quindi si usano SOLO dentro il layer.
  * `slot`:  buffer persistenti per-TU (grow-only, indice fisso) per stato che SOPRAVVIVE ai
  *          layer (cur/nxt del driver, hc/logits): NON toccati dal reset. */
-typedef struct { char* base; size_t cap, off; } LlmDsv4Arena;
-static inline LlmDsv4Arena* llm_dsv4_arena(void) { static LlmDsv4Arena a = {0, 0, 0}; return &a; }
-static inline void llm_dsv4_arena_reset(void) { llm_dsv4_arena()->off = 0; }
+/* Arena a BLOCCHI (non un singolo buffer con realloc): la crescita aggiunge un blocco NUOVO e
+ * NON sposta i precedenti, cosi' i puntatori distribuiti restano VALIDI fino al reset (contratto
+ * documentato). Il vecchio bump-realloc spostava la base a meta' layer (quando il mid allocava
+ * oltre la cap) invalidando i puntatori gia' consegnati (normed_all/attn_all/after...) -> SEGFAULT
+ * su prompt >=16 token. Vedi Bugs/(open) - DS4-Decode... §1-sexies. */
+typedef struct LlmDsv4ArenaBlk { char* base; size_t cap, off; struct LlmDsv4ArenaBlk* next; } LlmDsv4ArenaBlk;
+typedef struct { LlmDsv4ArenaBlk* head; } LlmDsv4Arena;
+static inline LlmDsv4Arena* llm_dsv4_arena(void) { static LlmDsv4Arena a = {0}; return &a; }
+static inline void llm_dsv4_arena_reset(void) {
+    for (LlmDsv4ArenaBlk* l = llm_dsv4_arena()->head; l; l = l->next) l->off = 0;
+}
 static inline void* llm_dsv4_arena_alloc(size_t bytes) {
     LlmDsv4Arena* a = llm_dsv4_arena();
     size_t n = (bytes + 63u) & ~(size_t)63u;
-    if (a->off + n > a->cap) {
-        size_t nc = a->cap ? a->cap : (size_t)(1u << 20);
-        while (nc < a->off + n) nc *= 2;
-        char* nb = (char*)realloc(a->base, nc);
-        if (!nb) return NULL;
-        a->base = nb; a->cap = nc;
-    }
-    void* p = a->base + a->off; a->off += n; return p;
+    for (LlmDsv4ArenaBlk* l = a->head; l; l = l->next)
+        if (l->off + n <= l->cap) { void* p = l->base + l->off; l->off += n; return p; }
+    size_t nc = (size_t)(1u << 20);
+    while (nc < n) nc *= 2;
+    LlmDsv4ArenaBlk* nl = (LlmDsv4ArenaBlk*)malloc(sizeof *nl);
+    if (!nl) return NULL;
+    nl->base = (char*)malloc(nc);
+    if (!nl->base) { free(nl); return NULL; }
+    nl->cap = nc; nl->off = 0; nl->next = a->head; a->head = nl;
+    void* p = nl->base; nl->off = n; return p;
 }
 static inline void* llm_dsv4_arena_alloc0(size_t bytes) {   /* zero-inizializzato (calloc-like) */
     size_t n = (bytes + 63u) & ~(size_t)63u;
