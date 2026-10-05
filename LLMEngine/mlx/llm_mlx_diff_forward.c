@@ -116,3 +116,52 @@ mlx_array llm_ai_mlx_diff_forward_logits(llm_ai_mlx_model_handle mh, const int32
     else llm_ai_mlx_destroy_session(sh);
     return logits;
 }
+
+/* ============================================================================
+ * G6 — FULL-PARAMETER training: espone i pesi del modello come VETTORE di array MLX
+ * DIFFERENZIABILI. Valido per modelli FP16/BF16 (pesi PLAIN → matmul con VJP); i modelli
+ * quantizzati (w+scales+biases) NON hanno VJP sul matmul → non allenabili full-param.
+ * Il PUL (gmbllm) costruisce value_and_grad su questi input e l'optimizer li aggiorna;
+ * il setter rimette i nuovi pesi nella mappa + invalida la wcache (il forward li rilegge).
+ * NIENTE produzione/alterazione di pesi in questa ABI (Apache remain inference+forward).
+ * ============================================================================ */
+int llm_ai_mlx_diff_num_params(llm_ai_mlx_model_handle mh) {
+    LlmMlxModel* m = (LlmMlxModel*)mh;
+    return (m && m->weights.shards) ? m->weights.count : 0;
+}
+
+/* Riempie `names[i]` (64 byte) e appende l'array i-esimo (ordine = iterazione della mappa).
+ * Ritorna il numero di parametri esposti, o -1. */
+int llm_ai_mlx_diff_get_params(llm_ai_mlx_model_handle mh, mlx_vector_array* out,
+                               char names[][64], int cap) {
+    LlmMlxModel* m = (LlmMlxModel*)mh;
+    if (!m || !m->weights.shards || !out || !names || cap <= 0) return -1;
+    *out = mlx_vector_array_new();
+    mlx_map_string_to_array_iterator it = mlx_map_string_to_array_iterator_new(*m->weights.shards);
+    const char* key = NULL;
+    mlx_array val = mlx_array_new();
+    int n = 0;
+    while (n < cap && mlx_map_string_to_array_iterator_next(&key, &val, it) == 0) {
+        llm_mlx_mode_set(names[n], 64, key ? key : "");
+        mlx_vector_array_append_value(*out, val);
+        n++;
+    }
+    mlx_array_free(val);
+    mlx_map_string_to_array_iterator_free(it);
+    return n;
+}
+
+/* Rimette i pesi (input) nella mappa per NOME + invalida la wcache. 0 ok / -1. */
+int llm_ai_mlx_diff_set_params(llm_ai_mlx_model_handle mh, mlx_vector_array in,
+                               const char names[][64], int n) {
+    LlmMlxModel* m = (LlmMlxModel*)mh;
+    if (!m || !m->weights.shards || !names || n <= 0) return -1;
+    for (int i = 0; i < n; i++) {
+        mlx_array v = mlx_array_new();
+        if (mlx_vector_array_get(&v, in, i) != 0) { mlx_array_free(v); return -1; }
+        if (mlx_map_string_to_array_insert(*m->weights.shards, names[i], v) != 0) { mlx_array_free(v); return -1; }
+        mlx_array_free(v);
+    }
+    llm_mlx_wcache_clear();
+    return 0;
+}

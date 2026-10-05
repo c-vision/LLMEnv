@@ -45,6 +45,13 @@ void llm_ai_mlx_diff_set_eager_sdpa(int on);
 /* Stream MLX del modello (per le closure/value_and_grad lato PUL). */
 mlx_stream llm_ai_mlx_diff_stream(llm_ai_mlx_model_handle mh);
 
+/* G6 — FULL-PARAMETER training: espone i pesi del modello come VETTORE di array MLX differenziabili
+ * (modelli FP16/BF16, pesi PLAIN). `get` riempie `names[i]` (64 byte) + appende l'array i-esimo;
+ * `set` rimette i pesi per NOME + invalida la wcache. Il PUL costruisce value_and_grad/optimizer. */
+int llm_ai_mlx_diff_num_params(llm_ai_mlx_model_handle mh);
+int llm_ai_mlx_diff_get_params(llm_ai_mlx_model_handle mh, mlx_vector_array* out, char names[][64], int cap);
+int llm_ai_mlx_diff_set_params(llm_ai_mlx_model_handle mh, mlx_vector_array in, const char names[][64], int n);
+
 #ifdef __cplusplus
 }
 #endif
