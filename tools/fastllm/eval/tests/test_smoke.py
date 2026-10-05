@@ -19,7 +19,7 @@ sys.path.insert(0, EVAL)
 
 import run_eval  # noqa: E402
 from adapters.engine_server import MockClient  # noqa: E402
-from suites.local import id_parity, needle, ppl, parity  # noqa: E402
+from suites.local import id_parity, needle, ppl, parity, token_parity  # noqa: E402
 
 
 class Smoke(unittest.TestCase):
@@ -102,6 +102,13 @@ class Smoke(unittest.TestCase):
             # la stessa run confrontata col golden -> PASS
             rc2 = run_eval.main(["--suite", "local", "--backend", "mock", "--report", td, "--golden", g])
             self.assertEqual(rc2, 0, "la run identica al golden deve passare")
+
+    def test_token_parity(self):
+        r = token_parity.run(MockClient(), {"max_tokens": 8, "prompts": ["x"]})
+        self.assertTrue(r["pass"], r)
+        self.assertTrue(r["value"])
+        r2 = token_parity.run(MockClient(vary=True), {"max_tokens": 8, "prompts": ["x"]})
+        self.assertFalse(r2["pass"], r2)
 
     def test_parity_skip_and_match(self):
         # senza reference -> saltato (pass)

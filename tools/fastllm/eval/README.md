@@ -42,6 +42,7 @@ Report JSON + Markdown in `tools/fastllm/eval/reports/` (gitignorati). Esito = P
 | `needle` | un fatto sepolto in contesto di rumore deve essere **recuperato** (greedy). |
 | `ppl` | **perplexità (bits/token)** dei token greedy via `/v1/completions`+logprobs; gate = dentro la **banda pre-registrata** (`band`, F2bis). |
 | `parity` | **parità greedy engine vs reference** (`reference.base_url`, es. `mlx_lm.server`): testo identico o `prefix_ratio >= tolerance`. Saltato se la reference non è configurata. |
+| `token_parity` | **parità TOKEN-level (GEN_IDS)**: due run greedy → lista **token identica** (`logprobs.tokens` della risposta). Più stretta del testo; skipped se il server non espone i token. |
 
 ## Stato (slice 1 F1 + slice 2 F2-parziale)
 - [x] runner CLI + adapter engine (mock + HTTP OpenAI-compatibile: chat + completions/logprobs).

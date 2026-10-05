@@ -80,7 +80,8 @@ class OpenAIClient(Client):
         except (KeyError, IndexError) as e:
             raise EngineError(f"risposta inattesa: {raw!r}") from e
         lp = ch.get("logprobs") or {}
-        return {"text": ch.get("text", ""), "logprobs": lp.get("token_logprobs")}
+        return {"text": ch.get("text", ""), "logprobs": lp.get("token_logprobs"),
+                "tokens": lp.get("tokens")}
 
     def models(self):
         try:
@@ -115,10 +116,11 @@ class MockClient(Client):
     def complete(self, prompt, *, max_tokens=64, logprobs=False):
         text = self.chat(prompt, max_tokens=max_tokens)["text"]
         lps = None
+        toks = text.split() or [""]
+        lps = None
         if logprobs:
-            n = max(1, len(text.split()))
-            lps = [-0.2] * n
-        return {"text": text, "logprobs": lps}
+            lps = [-0.2] * len(toks)
+        return {"text": text, "logprobs": lps, "tokens": toks}
 
 
 def make_client(cfg):

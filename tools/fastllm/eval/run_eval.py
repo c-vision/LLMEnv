@@ -21,7 +21,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from adapters.engine_server import make_client, EngineError, OpenAIClient  # noqa: E402
 
-LOCAL_GATES = ["id_parity", "needle", "ppl", "parity"]
+LOCAL_GATES = ["id_parity", "needle", "ppl", "parity", "token_parity"]
 
 
 def load_config(path):
