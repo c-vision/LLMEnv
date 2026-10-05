@@ -184,6 +184,12 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
         }
     }
 
+    /* §9.A: leggi SEMPRE (GGUF **o** dir MLX) il PIANO ESECUTIVO per-layer (`execplan`) e la
+     * POLITICA di residenza esperti (`expolicy`). Prima era dentro il ramo `.gguf` -> non lette
+     * per i modelli a directory (MLX). */
+    { char ep[2048]; if (llm_ai_mlx_opt_get_str("execplan", ep, (int)sizeof ep) == 0 && ep[0]) llm_mlx_execplan_load(ep); else llm_mlx_execplan_reset(); }
+    { char xp[2048]; if (llm_ai_mlx_opt_get_str("expolicy", xp, (int)sizeof xp) == 0 && xp[0]) { if (llm_mlx_expolicy_load(xp) == 0) llm_mlx_expolicy_apply(); } else llm_mlx_expolicy_reset(); }
+
     /* DS4 (DeepSeek V4 Flash): gestito da un engine AUTONOMO (ABI a 9 metodi), non dal forward
      * MLX generico. Vendored (`ds4`) o nativo (`ds4slow`) scelti con `ds4_backend`. Se il GGUF
      * non e' un DS4 il load dell'engine fallisce e si prosegue col GGUF generico. */
@@ -203,13 +209,6 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                   llm_gguf_close_file(&g, gmap, gmaplen);
               }
             }
-            /* §9.A M10 EXECUTION PLANNER: ingerisci il piano esecutivo per-layer se dichiarato
-             * (opzione `execplan` = path del JSON prodotto dal compile-time GMBasic/gmbllm);
-             * altrimenti azzera il piano (default per-layer). Dato PUL letto dall'engine Apache. */
-            { char ep[2048]; if (llm_ai_mlx_opt_get_str("execplan", ep, (int)sizeof ep) == 0 && ep[0]) llm_mlx_execplan_load(ep); else llm_mlx_execplan_reset(); }
-            /* §9.A EXPERT_RESIDENCY_POLICY: se dichiarata (opzione `expolicy` = path JSON),
-             * caricala e APPLICALA alle opzioni MoE PRIMA della creazione dei componenti. */
-            { char xp[2048]; if (llm_ai_mlx_opt_get_str("expolicy", xp, (int)sizeof xp) == 0 && xp[0]) { if (llm_mlx_expolicy_load(xp) == 0) llm_mlx_expolicy_apply(); } else llm_mlx_expolicy_reset(); }
             if (strcmp(ds4arch, "deepseek4") == 0) {
                 const LlmEngineLlmEngine* eng = llm_mlx_pick_ds4_engine();
                 if (eng != NULL && eng->load_model != NULL) {
