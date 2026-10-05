@@ -119,6 +119,13 @@ char* llm_ai_mlx_gguf_tokenizer_json(const char* path, size_t* out_len) {
     LlmEngineMoeGguf g; void* map = NULL; size_t maplen = 0;
     if (!llm_gguf_open_file(path, &g, &map, &maplen)) return NULL;
     char* json = NULL;
+    /* Preferisci il `tokenizer.gmb.json` VERBATIM scritto dal converter: round-trip esatto,
+     * nessun rebuild BPE (che puo' fallire su BPE non-llama / campi mancanti). */
+    { const LlmGgufVal* vs = llm_gguf_find_val(&g, "tokenizer.gmb.json");
+      if (vs != NULL && vs->type == GGSTR && vs->s != NULL && vs->slen > 0) {
+          char* cp = (char*)malloc((size_t)vs->slen);
+          if (cp) { memcpy(cp, vs->s, (size_t)vs->slen); if (out_len) *out_len = (size_t)vs->slen; llm_gguf_close_file(&g, map, maplen); return cp; }
+      } }
     const LlmGgufVal* v = llm_gguf_find_val(&g, "general.architecture");
     if (v != NULL && v->type == GGSTR && v->s != NULL && v->slen > 0) {
         char at[64]; int n = (int)v->slen; if (n > 63) n = 63;
