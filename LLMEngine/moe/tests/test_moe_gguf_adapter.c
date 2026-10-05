@@ -31,8 +31,8 @@ typedef struct { const char* name; uint32_t nd; uint64_t dims[4]; uint32_t type;
 
 /* K5: variante con metadata/tensor volutamente INCOERENTI (`meta_experts` > esperti stacked) e
  * router forzato su `high_expert` (>=0): serve al test negativo "esperto non risolvibile". */
-static void write_tiny_moe_gguf_ex(const char* path, int with_shared, uint32_t meta_experts, int high_expert) {
-    TDef T[18];
+static void write_tiny_moe_gguf_nlayers(const char* path, int with_shared, uint32_t meta_experts, int high_expert, uint32_t layers) {
+    TDef T[64];
     const TDef base[] = {
         { "token_embd.weight",            2, {4,4,0,0}, LLMENGINE_MOE_GGML_F16 },
         { "output.weight",                2, {4,4,0,0}, LLMENGINE_MOE_GGML_F16 },
@@ -60,13 +60,27 @@ static void write_tiny_moe_gguf_ex(const char* path, int with_shared, uint32_t m
         T[NT++] = (TDef){ "blk.0.ffn_up_shexp.weight",   2, {4,3,0,0}, LLMENGINE_MOE_GGML_F16 };
         T[NT++] = (TDef){ "blk.0.ffn_down_shexp.weight", 2, {3,4,0,0}, LLMENGINE_MOE_GGML_F16 };
     }
+    /* §9.A: replica i tensor `blk.0.*` per i layer 1..layers-1 (serve al prefetch cross-layer). */
+    {
+        static char nbuf[64][64];
+        uint32_t baseNT = NT;
+        for (uint32_t L = 1; L < layers; ++L) {
+            for (uint32_t i = 0; i < baseNT; ++i) {
+                if (strncmp(T[i].name, "blk.0.", 6) != 0) continue;
+                TDef d = T[i];
+                snprintf(nbuf[NT], sizeof(nbuf[NT]), "blk.%u.%s", L, T[i].name + 6);
+                d.name = nbuf[NT];
+                T[NT++] = d;
+            }
+        }
+    }
     FILE* f = fopen(path, "wb");
     CHECK(f != NULL);
     if (!f) return;
     w_u32(f, 0x46554747u); w_u32(f, 3);
     w_u64(f, NT); w_u64(f, 10);
     w_kv_str(f, "general.architecture", "qwen3moe");
-    w_kv_u32(f, "qwen3moe.block_count", 1);
+    w_kv_u32(f, "qwen3moe.block_count", layers);
     w_kv_u32(f, "qwen3moe.embedding_length", 4);
     w_kv_u32(f, "qwen3moe.attention.head_count", 1);
     w_kv_u32(f, "qwen3moe.attention.head_count_kv", 1);
@@ -104,6 +118,10 @@ static void write_tiny_moe_gguf_ex(const char* path, int with_shared, uint32_t m
         }
     }
     fclose(f);
+}
+
+static void write_tiny_moe_gguf_ex(const char* path, int with_shared, uint32_t meta_experts, int high_expert) {
+    write_tiny_moe_gguf_nlayers(path, with_shared, meta_experts, high_expert, 1);
 }
 
 static void write_tiny_moe_gguf(const char* path, int with_shared) {
@@ -283,6 +301,45 @@ int main(void) {
         CHECK(stb.unresolvable_experts >= 1);
         llmengine_moe_provider_destroy(p);
         remove(gb);
+    }
+
+    /* ── §9.A: A/B del PREFETCH cross-layer REALE (predittore → async → store) ──
+     * Modello a 2 layer (block_count=2): con prefetch ON il predittore predice gli esperti di
+     * layer+1 e li fa caricare in anticipo. Con OFF nessun predittore (predictions=0). */
+    {
+        char g2[1200]; snprintf(g2, sizeof(g2), "%s/two.gguf", dir);
+        write_tiny_moe_gguf_nlayers(g2, 0, 4, 0, 2);
+        LlmEngineMoeProvider* p = llmengine_moe_provider_create();
+        CHECK(p != NULL);
+        float in1[1] = { 0.0f }, o[4];
+
+        LlmEngineMoeRuntimeConfig ro;
+        llmengine_moe_config_defaults(&ro);
+        ro.mode = LLMENGINE_MOE_MODE_SWAP; ro.cache_mb = 1; ro.prefetch_topn = 0;
+        CHECK(llmengine_moe_provider_load(p, "off", g2, &ro) == LLMENGINE_MOE_OK);
+        LlmEngineMoeRuntime* rto = llmengine_moe_provider_get(p, "off");
+        for (int i = 0; i < 8; ++i) CHECK(llmengine_moe_forward(rto, in1, 1, o) == LLMENGINE_MOE_OK);
+        LlmEngineMoePrefetchMetrics pmo;
+        CHECK(llmengine_moe_prefetch_metrics(rto, &pmo) == LLMENGINE_MOE_OK);
+
+        LlmEngineMoeRuntimeConfig rn;
+        llmengine_moe_config_defaults(&rn);
+        rn.mode = LLMENGINE_MOE_MODE_SWAP; rn.cache_mb = 1;
+        rn.async_workers = 1; rn.prefetch_topn = 2; rn.hotness = 1;
+        CHECK(llmengine_moe_provider_load(p, "on", g2, &rn) == LLMENGINE_MOE_OK);
+        LlmEngineMoeRuntime* rtn = llmengine_moe_provider_get(p, "on");
+        for (int i = 0; i < 8; ++i) CHECK(llmengine_moe_forward(rtn, in1, 1, o) == LLMENGINE_MOE_OK);
+        LlmEngineMoePrefetchMetrics pmn;
+        CHECK(llmengine_moe_prefetch_metrics(rtn, &pmn) == LLMENGINE_MOE_OK);
+        LlmEngineMoeStreamStats spn;
+        CHECK(llmengine_moe_stream_stats(rtn, &spn) == LLMENGINE_MOE_OK);
+        printf("[prefetch-AB] OFF predictions=%llu | ON predictions=%llu hits=%llu actual=%llu bytes_read=%llu\n",
+               (unsigned long long)pmo.predictions, (unsigned long long)pmn.predictions,
+               (unsigned long long)pmn.hits, (unsigned long long)pmn.actual_total,
+               (unsigned long long)spn.bytes_read);
+        CHECK(pmn.predictions > 0);          /* layer+1 predetto e poi osservato */
+        llmengine_moe_provider_destroy(p);
+        remove(g2);
     }
 
     remove(gp);

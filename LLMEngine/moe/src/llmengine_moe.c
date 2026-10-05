@@ -166,60 +166,9 @@ LlmEngineMoeStatus llmengine_moe_load_model_ex(LlmEngineMoeRuntime* rt, const ch
     rt->cfg_cache_mb = c.cache_mb;
     rt->hotness = c.hotness;
 
-    if (rt->meta.layer_count > 0 && rt->meta.expert_count > 0) {
-        if (c.mode == LLMENGINE_MOE_MODE_RESIDENT) {
-            /* Nessuno swap: cache >= expert_bytes (nessun async/prefetch). Preload dopo l'adapter. */
-            uint64_t bytes = rt->meta.routed_bytes;
-            uint64_t want_mb = (bytes + (1u << 20) - 1) >> 20;
-            if (c.cache_mb > want_mb) want_mb = c.cache_mb;
-            if (want_mb == 0) want_mb = 1;
-            LlmEngineMoeExpertCache* cache = NULL;
-            if (llmengine_moe_cache_create(&cache, want_mb * 1024ull * 1024ull) == LLMENGINE_MOE_OK) {
-                llmengine_moe_cache_set_evict_hook(cache, llmengine_moe_rt_evict_hook, rt);   /* K1 */
-                rt->cache = cache;
-            }
-        } else {
-            if (c.cache_mb > 0) {
-                LlmEngineMoeExpertCache* cache = NULL;
-                if (llmengine_moe_cache_create(&cache, c.cache_mb * 1024ull * 1024ull) == LLMENGINE_MOE_OK) {
-                    llmengine_moe_cache_set_evict_hook(cache, llmengine_moe_rt_evict_hook, rt);   /* K1 */
-                    rt->cache = cache;
-                }
-            }
-            if (c.async_workers > 0 && rt->cache != NULL) {
-                LlmEngineMoeAsync* async = NULL;
-                if (llmengine_moe_async_create(&async, c.async_workers, llmengine_moe_rt_load_expert, rt,
-                                         rt->cache, c.prefetch_cap) == LLMENGINE_MOE_OK) {
-                    llmengine_moe_async_set_profiler(async, rt->prof);   /* K1: trace richieste */
-                    rt->async = async;
-                }
-            }
-            if (c.prefetch_topn > 0 && rt->meta.layer_count > 0 && rt->meta.expert_count > 0) {
-                LlmEngineMoePredictor* pred = NULL;
-                if (llmengine_moe_predictor_create(&pred, rt->meta.layer_count, rt->meta.expert_count,
-                                             c.prefetch_topn, 4) == LLMENGINE_MOE_OK)
-                    rt->predictor = pred;
-            }
-        }
-    }
-
-    /* M17: controller adattivo (opt-in) — richiede prefetch attivo. */
-    if (rt->predictor != NULL) {
-        const char* ad = llm_ai_mlx_opt_env("LLMENGINE_MOE_ADAPTIVE");
-        if (ad != NULL && *ad && strcmp(ad, "0") != 0) {
-            rt->adaptive = 1;
-            rt->adapt_topn = c.prefetch_topn;
-            rt->adapt_pf_min = 1;
-            uint32_t pfmax = c.prefetch_topn * 2;
-            if (pfmax > rt->meta.expert_count) pfmax = rt->meta.expert_count;
-            if (pfmax <= rt->adapt_topn) pfmax = rt->adapt_topn + 1;
-            rt->adapt_pf_max = pfmax;
-            rt->adapt_cache_mb = c.cache_mb;
-            rt->adapt_cache_min = c.cache_mb / 4;
-            rt->adapt_interval = 16;
-            rt->adapt_last_press = LLMENGINE_MOE_PRESS_NORMAL;
-        }
-    }
+    /* NOTA: i componenti runtime (cache/async/predittore/adaptive) dipendono da
+     * rt->meta, che viene riempito dall'adapter solo in a->load() (piu' sotto).
+     * Per questo vengono creati DOPO a->load, non qui. */
 
     /* Primo adapter registrato che sa caricarlo. */
     for (uint32_t i = 0; i < rt->adapter_count; ++i) {
@@ -229,11 +178,55 @@ LlmEngineMoeStatus llmengine_moe_load_model_ex(LlmEngineMoeRuntime* rt, const ch
             rt->active = i;
             rt->loaded = 1;
             if (rt->meta.total_bytes == 0) rt->meta.total_bytes = size;
-            /* D19: hotness opt-in — la cache va creata ORA (meta noto: l'adapter lo riempie qui). */
-            if (rt->hotness && rt->cache == NULL && c.cache_mb > 0) {
-                LlmEngineMoeExpertCache* hc = NULL;
-                if (llmengine_moe_cache_create(&hc, c.cache_mb * 1024ull * 1024ull) == LLMENGINE_MOE_OK) {
-                    rt->cache = hc; moe_cache_configure(rt, hc, 1);
+            /* D19/§9.A: la cache va creata ORA (meta noto: l'adapter lo riempie qui).
+             * RESIDENT: cache >= routed_bytes; SWAP: cache_mb. */
+            if (rt->cache == NULL) {
+                uint64_t want_mb = c.cache_mb;
+                if (c.mode == LLMENGINE_MOE_MODE_RESIDENT) {
+                    uint64_t bytes = rt->meta.routed_bytes;
+                    uint64_t w = (bytes + (1u << 20) - 1) >> 20;
+                    if (want_mb < w) want_mb = w;
+                }
+                if (want_mb > 0) {
+                    LlmEngineMoeExpertCache* hc = NULL;
+                    if (llmengine_moe_cache_create(&hc, want_mb * 1024ull * 1024ull) == LLMENGINE_MOE_OK) {
+                        llmengine_moe_cache_set_evict_hook(hc, llmengine_moe_rt_evict_hook, rt);   /* K1 */
+                        rt->cache = hc; moe_cache_configure(rt, hc, c.hotness);
+                    }
+                }
+            }
+            /* §9.A: async + predittore prefetch (dipendono da meta, noto solo qui). */
+            if (c.mode != LLMENGINE_MOE_MODE_RESIDENT) {
+                if (c.async_workers > 0 && rt->async == NULL) {
+                    LlmEngineMoeAsync* async = NULL;
+                    if (llmengine_moe_async_create(&async, c.async_workers, llmengine_moe_rt_load_expert, rt,
+                                             rt->cache, c.prefetch_cap) == LLMENGINE_MOE_OK) {
+                        llmengine_moe_async_set_profiler(async, rt->prof);   /* K1: trace richieste */
+                        rt->async = async;
+                    }
+                }
+                if (c.prefetch_topn > 0 && rt->meta.layer_count > 0 && rt->meta.expert_count > 0 && rt->predictor == NULL) {
+                    LlmEngineMoePredictor* pred = NULL;
+                    if (llmengine_moe_predictor_create(&pred, rt->meta.layer_count, rt->meta.expert_count,
+                                                 c.prefetch_topn, 4) == LLMENGINE_MOE_OK)
+                        rt->predictor = pred;
+                }
+                /* M17: controller adattivo (opt-in) — richiede prefetch attivo. */
+                if (rt->predictor != NULL) {
+                    const char* ad = llm_ai_mlx_opt_env("LLMENGINE_MOE_ADAPTIVE");
+                    if (ad != NULL && *ad && strcmp(ad, "0") != 0) {
+                        rt->adaptive = 1;
+                        rt->adapt_topn = c.prefetch_topn;
+                        rt->adapt_pf_min = 1;
+                        uint32_t pfmax = c.prefetch_topn * 2;
+                        if (pfmax > rt->meta.expert_count) pfmax = rt->meta.expert_count;
+                        if (pfmax <= rt->adapt_topn) pfmax = rt->adapt_topn + 1;
+                        rt->adapt_pf_max = pfmax;
+                        rt->adapt_cache_mb = c.cache_mb;
+                        rt->adapt_cache_min = c.cache_mb / 4;
+                        rt->adapt_interval = 16;
+                        rt->adapt_last_press = LLMENGINE_MOE_PRESS_NORMAL;
+                    }
                 }
             }
             if (c.mode == LLMENGINE_MOE_MODE_RESIDENT) llmengine_moe_preload_resident(rt);
