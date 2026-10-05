@@ -37,12 +37,14 @@ Report JSON + Markdown in `tools/fastllm/eval/reports/` (gitignorati). Esito = P
 | `id_parity` | due run greedy (temp 0) dello stesso prompt → **testo identico** (non-determinismo/atomic-float/ordine riduzione). |
 | `needle` | un fatto sepolto in contesto di rumore deve essere **recuperato** (greedy). |
 | `ppl` | **perplexità (bits/token)** dei token greedy via `/v1/completions`+logprobs; gate = dentro la **banda pre-registrata** (`band`, F2bis). |
+| `parity` | **parità greedy engine vs reference** (`reference.base_url`, es. `mlx_lm.server`): testo identico o `prefix_ratio >= tolerance`. Saltato se la reference non è configurata. |
 
 ## Stato (slice 1 F1 + slice 2 F2-parziale)
 - [x] runner CLI + adapter engine (mock + HTTP OpenAI-compatibile: chat + completions/logprobs).
-- [x] 3 gate locali deterministici + report JSON/MD: `id_parity`, `needle`, `ppl` (banda).
-- [x] test con mock (id_parity NON-determinismo, needle, ppl banda).
-- [ ] (todo F2) parità **ID** engine-interna (`GEN_IDS`) e **teacher-forcing** gate; KL engine-vs-reference.
+- [x] 4 gate locali deterministici + report JSON/MD: `id_parity`, `needle`, `ppl` (banda), `parity` (vs reference).
+- [x] test con mock (id_parity NON-determinismo, needle, ppl banda, parity skip/match/fail).
+- [ ] (todo F2) parità **`GEN_IDS`** engine-interna (token-level) e **teacher-forcing** (il server NON
+  supporta `echo`/logprobs del prompt → serve un canale engine-side dedicato).
 - [ ] (todo) HALoGEN (subset, verifier locali) (F3); lm-evaluation-harness (F4).
 - [ ] (todo) verifier esterni opt-in + caching (F5).
 

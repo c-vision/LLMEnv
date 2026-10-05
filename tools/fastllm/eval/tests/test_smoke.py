@@ -19,7 +19,7 @@ sys.path.insert(0, EVAL)
 
 import run_eval  # noqa: E402
 from adapters.engine_server import MockClient  # noqa: E402
-from suites.local import id_parity, needle, ppl  # noqa: E402
+from suites.local import id_parity, needle, ppl, parity  # noqa: E402
 
 
 class Smoke(unittest.TestCase):
@@ -36,6 +36,7 @@ class Smoke(unittest.TestCase):
             self.assertTrue(gates["id_parity"])
             self.assertTrue(gates["needle"])
             self.assertTrue(gates["ppl"])
+            self.assertTrue(gates["parity"])  # saltato senza reference -> pass
 
     def test_id_parity_detects_nondeterminism(self):
         r = id_parity.run(MockClient(vary=True), {"max_tokens": 8, "prompts": ["x"]})
@@ -51,6 +52,17 @@ class Smoke(unittest.TestCase):
         # banda stretta attorno a 0 -> deve fallire (0.288 bits/token)
         r2 = ppl.run(MockClient(), {"max_tokens": 8, "band": [0.29, 0.30]})
         self.assertTrue(r2["pass"] or r2["value"] > 0.28, f"ppl atteso ~0.288: {r2}")
+
+    def test_parity_skip_and_match(self):
+        # senza reference -> saltato (pass)
+        self.assertTrue(parity.run(MockClient(), {"prompts": ["p"]})["pass"])
+        # reference identica -> match
+        r = parity.run(MockClient(answer="same"), {"_ref_client": MockClient(answer="same"), "prompts": ["p"]})
+        self.assertTrue(r["pass"], r)
+        # reference diversa -> fail (tolleranza 1.0)
+        r2 = parity.run(MockClient(answer="AAA"), {"_ref_client": MockClient(answer="BBB"),
+                                                    "prompts": ["p"], "tolerance": 1.0})
+        self.assertFalse(r2["pass"], r2)
 
 
 if __name__ == "__main__":

@@ -22,5 +22,13 @@
   "ppl": {
     "max_tokens": 32,
     "band": [0.0, 3.0]
+  },
+  "reference": {
+    "base_url": "",
+    "model": "local"
+  },
+  "parity": {
+    "max_tokens": 64,
+    "tolerance": 1.0
   }
 }

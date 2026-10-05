@@ -19,9 +19,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from adapters.engine_server import make_client, EngineError  # noqa: E402
+from adapters.engine_server import make_client, EngineError, OpenAIClient  # noqa: E402
 
-LOCAL_GATES = ["id_parity", "needle", "ppl"]
+LOCAL_GATES = ["id_parity", "needle", "ppl", "parity"]
 
 
 def load_config(path):
@@ -31,11 +31,13 @@ def load_config(path):
     return {}
 
 
-def run_gate(modname, client, cfg, reps):
+def run_gate(modname, client, cfg, reps, ref_client=None):
     mod = importlib.import_module(f"suites.local.{modname}")
+    gcfg = dict(cfg.get(modname, {}))
+    gcfg["_ref_client"] = ref_client
     results = []
     for _ in range(max(1, reps)):
-        results.append(mod.run(client, cfg.get(modname, {})))
+        results.append(mod.run(client, gcfg))
     passes = [r["pass"] for r in results]
     ok = all(passes)
     return {"gate": modname, "pass": ok,
@@ -73,12 +75,17 @@ def main(argv=None):
         print(f"[eval] ERRORE client: {e}", file=sys.stderr)
         return 2
 
+    ref_cfg = cfg.get("reference") or {}
+    ref_client = None
+    if ref_cfg.get("base_url"):
+        ref_client = OpenAIClient(ref_cfg["base_url"], ref_cfg.get("model", "local"), ref_cfg.get("api_key"))
+
     gates = LOCAL_GATES if args.suite == "local" else []
     report = {"generated": _dt.datetime.now().isoformat(timespec="seconds"),
               "suite": args.suite, "engine": cfg.get("engine", {}), "reps": args.reps,
               "gates": [], "pass": True}
     for g in gates:
-        r = run_gate(g, client, cfg, args.reps)
+        r = run_gate(g, client, cfg, args.reps, ref_client)
         report["gates"].append(r)
         report["pass"] = report["pass"] and r["pass"]
         mark = "PASS" if r["pass"] else "FAIL"
