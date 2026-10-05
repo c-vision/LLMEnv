@@ -18,5 +18,9 @@
     "needle_key": "PLUMBUS-7741",
     "needle_pos": 20,
     "max_tokens": 16
+  },
+  "ppl": {
+    "max_tokens": 32,
+    "band": [0.0, 3.0]
   }
 }

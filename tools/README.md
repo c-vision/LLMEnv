@@ -135,10 +135,11 @@ created: 2026-10-04
   `benchchronos/cli.py` + `serve.sh`. Vedi nota `BenchChronos-Benchmark-Coerente.md`.
   **Asse: prestazioni** (TTFT cold/warm, throughput, decode, RAM/swap).
 
-### `tools/fastllm/eval/` — qualità/fedeltà (NUOVO 2026-10-05)
+### `tools/fastllm/eval/` — qualità/fedeltà (NUOVO 2026-10-05; F1+F2-parz)
 - Harness Python **stdlib-only** (nessun import del motore; HTTP OpenAI-compatibile o backend `mock`):
-  `run_eval.py` (`--suite local --backend mock|http`), gate **deterministici** `id_parity` (due run
-  greedy → testo identico) e `needle` (retrieval), report JSON+MD, `tests/test_smoke.py`.
+  `run_eval.py` (`--suite local --backend mock|http`), **3 gate deterministici** — `id_parity` (due run
+  greedy → testo identico), `needle` (retrieval), `ppl` (perplexità bits/token via `/v1/completions`
+  logprobs, con **banda pre-registrata**) — report JSON+MD, `tests/test_smoke.py` (con `ppl`).
   **Asse ortogonale** a `tools/BenchChronos/`. Verifica: `python3 tools/fastllm/eval/run_eval.py --suite local --backend mock`.
   Rif.: todo `(open) - LLM-Eval-Harness-Qualita-e-Allucinazioni.md`.
 

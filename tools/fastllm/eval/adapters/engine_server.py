@@ -23,6 +23,10 @@ class Client:
         """Ritorna un dict {text, raw}. temperature=0 = greedy (deterministico atteso)."""
         raise NotImplementedError
 
+    def complete(self, prompt, *, max_tokens=64, logprobs=False):
+        """Completion grezza (`/v1/completions`). Ritorna {text, logprobs} (logprobs = list[float]|None)."""
+        raise NotImplementedError
+
 
 class OpenAIClient(Client):
     """Client HTTP verso un server OpenAI-compatibile (FastLLM serve / mlx_lm.server)."""
@@ -35,6 +39,20 @@ class OpenAIClient(Client):
         self.api_key = api_key
         self.timeout = timeout
 
+    def _post(self, path, body):
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(self.base_url + path, data=data,
+                                     headers={"Content-Type": "application/json"})
+        if self.api_key:
+            req.add_header("Authorization", "Bearer " + self.api_key)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raise EngineError(f"HTTP {e.code}: {e.read()[:400]!r}") from e
+        except Exception as e:  # noqa: BLE001
+            raise EngineError(str(e)) from e
+
     def chat(self, prompt, *, system=None, temperature=0.0, max_tokens=64, seed=None):
         msgs = []
         if system:
@@ -44,23 +62,25 @@ class OpenAIClient(Client):
                 "temperature": temperature, "max_tokens": max_tokens, "stream": False}
         if seed is not None:
             body["seed"] = seed
-        data = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(self.base_url + "/v1/chat/completions", data=data,
-                                     headers={"Content-Type": "application/json"})
-        if self.api_key:
-            req.add_header("Authorization", "Bearer " + self.api_key)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                raw = json.loads(r.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            raise EngineError(f"HTTP {e.code}: {e.read()[:400]!r}") from e
-        except Exception as e:  # noqa: BLE001
-            raise EngineError(str(e)) from e
+        raw = self._post("/v1/chat/completions", body)
         try:
             text = raw["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as e:
             raise EngineError(f"risposta inattesa: {raw!r}") from e
         return {"text": text, "raw": raw}
+
+    def complete(self, prompt, *, max_tokens=64, logprobs=False):
+        body = {"model": self.model, "prompt": prompt, "max_tokens": max_tokens,
+                "temperature": 0, "stream": False}
+        if logprobs:
+            body["logprobs"] = 1
+        raw = self._post("/v1/completions", body)
+        try:
+            ch = raw["choices"][0]
+        except (KeyError, IndexError) as e:
+            raise EngineError(f"risposta inattesa: {raw!r}") from e
+        lp = ch.get("logprobs") or {}
+        return {"text": ch.get("text", ""), "logprobs": lp.get("token_logprobs")}
 
     def models(self):
         try:
@@ -91,6 +111,14 @@ class MockClient(Client):
             self._n += 1
             text += f" #{self._n}"
         return {"text": text, "raw": {"mock": True}}
+
+    def complete(self, prompt, *, max_tokens=64, logprobs=False):
+        text = self.chat(prompt, max_tokens=max_tokens)["text"]
+        lps = None
+        if logprobs:
+            n = max(1, len(text.split()))
+            lps = [-0.2] * n
+        return {"text": text, "logprobs": lps}
 
 
 def make_client(cfg):
