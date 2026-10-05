@@ -1,4 +1,4 @@
-/* tools/moe_stream_bench.c — P0 "truth harness" dello streaming esperti MoE.
+/* tools/llmengine/moe_stream_bench.c — P0 "truth harness" dello streaming esperti MoE.
  *
  * Scopo (piano Piani/(open) - Piano-Metal-Streaming-Esperti-Banda.md): misurare in modo
  * DETERMINISTICO, senza il motore, come si leggono i byte degli esperti MoE da disco:
@@ -14,8 +14,8 @@
  * Nessuna dipendenza: solo POSIX + libc. Non e' codice di motore, e' un misuratore.
  *
  * Uso:
- *   cc -O2 tools/moe_stream_bench.c -o tools/moe_stream_bench
- *   tools/moe_stream_bench <dir_modello> [--max-mb N] [--iters K] [--chunk-mb M]
+ *   cc -O2 tools/llmengine/moe_stream_bench.c -o tools/llmengine/moe_stream_bench
+ *   tools/llmengine/moe_stream_bench <dir_modello> [--max-mb N] [--iters K] [--chunk-mb M]
  *
  * Esce 0 se ha misurato almeno una metrica; 1 su errore d'uso/IO.
  */

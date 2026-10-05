@@ -1,4 +1,4 @@
-/* tools/tq_moe_batch_repro.c — repro DETERMINISTICO del fallimento di `forward_tokens_batch`
+/* tools/llmengine/tq_moe_batch_repro.c — repro DETERMINISTICO del fallimento di `forward_tokens_batch`
  * per n piccolo (2..7) sul MoE TurboQuant (ramo unsorted).
  *
  * Carica il modello una volta (via dlopen sulla dylib del motore) e, per ogni lunghezza
@@ -7,7 +7,7 @@
  * n=2..7 falliva (`shared_expert lookup failed`); n=1 e n>=8 ok. Niente env, input fisso.
  *
  * Uso:
- *   clang -O2 tools/tq_moe_batch_repro.c -o /tmp/tqrepro
+ *   clang -O2 tools/llmengine/tq_moe_batch_repro.c -o /tmp/tqrepro
  *   /tmp/tqrepro <dylib> <model_dir> <id,id,...>
  */
 #include <dlfcn.h>

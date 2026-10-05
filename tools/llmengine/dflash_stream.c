@@ -1,4 +1,4 @@
-/* tools/dflash_stream.c — A1: DFlash2 a contesto PERSISTENTE. Confronta, TUTTO A WARM:
+/* tools/llmengine/dflash_stream.c — A1: DFlash2 a contesto PERSISTENTE. Confronta, TUTTO A WARM:
  *  (1) AR puro, (2) DFlash2 ONE-SHOT (N), (3) DFlash2 STREAMING (chunk), (4) wiring session_generate.
  * Warmup COMPLETO (compila i kernel del target E del draft) prima di ogni misura.
  * Uso: /tmp/dflashstream <dylib> <target_dir> <draft_dir> <id,id,...> <N> [chunk] */

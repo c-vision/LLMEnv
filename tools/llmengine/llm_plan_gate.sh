@@ -4,14 +4,14 @@
 # dichiarandolo". Metodo unit-first (§0sexies/§0septies): si misura l'unita' (decode), non si
 # indovina. Warm-up incluso (la 1a run e' fredda per cache-prefix).
 #
-# Uso: MODEL=<dir MLX> [NP=2048] [NG=64] [THR=0.02] bash tools/llm_plan_gate.sh [k=v ...]
+# Uso: MODEL=<dir MLX> [NP=2048] [NG=64] [THR=0.02] bash tools/llmengine/llm_plan_gate.sh [k=v ...]
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DYL="${LLM_MLX_DYLIB:-$ROOT/build/dist/osx-arm64/libllm_ai_mlx.dylib}"
 MDL="${MODEL:-}"; NP="${NP:-2048}"; NG="${NG:-64}"; THR="${THR:-0.02}"
 [ -n "$MDL" ] || { echo "uso: MODEL=<dir MLX> $0 [k=v ...]"; exit 2; }
 [ -f "$DYL" ] || { echo "dylib assente: $DYL"; exit 2; }
-BIN=/tmp/decode_profile; [ -x "$BIN" ] || cc -O2 -o "$BIN" "$ROOT/tools/decode_profile.c"
+BIN=/tmp/decode_profile; [ -x "$BIN" ] || cc -O2 -o "$BIN" "$ROOT/tools/llmengine/decode_profile.c"
 
 tokps() { "$BIN" "$DYL" "$MDL" "$NP" "$NG" "$@" --quiet 2>/dev/null | awk '/^ *[0-9]/{v=$4} END{print v}'; }
 

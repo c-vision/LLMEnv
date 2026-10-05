@@ -1,4 +1,4 @@
-/* tools/dflash_multi.c — A2: verifica `llm_ai_mlx_dflash2_generate_multi` (N sessioni in
+/* tools/llmengine/dflash_multi.c — A2: verifica `llm_ai_mlx_dflash2_generate_multi` (N sessioni in
  * round-loop batched) contro N esecuzioni single-sessione. Parità = stessi id greedy.
  *
  * Uso: dflash_multi <dylib> <target_dir> <draft_dir> <N_out> <nsess> [ctx_span]

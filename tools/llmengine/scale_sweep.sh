@@ -10,8 +10,8 @@
 #   con --grep/--field (default: piu' basso e' meglio; usa --higher-better per tok/s).
 #
 # Uso:
-#   MODEL=<dir MLX> [DYLIB=..] [NG=64] [REPS=1] tools/scale_sweep.sh 128,256,512,1024,2048,4096 [--opt k=v ...]
-#   tools/scale_sweep.sh --cmd "client --conc {W}" --grep tok/s --field 3 --higher-better 1,2,4,8
+#   MODEL=<dir MLX> [DYLIB=..] [NG=64] [REPS=1] tools/llmengine/scale_sweep.sh 128,256,512,1024,2048,4096 [--opt k=v ...]
+#   tools/llmengine/scale_sweep.sh --cmd "client --conc {W}" --grep tok/s --field 3 --higher-better 1,2,4,8
 #
 # Soglia cliff: env THRESH (default 15, %).
 set -eo pipefail
@@ -49,7 +49,7 @@ run_width() {
   NG="${NG:-64}"
   REPS="${REPS:-1}"
   BIN=/tmp/decode_profile
-  if [ ! -x "$BIN" ]; then cc -O2 -o "$BIN" "$ROOT/tools/decode_profile.c"; fi
+  if [ ! -x "$BIN" ]; then cc -O2 -o "$BIN" "$ROOT/tools/llmengine/decode_profile.c"; fi
   ROW=$("$BIN" "$DYL" "$MDL" "$W" "$NG" --reps "$REPS" --quiet $EXTRA_STR 2>/dev/null | awk '/^ *[0-9]+ /{print $2; exit}')
   PF=$(printf '%s\n' "$ROW" | awk -v w="$W" 'BEGIN{v=""} NF{if($1>0)v=$1/w} END{if(v=="")print "nan"; else printf "%.4f", v}')
   printf '%s %s\n' "$W" "${PF:-nan}"

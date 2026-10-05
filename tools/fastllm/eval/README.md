@@ -1,6 +1,6 @@
 # LLMEnv — Eval Harness (qualita'/fedelta')
 
-Tool **separato** in `LLMEnv/tools/eval/` (fuori dal CMake, nessun import del motore): valuta la
+Tool **separato** in `LLMEnv/tools/fastllm/eval/` (fuori dal CMake, nessun import del motore): valuta la
 **qualita'/fedelta'** di un modello/engine, asse **ortogonale** a `tools/BenchChronos/` e agli
 [[oracoli]] (che misurano le prestazioni).
 
@@ -14,17 +14,17 @@ Doc/piano completo: `01-Projects/LLMEnv/Todo/(open) - LLM-Eval-Harness-Qualita-e
 
 ```bash
 # smoke / CI: nessun motore, backend mock, deterministico
-python3 tools/eval/run_eval.py --suite local --backend mock
+python3 tools/fastllm/eval/run_eval.py --suite local --backend mock
 
 # contro un server locale OpenAI-compatibile (FastLLM serve / mlx_lm.server)
-python3 tools/eval/run_eval.py --suite local --backend http \
+python3 tools/fastllm/eval/run_eval.py --suite local --backend http \
     --base-url http://127.0.0.1:8080 --model local --reps 3
 
 # test unitari del harness
-python3 tools/eval/tests/test_smoke.py
+python3 tools/fastllm/eval/tests/test_smoke.py
 ```
 
-Report JSON + Markdown in `tools/eval/reports/` (gitignorati). Esito = PASS/FAIL complessivo.
+Report JSON + Markdown in `tools/fastllm/eval/reports/` (gitignorati). Esito = PASS/FAIL complessivo.
 
 > **Relazione con `tools/BenchChronos/`** (l'altro tool Python della repo): `BenchChronos` misura le
 > **prestazioni** (TTFT/throughput/decode/RAM, protocollo mlx-chronos); questo harness misura la
@@ -47,7 +47,7 @@ Report JSON + Markdown in `tools/eval/reports/` (gitignorati). Esito = PASS/FAIL
 
 ## Layout
 ```
-tools/eval/
+tools/fastllm/eval/
 ├── run_eval.py            # CLI
 ├── config/eval.json       # modelli/suite/soglie (NESSUNA chiave qui)
 ├── adapters/engine_server.py  # mock + OpenAI-compatibile (stdlib)

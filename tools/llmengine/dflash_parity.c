@@ -1,4 +1,4 @@
-/* tools/dflash_parity.c — parita' DFlash2 vs greedy AR (unita'-first, senza dispatch).
+/* tools/llmengine/dflash_parity.c — parita' DFlash2 vs greedy AR (unita'-first, senza dispatch).
  * Carica il target, due sessioni (stesso prompt): una genera AR (session_generate, n-gram
  * bit-exact), l'altra usa DFlash2 (dflash2_generate). Confronta gli id.
  * Uso: /tmp/dflashparity <dylib> <target_dir> <draft_dir> <id,id,...> <N> */
