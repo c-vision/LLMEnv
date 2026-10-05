@@ -137,8 +137,9 @@ created: 2026-10-04
 
 ### `tools/fastllm/eval/` — qualità/fedeltà (NUOVO 2026-10-05; F1–F5)
 - Harness Python **stdlib-only** (nessun import del motore; HTTP OpenAI-compatibile o backend `mock`).
-  `run_eval.py` — suite: **`local`** (4 gate **deterministici**: `id_parity` testo greedy identico,
-  `needle` retrieval, `ppl` perplexità bits/token con **banda**, `parity` greedy vs **reference**),
+  `run_eval.py` — suite: **`local`** (5 gate **deterministici**: `id_parity` testo greedy identico,
+  `needle` retrieval, `ppl` perplexità bits/token con **banda**, `parity` greedy vs **reference**,
+  `token_parity` parità **token-level**/GEN_IDS),
   **`lm-eval`** (lm-evaluation-harness via subprocess, accuracy, F4), **`halogen`** (factualità:
   recall atomic-unit con **verifier** locale a regole; `openai` opt-in + caching, F3/F5).
   **Golden/regressione** (`--save-golden`/`--golden`). Report JSON+MD, `tests/test_smoke.py`.
