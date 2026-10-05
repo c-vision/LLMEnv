@@ -8,7 +8,7 @@ Tool **separato** in `LLMEnv/tools/fastllm/eval/` (fuori dal CMake, nessun impor
 - **stdlib-only** (urllib/json/argparse): nessuna venv/pacchetto richiesto.
 - Parla col motore **solo** via HTTP OpenAI-compatibile, oppure col backend `mock` (test, no rete).
 
-Doc/piano completo: `01-Projects/LLMEnv/Todo/(open) - LLM-Eval-Harness-Qualita-e-Allucinazioni.md`.
+Doc/piano completo: `01-Projects/LLMEnv/Todo/(solved) - LLM-Eval-Harness-Qualita-e-Allucinazioni.md`.
 
 ## Uso
 

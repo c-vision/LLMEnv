@@ -144,7 +144,7 @@ created: 2026-10-04
   recall atomic-unit con **verifier** locale a regole; `openai` opt-in + caching, F3/F5).
   **Golden/regressione** (`--save-golden`/`--golden`). Report JSON+MD, `tests/test_smoke.py`.
   Guida: `Guide/Eval-Harness-Guida.md`. **Asse ortogonale** a `tools/BenchChronos/`.
-  **Nessun impatto sulle prestazioni dell'engine.** Rif.: todo `(open) - LLM-Eval-Harness-...`.
+  **Nessun impatto sulle prestazioni dell'engine.** Rif.: todo `(solved) - LLM-Eval-Harness-...`.
 
 ### `tools/llmengine/oracoli/` — sonde model-free (era `LLMEnv/oracoli/`; NON tracciata)
 
