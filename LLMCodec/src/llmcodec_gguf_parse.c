@@ -28,7 +28,9 @@ static const uint8_t* cur_bytes(Cur* c, size_t n) { if (!cur_have(c, n)) return 
 static int mem_str(Cur* c, char** out) {
     uint64_t n = cur_u(c, 8);
     if (!c->ok) return -1;
-    if (n > (1u << 24)) { c->ok = 0; if (c->st == LLMCODEC_GGUF_STATUS_OK) c->st = LLMCODEC_GGUF_STATUS_IMPLAUSIBLE; return -1; }
+    /* Cap di plausibilita': 1 GiB. Il vecchio 16 MiB (1<<24) RIFIUTAVA i tokenizer JSON grandi
+     * (es. Llama-3.2 ~17.2 MB `tokenizer.gmb.json`) -> il GGUF del converter non veniva aperto. */
+    if (n > (1ull << 30)) { c->ok = 0; if (c->st == LLMCODEC_GGUF_STATUS_OK) c->st = LLMCODEC_GGUF_STATUS_IMPLAUSIBLE; return -1; }
     char* s = (char*)malloc((size_t)n + 1);
     if (!s) { c->ok = 0; c->st = LLMCODEC_GGUF_STATUS_NO_MEM; return -1; }
     if (n) { const uint8_t* p = cur_bytes(c, (size_t)n); if (!p) { free(s); return -1; } memcpy(s, p, (size_t)n); }
