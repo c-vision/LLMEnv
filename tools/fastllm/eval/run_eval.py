@@ -7,7 +7,7 @@ Uso:
 
 Suite `local` = gate DETERMINISTICI (id_parity, needle). Non usa giudici LLM.
 Nessuna dipendenza dal build CMake; nessun import del motore (solo HTTP o mock).
-Doc: 01-Projects/LLMEnv/Todo/(open) - LLM-Eval-Harness-Qualita-e-Allucinazioni.md.
+Doc: 01-Projects/LLMEnv/Todo/(solved) - LLM-Eval-Harness-Qualita-e-Allucinazioni.md.
 """
 from __future__ import annotations
 

@@ -3,7 +3,7 @@
 Nessuna dipendenza dal codice del motore: si parla solo via HTTP (`/v1/chat/completions`).
 Il backend `mock` e' deterministico e non usa rete, cosi' l'harness e' testabile senza modello.
 
-Doc: 01-Projects/LLMEnv/Todo/(open) - LLM-Eval-Harness-Qualita-e-Allucinazioni.md (F1).
+Doc: 01-Projects/LLMEnv/Todo/(solved) - LLM-Eval-Harness-Qualita-e-Allucinazioni.md (F1).
 """
 from __future__ import annotations
 
