@@ -11,6 +11,8 @@
  */
 #include "llm_dsv4_attn_fwd.h"   /* llm_dsv4_linear, rms_norm_weight, attention_rows, rope_tail_ext_inplace */
 #include "llm_dsv4_moe_fwd.h"    /* llm_dsv4_swiglu, llm_dsv4_topk_desc (router) */
+#include "llm_dsv4_cache.h"      /* llm_dsv4_attention_mixed (MLA/compresse) */
+#include "llm_dsv41_attn.h"      /* llm_dsv41_swa_indices (sliding window) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -124,11 +126,71 @@ static int test_topk(void) {
     free(s); free(idx); return ok;
 }
 
+/* --- SWA: sliding-window indices (dsv41) vs riferimento --- */
+static int swa_ref(int start, int length, int window, int old_len, int* idx) {
+    int W = (start == 0) ? (length < window ? length : window) : window;
+    int lo = start - old_len; if (lo < 0) lo = 0;
+    for (int i = 0; i < length; i++) {
+        int pos = start + i;
+        if (start == 0) {
+            int base = pos - window + 1; if (base < 0) base = 0;
+            for (int j = 0; j < W; j++) { int local = base + j; idx[i * W + j] = (local >= 0 && local <= pos) ? local : -1; }
+        } else {
+            for (int j = 0; j < W; j++) { int local = pos - window + 1 + j; int v = (local >= lo && local <= pos); idx[i * W + j] = v ? (local - (start - old_len)) : -1; }
+        }
+    }
+    return W;
+}
+static int test_swa(void) {
+    int ok = 1;
+    int cases[][4] = { {0,5,3,0}, {0,2,4,0}, {10,4,3,2}, {7,6,2,0} };
+    for (int c = 0; c < 4; c++) {
+        int start = cases[c][0], length = cases[c][1], window = cases[c][2], old = cases[c][3];
+        int idxa[4096], idxb[4096];
+        int Wa = llm_dsv41_swa_indices(start, length, window, old, idxa);
+        int Wb = swa_ref(start, length, window, old, idxb);
+        if (Wa != Wb) { ok = 0; }
+        for (int i = 0; i < length * Wa && ok; i++) if (idxa[i] != idxb[i]) ok = 0;
+    }
+    printf("  swa_indices       %s\n", ok ? "OK" : "FAIL");
+    return ok;
+}
+/* --- MLA-like: attenzione mista raw+compresse (mask allowed) vs riferimento double --- */
+static int test_attention_mixed(void) {
+    int nh = 2, hd = 8, nraw = 4, ncomp = 3, allowed[3] = { 1, 0, 1 };
+    float *q = malloc(nh * hd * 4), *raw = malloc(nraw * hd * 4), *comp = malloc(ncomp * hd * 4), *snk = malloc(nh * 4), *o = malloc(nh * hd * 4);
+    for (int i = 0; i < nh * hd; i++) q[i] = (float)rnd();
+    for (int i = 0; i < nraw * hd; i++) raw[i] = (float)rnd();
+    for (int i = 0; i < ncomp * hd; i++) comp[i] = (float)rnd();
+    for (int i = 0; i < nh; i++) snk[i] = (float)rnd();
+    LlmDsv4Config cfg; memset(&cfg, 0, sizeof cfg);
+    llm_dsv4_attention_mixed(o, &cfg, q, raw, nraw, comp, ncomp, allowed, snk, nh, hd);
+    g_max = 0; g_sum = 0; g_n = 0;
+    double kq = 1.0 / sqrt((double)hd);
+    for (int h = 0; h < nh; h++) {
+        const float* qh = q + h * hd; double mx = snk[h];
+        for (int r = 0; r < nraw; r++) { double s = ref_dot(qh, raw + r * hd, hd) * kq; if (s > mx) mx = s; }
+        for (int r = 0; r < ncomp; r++) if (allowed[r]) { double s = ref_dot(qh, comp + r * hd, hd) * kq; if (s > mx) mx = s; }
+        double den = exp((double)snk[h] - mx);
+        for (int r = 0; r < nraw; r++) den += exp(ref_dot(qh, raw + r * hd, hd) * kq - mx);
+        for (int r = 0; r < ncomp; r++) if (allowed[r]) den += exp(ref_dot(qh, comp + r * hd, hd) * kq - mx);
+        for (int e = 0; e < hd; e++) {
+            double num = 0;
+            for (int r = 0; r < nraw; r++) num += exp(ref_dot(qh, raw + r * hd, hd) * kq - mx) * (double)raw[r * hd + e];
+            for (int r = 0; r < ncomp; r++) if (allowed[r]) num += exp(ref_dot(qh, comp + r * hd, hd) * kq - mx) * (double)comp[r * hd + e];
+            acc(o[h * hd + e], num / den);
+        }
+    }
+    double mean = g_sum / g_n; printf("  attention_mixed   max=%.2e mean=%.2e  %s\n", g_max, mean, g_max < 1e-3 ? "OK" : "FAIL");
+    free(q); free(raw); free(comp); free(snk); free(o); return g_max < 1e-3;
+}
+
 int main(void) {
     printf("[arch_lab] tol=%.1e (float vs riferimento double)\n", (double)TOL);
     int ok = 1;
     ok &= test_linear(); ok &= test_rms(); ok &= test_head_rms(); ok &= test_rope();
     ok &= test_attention_rows(); ok &= test_swiglu(); ok &= test_topk();
+    ok &= test_swa(); ok &= test_attention_mixed();
     printf("[arch_lab] %s\n", ok ? "TUTTI OK" : "QUALCHE FAIL");
     return ok ? 0 : 1;
 }
