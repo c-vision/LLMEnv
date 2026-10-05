@@ -366,6 +366,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_mla_glm4.c
     llm_mlx_layer_forward.c
     llm_mlx_execplan.c
+    llm_mlx_expolicy.c
     llm_mlx_qwen3_attn.c
     llm_mlx_weights_io.c
     llm_mlx_session_append.c
@@ -524,4 +525,11 @@ if(LLM_BUILD_DSV4_TESTS)
     target_include_directories(llm_mlx_execplan_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} "${cjson_SOURCE_DIR}" ${CMAKE_CURRENT_SOURCE_DIR}/../Options)
     set_target_properties(llm_mlx_execplan_test PROPERTIES LINKER_LANGUAGE CXX)
+
+    # §9.A EXPERT_RESIDENCY_POLICY: test model-free (parse + derive + apply).
+    add_executable(llm_mlx_expolicy_test tests/llm_mlx_expolicy_test.c)
+    target_link_libraries(llm_mlx_expolicy_test PRIVATE llm_ai_mlx cjson)
+    target_include_directories(llm_mlx_expolicy_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} "${cjson_SOURCE_DIR}" ${CMAKE_CURRENT_SOURCE_DIR}/../Options)
+    set_target_properties(llm_mlx_expolicy_test PROPERTIES LINKER_LANGUAGE CXX)
 endif()
