@@ -10,6 +10,7 @@
  * Build/uso: clang -O2 -I LLMEngine/mlx/ds4-slow tools/llmengine/arch_lab.c -lm -o /tmp/arch_lab && /tmp/arch_lab
  */
 #include "llm_dsv4_attn_fwd.h"   /* llm_dsv4_linear, rms_norm_weight, attention_rows, rope_tail_ext_inplace */
+#include "llm_dsv4_moe_fwd.h"    /* llm_dsv4_swiglu, llm_dsv4_topk_desc (router) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -88,10 +89,46 @@ static int test_rope(void) {
     free(x); free(xr); return g_max < 1e-3;
 }
 
+static int test_head_rms(void) {
+    int nh = 4, hd = 16; float* x = malloc(nh * hd * 4), *xr = malloc(nh * hd * 4);
+    for (int i = 0; i < nh * hd; i++) { x[i] = (float)rnd(); xr[i] = x[i]; }
+    llm_dsv4_head_rms_norm_inplace(x, nh, hd, 1e-5f);
+    g_max = 0; g_sum = 0; g_n = 0;
+    for (int h = 0; h < nh; h++) {
+        double ss = 0; for (int i = 0; i < hd; i++) ss += (double)xr[h * hd + i] * xr[h * hd + i];
+        double sc = 1.0 / sqrt(ss / hd + 1e-5);
+        for (int i = 0; i < hd; i++) acc(x[h * hd + i], (double)xr[h * hd + i] * sc);
+    }
+    double mean = g_sum / g_n; printf("  head_rms (qk-norm) max=%.2e mean=%.2e  %s\n", g_max, mean, g_max < 1e-3 ? "OK" : "FAIL");
+    free(x); free(xr); return g_max < 1e-3;
+}
+static int test_swiglu(void) {
+    int n = 64; float *g = malloc(n * 4), *u = malloc(n * 4), *o = malloc(n * 4);
+    for (int i = 0; i < n; i++) { g[i] = (float)rnd(); u[i] = (float)rnd(); }
+    llm_dsv4_swiglu(o, g, u, n, 0.0f);
+    g_max = 0; g_sum = 0; g_n = 0;
+    for (int i = 0; i < n; i++) { double s = (double)g[i] / (1.0 + exp(-(double)g[i])); acc(o[i], s * (double)u[i]); }
+    double mean = g_sum / g_n; printf("  swiglu            max=%.2e mean=%.2e  %s\n", g_max, mean, g_max < 1e-3 ? "OK" : "FAIL");
+    free(g); free(u); free(o); return g_max < 1e-3;
+}
+static int test_topk(void) {
+    int n = 32, k = 6; float* s = malloc(n * 4); int* idx = malloc(k * 4);
+    for (int i = 0; i < n; i++) s[i] = (float)(rnd() * 10.0);
+    llm_dsv4_topk_desc(s, n, k, idx);
+    /* rif: ordina per (score desc, indice asc) e prendi i primi k */
+    int ref[64]; for (int i = 0; i < n; i++) ref[i] = i;
+    for (int a = 0; a < n; a++) for (int b = a + 1; b < n; b++)
+        if (s[ref[b]] > s[ref[a]]) { int t = ref[a]; ref[a] = ref[b]; ref[b] = t; }
+    int ok = 1; for (int j = 0; j < k; j++) if (idx[j] != ref[j]) ok = 0;
+    printf("  topk_desc (router) %s\n", ok ? "OK" : "FAIL");
+    free(s); free(idx); return ok;
+}
+
 int main(void) {
     printf("[arch_lab] tol=%.1e (float vs riferimento double)\n", (double)TOL);
     int ok = 1;
-    ok &= test_linear(); ok &= test_rms(); ok &= test_rope(); ok &= test_attention_rows();
+    ok &= test_linear(); ok &= test_rms(); ok &= test_head_rms(); ok &= test_rope();
+    ok &= test_attention_rows(); ok &= test_swiglu(); ok &= test_topk();
     printf("[arch_lab] %s\n", ok ? "TUTTI OK" : "QUALCHE FAIL");
     return ok ? 0 : 1;
 }
