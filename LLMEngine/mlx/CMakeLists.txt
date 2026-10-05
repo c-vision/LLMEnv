@@ -369,6 +369,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_expolicy.c
     llm_mlx_kvclasses.c
     llm_mlx_kvformat.c
+    llm_mlx_kvcost.c
     llm_mlx_qwen3_attn.c
     llm_mlx_weights_io.c
     llm_mlx_session_append.c
@@ -546,4 +547,10 @@ if(LLM_BUILD_DSV4_TESTS)
     target_link_libraries(llm_mlx_kvformat_test PRIVATE llm_ai_mlx)
     target_include_directories(llm_mlx_kvformat_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     set_target_properties(llm_mlx_kvformat_test PROPERTIES LINKER_LANGUAGE CXX)
+
+    # §9.A M10a: test model-free del modello di costo KV (KEEP/PERSIST/RECOMPUTE).
+    add_executable(llm_mlx_kvcost_test tests/llm_mlx_kvcost_test.c)
+    target_link_libraries(llm_mlx_kvcost_test PRIVATE llm_ai_mlx)
+    target_include_directories(llm_mlx_kvcost_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    set_target_properties(llm_mlx_kvcost_test PROPERTIES LINKER_LANGUAGE CXX)
 endif()
