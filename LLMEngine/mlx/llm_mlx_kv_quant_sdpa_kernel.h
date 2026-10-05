@@ -225,119 +225,8 @@ static const char llm_kvq_combine_src[] =
     "    }\n"
 ;
 
-/* FA2 (2026-10-03): kernel di PREFILL con tensor unit (simdgroup MMA). Un threadgroup per
- * (q-head, tile di KTQ=8 posizioni). Loop sulle key-tile [0, nci+NR): cold int8 (dequant-on-read
- * via ptab) e recent fp16. QK^T = Q @ Kt (K trasposto in threadgroup), online softmax causale,
- * poi PV = P @ V. Scrive l'output direttamente (niente split-K/combine). Algoritmo validato in
- * oracoli/fa2_probe.c. Template: come il kernel v1 + KTQ (query-tile) e KT (key-tile). */
-static const char llm_kvq_sdpa_kernel_src_fa2[] =
-    "\n"
-    "    uint tid = thread_position_in_threadgroup.x;\n"
-    "    uint gid = thread_position_in_grid.x;\n"
-    "    constexpr uint G = GK;\n"
-    "    constexpr uint KWB = (Dhead * BK) / 8u;\n"
-    "    constexpr uint VWB = (Dhead * BV) / 8u;\n"
-    "    constexpr uint KTM = 8u;\n"
-    "    constexpr uint NT = (NQX + KTQ - 1u) / KTQ;\n"
-    "    uint qh = gid / NT;\n"
-    "    uint p0 = (gid % NT) * KTQ;\n"
-    "    uint NVQ = (NQX - p0 < KTM) ? (NQX - p0) : KTM;\n"
-    "    uint kh = qh * NKV / NH;\n"
-    "    uint nkey = nci + NR;\n"
-    "    threadgroup half  qt[KTM*Dhead];\n"
-    "    threadgroup half  kt[Dhead*KT];\n"
-    "    threadgroup half  vt[KT*Dhead];\n"
-    "    threadgroup half  zt[KTM*KT];\n"
-    "    threadgroup half  pt[KTM*KT];\n"
-    "    threadgroup half  ot[KTM*Dhead];\n"
-    "    threadgroup float oacc[KTM*Dhead];\n"
-    "    threadgroup float mrow[KTM], lrow[KTM], frow[KTM];\n"
-    "    threadgroup half  zbuf[64];\n"
-    "    for (uint i = tid; i < KTM*Dhead; i += 32u) oacc[i] = 0.0f;\n"
-    "    for (uint i = tid; i < 64u; i += 32u) zbuf[i] = (half)0;\n"
-    "    for (uint i = tid; i < KTM*KT; i += 32u) pt[i] = (half)0;\n"
-    "    for (uint i = tid; i < KTM; i += 32u) { mrow[i] = -INFINITY; lrow[i] = 0.0f; frow[i] = 0.0f; }\n"
-    "    for (uint i = tid; i < KTM*Dhead; i += 32u) {\n"
-    "        uint r = i / Dhead;\n"
-    "        qt[i] = (r < NVQ) ? (half)q[(qh*NQX + p0 + r)*Dhead + (i%Dhead)] : (half)0;\n"
-    "    }\n"
-    "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-    "    simdgroup_half8x8 Aq[Dhead/8];\n"
-    "    for (uint k = 0; k < Dhead/8; ++k) simdgroup_load(Aq[k], qt + k*8u, Dhead);\n"
-    "    uint ntiles = (nkey + KT - 1u) / KT;\n"
-    "    for (uint tl = 0; tl < ntiles; ++tl) {\n"
-    "        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-    "        for (uint i = tid; i < KT*Dhead; i += 32u) {\n"
-    "            uint j = i / Dhead, d = i % Dhead;\n"
-    "            uint t = tl*KT + j;\n"
-    "            float kd = 0.0f, vd = 0.0f;\n"
-    "            if (t < nkey && t < nci) {\n"
-    "                const uint pg = (uint)ptab[t / PT] * PT + (t % PT);\n"
-    "                const device uint*    kw  = (const device uint*)((const device uint8_t*)Kc_w + (size_t)(kh * capi + pg) * KWB);\n"
-    "                const device uint8_t* kwb = (const device uint8_t*)kw;\n"
-    "                const device ST*      ks  = Kc_s + (kh * capi + pg) * (Dhead / G);\n"
-    "                const device ST*      kb  = Kc_b + (kh * capi + pg) * (Dhead / G);\n"
-    "                kd = llm_kv_dq(llm_kv_val<BK, SYM>(kw, kwb, d), (float)ks[d / G], (float)kb[d / G]);\n"
-    "                const device uint*    vw  = (const device uint*)((const device uint8_t*)Vc_w + (size_t)(kh * capi + pg) * VWB);\n"
-    "                const device uint8_t* vwb = (const device uint8_t*)vw;\n"
-    "                const device ST*      vs  = Vc_s + (kh * capi + pg) * (Dhead / G);\n"
-    "                const device ST*      vb  = Vc_b + (kh * capi + pg) * (Dhead / G);\n"
-    "                vd = llm_kv_dq(llm_kv_val<BV, SYM>(vw, vwb, d), (float)vs[d / G], (float)vb[d / G]);\n"
-    "            } else if (t < nkey) {\n"
-    "                kd = (float)Kr[(kh * NR + (t - nci)) * Dhead + d];\n"
-    "                vd = (float)Vr[(kh * NR + (t - nci)) * Dhead + d];\n"
-    "            }\n"
-    "            kt[d*KT + j] = (half)kd;\n"
-    "            vt[j*Dhead + d] = (half)vd;\n"
-    "        }\n"
-    "        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-    "        for (uint nb = 0; nb < KT/8; ++nb) {\n"
-    "            simdgroup_half8x8 acc; simdgroup_load(acc, zbuf, 8u);\n"
-    "            for (uint k = 0; k < Dhead/8; ++k) {\n"
-    "                simdgroup_half8x8 Bk; simdgroup_load(Bk, kt + k*8u*KT + nb*8u, KT);\n"
-    "                simdgroup_multiply_accumulate(acc, Aq[k], Bk, acc);\n"
-    "            }\n"
-    "            simdgroup_store(acc, zt + nb*8u, KT);\n"
-    "        }\n"
-    "        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-    "        if (tid < NVQ) {\n"
-    "            uint m = tid; int qpos = (int)(nci + NR - NQX + p0 + m);\n"
-    "            float mx = -INFINITY;\n"
-    "            for (uint j = 0; j < KT; ++j) { int kn = (int)(tl*KT + j);\n"
-    "                if (kn >= (int)nkey || kn > qpos) continue;\n"
-    "                mx = max(mx, (float)zt[m*KT+j] * scale); }\n"
-    "            float mnew = max(mrow[m], mx);\n"
-    "            float f = (mrow[m] > -INFINITY) ? exp(mrow[m] - mnew) : 0.0f;\n"
-    "            float s = 0.0f;\n"
-    "            for (uint j = 0; j < KT; ++j) { int kn = (int)(tl*KT + j); float e = 0.0f;\n"
-    "                if (kn < (int)nkey && kn <= qpos) e = exp((float)zt[m*KT+j] * scale - mnew);\n"
-    "                pt[m*KT+j] = (half)e; s += e; }\n"
-    "            frow[m] = f; lrow[m] = lrow[m]*f + s; mrow[m] = mnew;\n"
-    "        }\n"
-    "        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-    "        simdgroup_half8x8 Pa[KT/8];\n"
-    "        for (uint k = 0; k < KT/8; ++k) simdgroup_load(Pa[k], pt + k*8u, KT);\n"
-    "        for (uint nb = 0; nb < Dhead/8; ++nb) {\n"
-    "            simdgroup_half8x8 acc; simdgroup_load(acc, zbuf, 8u);\n"
-    "            for (uint k = 0; k < KT/8; ++k) {\n"
-    "                simdgroup_half8x8 Bk; simdgroup_load(Bk, vt + (k*8u)*Dhead + nb*8u, Dhead);\n"
-    "                simdgroup_multiply_accumulate(acc, Pa[k], Bk, acc);\n"
-    "            }\n"
-    "            simdgroup_store(acc, ot + nb*8u, Dhead);\n"
-    "        }\n"
-    "        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-    "        for (uint i = tid; i < KTM*Dhead; i += 32u)\n"
-    "            oacc[i] = oacc[i]*frow[i/Dhead] + (float)ot[i];\n"
-    "    }\n"
-    "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-    "    for (uint i = tid; i < NVQ*Dhead; i += 32u) {\n"
-    "        uint m = i / Dhead;\n"
-    "        out[(qh*NQX + p0 + m)*Dhead + (i%Dhead)] = (lrow[m] > 0.0f) ? oacc[i]/lrow[m] : 0.0f;\n"
-    "    }\n"
-;
-
-typedef struct { mlx_fast_metal_kernel part, combine, fa2; bool built; bool built_fa2; } llm_kvq_sdpa_cache;
-static llm_kvq_sdpa_cache llm_kvq_sdpa_singleton = { {0}, {0}, {0}, false, false };
+typedef struct { mlx_fast_metal_kernel part, combine; bool built; } llm_kvq_sdpa_cache;
+static llm_kvq_sdpa_cache llm_kvq_sdpa_singleton = { {0}, {0}, false };
 
 #ifndef LLM_KVQ_SPLITS
 #define LLM_KVQ_SPLITS 8
@@ -396,14 +285,6 @@ static bool llm_kvq_gqa(void) {
     return llm_ai_mlx_opt_get_bool("kvq_gqa", &b) == 0 && b != 0;
 }
 
-/* FA2 (2026-10-03): kernel prefill con tensor-unit (simdgroup MMA) invece dei dot scalari.
- * OPT-IN (default OFF: il default su main resta il W3 TQ-tile). Vedi
- * oracoli/fa2_probe.c per l'algoritmo validato (online softmax + causale). */
-static bool llm_kvq_fa2(void) {
-    int b = 0;
-    return llm_ai_mlx_opt_get_bool("kvq_fa2", &b) == 0 && b != 0;
-}
-
 static int llm_mlx_kvq_sdpa_kernel_build(void) {
     if (llm_kvq_sdpa_singleton.built) return 0;
     {
@@ -429,20 +310,6 @@ static int llm_mlx_kvq_sdpa_kernel_build(void) {
         llm_kvq_sdpa_singleton.combine = mlx_fast_metal_kernel_new(
             "llm_kvq_combine", iv, ov, llm_kvq_combine_src, llm_kvq_sdpa_kernel_header,
             /*ensure_row_contiguous=*/true, /*atomic_outputs=*/false);
-        mlx_vector_string_free(iv); mlx_vector_string_free(ov);
-    }
-    {
-        const char* in_names[] = {"q", "scale", "nci", "capi", "Kc_w", "Kc_s", "Kc_b", "Vc_w", "Vc_s", "Vc_b", "Kr", "Vr", "ptab"};
-        const char* out_names[] = {"out"};
-        mlx_vector_string iv = mlx_vector_string_new();
-        for (int i = 0; i < 13; i++) mlx_vector_string_append_value(iv, in_names[i]);
-        mlx_vector_string ov = mlx_vector_string_new();
-        mlx_vector_string_append_value(ov, out_names[0]);
-        llm_kvq_sdpa_singleton.fa2 = mlx_fast_metal_kernel_new(
-            "llm_kvq_sdpa_fa2", iv, ov,
-            llm_kvq_sdpa_kernel_src_fa2, llm_kvq_sdpa_kernel_header,
-            /*ensure_row_contiguous=*/true, /*atomic_outputs=*/false);
-        llm_kvq_sdpa_singleton.built_fa2 = (llm_kvq_sdpa_singleton.fa2.ctx != NULL);
         mlx_vector_string_free(iv); mlx_vector_string_free(ov);
     }
     llm_kvq_sdpa_singleton.built = true;
@@ -517,59 +384,6 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
         if (ptab_own.ctx == NULL) return false;
         ptab = ptab_own;
     }
-    mlx_array fa2_saved = mlx_array_new();
-    bool fa2_verify = (getenv("LLM_FA2_VERIFY") != NULL);
-    /* FA2 opt-in (kvq_fa2=1): prefill con tensor unit (simdgroup MMA). Default OFF -> path W3
-     * intatto. Richiede nqy multiplo di KTQ=8 e hd multiplo di 8; altrimenti fallback W3. */
-    if (getenv("LLM_FA2_DBG")) fprintf(stderr, "[KVQ] nqy=%d nh=%d hd=%d nkv=%d nc=%d cap=%d fa2opt=%d built=%d nq=%d\n", nqy, nh, hd, nkv, nc, cap, (int)llm_kvq_fa2(), (int)llm_kvq_sdpa_singleton.built_fa2, nq);
-    if (nqy > 1 && llm_kvq_fa2() && llm_kvq_sdpa_singleton.built_fa2 && (hd % 8) == 0) {
-        const int KTQ = 8, KT = 32;
-        if (getenv("LLM_FA2_DBG")) fprintf(stderr, "[FA2] nqy=%d hd=%d nh=%d nkv=%d nc=%d nr=%d cap=%d\n", nqy, hd, nh, nkv, nc, nr, cap);
-        mlx_vector_array fin = mlx_vector_array_new();
-        mlx_array fscale = mlx_array_new_float(scale);
-        mlx_array fnci = mlx_array_new_int(nc);
-        mlx_array fcapi = mlx_array_new_int(cap);
-        mlx_vector_array_append_value(fin, q);
-        mlx_vector_array_append_value(fin, fscale);
-        mlx_vector_array_append_value(fin, fnci);
-        mlx_vector_array_append_value(fin, fcapi);
-        mlx_vector_array_append_value(fin, Kc_w);
-        mlx_vector_array_append_value(fin, Kc_s);
-        mlx_vector_array_append_value(fin, Kc_b);
-        mlx_vector_array_append_value(fin, Vc_w);
-        mlx_vector_array_append_value(fin, Vc_s);
-        mlx_vector_array_append_value(fin, Vc_b);
-        mlx_vector_array_append_value(fin, Kr);
-        mlx_vector_array_append_value(fin, Vr);
-        mlx_vector_array_append_value(fin, ptab);
-        mlx_fast_metal_kernel_config fcfg = mlx_fast_metal_kernel_config_new();
-        mlx_fast_metal_kernel_config_add_template_arg_dtype(fcfg, "T", T);
-        mlx_fast_metal_kernel_config_add_template_arg_dtype(fcfg, "ST", st);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "Dhead", hd);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "NH", nh);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "NQX", nqy);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "NKV", nkv);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "GK", gval > 0 ? gval : 64);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "SYM", gval > 0 ? 1 : 0);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "BK", kbits);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "BV", vbits);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "NR", nr);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "PT", 32);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "KTQ", KTQ);
-        mlx_fast_metal_kernel_config_add_template_arg_int(fcfg, "KT", KT);
-        int fosh[2] = {nh*nqy, hd};
-        mlx_fast_metal_kernel_config_add_output_arg(fcfg, fosh, 2, MLX_FLOAT32);
-        mlx_fast_metal_kernel_config_set_grid(fcfg, (nh * ((nqy + KTQ - 1) / KTQ)) * 32, 1, 1);
-        mlx_fast_metal_kernel_config_set_thread_group(fcfg, 32, 1, 1);
-        mlx_vector_array fouts = mlx_vector_array_new();
-        int frc = mlx_fast_metal_kernel_apply(&fouts, llm_kvq_sdpa_singleton.fa2, fin, fcfg, stream);
-        bool fok = (frc == 0) && mlx_vector_array_size(fouts) == 1;
-        if (fok) { mlx_array a0 = mlx_array_new(); fok = mlx_vector_array_get(&a0, fouts, 0) == 0; if (fok) mlx_array_set(&fa2_saved, a0); mlx_array_free(a0); }
-        mlx_fast_metal_kernel_config_free(fcfg);
-        mlx_vector_array_free(fin); mlx_vector_array_free(fouts);
-        mlx_array_free(fscale); mlx_array_free(fnci); mlx_array_free(fcapi);
-        if (fok && !fa2_verify) { mlx_array_set(out, fa2_saved); mlx_array_free(fa2_saved); mlx_array_free(ptab_own); mlx_array_free(q_flat); return true; }
-    }
     mlx_vector_array inputs = mlx_vector_array_new();
     mlx_array scale_arr = mlx_array_new_float(scale);
     mlx_array nci_arr = mlx_array_new_int(nc);
@@ -643,23 +457,6 @@ static bool llm_mlx_kvq_sdpa_decode(mlx_array* out, mlx_array q,
         mlx_vector_array_free(cin);
         mlx_vector_array_free(couts);
     }
-    if (fa2_verify && fa2_saved.ctx != NULL && out->ctx != NULL && (int)mlx_array_size(fa2_saved) == (int)mlx_array_size(*out)
-        && mlx_array_dtype(fa2_saved) == MLX_FLOAT32 && mlx_array_dtype(*out) == MLX_FLOAT32) {
-        mlx_array_eval(fa2_saved); mlx_array_eval(*out);
-        const float* A = mlx_array_data_float32(fa2_saved);
-        const float* B = mlx_array_data_float32(*out);
-        float gmax = -1.0f; int rowmax = -1;
-        for (int r = 0; r < nh*nqy; r++) { float d = 0.0f;
-            for (int c = 0; c < hd; c++) { float a = A[r*hd+c], b = B[r*hd+c]; float dd = a>b?(a-b):(b-a); if (dd > d) d = dd; }
-            if (d > gmax) { gmax = d; rowmax = r; } }
-        float ma=-1e30f, mb=-1e30f; int na=0, nb=0;
-        for (int i = 0; i < nh*nqy*hd; i++) { float a=A[i], b=B[i];
-            if (!(a==a) || a>1e30f || a<-1e30f) na++; if (!(b==b) || b>1e30f || b<-1e30f) nb++;
-            if (a>ma) ma=a; if (b>mb) mb=b; }
-        fprintf(stderr, "[FA2VERIFY] nqy=%d nh=%d nc=%d nr=%d maxdiff=%.5g row=%d head=%d pos=%d | maxA=%.5g maxB=%.5g badA=%d badB=%d\n",
-                nqy, nh, nc, nr, gmax, rowmax, rowmax/nqy, rowmax%nqy, ma, mb, na, nb);
-    }
-    mlx_array_free(fa2_saved);
     mlx_array_free(pm); mlx_array_free(pl); mlx_array_free(pacc);
     mlx_fast_metal_kernel_config_free(cfg);
     mlx_vector_array_free(inputs);
