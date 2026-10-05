@@ -53,8 +53,8 @@ static int test_rms(void) {
     double mean = g_sum / g_n; printf("  rms_norm_weight   max=%.2e mean=%.2e  %s\n", g_max, mean, g_max < TOL ? "OK" : "FAIL");
     free(x); free(w); free(o); return g_max < TOL;
 }
-static int test_attention_rows(void) {
-    int nh = 4, hd = 16, nkv = 8; float *q = malloc(nh * hd * 4), *kv = malloc(nkv * hd * 4), *snk = malloc(nh * 4), *o = malloc(nh * hd * 4);
+static int attention_case(int nh, int nkv, const char* label) {
+    int hd = 16; float *q = malloc(nh * hd * 4), *kv = malloc(nkv * hd * 4), *snk = malloc(nh * 4), *o = malloc(nh * hd * 4);
     for (int i = 0; i < nh * hd; i++) q[i] = (float)rnd();
     for (int i = 0; i < nkv * hd; i++) kv[i] = (float)rnd();
     for (int i = 0; i < nh; i++) snk[i] = (float)(rnd() * 2.0);
@@ -70,7 +70,7 @@ static int test_attention_rows(void) {
             acc(o[h * hd + e], num / den);
         }
     }
-    double mean = g_sum / g_n; printf("  attention_rows    max=%.2e mean=%.2e  %s\n", g_max, mean, g_max < 1e-3 ? "OK" : "FAIL");
+    double mean = g_sum / g_n; printf("  %-17s max=%.2e mean=%.2e  %s\n", label, g_max, mean, g_max < 1e-3 ? "OK" : "FAIL");
     free(q); free(kv); free(snk); free(o); return g_max < 1e-3;
 }
 static int test_rope(void) {
@@ -189,7 +189,10 @@ int main(void) {
     printf("[arch_lab] tol=%.1e (float vs riferimento double)\n", (double)TOL);
     int ok = 1;
     ok &= test_linear(); ok &= test_rms(); ok &= test_head_rms(); ok &= test_rope();
-    ok &= test_attention_rows(); ok &= test_swiglu(); ok &= test_topk();
+    ok &= attention_case(4, 8, "attention_rows");
+    ok &= attention_case(8, 2, "gqa (03)");
+    ok &= attention_case(8, 1, "mqa (04)");
+    ok &= test_swiglu(); ok &= test_topk();
     ok &= test_swa(); ok &= test_attention_mixed();
     printf("[arch_lab] %s\n", ok ? "TUTTI OK" : "QUALCHE FAIL");
     return ok ? 0 : 1;
