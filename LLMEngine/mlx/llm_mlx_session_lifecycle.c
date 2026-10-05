@@ -8,6 +8,7 @@
 #include "llm_mlx_ops.h"
 #include "llm_mlx_kvpage.h"
 #include "llm_mlx_kvclasses.h"   /* §9.A M10d: classi KV RUNTIME/PERSISTENT */
+#include "llm_mlx_mobj.h"        /* §9.A M10: MEMORY OBJECT runtime manager */
 #include "llm_mlx_kvdisk.h"
 #include "llm_mlx_ngram.h"
 #include "llm_mlx_qwen4exp.h"
@@ -282,6 +283,8 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
         if (kvb == 0) kvb = 1;
         char tag[64]; snprintf(tag, sizeof tag, "session.%p", (void*)s);
         (void)llm_mlx_kvclasses_register(tag, LLM_KVCLASS_RUNTIME, kvb);
+        /* §9.A M10: registra anche nel manager unificato (categoria KV_RUNTIME). */
+        (void)llm_mlx_mobj_register(tag, LLM_MOBJ_KV_RUNTIME, LLM_MOBJ_RESIDENT, kvb);
     }
     /* KV quant: alloco per-layer SOLO se kv_quantize attivo (default OFF -> nessun overhead).
      * KV-quant PER-SESSIONE: lo stato kvq_* vive sulla sessione e viene passato esplicitamente
@@ -449,7 +452,7 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
 
 void llm_mlx_session_destroy(LlmMlxSession* s) {
     /* §9.A M10d: deregistra il KV_RUNTIME della sessione dal manager delle classi KV. */
-    { char tag[64]; snprintf(tag, sizeof tag, "session.%p", (void*)s); (void)llm_mlx_kvclasses_unregister(tag); }
+    { char tag[64]; snprintf(tag, sizeof tag, "session.%p", (void*)s); (void)llm_mlx_kvclasses_unregister(tag); (void)llm_mlx_mobj_unregister(tag); }
     llm_mlx_session_spec_free(s);   /* spec streaming: libera i checkpoint K/V (alias) */
     if (s->deleg_sess) {
         if (s->model && s->model->deleg && s->model->deleg->destroy_session)

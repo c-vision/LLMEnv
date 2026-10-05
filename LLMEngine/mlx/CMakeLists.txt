@@ -371,6 +371,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_kvformat.c
     llm_mlx_kvcost.c
     llm_mlx_kvdag.c
+    llm_mlx_mobj.c
     llm_mlx_qwen3_attn.c
     llm_mlx_weights_io.c
     llm_mlx_session_append.c
@@ -560,4 +561,10 @@ if(LLM_BUILD_DSV4_TESTS)
     target_link_libraries(llm_mlx_kvdag_test PRIVATE llm_ai_mlx)
     target_include_directories(llm_mlx_kvdag_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     set_target_properties(llm_mlx_kvdag_test PROPERTIES LINKER_LANGUAGE CXX)
+
+    # §9.A M10: test model-free del MEMORY OBJECT runtime manager unificato.
+    add_executable(llm_mlx_mobj_test tests/llm_mlx_mobj_test.c)
+    target_link_libraries(llm_mlx_mobj_test PRIVATE llm_ai_mlx)
+    target_include_directories(llm_mlx_mobj_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    set_target_properties(llm_mlx_mobj_test PROPERTIES LINKER_LANGUAGE CXX)
 endif()
