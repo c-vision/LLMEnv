@@ -156,12 +156,13 @@ static int gguf_prefetch_fn(void* ctx, uint32_t layer, uint32_t expert) {
     return llmengine_moe_gguf_store_prefetch(s->store, layer, expert);
 }
 
-static void gguf_route_cb(void* ctx, uint32_t layer, const uint32_t* experts, uint32_t n) {
+static void gguf_route_cb(void* ctx, uint32_t layer, const uint32_t* experts, const float* probs, uint32_t n) {
     GgufSelf* s = (GgufSelf*)ctx;
     if (s->store != NULL) {
         s->store->step++;
         if (s->rt != NULL) s->store->prof = llmengine_moe_profiler(s->rt);   /* K1: trace avviato dopo il load */
-        llmengine_moe_gguf_store_note_route(s->store, layer, experts, n);    /* D19: hotness sul cache reale */
+        /* D19/M7: hotness PESATA per route_prob (un esperto ad alta probabilita' pesa di piu'). */
+        llmengine_moe_gguf_store_note_route_prob(s->store, layer, experts, probs, n);
     }
     if (s->rt != NULL) llmengine_moe_notify_routing(s->rt, layer, experts, n);
 }

@@ -81,6 +81,19 @@ static inline void llmengine_moe_gguf_store_note_route(GgufStore* s, uint32_t la
             s->freq[(size_t)layer * s->f_experts + experts[i]]++;
 }
 
+/* D19/M7: hotness PESATA per route_prob — accumula massa di probabilita' (fixed-point) per
+ * (layer,expert); un esperto scelto con probabilita' alta pesa piu' di uno marginale. Con
+ * `probs==NULL` ricade sul conteggio (come note_route). */
+static inline void llmengine_moe_gguf_store_note_route_prob(GgufStore* s, uint32_t layer,
+                                                            const uint32_t* experts, const float* probs, uint32_t n) {
+    if (s == NULL || s->freq == NULL || layer >= s->f_layers) return;
+    for (uint32_t i = 0; i < n; ++i)
+        if (experts != NULL && experts[i] < s->f_experts) {
+            uint32_t bump = (probs != NULL) ? (uint32_t)(probs[i] * 1024.0f) + 1u : 1u;
+            s->freq[(size_t)layer * s->f_experts + experts[i]] += bump;
+        }
+}
+
 static inline void llmengine_moe_gguf_store_set_hotness(GgufStore* s, int on) {
     if (s != NULL) s->hotness = on ? 1 : 0;
 }

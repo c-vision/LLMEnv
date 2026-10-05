@@ -61,7 +61,10 @@ typedef LlmEngineMoeStatus (*Q3ExpertBlobFn)(void* ctx, uint32_t layer, uint32_t
 /* M6 v2 — feed ROUTER-BASED del prefetch: l'adapter notifica gli esperti scelti dal router per il
  * layer (top-k del decode, unione delle posizioni nel prefill), così il predittore cross-layer può
  * prefetchare il layer successivo (prima l'adapter reale NON notificava → prefetch inattivo). */
-typedef void (*Q3RouteFn)(void* ctx, uint32_t layer, const uint32_t* experts, uint32_t n);
+/* M6/M7: notifica del routing del layer. `probs` = probabilita' del router per gli esperti
+ * selezionati (puo' essere NULL, es. per l'UNIONE del prefill batched): alimenta la hotness
+ * pesata per route_prob. */
+typedef void (*Q3RouteFn)(void* ctx, uint32_t layer, const uint32_t* experts, const float* probs, uint32_t n);
 
 /* ── primitive (testabili in isolamento) ── */
 void llmengine_moe_rmsnorm(const float* x, const float* w, float eps, uint32_t n, float* out);

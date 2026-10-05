@@ -217,7 +217,7 @@ LlmEngineMoeStatus llmengine_moe_qwen3_decode_layer(const Q3Cfg* cfg, const Q3La
             if (z2 > 0.0) for (uint32_t t = 0; t < k; ++t) sel[t] = (float)(sel[t] / z2);
         }
     }
-    if (route_fn != NULL) route_fn(route_ctx, layer, idx, k);   /* M6 v2: feed router-based */
+    if (route_fn != NULL) route_fn(route_ctx, layer, idx, sel, k);   /* M6 v2: feed router-based (+route_prob) */
     for (uint32_t i = 0; i < hidden; ++i) eout[i] = 0.0f;
     for (uint32_t t = 0; t < k; ++t) {
         float* ex = (float*)malloc((size_t)hidden * sizeof(float));
@@ -314,7 +314,7 @@ LlmEngineMoeStatus llmengine_moe_qwen3_prefill_batchfn(const Q3Cfg* cfg, const Q
         if (route_fn != NULL) {   /* M6 v2: notifica l'UNIONE del layer (feed router-based) */
             uint32_t ulist[512]; uint32_t un = 0;
             for (uint32_t e = 0; e < ne && un < 512u; ++e) if (used[e]) ulist[un++] = e;
-            route_fn(route_ctx, l, ulist, un);
+            route_fn(route_ctx, l, ulist, NULL, un);   /* unione prefill: probs non per-esperto */
         }
         for (uint32_t e = 0; e < ne; ++e) {
             if (!used[e]) continue;
