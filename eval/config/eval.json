@@ -1,0 +1,22 @@
+{
+  "engine": {
+    "backend": "mock",
+    "base_url": "http://127.0.0.1:8080",
+    "model": "local",
+    "timeout": 1200
+  },
+  "id_parity": {
+    "max_tokens": 64,
+    "prompts": [
+      "The capital of France is",
+      "1, 2, 3,",
+      "def add(a, b):"
+    ]
+  },
+  "needle": {
+    "n_filler": 40,
+    "needle_key": "PLUMBUS-7741",
+    "needle_pos": 20,
+    "max_tokens": 16
+  }
+}
