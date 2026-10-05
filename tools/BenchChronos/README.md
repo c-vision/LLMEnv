@@ -27,7 +27,7 @@ git clone --depth 1 https://github.com/igurss/mlx-chronos.git vendor/mlx-chronos
 
 ## Uso
 ```bash
-cd LLMEnv/BenchChronos
+cd LLMEnv/tools/BenchChronos
 export PYTHONPATH="$(pwd)/vendor/mlx-chronos:$(pwd)"
 PY=~/ai/env-vllmlx/bin/python
 

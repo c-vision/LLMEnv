@@ -1,8 +1,8 @@
 # LLMEnv — Eval Harness (qualita'/fedelta')
 
 Tool **separato** in `LLMEnv/tools/eval/` (fuori dal CMake, nessun import del motore): valuta la
-**qualita'/fedelta'** di un modello/engine, asse **ortogonale** a `BenchChronos/` e agli [[oracoli]]
-(che misurano le prestazioni).
+**qualita'/fedelta'** di un modello/engine, asse **ortogonale** a `tools/BenchChronos/` e agli
+[[oracoli]] (che misurano le prestazioni).
 
 - **Deterministico** dove possibile: i gate "locali" non usano giudici LLM.
 - **stdlib-only** (urllib/json/argparse): nessuna venv/pacchetto richiesto.
@@ -26,7 +26,7 @@ python3 tools/eval/tests/test_smoke.py
 
 Report JSON + Markdown in `tools/eval/reports/` (gitignorati). Esito = PASS/FAIL complessivo.
 
-> **Relazione con `BenchChronos/`** (l'altro tool Python della repo): `BenchChronos` misura le
+> **Relazione con `tools/BenchChronos/`** (l'altro tool Python della repo): `BenchChronos` misura le
 > **prestazioni** (TTFT/throughput/decode/RAM, protocollo mlx-chronos); questo harness misura la
 > **qualita'/fedelta'** (gate deterministici +, in seguito, HALoGEN/lm-eval). Assi **ortogonali**.
 
