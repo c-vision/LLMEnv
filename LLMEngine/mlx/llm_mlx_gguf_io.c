@@ -140,6 +140,45 @@ char* llm_ai_mlx_gguf_tokenizer_json(const char* path, size_t* out_len) {
 
 void llm_ai_mlx_free_str(char* p) { free(p); }
 
+/* Meta chat del GGUF per il templating del consumer (C#): architettura + chat_template REALE +
+ * eos/bos token STRING (risolti dall'id nel vocabolario). JSON malloc-ato; null per i campi
+ * assenti. Serve a usare il template del MODELLO invece di assumere deepseek_v4 per ogni .gguf
+ * (che su un OLMoE generico produce un eos inesistente -> errore "did not encode to one token"). */
+char* llm_ai_mlx_gguf_chat_meta(const char* path, size_t* out_len) {
+    if (out_len) *out_len = 0;
+    if (path == NULL || *path == '\0') return NULL;
+    LlmEngineMoeGguf g; void* map = NULL; size_t maplen = 0;
+    if (!llm_gguf_open_file(path, &g, &map, &maplen)) return NULL;
+    const char* arch = NULL; const char* tpl = NULL;
+    const char* eos = NULL; const char* bos = NULL;
+    const LlmGgufVal* va = llm_gguf_find_val(&g, "general.architecture");
+    if (va && va->type == GGSTR && va->s) arch = va->s;
+    const LlmGgufVal* vt = llm_gguf_find_val(&g, "tokenizer.chat_template");
+    if (vt && vt->type == GGSTR && vt->s) tpl = vt->s;
+    const char** toks = NULL; size_t* tlens = NULL;
+    long nt = llm_gguf_kv_array_str(&g, "tokenizer.ggml.tokens", &toks, &tlens);
+    const LlmGgufVal* ve = llm_gguf_find_val(&g, "tokenizer.ggml.eos_token_id");
+    const LlmGgufVal* vb = llm_gguf_find_val(&g, "tokenizer.ggml.bos_token_id");
+    if (toks && nt > 0) {
+        if (ve && ve->type != GGARR && ve->u < (uint64_t)nt) eos = toks[ve->u];
+        if (vb && vb->type != GGARR && vb->u < (uint64_t)nt) bos = toks[vb->u];
+    }
+    LlmDsv4TokBuf b; memset(&b, 0, sizeof b);
+    LLM_D4PUT(&b, "{\"architecture\":");
+    if (arch) llm_dsv4_tok_jsonstr(&b, arch, strlen(arch)); else LLM_D4PUT(&b, "null");
+    LLM_D4PUT(&b, ",\"chat_template\":");
+    if (tpl) llm_dsv4_tok_jsonstr(&b, tpl, strlen(tpl)); else LLM_D4PUT(&b, "null");
+    LLM_D4PUT(&b, ",\"eos_token\":");
+    if (eos) llm_dsv4_tok_jsonstr(&b, eos, strlen(eos)); else LLM_D4PUT(&b, "null");
+    LLM_D4PUT(&b, ",\"bos_token\":");
+    if (bos) llm_dsv4_tok_jsonstr(&b, bos, strlen(bos)); else LLM_D4PUT(&b, "null");
+    LLM_D4PUT(&b, "}");
+    free(toks); free(tlens);
+    llm_gguf_close_file(&g, map, maplen);
+    if (out_len) *out_len = b.len;
+    return b.p;
+}
+
 /* LLM_MLX_ERRTRACE=1: error handler MLX con backtrace (diagnostica temporanea). */
 void llm_mlx_err_trace_handler(const char* msg, void* data) {
     (void)data;

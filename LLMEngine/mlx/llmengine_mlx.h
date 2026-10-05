@@ -147,6 +147,11 @@ void llm_ai_mlx_free_model(llm_ai_mlx_model_handle handle);
  *   essere passata a llmtoken_load_json(byte, len). */
 int llm_ai_mlx_gguf_supported(const char* path);
 char* llm_ai_mlx_gguf_tokenizer_json(const char* path, size_t* out_len);
+/* Meta chat del GGUF (JSON malloc-ato, libera con llm_ai_mlx_free_str):
+ * {"architecture":..,"chat_template":..,"eos_token":..,"bos_token":..} (null se assenti).
+ * Il consumer C# lo usa per applicare il template REALE del modello, invece di assumere
+ * deepseek_v4 per ogni .gguf (che su una arch generica da' un eos inesistente). */
+char* llm_ai_mlx_gguf_chat_meta(const char* path, size_t* out_len);
 void llm_ai_mlx_free_str(char* p);
 
 /* Genera fino a max_new_tokens token id in modo autoregressivo (sampling
