@@ -42,11 +42,18 @@ Report JSON + Markdown in `tools/fastllm/eval/reports/` (gitignorati). Esito = P
 ## Stato (slice 1 F1 + slice 2 F2-parziale)
 - [x] runner CLI + adapter engine (mock + HTTP OpenAI-compatibile: chat + completions/logprobs).
 - [x] 4 gate locali deterministici + report JSON/MD: `id_parity`, `needle`, `ppl` (banda), `parity` (vs reference).
-- [x] test con mock (id_parity NON-determinismo, needle, ppl banda, parity skip/match/fail).
+- [x] **golden/regressione** (`--save-golden`/`--golden`/`--golden-tol`).
+- [x] test con mock (id_parity NON-determinismo, needle, ppl banda, parity skip/match/fail, golden roundtrip).
 - [ ] (todo F2) parità **`GEN_IDS`** engine-interna (token-level) e **teacher-forcing** (il server NON
   supporta `echo`/logprobs del prompt → serve un canale engine-side dedicato).
 - [ ] (todo) HALoGEN (subset, verifier locali) (F3); lm-evaluation-harness (F4).
 - [ ] (todo) verifier esterni opt-in + caching (F5).
+
+## Golden / regressione (F6-lite)
+`--save-golden <file>` salva i valori dei gate come **riferimento**; `--golden <file>` confronta la run
+col riferimento (`bool` esatto; numerico `|Δ|/max(1,|b|) <= --golden-tol`, default `0.05`). Serve a
+**rilevare regressioni di qualità** dopo un'ottimizzazione (stesso modello/opzioni): salvi il golden sul
+baseline, poi confronti dopo il cambiamento.
 
 ## Layout
 ```

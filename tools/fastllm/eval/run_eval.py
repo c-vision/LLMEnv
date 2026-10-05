@@ -31,6 +31,41 @@ def load_config(path):
     return {}
 
 
+def _gate_summary(report):
+    return {g["gate"]: {"metric": g["metric"], "value": g["value"]} for g in report["gates"]}
+
+
+def save_golden(report, path):
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"suite": report["suite"], "engine": report["engine"], "gates": _gate_summary(report)},
+                  f, indent=2)
+
+
+def compare_golden(report, golden, tol):
+    """Confronta i gate della run col golden. bool = esatto; numerico = |Δ|/max(1,|b|) <= tol."""
+    cur = _gate_summary(report)
+    rows, ok = [], True
+    for name, g in golden.get("gates", {}).items():
+        b = g.get("value")
+        if name not in cur:
+            rows.append({"gate": name, "golden": b, "current": None, "ok": False, "why": "gate assente"})
+            ok = False
+            continue
+        a = cur[name]["value"]
+        if isinstance(a, bool) and isinstance(b, bool):
+            good = (a == b)
+        elif isinstance(a, (int, float)) and isinstance(b, (int, float)) and a is not None and b is not None:
+            good = abs(float(a) - float(b)) / max(1.0, abs(float(b))) <= tol
+        else:
+            good = (a == b)
+        rows.append({"gate": name, "golden": b, "current": a, "ok": good})
+        ok = ok and good
+    return {"ok": ok, "tolerance": tol, "rows": rows}
+
+
 def run_gate(modname, client, cfg, reps, ref_client=None):
     mod = importlib.import_module(f"suites.local.{modname}")
     gcfg = dict(cfg.get(modname, {}))
@@ -56,6 +91,9 @@ def main(argv=None):
     ap.add_argument("--base-url", default=None)
     ap.add_argument("--model", default=None)
     ap.add_argument("--reps", type=int, default=1)
+    ap.add_argument("--golden", default=None, help="confronta i gate col report di riferimento (regression)")
+    ap.add_argument("--save-golden", default=None, help="salva il report corrente come golden")
+    ap.add_argument("--golden-tol", type=float, default=0.05, help="tolleranza relativa per i gate numerici")
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -90,6 +128,21 @@ def main(argv=None):
         report["pass"] = report["pass"] and r["pass"]
         mark = "PASS" if r["pass"] else "FAIL"
         print(f"[eval] {r['gate']:12s} {mark}  ({r['metric']}={r['value']})")
+
+    if args.golden:
+        try:
+            with open(args.golden, encoding="utf-8") as f:
+                gres = compare_golden(report, json.load(f), args.golden_tol)
+            report["golden"] = gres
+            report["pass"] = report["pass"] and gres["ok"]
+            bad = [r["gate"] for r in gres["rows"] if not r["ok"]]
+            print(f"[eval] golden {'PASS' if gres['ok'] else 'FAIL'}"
+                  + (f" (gate diversi: {bad})" if bad else ""))
+        except Exception as e:  # noqa: BLE001
+            print(f"[eval] golden errore: {e}", file=sys.stderr)
+    if args.save_golden:
+        save_golden(report, args.save_golden)
+        print(f"[eval] golden salvato: {args.save_golden}")
 
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     jpath = os.path.join(report_dir, f"eval-{args.suite}-{stamp}.json")

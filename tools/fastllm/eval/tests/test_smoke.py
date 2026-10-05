@@ -53,6 +53,16 @@ class Smoke(unittest.TestCase):
         r2 = ppl.run(MockClient(), {"max_tokens": 8, "band": [0.29, 0.30]})
         self.assertTrue(r2["pass"] or r2["value"] > 0.28, f"ppl atteso ~0.288: {r2}")
 
+    def test_golden_roundtrip(self):
+        with tempfile.TemporaryDirectory() as td:
+            g = os.path.join(td, "golden.json")
+            rc = run_eval.main(["--suite", "local", "--backend", "mock", "--report", td, "--save-golden", g])
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(g))
+            # la stessa run confrontata col golden -> PASS
+            rc2 = run_eval.main(["--suite", "local", "--backend", "mock", "--report", td, "--golden", g])
+            self.assertEqual(rc2, 0, "la run identica al golden deve passare")
+
     def test_parity_skip_and_match(self):
         # senza reference -> saltato (pass)
         self.assertTrue(parity.run(MockClient(), {"prompts": ["p"]})["pass"])
