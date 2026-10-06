@@ -66,6 +66,16 @@ if [ -f "$HERE/llm_dsv4_batch_moe_oracle.c" ]; then
   else echo "FAIL llm_dsv4_batch_moe_oracle:"; sed -n '1,8p' "/tmp/build_ds4moe.err"; fi
 fi
 
+# llm_dsv4_decode_fn_bench: bench per-funzione del decode DS4 (model-free, pesi sintetici) via dlopen.
+if [ -f "$HERE/llm_dsv4_decode_fn_bench.c" ]; then
+  DSINC=(-I"$ROOT/LLMEngine/mlx/ds4-slow" -I"$ROOT/LLMEngine/mlx/ds41-native" -I"$ROOT/LLMCodec/include")
+  if clang -std=c17 -O2 -Wno-deprecated-declarations $INC "${DSINC[@]}" "$HERE/llm_dsv4_decode_fn_bench.c" \
+       -L"$B" -lllmcodec_ggml -L"$B/llmengine_mlx" -lllm_ai_mlx -Wl,-rpath,"$B/llmengine_mlx" -Wl,-rpath,"$B" \
+       "${STATIC[@]}" "${FW[@]}" -o "$HERE/llm_dsv4_decode_fn_bench" 2>"/tmp/build_ds4fn.err"; then
+    echo "OK   llm_dsv4_decode_fn_bench"
+  else echo "FAIL llm_dsv4_decode_fn_bench:"; sed -n '1,6p' "/tmp/build_ds4fn.err"; fi
+fi
+
 # attn_roof: il driver .c (C) + alias .cpp (C++) -> link insieme.
 if [ -f "$HERE/llm_mlx_attn_roof_probe.c" ]; then
   if clang -std=c17 -O2 -Wno-deprecated-declarations $INC -c "$HERE/llm_mlx_attn_roof_probe.c" -o /tmp/attn_roof.o 2>/tmp/build_attn.err \
