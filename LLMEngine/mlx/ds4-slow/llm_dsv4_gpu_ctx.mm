@@ -424,6 +424,6 @@ int llm_dsv4_gpu_attn_project_try(const LlmDsv4Config* c, const LlmDsv4LayerWeig
 int llm_dsv4_gpu_attn_finish_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                  float* heads, int pos, float* out) {
     if (!g_on) return 0;
-    llm_dsv4_metal_set_op(1);
+    llm_dsv4_metal_set_op(3);   /* op 3 = attn FINISH/out (separato dai project+mid, op 1) */
     { int r = llm_dsv4_gpu_attn_finish(&g_attn, c, L, il, heads, pos, out) ? 1 : 0; llm_dsv4_metal_set_op(0); return r; }
 }

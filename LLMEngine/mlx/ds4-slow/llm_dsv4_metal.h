@@ -151,6 +151,7 @@ double llm_dsv4_metal_gpu_total_ms(void);  /* timestamp GPU di tutte le classi, 
 long llm_dsv4_metal_dispatches(void);   /* TEMP: conteggio dispatch Metal (cumulativo) */
 long llm_dsv4_metal_command_buffers(void); /* TEMP: CB completati (cumulativo) */
 long llm_dsv4_metal_command_buffers_op(int op); /* TEMP: CB completati per classe (1=attn 2=moe 0=altro) */
+double llm_dsv4_metal_gpu_ms_op(int op);  /* TEMP: GPU-reale per classe (1=attn-proj+mid 3=attn-finish 2=moe) */
 long llm_dsv4_metal_res_commits(void);  /* TEMP: conteggio commit del residency set (cumulativo) */
 long llm_dsv4_metal_res_adds(void);     /* TEMP: conteggio addAllocation nel residency set (cumulativo) */
 /* Command buffer CONDIVISO: begin apre, end committa+aspetta UNA volta. Le funzioni attn che trovano
