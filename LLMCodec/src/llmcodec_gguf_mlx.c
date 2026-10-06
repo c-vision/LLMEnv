@@ -264,9 +264,14 @@ int llmcodec_mlx_to_gguf_ex(const char* mlx_dir, const char* out_path, int ggml_
                           (bl && ln > bl && strcmp(t->name+ln-bl, rm->bias_suffix) == 0)) continue; }
             int stack = rm ? llmcodec_rolemap_stack(rm, t->name) : 0;
             if (stack && getenv("LLMCODEC_GGUF_NO_EXPERTS")) continue;   /* check rapido dei nomi (no encode esperti) */
-            /* GGUF del modello MAIN: i sotto-modelli MTP/Vision non appartengono (artefatti separati). */
+            /* GGUF del modello MAIN: i sotto-modelli MTP/Vision/Audio non appartengono (artefatti
+             * separati). `vision_tower.`/`vision_model.` càpita o come prefisso o dopo
+             * `model.`/`language_model.`, quindi si usa strstr (i sottografi collisionerebbero coi
+             * nomi LM se mappati dal role map). */
             if (strncmp(t->name,"mtp.",4)==0 || strncmp(t->name,"vision.",7)==0 ||
                 strncmp(t->name,"aligner.",8)==0 || strncmp(t->name,"image_",6)==0) continue;
+            if (strstr(t->name,"vision_tower") || strstr(t->name,"vision_model") ||
+                strstr(t->name,"audio_tower") || strstr(t->name,"vision_encoder")) continue;
             if (only_l1 >= 0 && strstr(t->name, "layers.") != NULL) { int L = src_layer_of(t->name); if (L < only_l0 || L >= only_l1) continue; }
             uint8_t* raw = llmcodec_slurp_range(sp, base + t->begin, t->end - t->begin);
             if (raw == NULL) continue;
