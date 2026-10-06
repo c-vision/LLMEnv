@@ -105,5 +105,33 @@ int llmengine_moe_quant_alloc_bits_min(const uint64_t* nparams, const double* re
         out_cand[best_i]++;
         bits_now += best_cost;
     }
-    return infeasible ? -2 : 0;
+    if (infeasible) return -2;
+    /* §6.1 S3 — DEVIAZIONE VERSO IL BASSO (swap): con l'ancora = baseline non c'e' slack per
+     * promuovere; allora si SCENDE di un gradino su un tensore poco sensibile (liberando budget)
+     * per SALIRE su uno piu' sensibile, se il guadagno netto e' positivo e il budget resta
+     * rispettato. Local search a passi limitati. Cosi' l'allocazione puo' BATTERE la baseline a
+     * PARI bpw (non solo eguagliarla). Il pavimento resta un'ANCORA, non un vincolo rigido. */
+    for (int pass = 0; pass < 128; ++pass) {
+        int bi = -1, bj = -1; double best = 0.0, bcost = 0.0;
+        for (int i = 0; i < n; ++i) {
+            int ci = out_cand[i]; if (ci + 1 >= ncand) continue;
+            double gi = rel[(size_t)i*ncand + ci] - rel[(size_t)i*ncand + ci + 1];
+            if (gi <= 0.0) continue;
+            double cost_i = (double)nparams[i] * (double)(cand[ci + 1] - cand[ci]);
+            for (int j = 0; j < n; ++j) {
+                int cj = out_cand[j]; if (cj - 1 < 0) continue;
+                double loss_j = rel[(size_t)j*ncand + cj - 1] - rel[(size_t)j*ncand + cj]; /* >=0 */
+                double freed = (double)nparams[j] * (double)(cand[cj] - cand[cj - 1]);
+                if (cost_i > freed + 1e-9) continue;
+                double net = gi - loss_j;
+                if (net > best) { best = net; bi = i; bj = j; bcost = cost_i; }
+            }
+        }
+        if (bi < 0 || bi == bj) break;
+        out_cand[bi]++; out_cand[bj]--;   /* budget netto <= 0: resta entro il target */
+        bits_now += (double)nparams[bi]*(cand[out_cand[bi]]-cand[out_cand[bi]-1])
+                  - (double)nparams[bj]*(cand[out_cand[bj]+1]-cand[out_cand[bj]]);
+        (void)bcost;
+    }
+    return 0;
 }

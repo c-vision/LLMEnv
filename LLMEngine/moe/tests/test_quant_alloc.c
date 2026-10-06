@@ -125,6 +125,28 @@ int main(void) {
           CHECK(llmengine_moe_quant_alloc_bits_min(np, rel, 2, 3, cand, badmn, 5.0, oc) < 0); }
     }
 
+    /* (e) SWAP / deviazione verso il basso (S3): ancora = floor (6 bit per tutti, target 6.0 =
+     * il pavimento, nessuno slack). Il tensore 0 e' insensibile, il 2 sensibilissimo: lo swap
+     * SCENDE il 0 (6->4, libera 200) e SALE il 2 (6->8, costa 200) -> guadagno netto > 0 A PARI
+     * bpw. Verifica: oc = {1,2,3} e media bit ancora 6.0. */
+    {
+        const int cand[4] = {2, 4, 6, 8};
+        uint64_t np[3] = {100,100,100};
+        double rel[12] = {
+            0.100, 0.099, 0.0980, 0.0975,   /* tensore 0: insensibile (guadagni minimi) */
+            0.100, 0.050, 0.0200, 0.0150,   /* tensore 1: media */
+            0.100, 0.050, 0.0200, 0.0010    /* tensore 2: sensibilissimo in alto */
+        };
+        const int mn[3] = {2,2,2};          /* ancora = 6 bit per tutti */
+        int oc[3];
+        CHECK(llmengine_moe_quant_alloc_bits_min(np, rel, 3, 4, cand, mn, 6.0, oc) == 0);
+        /* lo swap promuove il SENSIBILE (2) e retrocede l'INSENSIBILE (0), a pari bpw; puo'
+         * cascatare (piu' di un gradino), quindi si verifica la direzione, non il valore esatto. */
+        CHECK(oc[2] == 3);          /* il sensibile e' salito al massimo */
+        CHECK(oc[0] <= 1);          /* l'insensibile e' sceso sotto l'ancora */
+        double avg = (cand[oc[0]] + cand[oc[1]] + cand[oc[2]]) / 3.0; CHECK(avg <= 6.0 + 1e-9);
+    }
+
     if (fails) { fprintf(stderr, "test_quant_alloc: %d FAIL\n", fails); return 1; }
     printf("test_quant_alloc: OK\n");
     return 0;
