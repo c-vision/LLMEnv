@@ -807,6 +807,62 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    float acc = 0.f; for (uint i = tid; i < n; i += 32u) acc += wr[i] * X[i];\n"
 "    acc = simd_sum(acc); if (tid == 0u) O[row] = acc;\n"
 "}\n"
+/* Varianti PARALLELE (1 TG da 128/256 thread) dei kernel mHC/route del decode (solo per il tail leggero hcroute): gli originali girano
+ * con UN solo simdgroup / un thread (route 0.33 ms, rms 0.16 ms, gemv fn 0.15 ms per layer). Ordine di somma diverso -> non bit-esatti. */
+"kernel void dsv4_rms_no_w_p(device const float* X [[buffer(0)]], device float* O [[buffer(1)]],\n"
+"    constant uint* P [[buffer(2)]], constant float* CF [[buffer(3)]],\n"
+"    uint tid [[thread_index_in_threadgroup]], ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {\n"
+"    threadgroup float part[8]; const uint n = P[0]; const float eps = CF[0];\n"
+"    float s = 0.f; for (uint i = tid; i < n; i += 256u) { float v = X[i]; s += v*v; }\n"
+"    s = simd_sum(s); if (lane == 0) part[sg] = s; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    float t = 0.f; for (uint k = 0; k < 8u; k++) t += part[k];\n"
+"    const float sc = 1.f / sqrt(t / (float)n + eps);\n"
+"    for (uint i = tid; i < n; i += 256u) O[i] = X[i] * sc;\n"
+"}\n"
+"kernel void dsv4_rms_w_p(device const float* X [[buffer(0)]], device const float* W [[buffer(1)]],\n"
+"    device float* O [[buffer(2)]], constant uint* P [[buffer(3)]], constant float* CF [[buffer(4)]],\n"
+"    uint tid [[thread_index_in_threadgroup]], ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {\n"
+"    threadgroup float part[8]; const uint n = P[0]; const float eps = CF[0];\n"
+"    float s = 0.f; for (uint i = tid; i < n; i += 256u) { float v = X[i]; s += v*v; }\n"
+"    s = simd_sum(s); if (lane == 0) part[sg] = s; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    float t = 0.f; for (uint k = 0; k < 8u; k++) t += part[k];\n"
+"    const float scale = 1.f / sqrt(t / (float)n + eps);\n"
+"    for (uint i = tid; i < n; i += 256u) O[i] = X[i] * scale * W[i];\n"
+"}\n"
+"kernel void dsv4_gemv_f32_p(device const float* W [[buffer(0)]], device const float* X [[buffer(1)]],\n"
+"    device float* O [[buffer(2)]], constant uint* P [[buffer(3)]],\n"
+"    uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]], ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {\n"
+"    threadgroup float part[4]; const uint n = P[0]; const uint lead = P[1]; device const float* wr = W + lead + (ulong)row * n;\n"
+"    float acc = 0.f; for (uint i = tid; i < n; i += 128u) acc += wr[i] * X[i];\n"
+"    acc = simd_sum(acc); if (lane == 0) part[sg] = acc; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    if (tid == 0u) O[row] = part[0] + part[1] + part[2] + part[3];\n"
+"}\n"
+/* route con UN TG da 256 thread (n_expert <= 256): stessa semantica di dsv4_route (a pari score vince l'indice minore). */
+"kernel void dsv4_route_p(device const float* LOGITS [[buffer(0)]], device const float* BIAS [[buffer(1)]],\n"
+"    device int* SELECTED [[buffer(2)]], device float* WEIGHT [[buffer(3)]],\n"
+"    constant uint* P [[buffer(4)]], constant float* CF [[buffer(5)]],\n"
+"    uint tid [[thread_index_in_threadgroup]], ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {\n"
+"    threadgroup float tv[8]; threadgroup uint ti[8]; threadgroup float tp[256]; threadgroup int tsel[16];\n"
+"    const uint n_expert = P[0], used = P[1], has_bias = P[2]; const float scale = CF[0];\n"
+"    const bool valid = tid < n_expert; float p = 0.f, sc = -INFINITY;\n"
+"    if (valid) { float x = LOGITS[tid]; float sp = (x > 20.f) ? x : ((x < -20.f) ? exp(x) : log(1.f + exp(x))); p = sqrt(sp); sc = p + (has_bias ? BIAS[tid] : 0.f); }\n"
+"    tp[tid] = p; bool taken = false;\n"
+"    for (uint k = 0; k < used; k++) {\n"
+"        const float v = (valid && !taken) ? sc : -INFINITY;\n"
+"        const float m = simd_max(v); const uint cand = (valid && !taken && v == m) ? tid : 0xffffffffu; const uint ci = simd_min(cand);\n"
+"        if (lane == 0) { tv[sg] = m; ti[sg] = ci; }\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        float bm = tv[0]; uint bi = ti[0];\n"
+"        for (uint g = 1; g < 8u; g++) { if (tv[g] > bm || (tv[g] == bm && ti[g] < bi)) { bm = tv[g]; bi = ti[g]; } }\n"
+"        if (tid == bi) taken = true; if (tid == 0u) tsel[k] = (int)bi;\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    }\n"
+"    if (tid == 0u) {\n"
+"        float sum = 0.f; for (uint i = 0; i < used; i++) sum += tp[tsel[i]];\n"
+"        if (sum < 6.103515625e-5f) sum = 6.103515625e-5f;\n"
+"        for (uint i = 0; i < used; i++) { SELECTED[i] = tsel[i]; WEIGHT[i] = tp[tsel[i]] / sum * scale; }\n"
+"    }\n"
+"}\n"
 "kernel void dsv4_hc_sinkhorn(device const float* MIX [[buffer(0)]], device const float* SCALE [[buffer(1)]],\n"
 "    device const float* BASE [[buffer(2)]], device float* OUT [[buffer(3)]],\n"
 "    constant uint* P [[buffer(4)]], constant float* CF [[buffer(5)]]) {\n"
@@ -1598,7 +1654,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_rope_rows_inv, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_comp_chain, pso_rope_ev, pso_iscore_t, pso_iscore_t_mma, pso_itopk_t, pso_apart_t, pso_apart_mma, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
-    id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
+    id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_rms_no_w_p, pso_rms_w_p, pso_gemv_p, pso_route_p, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
     id<MTLComputePipelineState> pso_route;   /* router su GPU (softplus/top-k) */
     id<MTLComputePipelineState> pso_addr_pair, pso_addr_sum6; /* MoE via tabella indirizzi (ds4 addr) */
     id<MTLComputePipelineState> pso_tbl_pair, pso_tbl_sum6;  /* MoE via argument buffer (ds4 table) */
@@ -1823,6 +1879,10 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     b->pso_hc_sum   = f18 ? [dev newComputePipelineStateWithFunction:f18 error:&err] : nil;
     b->pso_hc_post  = f19 ? [dev newComputePipelineStateWithFunction:f19 error:&err] : nil;
     b->pso_route    = f20 ? [dev newComputePipelineStateWithFunction:f20 error:&err] : nil;
+    { const char* nm[4] = { "dsv4_rms_no_w_p", "dsv4_rms_w_p", "dsv4_gemv_f32_p", "dsv4_route_p" };
+      id<MTLComputePipelineState>* dst[4] = { &b->pso_rms_no_w_p, &b->pso_rms_w_p, &b->pso_gemv_p, &b->pso_route_p };
+      for (int i = 0; i < 4; i++) { id<MTLFunction> f = [lib newFunctionWithName:[NSString stringWithUTF8String:nm[i]]];
+          *dst[i] = f ? [dev newComputePipelineStateWithFunction:f error:&err] : nil; if (f) [f release]; } }
     b->pso_addr_pair = f21 ? [dev newComputePipelineStateWithFunction:f21 error:&err] : nil;
     b->pso_addr_sum6 = f22 ? [dev newComputePipelineStateWithFunction:f22 error:&err] : nil;
     id<MTLFunction> f23 = [lib newFunctionWithName:@"dsv4_slots6_tbl_pair"];
@@ -3996,6 +4056,7 @@ void llm_dsv4_metal_argbuf_free(void* handle) {
  * dell'attn (che ha lasciato l'uscita in sx[5]). Download rimandati a shared_end. 0 = ok; <0 = NON encodato (nessun effetto). */
 int llm_dsv4_metal_attn_hc_route(LlmDsv4Metal* b, const LlmDsv4HcRouteParams* q) {
     if (!b || !q || !b->sactive) return -1;
+    if (!b->pso_rms_no_w_p || !b->pso_rms_w_p || !b->pso_gemv_p || !b->pso_route_p || q->n_expert > 256) return -1;   /* varianti parallele */
     if (!b->pso_hc_post || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_rms_w || !b->pso_route) return -1;
     if (!q->res || !q->post_attn || !q->comb_attn || !q->fn || !q->scale || !q->base || !q->norm_w || !q->router_w ||
         !q->after || !q->normed || !q->split || !q->sel || !q->rw) return -1;
@@ -4012,17 +4073,23 @@ int llm_dsv4_metal_attn_hc_route(LlmDsv4Metal* b, const LlmDsv4HcRouteParams* q)
     id<MTLBuffer> LOGI = dsv4_scratch(b, &b->sx[28], &b->sx_cap[28], (size_t)q->n_expert*sizeof(float));
     id<MTLBuffer> SEL  = dsv4_scratch(b, &b->sx[29], &b->sx_cap[29], (size_t)q->used*sizeof(int));
     id<MTLBuffer> RW   = dsv4_scratch(b, &b->sx[30], &b->sx_cap[30], (size_t)q->used*sizeof(float));
-    size_t fn_lead = 0, rtw_lead = 0;
-    id<MTLBuffer> FN  = dsv4_view(b, q->fn, (size_t)SIZE*HCD*sizeof(float), &fn_lead);
-    id<MTLBuffer> RTW = dsv4_view(b, q->router_w, (size_t)q->n_expert*D*sizeof(float), &rtw_lead);
-    id<MTLBuffer> RES   = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->res, (size_t)HC*D*sizeof(float));
-    id<MTLBuffer> POST  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->post_attn, (size_t)HC*sizeof(float));
-    id<MTLBuffer> COMB  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->comb_attn, (size_t)HC*HC*sizeof(float));
-    id<MTLBuffer> SCALE = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->scale, 3*sizeof(float));
-    id<MTLBuffer> BASE  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->base, (size_t)SIZE*sizeof(float));
-    id<MTLBuffer> NORMW = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->norm_w, (size_t)D*sizeof(float));
-    id<MTLBuffer> EXPB  = q->exp_probs_b ? (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->exp_probs_b, (size_t)q->n_expert*sizeof(float)) : nil;
+    /* pesi statici: viste no-copy in CACHE (una volta per puntatore, offset = lead); per-chiamata: solo scratch + memcpy */
+    size_t fn_lead = 0, rtw_lead = 0, sc_lead = 0, bs_lead = 0, nw_lead = 0, eb_lead = 0;
+    id<MTLBuffer> FN  = dsv4_view_cached(b, q->fn, (size_t)SIZE*HCD*sizeof(float), &fn_lead);
+    id<MTLBuffer> RTW = dsv4_view_cached(b, q->router_w, (size_t)q->n_expert*D*sizeof(float), &rtw_lead);
+    id<MTLBuffer> SCALE = dsv4_view_cached(b, q->scale, 3*sizeof(float), &sc_lead);
+    id<MTLBuffer> BASE  = dsv4_view_cached(b, q->base, (size_t)SIZE*sizeof(float), &bs_lead);
+    id<MTLBuffer> NORMW = dsv4_view_cached(b, q->norm_w, (size_t)D*sizeof(float), &nw_lead);
+    id<MTLBuffer> EXPB  = q->exp_probs_b ? dsv4_view_cached(b, q->exp_probs_b, (size_t)q->n_expert*sizeof(float), &eb_lead) : nil;
+    id<MTLBuffer> RES   = dsv4_scratch(b, &b->sx[88], &b->sx_cap[88], (size_t)HC*D*sizeof(float));
+    id<MTLBuffer> POST  = dsv4_scratch(b, &b->sx[89], &b->sx_cap[89], (size_t)HC*sizeof(float));
+    id<MTLBuffer> COMB  = dsv4_scratch(b, &b->sx[90], &b->sx_cap[90], (size_t)HC*HC*sizeof(float));
     int rc = (ATTN&&NXT&&FLAT&&MIXES&&SPLIT&&HIN&&NRM&&LOGI&&SEL&&RW&&FN&&RTW&&RES&&POST&&COMB&&SCALE&&BASE&&NORMW) ? 0 : -2;
+    if (rc == 0) {
+        memcpy([RES contents], q->res, (size_t)HC*D*sizeof(float));
+        memcpy([POST contents], q->post_attn, (size_t)HC*sizeof(float));
+        memcpy([COMB contents], q->comb_attn, (size_t)HC*HC*sizeof(float));
+    }
     if (rc == 0) {
         id<MTLComputeCommandEncoder> e = b->se;
         /* hc_post_attn: NXT = post*ATTN + comb*RES */
@@ -4032,35 +4099,35 @@ int llm_dsv4_metal_attn_hc_route(LlmDsv4Metal* b, const LlmDsv4HcRouteParams* q)
         { uint32_t P[2]={D,HC}; [e setBytes:P length:sizeof(P) atIndex:5]; }
         [e dispatchThreadgroups:MTLSizeMake((HC*D+63)/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
         /* mhc_pre_ffn: rms_no_w(NXT)->FLAT; gemv(fn)->MIXES; sinkhorn->SPLIT; hc_sum->HIN; rms_w->NRM */
-        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_rms_no_w];
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_rms_no_w_p];
         [e setBuffer:NXT offset:0 atIndex:0]; [e setBuffer:FLAT offset:0 atIndex:1];
         { uint32_t P[1]={HCD}; [e setBytes:P length:sizeof(P) atIndex:2]; float cf[1]={q->rms_eps}; [e setBytes:cf length:sizeof(cf) atIndex:3]; }
-        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
-        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_f32];
+        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_p];
         [e setBuffer:FN offset:0 atIndex:0]; [e setBuffer:FLAT offset:0 atIndex:1]; [e setBuffer:MIXES offset:0 atIndex:2];
         { uint32_t P[2]={HCD,(uint32_t)(fn_lead/sizeof(float))}; [e setBytes:P length:sizeof(P) atIndex:3]; }
-        [e dispatchThreadgroups:MTLSizeMake(SIZE,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        [e dispatchThreadgroups:MTLSizeMake(SIZE,1,1) threadsPerThreadgroup:MTLSizeMake(128,1,1)];
         g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_sinkhorn];
-        [e setBuffer:MIXES offset:0 atIndex:0]; [e setBuffer:SCALE offset:0 atIndex:1]; [e setBuffer:BASE offset:0 atIndex:2]; [e setBuffer:SPLIT offset:0 atIndex:3];
+        [e setBuffer:MIXES offset:0 atIndex:0]; [e setBuffer:SCALE offset:(NSUInteger)sc_lead atIndex:1]; [e setBuffer:BASE offset:(NSUInteger)bs_lead atIndex:2]; [e setBuffer:SPLIT offset:0 atIndex:3];
         { uint32_t P[2]={HC,(uint32_t)q->sinkhorn_iters}; [e setBytes:P length:sizeof(P) atIndex:4]; float cf[1]={q->hc_eps}; [e setBytes:cf length:sizeof(cf) atIndex:5]; }
         [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
         g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hc_sum];
         [e setBuffer:NXT offset:0 atIndex:0]; [e setBuffer:SPLIT offset:0 atIndex:1]; [e setBuffer:HIN offset:0 atIndex:2];
         { uint32_t P[2]={D,HC}; [e setBytes:P length:sizeof(P) atIndex:3]; }
         [e dispatchThreadgroups:MTLSizeMake((D+63)/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
-        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_rms_w];
-        [e setBuffer:HIN offset:0 atIndex:0]; [e setBuffer:NORMW offset:0 atIndex:1]; [e setBuffer:NRM offset:0 atIndex:2];
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_rms_w_p];
+        [e setBuffer:HIN offset:0 atIndex:0]; [e setBuffer:NORMW offset:(NSUInteger)nw_lead atIndex:1]; [e setBuffer:NRM offset:0 atIndex:2];
         { uint32_t P[1]={D}; [e setBytes:P length:sizeof(P) atIndex:3]; float cf[1]={q->rms_eps}; [e setBytes:cf length:sizeof(cf) atIndex:4]; }
-        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
         /* route: logits = gemv_f32(router, NRM); SEL/RW */
-        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_f32];
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_p];
         [e setBuffer:RTW offset:0 atIndex:0]; [e setBuffer:NRM offset:0 atIndex:1]; [e setBuffer:LOGI offset:0 atIndex:2];
         { uint32_t P[2]={D,(uint32_t)(rtw_lead/sizeof(float))}; [e setBytes:P length:sizeof(P) atIndex:3]; }
-        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)q->n_expert,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
-        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_route];
-        [e setBuffer:LOGI offset:0 atIndex:0]; [e setBuffer:(EXPB?EXPB:SCALE) offset:0 atIndex:1]; [e setBuffer:SEL offset:0 atIndex:2]; [e setBuffer:RW offset:0 atIndex:3];
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)q->n_expert,1,1) threadsPerThreadgroup:MTLSizeMake(128,1,1)];
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_route_p];
+        [e setBuffer:LOGI offset:0 atIndex:0]; [e setBuffer:(EXPB?EXPB:SCALE) offset:(NSUInteger)(EXPB?eb_lead:sc_lead) atIndex:1]; [e setBuffer:SEL offset:0 atIndex:2]; [e setBuffer:RW offset:0 atIndex:3];
         { uint32_t P[3]={(uint32_t)q->n_expert,(uint32_t)q->used,(EXPB?1u:0u)}; [e setBytes:P length:sizeof(P) atIndex:4]; float cf[1]={q->expert_scale}; [e setBytes:cf length:sizeof(cf) atIndex:5]; }
-        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
         /* download dopo il wait unico (shared_end) */
         #define DSV4_PEND(DST, SRC, NB) do { b->pend_dst[b->pend_n] = (DST); b->pend_src[b->pend_n] = (SRC); b->pend_nb[b->pend_n] = (NB); b->pend_n++; } while (0)
         DSV4_PEND(q->after,  NXT,   (size_t)HC*D*sizeof(float));
@@ -4070,9 +4137,6 @@ int llm_dsv4_metal_attn_hc_route(LlmDsv4Metal* b, const LlmDsv4HcRouteParams* q)
         DSV4_PEND(q->rw,     RW,    (size_t)q->used*sizeof(float));
         #undef DSV4_PEND
     }
-    /* i buffer piccoli sono trattenuti dalla cb finche' non completa */
-    [RES release]; [POST release]; [COMB release]; [SCALE release]; [BASE release]; [NORMW release]; if (EXPB) [EXPB release];
-    if (FN) [FN release]; if (RTW) [RTW release];
     return rc;
 }
 
