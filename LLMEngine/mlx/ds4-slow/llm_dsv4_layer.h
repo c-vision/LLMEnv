@@ -37,15 +37,38 @@ static inline void llm_dsv4_pf_dump(const char* tag) {
             tag, g_pf_layers, g_pf_t1, g_pf_tmoe, _io, _mm, g_pf_t3,
             g_pf_hc_gpu, g_pf_hc_cpu, g_pf_attn_gpu, g_pf_attn_cpu, g_pf_moe_batch, g_pf_moe_cpu);
 }
-static inline void llm_dsv4_pf_decode_dump(int ntok) {
+typedef struct {
+    double gpu_total, gpu_attn, gpu_moe, route, store, metal;
+    long command_buffers, dispatch, rescommit, resadd;
+} LlmDsv4DecodeProfileSnapshot;
+
+static inline LlmDsv4DecodeProfileSnapshot llm_dsv4_pf_decode_snapshot(void) {
+    LlmDsv4DecodeProfileSnapshot s = {0};
+    s.gpu_total = llm_dsv4_metal_gpu_total_ms();
+    llm_dsv4_metal_gpu_ms(&s.gpu_attn, &s.gpu_moe);
+    llm_dsv4_gpu_moe_pt_prof(&s.route, &s.store, &s.metal);
+    s.command_buffers = llm_dsv4_metal_command_buffers();
+    s.dispatch = llm_dsv4_metal_dispatches();
+    s.rescommit = llm_dsv4_metal_res_commits();
+    s.resadd = llm_dsv4_metal_res_adds();
+    return s;
+}
+
+static inline void llm_dsv4_pf_decode_dump(int ntok, LlmDsv4DecodeProfileSnapshot before, double wall_ms) {
     if (!llm_dsv4_pf_on() || ntok <= 0) return;
-    double ga = 0, gm = 0; llm_dsv4_metal_gpu_ms(&ga, &gm);   /* GPU reale (cumulativo) */
-    double pr = 0, ps = 0, pm = 0; llm_dsv4_gpu_moe_pt_prof(&pr, &ps, &pm);   /* glue host MoE (cumulativo) */
-    long nd = llm_dsv4_metal_dispatches();
-    long nc = llm_dsv4_metal_res_commits();
-    long na = llm_dsv4_metal_res_adds();
-    fprintf(stderr, "[dsv4-decode] CPU attn=%.1f moe=%.1f | GPU attn=%.1f moe=%.1f | MoEhost route=%.1f store=%.1f metal=%.1f | dispatch=%ld rescommit=%ld resadd=%ld (n=%d tok, %.1f ms/tok)\n",
-            g_pf_d_attn, g_pf_d_moe, ga, gm, pr, ps, pm, nd, nc, na, ntok, (g_pf_d_attn + g_pf_d_moe) / (double)ntok);
+    LlmDsv4DecodeProfileSnapshot after = llm_dsv4_pf_decode_snapshot();
+    /* wall-GPU e' solo un residuo: include wait/idle e non equivale a tempo CPU puro. */
+    fprintf(stderr, "[dsv4-decode] wall total=%.1f attn=%.1f moe=%.1f | GPU counted total=%.1f attn=%.1f moe=%.1f | wall-GPU=%.1f | MoEhost route=%.1f store=%.1f metal=%.1f | cb=%ld dispatch=%ld rescommit=%ld resadd=%ld (n=%d tok, %.1f ms/tok)\n",
+            wall_ms,
+            g_pf_d_attn, g_pf_d_moe,
+            after.gpu_total - before.gpu_total,
+            after.gpu_attn - before.gpu_attn, after.gpu_moe - before.gpu_moe,
+            wall_ms - (after.gpu_total - before.gpu_total),
+            after.route - before.route, after.store - before.store, after.metal - before.metal,
+            after.command_buffers - before.command_buffers,
+            after.dispatch - before.dispatch, after.rescommit - before.rescommit,
+            after.resadd - before.resadd, ntok,
+            (g_pf_d_attn + g_pf_d_moe) / (double)ntok);
     g_pf_d_attn = 0; g_pf_d_moe = 0;   /* per-token: azzera per il prossimo dump */
 }
 

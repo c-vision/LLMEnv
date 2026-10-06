@@ -228,6 +228,10 @@ static inline void llm_dsv4_engine_append(LlmDsv4Engine* e, const int* ids, int 
 static inline int llm_dsv4_engine_generate_step(LlmDsv4Engine* e, int* out, int max_new, int eos) {
     int HC = e->w.cfg.n_hc, D = e->w.cfg.n_embd;
     if (!e->has_pending) return 0;
+    int profile = llm_dsv4_pf_on();
+    double wall_start = profile ? llm_dsv4_pf_now() : 0;
+    LlmDsv4DecodeProfileSnapshot profile_start = {0};
+    if (profile) profile_start = llm_dsv4_pf_decode_snapshot();
     float* hc = (float*)malloc(sizeof(float) * (size_t)HC * D);
     int n = 0;
     while (n < max_new) {
@@ -240,7 +244,7 @@ static inline int llm_dsv4_engine_generate_step(LlmDsv4Engine* e, int* out, int 
             ? llm_dsv4_sample_host(e->logits, e->w.cfg.n_vocab, e->sm_temp, e->sm_top_k, e->sm_top_p, &e->sm_rng)
             : llm_dsv4_argmax(e->logits, e->w.cfg.n_vocab);
     }
-    llm_dsv4_pf_decode_dump(n);   /* TEMP: profilo decode (attn vs MoE) */
+    if (profile) llm_dsv4_pf_decode_dump(n, profile_start, llm_dsv4_pf_now() - wall_start);
     free(hc);
     return n;
 }

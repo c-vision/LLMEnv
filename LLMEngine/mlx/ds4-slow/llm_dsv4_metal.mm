@@ -19,6 +19,7 @@
  * (llm_dsv4_gpu_ctx.mm) prima della call. Immune al carico CPU. */
 static double g_dsv4_mtl_gpu_ms[4] = {0, 0, 0, 0};
 static int    g_dsv4_mtl_op = 0;
+static long   g_dsv4_mtl_command_buffers = 0;
 /* TEMP (dsv4_profile): conteggio dispatch Metal (una chiamata setComputePipelineState ~ un dispatch). */
 long g_dsv4_dispatchs = 0;
 long g_dsv4_res_commits = 0;
@@ -26,12 +27,18 @@ long g_dsv4_res_adds = 0;
 long llm_dsv4_metal_dispatches(void) { return g_dsv4_dispatchs; }
 long llm_dsv4_metal_res_commits(void) { return g_dsv4_res_commits; }
 long llm_dsv4_metal_res_adds(void) { return g_dsv4_res_adds; }
+long llm_dsv4_metal_command_buffers(void) { return g_dsv4_mtl_command_buffers; }
 void llm_dsv4_metal_set_op(int op) { g_dsv4_mtl_op = (op >= 0 && op < 4) ? op : 0; }
 void llm_dsv4_metal_gpu_ms(double* attn, double* moe) {
     if (attn) *attn = g_dsv4_mtl_gpu_ms[1];
     if (moe)  *moe  = g_dsv4_mtl_gpu_ms[2];
 }
+double llm_dsv4_metal_gpu_total_ms(void) {
+    return g_dsv4_mtl_gpu_ms[0] + g_dsv4_mtl_gpu_ms[1] +
+           g_dsv4_mtl_gpu_ms[2] + g_dsv4_mtl_gpu_ms[3];
+}
 static void dsv4_gpu_acct(id<MTLCommandBuffer> cb) {
+    g_dsv4_mtl_command_buffers++;
     double s = (double)cb.GPUStartTime, e = (double)cb.GPUEndTime;
     if (e > s) g_dsv4_mtl_gpu_ms[g_dsv4_mtl_op] += (e - s) * 1e3;
 }
