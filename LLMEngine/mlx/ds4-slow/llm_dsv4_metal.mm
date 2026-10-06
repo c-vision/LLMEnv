@@ -3353,10 +3353,20 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
     id<MTLComputeCommandEncoder> e = b->sactive ? b->se : [cb computeCommandEncoder];
     /* FASE A — proiezioni f32 indipendenti per TUTTI i token (pesi letti una volta per tile di 16 token invece che per token) */
     if (ratio > 0) {
-        #define GEMV_NT(W_BUF, XBUF, OBUF, NIN, NOUT) do { g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_nt]; \
+        /* DECODE (nt==1): gemv_f32_nt e' una tile da 16 token (4 righe x 16 acc): a nt=1 fa 16 FMA per peso di cui 15 su zeri
+         * (misurato: ~35-40 GB/s, 95% del GPU del mid). gemv_f32 (1 riga per TG) ha lo STESSO ordine di accumulo
+         * (lane i, i+32, ... poi simd_sum) -> risultato identico bit a bit. */
+        #define GEMV_NT(W_BUF, XBUF, OBUF, NIN, NOUT) do { \
+            if (nt == 1 && b->pso_gemv_f32) { \
+                g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_f32]; \
+                [e setBuffer:(id<MTLBuffer>)(W_BUF) offset:0 atIndex:0]; [e setBuffer:(XBUF) offset:0 atIndex:1]; [e setBuffer:(OBUF) offset:0 atIndex:2]; \
+                { uint32_t P_[2] = { (uint32_t)(NIN), 0u }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; } \
+                [e dispatchThreadgroups:MTLSizeMake((NSUInteger)(NOUT), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; \
+            } else { \
+            g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_nt]; \
             [e setBuffer:(id<MTLBuffer>)(W_BUF) offset:0 atIndex:0]; [e setBuffer:(XBUF) offset:0 atIndex:1]; [e setBuffer:(OBUF) offset:0 atIndex:2]; \
             { uint32_t P_[3] = { (uint32_t)(NIN), (uint32_t)nt, (uint32_t)(NOUT) }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; } \
-            [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)(NOUT) + 3) / 4, ((NSUInteger)nt + 15) / 16, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; } while (0)
+            [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)(NOUT) + 3) / 4, ((NSUInteger)nt + 15) / 16, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; } } while (0)
         GEMV_NT(p0->w_ckv, X, PKV, embd, W_);
         GEMV_NT(p0->w_cgate, X, PSC, embd, W_);
         if (p0->has_idx) {
