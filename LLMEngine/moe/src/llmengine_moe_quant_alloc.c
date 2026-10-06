@@ -69,3 +69,41 @@ int llmengine_moe_quant_alloc_bits(const uint64_t* nparams, const double* rel, i
     }
     return 0;
 }
+
+/* §6.1 S3 — variante ANCORATA: parte dal FLOOR per-tensore `min_cand[i]` (la ricetta baseline per
+ * ruolo) e promuove SOLO sopra il floor col miglior (guadagno/costo), entro il budget medio.
+ * Cosi' il risultato e' "baseline + deviazioni nette", non "Q2_K + promozioni" (che sotto-spende
+ * sulla maggior parte dei tensori). Se il floor da solo supera il budget, scrive il floor e
+ * ritorna -2 (infeasible: il chiamante decide, es. alzare il target o ridurre il floor). */
+int llmengine_moe_quant_alloc_bits_min(const uint64_t* nparams, const double* rel, int n, int ncand,
+                         const int* cand, const int* min_cand, double target_avg_bits, int* out_cand) {
+    if (!nparams || !rel || !cand || !min_cand || !out_cand || n <= 0 || ncand <= 0) return -1;
+    for (int i = 1; i < ncand; ++i) if (cand[i] <= cand[i - 1]) return -1;  /* bit crescenti */
+    uint64_t total = 0;
+    for (int i = 0; i < n; ++i) { if (nparams[i] == 0) return -1; total += nparams[i]; }
+    if (total == 0) return -1;
+    for (int i = 0; i < n; ++i) if (min_cand[i] < 0 || min_cand[i] >= ncand) return -1;
+
+    double bits_now = 0.0;
+    for (int i = 0; i < n; ++i) { out_cand[i] = min_cand[i];
+        bits_now += (double)nparams[i] * (double)cand[min_cand[i]]; }
+    const int infeasible = (bits_now / (double)total > target_avg_bits + 1e-9);
+    for (;;) {
+        int best_i = -1;
+        double best_score = 0.0, best_cost = 0.0;
+        for (int i = 0; i < n; ++i) {
+            int c = out_cand[i];
+            if (c + 1 >= ncand) continue;
+            double gain = rel[(size_t)i * ncand + c] - rel[(size_t)i * ncand + c + 1];
+            if (gain <= 0.0) continue;
+            double cost = (double)nparams[i] * (double)(cand[c + 1] - cand[c]);
+            if ((bits_now + cost) / (double)total > target_avg_bits + 1e-9) continue;
+            double score = gain / cost;
+            if (score > best_score) { best_score = score; best_i = i; best_cost = cost; }
+        }
+        if (best_i < 0) break;
+        out_cand[best_i]++;
+        bits_now += best_cost;
+    }
+    return infeasible ? -2 : 0;
+}

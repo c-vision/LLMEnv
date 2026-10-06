@@ -93,6 +93,38 @@ int main(void) {
         }
     }
 
+    /* (d) allocatore ANCORATO (S3): parte dal FLOOR per-tensore e promuove solo sopra, entro il
+     * budget. Verifica: (1) budget=pavimento -> nessuna promozione; (2) budget un po' sopra ->
+     * promuove il piu' sensibile; (3) pavimento>budget -> -2 e out=floor. */
+    {
+        const int cand[3] = {2, 4, 8};   /* bit crescenti */
+        /* (1) floor {1,1,1} (4 bit) e budget 4.0 = esattamente il pavimento -> resta il floor */
+        { uint64_t np[3] = {100,100,100};
+          double rel[9] = {0.10,0.05,0.01, 0.10,0.05,0.01, 0.10,0.05,0.01};
+          const int mn[3] = {1,1,1}; int oc[3];
+          CHECK(llmengine_moe_quant_alloc_bits_min(np, rel, 3, 3, cand, mn, 4.0, oc) == 0);
+          CHECK(oc[0] == 1 && oc[1] == 1 && oc[2] == 1); }
+        /* (2) floor {1,1,1}, budget 5.34 -> promuove UNO, il piu' sensibile (indice 2) a 8 bit
+         *     (avg risultante (4+4+8)/3 = 5.333 <= 5.34) */
+        { uint64_t np[3] = {100,100,100};
+          double rel[9] = {0.10,0.05,0.045, 0.10,0.05,0.045, 0.10,0.05,0.001};
+          const int mn[3] = {1,1,1}; int oc[3];
+          CHECK(llmengine_moe_quant_alloc_bits_min(np, rel, 3, 3, cand, mn, 5.34, oc) == 0);
+          CHECK(oc[0] == 1 && oc[1] == 1 && oc[2] == 2);
+          double avg = (4.0*100 + 4.0*100 + 8.0*100) / 300.0; CHECK(avg <= 5.34 + 1e-9); }
+        /* (3) floor {2,2,2} (8 bit) ma budget 4.0 -> infeasible, out resta il floor */
+        { uint64_t np[3] = {100,100,100};
+          double rel[9] = {0.10,0.05,0.01, 0.10,0.05,0.01, 0.10,0.05,0.01};
+          const int mn[3] = {2,2,2}; int oc[3];
+          CHECK(llmengine_moe_quant_alloc_bits_min(np, rel, 3, 3, cand, mn, 4.0, oc) == -2);
+          CHECK(oc[0] == 2 && oc[1] == 2 && oc[2] == 2); }
+        /* input invalidi */
+        { uint64_t np[2] = {100,100}; double rel[6] = {0.1,0.05,0.01,0.1,0.05,0.01}; int oc[2];
+          const int mn[2] = {0,0}; const int badmn[2] = {5,0};
+          CHECK(llmengine_moe_quant_alloc_bits_min(np, rel, 2, 3, cand, NULL, 5.0, oc) < 0);
+          CHECK(llmengine_moe_quant_alloc_bits_min(np, rel, 2, 3, cand, badmn, 5.0, oc) < 0); }
+    }
+
     if (fails) { fprintf(stderr, "test_quant_alloc: %d FAIL\n", fails); return 1; }
     printf("test_quant_alloc: OK\n");
     return 0;

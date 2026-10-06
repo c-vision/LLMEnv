@@ -35,6 +35,13 @@ int llmengine_moe_quant_rel_error(const float* x, const float* imp, uint32_t row
 int llmengine_moe_quant_alloc_bits(const uint64_t* nparams, const double* rel, int n, int ncand,
                          const int* cand, double target_avg_bits, int* out_cand);
 
+/* §6.1 S3 — variante ANCORATA: come sopra, ma con un FLOOR per-tensore `min_cand[i]` (>=0, indice
+ * di candidato). `out_cand` parte dal floor (la ricetta baseline per ruolo) e il greedy promuove
+ * SOLO sopra il floor entro il budget medio. Ritorna 0 se rispetta il budget, -2 se il floor da
+ * solo lo supera (infeasible; `out_cand` resta il floor), -1 su input invalido. */
+int llmengine_moe_quant_alloc_bits_min(const uint64_t* nparams, const double* rel, int n, int ncand,
+                         const int* cand, const int* min_cand, double target_avg_bits, int* out_cand);
+
 #ifdef __cplusplus
 }
 #endif
