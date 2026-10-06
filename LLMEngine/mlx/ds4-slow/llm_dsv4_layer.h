@@ -40,6 +40,7 @@ static inline void llm_dsv4_pf_dump(const char* tag) {
 typedef struct {
     double gpu_total, gpu_attn, gpu_moe, route, store, metal;
     long command_buffers, dispatch, rescommit, resadd;
+    long cb_attn, cb_moe, cb_other;
 } LlmDsv4DecodeProfileSnapshot;
 
 static inline LlmDsv4DecodeProfileSnapshot llm_dsv4_pf_decode_snapshot(void) {
@@ -48,6 +49,9 @@ static inline LlmDsv4DecodeProfileSnapshot llm_dsv4_pf_decode_snapshot(void) {
     llm_dsv4_metal_gpu_ms(&s.gpu_attn, &s.gpu_moe);
     llm_dsv4_gpu_moe_pt_prof(&s.route, &s.store, &s.metal);
     s.command_buffers = llm_dsv4_metal_command_buffers();
+    s.cb_attn = llm_dsv4_metal_command_buffers_op(1);
+    s.cb_moe = llm_dsv4_metal_command_buffers_op(2);
+    s.cb_other = llm_dsv4_metal_command_buffers_op(0);
     s.dispatch = llm_dsv4_metal_dispatches();
     s.rescommit = llm_dsv4_metal_res_commits();
     s.resadd = llm_dsv4_metal_res_adds();
@@ -69,6 +73,9 @@ static inline void llm_dsv4_pf_decode_dump(int ntok, LlmDsv4DecodeProfileSnapsho
             after.dispatch - before.dispatch, after.rescommit - before.rescommit,
             after.resadd - before.resadd, ntok,
             (g_pf_d_attn + g_pf_d_moe) / (double)ntok);
+    fprintf(stderr, "[dsv4-decode-cb] cb per classe (delta): attn=%ld moe=%ld altro=%ld (n=%d tok, tot=%.1f cb/tok)\n",
+            after.cb_attn - before.cb_attn, after.cb_moe - before.cb_moe, after.cb_other - before.cb_other,
+            ntok, ntok ? (double)(after.command_buffers - before.command_buffers) / ntok : 0);
     g_pf_d_attn = 0; g_pf_d_moe = 0;   /* per-token: azzera per il prossimo dump */
 }
 

@@ -28,6 +28,8 @@ long llm_dsv4_metal_dispatches(void) { return g_dsv4_dispatchs; }
 long llm_dsv4_metal_res_commits(void) { return g_dsv4_res_commits; }
 long llm_dsv4_metal_res_adds(void) { return g_dsv4_res_adds; }
 long llm_dsv4_metal_command_buffers(void) { return g_dsv4_mtl_command_buffers; }
+static long g_dsv4_mtl_cb_byop[4] = {0, 0, 0, 0};
+long llm_dsv4_metal_command_buffers_op(int op) { return (op >= 0 && op < 4) ? g_dsv4_mtl_cb_byop[op] : 0; }
 void llm_dsv4_metal_set_op(int op) { g_dsv4_mtl_op = (op >= 0 && op < 4) ? op : 0; }
 void llm_dsv4_metal_gpu_ms(double* attn, double* moe) {
     if (attn) *attn = g_dsv4_mtl_gpu_ms[1];
@@ -39,6 +41,7 @@ double llm_dsv4_metal_gpu_total_ms(void) {
 }
 static void dsv4_gpu_acct(id<MTLCommandBuffer> cb) {
     g_dsv4_mtl_command_buffers++;
+    g_dsv4_mtl_cb_byop[g_dsv4_mtl_op]++;
     double s = (double)cb.GPUStartTime, e = (double)cb.GPUEndTime;
     if (e > s) g_dsv4_mtl_gpu_ms[g_dsv4_mtl_op] += (e - s) * 1e3;
 }

@@ -40,6 +40,7 @@ void llm_dsv4_metal_set_op(int op);
 void llm_dsv4_metal_gpu_ms(double* attn, double* moe);
 double llm_dsv4_metal_gpu_total_ms(void);
 long llm_dsv4_metal_command_buffers(void);
+long llm_dsv4_metal_command_buffers_op(int op); /* TEMP: CB per classe (1=attn 2=moe 0=altro) */
 long llm_dsv4_metal_dispatches(void);   /* TEMP: conteggio dispatch Metal (cumulativo) */
 long llm_dsv4_metal_res_commits(void);  /* TEMP: conteggio commit del residency set (cumulativo) */
 long llm_dsv4_metal_res_adds(void);     /* TEMP: conteggio addAllocation nel residency set (cumulativo) */
