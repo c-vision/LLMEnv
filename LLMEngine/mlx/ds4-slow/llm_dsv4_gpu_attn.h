@@ -159,8 +159,8 @@ static inline bool llm_dsv4_gpu_attn_project_batch(LlmDsv4AttnGpu* m, const LlmD
     if (ext_factor != 0.0f && freq_scale > 0.0f) attn_factor /= 1.0f + 0.1f * logf(1.0f / freq_scale);
     float rope_cfg[7] = { freq_base, freq_scale, ext_factor, attn_factor, c->rope_yarn_beta_fast,
                           c->rope_yarn_beta_slow, (float)(compressed ? c->rope_orig_ctx : 0) };
-    int f16_ok = 0; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_f16", &v) == 0) f16_ok = v; }   /* default ON (come ds4) */
-    if (f16_ok && nt >= 16 && llm_dsv4_metal_attn_proj_mm_batch(m->be, nt, m->qa[il].w, m->qa[il].row_bytes, m->kv[il].w, m->kv[il].row_bytes,
+    int f16_ok = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_f16", &v) == 0) f16_ok = v; }   /* default ON (come ds4) */
+    if (f16_ok && nt >= 192 && llm_dsv4_metal_attn_proj_mm_batch(m->be, nt, m->qa[il].w, m->qa[il].row_bytes, m->kv[il].w, m->kv[il].row_bytes,
                                                                 m->qb[il].w, m->qb[il].row_bytes, xn, (uint32_t)embd, L->attn_q_a_norm,
                                                                 L->attn_kv_a_norm, (uint32_t)lq, (uint32_t)hd, (uint32_t)qd, c->n_head,
                                                                 c->n_rot, rope_cfg, pos0, c->rms_eps, q, kv, qrn) == 0) return true;
@@ -193,8 +193,8 @@ static inline bool llm_dsv4_gpu_attn_finish_batch(LlmDsv4AttnGpu* m, const LlmDs
     int nrot = use_gpu ? c->n_rot : 0;
     /* chunk grande: out_a/out_b come mul_mm_id Q8_0 (pesi letti una volta per il chunk; attivazioni a half come ds4, quindi
      * NON bit-exact col per-token: opzione dsv4_prefill_f16=0 per il percorso f32 identico al token-per-token) */
-    int f16_ok = 0; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_f16", &v) == 0) f16_ok = v; }   /* default: ON (come ds4) */
-    if (f16_ok && nt >= 16 && llm_dsv4_metal_attn_out_mm_batch(m->be, nt, m->outa[il].w, m->outa[il].row_bytes, ng, (uint32_t)gd, (uint32_t)rank,
+    int f16_ok = 1; { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_f16", &v) == 0) f16_ok = v; }   /* default: ON (come ds4) */
+    if (f16_ok && nt >= 192 && llm_dsv4_metal_attn_out_mm_batch(m->be, nt, m->outa[il].w, m->outa[il].row_bytes, ng, (uint32_t)gd, (uint32_t)rank,
                                                      m->outb[il].w, m->outb[il].row_bytes, (uint32_t)ol, (uint32_t)embd,
                                                      (uint32_t)ht, heads, out, nrot, c->n_head_dim, pos0, c->n_head, use_gpu ? rope_cfg : NULL, heads_dev) == 0) return true;
     return llm_dsv4_metal_attn_out_fused_batch(m->be, nt, m->outa[il].w, m->outa[il].row_bytes, 0, ng, (uint32_t)gd,
