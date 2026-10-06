@@ -21,7 +21,11 @@ static double g_dsv4_mtl_gpu_ms[4] = {0, 0, 0, 0};
 static int    g_dsv4_mtl_op = 0;
 /* TEMP (dsv4_profile): conteggio dispatch Metal (una chiamata setComputePipelineState ~ un dispatch). */
 long g_dsv4_dispatchs = 0;
+long g_dsv4_res_commits = 0;
+long g_dsv4_res_adds = 0;
 long llm_dsv4_metal_dispatches(void) { return g_dsv4_dispatchs; }
+long llm_dsv4_metal_res_commits(void) { return g_dsv4_res_commits; }
+long llm_dsv4_metal_res_adds(void) { return g_dsv4_res_adds; }
 void llm_dsv4_metal_set_op(int op) { g_dsv4_mtl_op = (op >= 0 && op < 4) ? op : 0; }
 void llm_dsv4_metal_gpu_ms(double* attn, double* moe) {
     if (attn) *attn = g_dsv4_mtl_gpu_ms[1];
@@ -693,15 +697,15 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    device float* NORMED [[buffer(3)]], constant uint* P [[buffer(4)]], constant float* CF [[buffer(5)]],\n"
 "    uint t [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]], ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {\n"
 "    const uint D = P[0], HC = P[1], size = P[2];\n"
-"    threadgroup float hin[4096]; threadgroup float sh[8];\n"
+"    threadgroup float sh[8];\n"   /* NIENTE hin[D]: usava 16-32KB di threadgroup memory (> 32KB col doppio) -> dispatch invalido -> garbage. Ricalcolo `a` nella 2a passata. */
 "    device const float* pre = SPL + (ulong)t * size; device const float* res = RES + (ulong)t * HC * D;\n"
 "    float s = 0.f;\n"
-"    for (uint d = tid; d < D; d += 256u) { float a = 0.f; for (uint h = 0; h < HC; h++) a += res[(ulong)h * D + d] * pre[h]; hin[d] = a; s += a * a; }\n"
+"    for (uint d = tid; d < D; d += 256u) { float a = 0.f; for (uint h = 0; h < HC; h++) a += res[(ulong)h * D + d] * pre[h]; s += a * a; }\n"
 "    s = simd_sum(s); if (lane == 0u) sh[sg] = s;\n"
 "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
 "    float tot = 0.f; for (uint k = 0; k < 8u; k++) tot += sh[k];\n"
 "    const float scale = 1.f / sqrt(tot / (float)D + CF[0]);\n"
-"    for (uint d = tid; d < D; d += 256u) NORMED[(ulong)t * D + d] = hin[d] * scale * W[d];\n"
+"    for (uint d = tid; d < D; d += 256u) { float a = 0.f; for (uint h = 0; h < HC; h++) a += res[(ulong)h * D + d] * pre[h]; NORMED[(ulong)t * D + d] = a * scale * W[d]; }\n"
 "}\n"
 /* out[t][dst][d] = bo[t][d]*post[t][dst] + sum_src comb[t][dst+src*HC]*res[t][src][d]; grid (ceil(HC*D/256), N). P={D, HC, size}. */
 "kernel void dsv4_hcb_post(device const float* BO [[buffer(0)]], device const float* RES [[buffer(1)]], device const float* SPL [[buffer(2)]],\n"
@@ -1649,9 +1653,10 @@ static void dsv4_res_add(LlmDsv4Metal* b, id<MTLBuffer> buf) {
     }
     [b->residency addAllocation:buf];
     b->res_dirty = 1;
+    g_dsv4_res_adds++;
 }
 static void dsv4_res_commit(LlmDsv4Metal* b) {
-    if (b->residency && b->res_dirty) { [b->residency commit]; [b->residency requestResidency]; b->res_dirty = 0; }
+    if (b->residency && b->res_dirty) { [b->residency commit]; [b->residency requestResidency]; b->res_dirty = 0; g_dsv4_res_commits++; }
 }
 
 /* View no-copy della memoria [ptr, ptr+bytes): base allineata a pagina, `*lead` = scarto di `ptr`

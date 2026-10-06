@@ -42,8 +42,10 @@ static inline void llm_dsv4_pf_decode_dump(int ntok) {
     double ga = 0, gm = 0; llm_dsv4_metal_gpu_ms(&ga, &gm);   /* GPU reale (cumulativo) */
     double pr = 0, ps = 0, pm = 0; llm_dsv4_gpu_moe_pt_prof(&pr, &ps, &pm);   /* glue host MoE (cumulativo) */
     long nd = llm_dsv4_metal_dispatches();
-    fprintf(stderr, "[dsv4-decode] CPU attn=%.1f moe=%.1f | GPU attn=%.1f moe=%.1f | MoEhost route=%.1f store=%.1f metal=%.1f | dispatch=%ld (n=%d tok, %.1f ms/tok)\n",
-            g_pf_d_attn, g_pf_d_moe, ga, gm, pr, ps, pm, nd, ntok, (g_pf_d_attn + g_pf_d_moe) / (double)ntok);
+    long nc = llm_dsv4_metal_res_commits();
+    long na = llm_dsv4_metal_res_adds();
+    fprintf(stderr, "[dsv4-decode] CPU attn=%.1f moe=%.1f | GPU attn=%.1f moe=%.1f | MoEhost route=%.1f store=%.1f metal=%.1f | dispatch=%ld rescommit=%ld resadd=%ld (n=%d tok, %.1f ms/tok)\n",
+            g_pf_d_attn, g_pf_d_moe, ga, gm, pr, ps, pm, nd, nc, na, ntok, (g_pf_d_attn + g_pf_d_moe) / (double)ntok);
     g_pf_d_attn = 0; g_pf_d_moe = 0;   /* per-token: azzera per il prossimo dump */
 }
 

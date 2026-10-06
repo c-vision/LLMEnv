@@ -39,6 +39,8 @@ void llm_dsv4_gpu_moe_pt_prof(double* route_ms, double* store_ms, double* metal_
 void llm_dsv4_metal_set_op(int op);
 void llm_dsv4_metal_gpu_ms(double* attn, double* moe);
 long llm_dsv4_metal_dispatches(void);   /* TEMP: conteggio dispatch Metal (cumulativo) */
+long llm_dsv4_metal_res_commits(void);  /* TEMP: conteggio commit del residency set (cumulativo) */
+long llm_dsv4_metal_res_adds(void);     /* TEMP: conteggio addAllocation nel residency set (cumulativo) */
 /* TEMP: flag di profilazione CONDIVISO (il registro opzioni e' per-TU: il TU del motore imposta
  * questo, gli altri lo leggono). 0=off, 1=on, -1=non ancora risolto. */
 extern int g_dsv4_prof_global;
