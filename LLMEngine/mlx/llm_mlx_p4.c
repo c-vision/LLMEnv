@@ -1,6 +1,7 @@
 /* llm_mlx_p4.c — dominio P4: MEMORY PLAN + ADMISSION. Estratto da llmengine_mlx.c (split fase 2), VERBATIM, funzioni da static a extern. */
 #include "llm_mlx_internal.h"
 #include "llm_engine_opts.h"   /* opt_env: registro */
+#include "llm_mlx_memgov.h"    /* llm_memgov_system_free_bytes: libero+reclamabile REALE */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,8 +102,21 @@ void llm_p4_plan_init(LlmMlxModel* m) {
     const uint64_t ram = llm_p4_sysctl_u64("hw.memsize");
     uint64_t limit = ram ? (ram / 4ull) * 3ull : 0;
     if (wired && (limit == 0 || wired < limit)) limit = wired;
+    /* Il wired_limit / (3/4·RAM) e' un MASSIMO TEORICO. Se altre AI/processi occupano la
+     * macchina, la RAM disponibile REALE puo' essere molto minore: pianificare il budget KV
+     * sul teorico sovra-impegna la memoria e il processo viene ucciso (jetsam) appena la KV
+     * cresce. Si prende il MINIMO fra il teorico e cio' che entra DAVVERO = residente (i nostri
+     * pesi, gia' conteggiati in `p4_weights_bytes`) + libero/reclamabile reale del sistema. */
+    { uint64_t avail = llm_memgov_system_free_bytes();
+      if (avail > 0) { uint64_t real = avail + m->p4_weights_bytes; if (real < limit) limit = real; } }
     const uint64_t reserve = (uint64_t)m->p4_reserve_mb * 1024ull * 1024ull;
-    const uint64_t used = m->p4_weights_bytes + reserve;
+    /* HOT-SET dei pesi lazy: durante il forward una frazione dei pesi (pagine toccate di recente
+     * che il SO non evince) resta RESIDENTE. Va riservata coi pesi, altrimenti la KV la occupa e
+     * un modello >RAM thrasha/kill. Stessa convenzione della guardia C# (ModelMemoryGuard:
+     * HotSetBytes = modelBytes / 8). Con pretouch (default) i pesi sono gia' tutti contati in
+     * p4_weights_bytes e l'hot-set e' ~0, quindi non cambia nulla. */
+    const uint64_t hot_set = m->p4_weights_bytes / 8ull;
+    const uint64_t used = m->p4_weights_bytes + reserve + hot_set;
     m->p4_budget_bytes = (limit > used) ? (limit - used) : 0;
     m->p4_kv_per_token = llm_p4_kv_per_token(&m->cfg);
     m->p4_kv_per_token_q = llm_p4_kv_per_token_int8(&m->cfg);
