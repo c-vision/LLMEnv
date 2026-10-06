@@ -573,6 +573,48 @@ static int rp_pat_match(const char* pat, const char* s, char vals[][64], int max
     }
     return *s ? -1 : nv;
 }
+/* Fallback GENERICO canonical(GGUF)->HF per le arch a struttura STANDARD (llama/qwen/mistral/
+ * gemma/...), usato quando la regola `.llmarch` non dichiara il campo `hf`. Copre i nomi canonici
+ * canonici standard; le arch a struttura NON standard (esperti fusi gpt_oss, MLA, multimodale)
+ * devono dichiarare `hf` esplicito per-role, altrimenti resta il fallback al nome canonico (che
+ * l'engine carica via la role map, ma non e' HF/mlx_lm-compatibile). */
+static const struct { const char* gguf; const char* hf; } k_std_g2hf[] = {
+    { "token_embd.weight",         "model.embed_tokens.weight" },
+    { "output.weight",             "lm_head.weight" },
+    { "output_norm.weight",        "model.norm.weight" },
+    { "blk.%d.attn_norm.weight",   "model.layers.%d.input_layernorm.weight" },
+    { "blk.%d.ffn_norm.weight",    "model.layers.%d.post_attention_layernorm.weight" },
+    { "blk.%d.attn_q.weight",      "model.layers.%d.self_attn.q_proj.weight" },
+    { "blk.%d.attn_k.weight",      "model.layers.%d.self_attn.k_proj.weight" },
+    { "blk.%d.attn_v.weight",      "model.layers.%d.self_attn.v_proj.weight" },
+    { "blk.%d.attn_output.weight", "model.layers.%d.self_attn.o_proj.weight" },
+    { "blk.%d.ffn_gate.weight",    "model.layers.%d.mlp.gate_proj.weight" },
+    { "blk.%d.ffn_up.weight",      "model.layers.%d.mlp.up_proj.weight" },
+    { "blk.%d.ffn_down.weight",    "model.layers.%d.mlp.down_proj.weight" },
+    { "blk.%d.ffn_gate_inp.weight", "model.layers.%d.mlp.gate.weight" },   /* router MoE */
+    { "blk.%d.attn_q_norm.weight", "model.layers.%d.self_attn.q_norm.weight" },
+    { "blk.%d.attn_k_norm.weight", "model.layers.%d.self_attn.k_norm.weight" },
+    { NULL, NULL }
+};
+
+static int rp_std_g2hf(const char* canon, char* out, size_t cap) {
+    for (int k = 0; k_std_g2hf[k].gguf != NULL; ++k) {
+        char vals[8][64];
+        int nv = rp_pat_match(k_std_g2hf[k].gguf, canon, vals, 8);
+        if (nv < 0) continue;
+        size_t o = 0; int vi = 0;
+        for (const char* p = k_std_g2hf[k].hf; *p && o < cap - 1; ) {
+            if (p[0] == '%' && (p[1] == 'd' || p[1] == 's')) {
+                const char* v = (vi < nv) ? vals[vi] : "";
+                o += (size_t)snprintf(out + o, cap - o, "%s", v); vi++; p += 2;
+            } else out[o++] = *p++;
+        }
+        out[o < cap ? o : cap - 1] = 0;
+        return 1;
+    }
+    return 0;
+}
+
 int llmcodec_rolemap_canonical_to_hf(const LlmCodecRoleMap* m, const char* canon, char* out, size_t cap) {
     if (m == NULL || canon == NULL || out == NULL || cap == 0) return 0;
     out[0] = 0;
@@ -591,5 +633,5 @@ int llmcodec_rolemap_canonical_to_hf(const LlmCodecRoleMap* m, const char* canon
         out[o < cap ? o : cap - 1] = 0;
         return 1;
     }
-    return 0;
+    return rp_std_g2hf(canon, out, cap);   /* fallback standard (arch senza campo `hf`) */
 }
