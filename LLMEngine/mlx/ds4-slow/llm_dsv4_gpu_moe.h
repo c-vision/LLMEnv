@@ -82,6 +82,13 @@ static inline bool llm_dsv4_gpu_moe_init(LlmDsv4MoeGpu* m, LlmDsv4Metal* be, con
 /* MoE completo GPU. `x` [embd] -> `out` [embd].false -> il chiamante usa il path C.
  * Il routing e lo shared expert restano nel path C (riuso); solo gli esperti instradati
  * girano sui kernel Metal. */
+/* Route pre-calcolata (decode device-resident): impostata dal layer, consumata UNA volta da llm_dsv4_gpu_moe. */
+static struct { int valid, used; int sel[LLM_DSV4_MAX_EXPERT_USED]; float rw[LLM_DSV4_MAX_EXPERT_USED]; } g_dsv4_pre_route;
+static inline void dsv4_pre_route_set(const int* sel, const float* rw, int used) {
+    if (!sel || !rw || used <= 0 || used > LLM_DSV4_MAX_EXPERT_USED) { g_dsv4_pre_route.valid = 0; return; }
+    for (int i = 0; i < used; i++) { g_dsv4_pre_route.sel[i] = sel[i]; g_dsv4_pre_route.rw[i] = rw[i]; }
+    g_dsv4_pre_route.used = used; g_dsv4_pre_route.valid = 1;
+}
 static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
                                     int il, const float* x, int token, float* out) {
     if (!llm_dsv4_gpu_enabled() || !m || !m->inited || il < 0 || il >= c->n_layer) return false;
@@ -96,6 +103,10 @@ static inline bool llm_dsv4_gpu_moe(LlmDsv4MoeGpu* m, const LlmDsv4Config* c, co
     float weight[LLM_DSV4_MAX_EXPERT_USED];
     int pf_g = (g_dsv4_prof_global > 0) ? 1 : 0;   /* flag condiviso (registro opzioni per-TU) */
     double _pt = pf_g ? llm_dsv4_gm_now() : 0;
+    if (g_dsv4_pre_route.valid && g_dsv4_pre_route.used == used) {   /* route gia' calcolata su GPU nella cb dell'attn */
+        for (int i = 0; i < used; i++) { selected[i] = g_dsv4_pre_route.sel[i]; weight[i] = g_dsv4_pre_route.rw[i]; }
+        g_dsv4_pre_route.valid = 0;
+    } else
     llm_dsv4_moe_route(c, L, x, il, token, selected, weight);   /* riuso C */
     if (pf_g) { g_dsv4_pt_route_ms += llm_dsv4_gm_now() - _pt; _pt = llm_dsv4_gm_now(); }
     bool ok = true;

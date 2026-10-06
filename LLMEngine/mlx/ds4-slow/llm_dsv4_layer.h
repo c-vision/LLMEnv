@@ -43,6 +43,7 @@ typedef struct {
     long cb_attn, cb_moe, cb_other;
     double gpu_finish; long cb_finish;
     double gpu_mid; long cb_mid;
+    long waits;
 } LlmDsv4DecodeProfileSnapshot;
 
 static inline LlmDsv4DecodeProfileSnapshot llm_dsv4_pf_decode_snapshot(void) {
@@ -59,6 +60,7 @@ static inline LlmDsv4DecodeProfileSnapshot llm_dsv4_pf_decode_snapshot(void) {
     s.gpu_mid = llm_dsv4_metal_gpu_ms_op(4);       /* op4 = attn MID */
     s.cb_mid = llm_dsv4_metal_command_buffers_op(4);
     s.dispatch = llm_dsv4_metal_dispatches();
+    s.waits = llm_dsv4_metal_waits();
     s.rescommit = llm_dsv4_metal_res_commits();
     s.resadd = llm_dsv4_metal_res_adds();
     return s;
@@ -79,6 +81,8 @@ static inline void llm_dsv4_pf_decode_dump(int ntok, LlmDsv4DecodeProfileSnapsho
             after.dispatch - before.dispatch, after.rescommit - before.rescommit,
             after.resadd - before.resadd, ntok,
             (g_pf_d_attn + g_pf_d_moe) / (double)ntok);
+    fprintf(stderr, "[dsv4-decode-wait] waitUntilCompleted/token=%.1f (tot=%ld cb=%ld n=%d tok)\n",
+            ntok ? (double)(after.waits - before.waits) / ntok : 0, after.waits - before.waits, after.command_buffers - before.command_buffers, ntok);
     fprintf(stderr, "[dsv4-decode-cb] GPU cl (delta): project(op1)=%.1f | mid(op4)=%.1f | finish(op3)=%.1f | moe(op2)=%.1f  (n=%d tok)\n",
             (after.gpu_attn - before.gpu_attn), (after.gpu_mid - before.gpu_mid), (after.gpu_finish - before.gpu_finish), (after.gpu_moe - before.gpu_moe), ntok);
     fprintf(stderr, "[dsv4-decode-cb] cb (delta): project=%ld mid=%ld finish=%ld moe=%ld altro=%ld (tot=%.1f/tok)\n",
@@ -122,6 +126,16 @@ static inline void llm_dsv4_layer_forward(const LlmDsv4Config* c, const LlmDsv4L
  * Lo stato (globals + setter) vive nel motore (llm_mlx_dsv4_layer_ops.h): il wiring del
  * `.llmarch` non dipende da questa cartella. ── */
 #include "llm_mlx_dsv4_layer_ops.h"
+#include "llm_dsv4_hcroute.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Decode device-resident: attn (project+mid+finish) + mHC post/pre + route in UNA cb. Flag: bit0 = attn eseguita, bit1 = mHC+route eseguiti. */
+int llm_dsv4_gpu_attn_hcroute_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
+        int ratio, int raw_cap, int comp_cap, const float* xn, int pos, float* out, const LlmDsv4HcRouteParams* hr);
+#ifdef __cplusplus
+}
+#endif
 
 /* Un layer su un token eseguendo la PIPELINE `ops` (default: canonica mhc/attn/mhc/mhc/moe/mhc). */
 static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L,
@@ -141,6 +155,15 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
     float* post   = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)HC);
     float* comb   = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)HC * HC);
     int tail_done = 0;
+    /* decode device-resident (dsv4_attn_dev): mHC post(attn)+pre(ffn)+route fatti su GPU nella cb dell'attn */
+    int route_fused = 0;
+    float* ffn_normed = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D);
+    float* ffn_split  = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)(2 + HC) * HC);
+    int*   hr_sel     = (int*)llm_dsv4_arena_alloc(sizeof(int) * (size_t)c->n_expert_used);
+    float* hr_rw      = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)c->n_expert_used);
+    const int canon6 = n_ops == 6 && strcmp(ops[0], "mhc_pre_attn") == 0 && strcmp(ops[1], "attention") == 0 &&
+                       strcmp(ops[2], "mhc_post_attn") == 0 && strcmp(ops[3], "mhc_pre_ffn") == 0 &&
+                       strcmp(ops[4], "moe") == 0 && strcmp(ops[5], "mhc_post_ffn") == 0;
     for (int k = 0; k < n_ops; k++) {
         const char* op = ops[k];
         if (strcmp(op, "mhc_pre_attn") == 0) {
@@ -148,6 +171,11 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
             llm_dsv4_block_pre(c, L->hc_attn_fn, L->hc_attn_scale, L->hc_attn_base, L->attn_norm, cur, normed, post, comb);
         } else if (strcmp(op, "mhc_pre_ffn") == 0) {
             memcpy(saved, cur, sizeof(float) * (size_t)HC * D);
+            if (route_fused) {   /* gia' calcolato su GPU: split = pre[HC] | post[HC] | comb[HC*HC] */
+                memcpy(normed, ffn_normed, sizeof(float) * (size_t)D);
+                memcpy(post, ffn_split + HC, sizeof(float) * (size_t)HC);
+                memcpy(comb, ffn_split + 2 * HC, sizeof(float) * (size_t)HC * HC);
+            } else
             llm_dsv4_block_pre(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, cur, normed, post, comb);
         } else if (strcmp(op, "attention") == 0) {
             if (pf) _t = llm_dsv4_pf_now();
@@ -185,7 +213,26 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
                  * nt=1 (project->slot device, mid device, out da device) -> 1 cb invece di 3.
                  * Verificare con l'oracolo di parita' (ramo dichiarato non-bit-exact). */
                 int dev = 0; { int v = 0; if (llm_ai_mlx_opt_get_bool("dsv4_attn_dev", &v) == 0) dev = v; }   /* default OFF (bit-exact): device-resident opt-in */
-                if (!(dev && llm_dsv4_gpu_attn_batch_try(c, L, il, cache->compress_ratio, cache->raw_cap,
+                int attn_done = 0;
+                /* mHC post/pre + route su GPU nella cb dell'attn: opt-in `dsv4_hcroute` (default OFF). MISURATO NEGATIVO
+                 * (id identici ma +27 ms/token di GPU: i kernel hc/sinkhorn/rms a 1 threadgroup sono piu' lenti del CPU e i wait
+                 * restano 86): servirebbe prima ottimizzare quei kernel. */
+                int hcr_on = 0; { int v = 0; if (llm_ai_mlx_opt_get_bool("dsv4_hcroute", &v) == 0) hcr_on = v; }
+                if (dev && hcr_on && canon6 && il >= c->n_hash_layer && L->ffn_gate_inp) {
+                    LlmDsv4HcRouteParams hr; memset(&hr, 0, sizeof hr);
+                    hr.D = D; hr.HC = HC; hr.SIZE = (2 + HC) * HC; hr.HCD = HC * D;
+                    hr.sinkhorn_iters = c->n_hc_sinkhorn_iter; hr.hc_eps = c->hc_eps; hr.rms_eps = c->rms_eps;
+                    hr.n_expert = c->n_expert; hr.used = c->n_expert_used; hr.expert_scale = c->expert_weight_scale;
+                    hr.res = saved; hr.post_attn = post; hr.comb_attn = comb;
+                    hr.fn = L->hc_ffn_fn; hr.scale = L->hc_ffn_scale; hr.base = L->hc_ffn_base; hr.norm_w = L->ffn_norm;
+                    hr.router_w = L->ffn_gate_inp; hr.exp_probs_b = L->exp_probs_b;
+                    hr.after = nxt; hr.normed = ffn_normed; hr.split = ffn_split; hr.sel = hr_sel; hr.rw = hr_rw;
+                    int fl = llm_dsv4_gpu_attn_hcroute_try(c, L, il, cache->compress_ratio, cache->raw_cap, cache->comp_cap,
+                                                           normed, pos, proj, &hr);
+                    attn_done = (fl & 1) != 0;
+                    if (attn_done && (fl & 2)) { route_fused = 1; memcpy(cur, nxt, sizeof(float) * (size_t)HC * D); }
+                }
+                if (!attn_done && !(dev && llm_dsv4_gpu_attn_batch_try(c, L, il, cache->compress_ratio, cache->raw_cap,
                                                          cache->comp_cap, normed, pos, 1, proj)))
                     llm_dsv4_attn_cached(c, L, pe, cache, normed, pos, il, proj);
             }
@@ -193,11 +240,16 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
             if (tail_done) break;
         } else if (strcmp(op, "moe") == 0) {
             if (pf) _t = llm_dsv4_pf_now();
-            if (!llm_dsv4_gpu_moe_try(c, L, il, normed, token, proj)) {
+            if (route_fused) llm_dsv4_gpu_set_route(hr_sel, hr_rw, c->n_expert_used);
+            int moe_gpu_ok = llm_dsv4_gpu_moe_try(c, L, il, normed, token, proj);
+            if (route_fused) llm_dsv4_gpu_set_route(NULL, NULL, 0);   /* mai lasciare una route stantia */
+            if (!moe_gpu_ok) {
                 if (pe && pe->gate) llm_dsv4_moe_forward_packed(c, L, pe, normed, il, token, proj);
                 else                llm_dsv4_moe_forward(c, L, normed, il, token, proj);
             }
             if (pf) g_pf_d_moe += llm_dsv4_pf_now() - _t;
+        } else if (strcmp(op, "mhc_post_attn") == 0 && route_fused) {
+            /* mHC post(attn) gia' eseguito su GPU nella cb dell'attn: cur = after */
         } else if (strcmp(op, "mhc_post_attn") == 0 || strcmp(op, "mhc_post_ffn") == 0) {
             llm_dsv4_block_post(c, proj, saved, post, comb, nxt);
             memcpy(cur, nxt, sizeof(float) * (size_t)HC * D);

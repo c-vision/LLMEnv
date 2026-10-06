@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include "llm_dsv4_gpu_ctx.h"
+#include "llm_dsv4_hcroute.h"
 #include "llm_engine_opts.h"
 #include "llm_dsv4_gpu.h"
 #include "llm_dsv4_gpu_moe.h"
@@ -99,6 +100,7 @@ int llm_dsv4_gpu_attn_tail_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights
 }
 
 int llm_dsv4_gpu_ctx_active(void) { return g_on; }
+void llm_dsv4_gpu_set_route(const int* sel, const float* rw, int used) { dsv4_pre_route_set(sel, rw, used); }
 
 /* ── Middle attenzione su GPU: pesi compressor/indexer (f32) + KV/stato su device ── */
 typedef struct {
@@ -231,8 +233,9 @@ int llm_dsv4_gpu_attn_mid_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights*
 /* Attenzione di un CHUNK di `nt` token consecutivi (pos0..) del layer `il`: proiezioni, middle e output
  * grouped-LoRA, ciascuna fase in UNA command buffer per tutto il chunk. xn [nt*embd] -> out [nt*embd].
  * Tutto-o-niente: 1 = eseguito su GPU; 0 = nulla e' stato modificato (usare il path per-token). */
-int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
-        int ratio, int raw_cap, int comp_cap, const float* xn, int pos0, int nt, float* out) {
+/* Decode device-resident. Ritorna flag: bit0 = attn eseguita; bit1 = anche mHC post/pre + route eseguiti (se `hr`). */
+static int dsv4_attn_dev_run(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
+        int ratio, int raw_cap, int comp_cap, const float* xn, int pos0, int nt, float* out, const LlmDsv4HcRouteParams* hr) {
     if (!g_on || !g_be || !c || !L || il < 0 || il >= LLM_DSV4_MAX_LAYER || nt <= 0) return 0;
     if (nt != 1) return 0;   /* device-resident solo per il decode (nt=1); il prefill batch resta per-token (come prima: il project con out=NULL falliva sempre) */
     if (ratio != 0 && ratio != 4 && ratio != 128) return 0;
@@ -271,8 +274,22 @@ int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeight
     /* nt==1: anche il finish (RoPE inversa + out_a/out_b) nella STESSA cb condivisa -> UN solo wait per l'attn del layer
      * (project+mid+finish); il download di `out` avviene in shared_end. */
     if (ok) ok = llm_dsv4_gpu_attn_finish_batch(&g_attn, c, L, il, hds, pos0, nt, out, heads_dev);
+    int flags = ok ? 1 : 0;
+    /* stessa cb: mHC post(attn) + mHC pre(ffn) + route MoE -> dopo il wait unico l'host salta CPU post/pre/route */
+    if (ok && hr && use_shared) { if (llm_dsv4_metal_attn_hc_route(g_be, hr) == 0) flags |= 2; }
     if (use_shared) llm_dsv4_metal_shared_end(g_be);
-    return ok ? 1 : 0;
+    return flags;
+}
+
+extern "C" int llm_dsv4_gpu_attn_hcroute_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
+        int ratio, int raw_cap, int comp_cap, const float* xn, int pos, float* out, const LlmDsv4HcRouteParams* hr);
+int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
+        int ratio, int raw_cap, int comp_cap, const float* xn, int pos0, int nt, float* out) {
+    return dsv4_attn_dev_run(c, L, il, ratio, raw_cap, comp_cap, xn, pos0, nt, out, NULL) & 1;
+}
+int llm_dsv4_gpu_attn_hcroute_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
+        int ratio, int raw_cap, int comp_cap, const float* xn, int pos, float* out, const LlmDsv4HcRouteParams* hr) {
+    return dsv4_attn_dev_run(c, L, il, ratio, raw_cap, comp_cap, xn, pos, 1, out, hr);
 }
 
 /* Prewarm dei pesi statici (attn Q8_0 + shared expert): una sola commit del residency set invece di una per cb nel primo chunk. */

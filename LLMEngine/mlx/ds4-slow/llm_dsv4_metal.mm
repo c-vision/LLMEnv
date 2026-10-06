@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "llm_dsv4_metal.h"
+#include "llm_dsv4_hcroute.h"
 #include "llm_engine_opts.h"
 #include "llm_dsv4_metal_tables.h"
 #include "llm_dsv4_metal_mmid.h"   /* MoE batched mul_mm_id (estratto da ds4) */
@@ -1617,7 +1618,7 @@ struct LlmDsv4Metal {
     id<MTLCommandBuffer> scb;
     id<MTLComputeCommandEncoder> se;
     int sactive;
-    float* pend_out; id<MTLBuffer> pend_buf; size_t pend_bytes;   /* download rimandato a shared_end (attn out in cb condivisa) */
+    float* pend_dst[8]; id<MTLBuffer> pend_src[8]; size_t pend_nb[8]; int pend_n;   /* download rimandati a shared_end (cb condivisa) */
     /* Buffer scratch PERSISTENTI riusati (slot per job): niente alloc/copia per-token. */
     id<MTLBuffer> sx[96], so[64], spb[64];
     /* Cache PERSISTENTE delle view no-copy (base pagina -> MTLBuffer): creare una view costa decine
@@ -1651,8 +1652,8 @@ void llm_dsv4_metal_shared_end(LlmDsv4Metal* b) {
     [b->se endEncoding];
     dsv4_res_commit(b); [b->scb commit];
     { g_dsv4_waits++; [b->scb waitUntilCompleted]; } dsv4_gpu_acct(b->scb);
-    if (b->pend_out && b->pend_buf && !b->scb.error) memcpy(b->pend_out, [b->pend_buf contents], b->pend_bytes);
-    b->pend_out = NULL; b->pend_buf = nil; b->pend_bytes = 0;
+    if (!b->scb.error) for (int i = 0; i < b->pend_n; i++) memcpy(b->pend_dst[i], [b->pend_src[i] contents], b->pend_nb[i]);
+    b->pend_n = 0;
     b->scb = nil; b->se = nil; b->sactive = 0;
 }
 
@@ -3009,8 +3010,8 @@ int llm_dsv4_metal_attn_out_fused_batch(LlmDsv4Metal* b, int nt,
             [e dispatchThreadgroups:MTLSizeMake(embd, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
         }
         if (b->sactive) {   /* cb condivisa: niente commit/wait qui; il download di OUT avviene in shared_end */
-            b->pend_out = out; b->pend_buf = OUT; b->pend_bytes = (size_t)nt * embd * sizeof(float);
-            rc = 0;
+            if (b->pend_n < 8) { b->pend_dst[b->pend_n] = out; b->pend_src[b->pend_n] = OUT; b->pend_nb[b->pend_n] = (size_t)nt * embd * sizeof(float); b->pend_n++; rc = 0; }
+            else rc = -4;
         } else {
         [e endEncoding];
         dsv4_res_commit(b); [cb commit];
@@ -3991,6 +3992,90 @@ void llm_dsv4_metal_argbuf_free(void* handle) {
 
 /* TAIL FUSO del layer (ds4): attn-out + mhc_post + mhc_pre + route + moe + mhc_post in UNA cb.
  * 0 = ok, <0 = fallback CPU. */
+/* "Tail leggero" del decode (nel cb CONDIVISO attivo): mHC post(attn) -> mHC pre(ffn) -> route MoE, tutto su GPU dopo il finish
+ * dell'attn (che ha lasciato l'uscita in sx[5]). Download rimandati a shared_end. 0 = ok; <0 = NON encodato (nessun effetto). */
+int llm_dsv4_metal_attn_hc_route(LlmDsv4Metal* b, const LlmDsv4HcRouteParams* q) {
+    if (!b || !q || !b->sactive) return -1;
+    if (!b->pso_hc_post || !b->pso_rms_no_w || !b->pso_gemv_f32 || !b->pso_sinkhorn || !b->pso_hc_sum || !b->pso_rms_w || !b->pso_route) return -1;
+    if (!q->res || !q->post_attn || !q->comb_attn || !q->fn || !q->scale || !q->base || !q->norm_w || !q->router_w ||
+        !q->after || !q->normed || !q->split || !q->sel || !q->rw) return -1;
+    if (b->pend_n + 5 > 8) return -1;
+    const uint32_t D = (uint32_t)q->D, HC = (uint32_t)q->HC, SIZE = (uint32_t)q->SIZE, HCD = (uint32_t)q->HCD;
+    if (D % 32u) return -1;
+    id<MTLBuffer> ATTN = dsv4_scratch(b, &b->sx[5], &b->sx_cap[5], (size_t)D * sizeof(float));   /* uscita del finish */
+    id<MTLBuffer> NXT  = dsv4_scratch(b, &b->sx[22], &b->sx_cap[22], (size_t)HC*D*sizeof(float));
+    id<MTLBuffer> FLAT = dsv4_scratch(b, &b->sx[23], &b->sx_cap[23], (size_t)HCD*sizeof(float));
+    id<MTLBuffer> MIXES= dsv4_scratch(b, &b->sx[24], &b->sx_cap[24], (size_t)SIZE*sizeof(float));
+    id<MTLBuffer> SPLIT= dsv4_scratch(b, &b->sx[25], &b->sx_cap[25], (size_t)SIZE*sizeof(float));
+    id<MTLBuffer> HIN  = dsv4_scratch(b, &b->sx[26], &b->sx_cap[26], (size_t)D*sizeof(float));
+    id<MTLBuffer> NRM  = dsv4_scratch(b, &b->sx[27], &b->sx_cap[27], (size_t)D*sizeof(float));
+    id<MTLBuffer> LOGI = dsv4_scratch(b, &b->sx[28], &b->sx_cap[28], (size_t)q->n_expert*sizeof(float));
+    id<MTLBuffer> SEL  = dsv4_scratch(b, &b->sx[29], &b->sx_cap[29], (size_t)q->used*sizeof(int));
+    id<MTLBuffer> RW   = dsv4_scratch(b, &b->sx[30], &b->sx_cap[30], (size_t)q->used*sizeof(float));
+    size_t fn_lead = 0, rtw_lead = 0;
+    id<MTLBuffer> FN  = dsv4_view(b, q->fn, (size_t)SIZE*HCD*sizeof(float), &fn_lead);
+    id<MTLBuffer> RTW = dsv4_view(b, q->router_w, (size_t)q->n_expert*D*sizeof(float), &rtw_lead);
+    id<MTLBuffer> RES   = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->res, (size_t)HC*D*sizeof(float));
+    id<MTLBuffer> POST  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->post_attn, (size_t)HC*sizeof(float));
+    id<MTLBuffer> COMB  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->comb_attn, (size_t)HC*HC*sizeof(float));
+    id<MTLBuffer> SCALE = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->scale, 3*sizeof(float));
+    id<MTLBuffer> BASE  = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->base, (size_t)SIZE*sizeof(float));
+    id<MTLBuffer> NORMW = (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->norm_w, (size_t)D*sizeof(float));
+    id<MTLBuffer> EXPB  = q->exp_probs_b ? (id<MTLBuffer>)llm_dsv4_metal_upload(b, q->exp_probs_b, (size_t)q->n_expert*sizeof(float)) : nil;
+    int rc = (ATTN&&NXT&&FLAT&&MIXES&&SPLIT&&HIN&&NRM&&LOGI&&SEL&&RW&&FN&&RTW&&RES&&POST&&COMB&&SCALE&&BASE&&NORMW) ? 0 : -2;
+    if (rc == 0) {
+        id<MTLComputeCommandEncoder> e = b->se;
+        /* hc_post_attn: NXT = post*ATTN + comb*RES */
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hc_post];
+        [e setBuffer:ATTN offset:0 atIndex:0]; [e setBuffer:RES offset:0 atIndex:1]; [e setBuffer:POST offset:0 atIndex:2];
+        [e setBuffer:COMB offset:0 atIndex:3]; [e setBuffer:NXT offset:0 atIndex:4];
+        { uint32_t P[2]={D,HC}; [e setBytes:P length:sizeof(P) atIndex:5]; }
+        [e dispatchThreadgroups:MTLSizeMake((HC*D+63)/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
+        /* mhc_pre_ffn: rms_no_w(NXT)->FLAT; gemv(fn)->MIXES; sinkhorn->SPLIT; hc_sum->HIN; rms_w->NRM */
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_rms_no_w];
+        [e setBuffer:NXT offset:0 atIndex:0]; [e setBuffer:FLAT offset:0 atIndex:1];
+        { uint32_t P[1]={HCD}; [e setBytes:P length:sizeof(P) atIndex:2]; float cf[1]={q->rms_eps}; [e setBytes:cf length:sizeof(cf) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_f32];
+        [e setBuffer:FN offset:0 atIndex:0]; [e setBuffer:FLAT offset:0 atIndex:1]; [e setBuffer:MIXES offset:0 atIndex:2];
+        { uint32_t P[2]={HCD,(uint32_t)(fn_lead/sizeof(float))}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake(SIZE,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_sinkhorn];
+        [e setBuffer:MIXES offset:0 atIndex:0]; [e setBuffer:SCALE offset:0 atIndex:1]; [e setBuffer:BASE offset:0 atIndex:2]; [e setBuffer:SPLIT offset:0 atIndex:3];
+        { uint32_t P[2]={HC,(uint32_t)q->sinkhorn_iters}; [e setBytes:P length:sizeof(P) atIndex:4]; float cf[1]={q->hc_eps}; [e setBytes:cf length:sizeof(cf) atIndex:5]; }
+        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hc_sum];
+        [e setBuffer:NXT offset:0 atIndex:0]; [e setBuffer:SPLIT offset:0 atIndex:1]; [e setBuffer:HIN offset:0 atIndex:2];
+        { uint32_t P[2]={D,HC}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake((D+63)/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_rms_w];
+        [e setBuffer:HIN offset:0 atIndex:0]; [e setBuffer:NORMW offset:0 atIndex:1]; [e setBuffer:NRM offset:0 atIndex:2];
+        { uint32_t P[1]={D}; [e setBytes:P length:sizeof(P) atIndex:3]; float cf[1]={q->rms_eps}; [e setBytes:cf length:sizeof(cf) atIndex:4]; }
+        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        /* route: logits = gemv_f32(router, NRM); SEL/RW */
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_f32];
+        [e setBuffer:RTW offset:0 atIndex:0]; [e setBuffer:NRM offset:0 atIndex:1]; [e setBuffer:LOGI offset:0 atIndex:2];
+        { uint32_t P[2]={D,(uint32_t)(rtw_lead/sizeof(float))}; [e setBytes:P length:sizeof(P) atIndex:3]; }
+        [e dispatchThreadgroups:MTLSizeMake((NSUInteger)q->n_expert,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+        g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_route];
+        [e setBuffer:LOGI offset:0 atIndex:0]; [e setBuffer:(EXPB?EXPB:SCALE) offset:0 atIndex:1]; [e setBuffer:SEL offset:0 atIndex:2]; [e setBuffer:RW offset:0 atIndex:3];
+        { uint32_t P[3]={(uint32_t)q->n_expert,(uint32_t)q->used,(EXPB?1u:0u)}; [e setBytes:P length:sizeof(P) atIndex:4]; float cf[1]={q->expert_scale}; [e setBytes:cf length:sizeof(cf) atIndex:5]; }
+        [e dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+        /* download dopo il wait unico (shared_end) */
+        #define DSV4_PEND(DST, SRC, NB) do { b->pend_dst[b->pend_n] = (DST); b->pend_src[b->pend_n] = (SRC); b->pend_nb[b->pend_n] = (NB); b->pend_n++; } while (0)
+        DSV4_PEND(q->after,  NXT,   (size_t)HC*D*sizeof(float));
+        DSV4_PEND(q->normed, NRM,   (size_t)D*sizeof(float));
+        DSV4_PEND(q->split,  SPLIT, (size_t)SIZE*sizeof(float));
+        DSV4_PEND((float*)q->sel, SEL, (size_t)q->used*sizeof(int));
+        DSV4_PEND(q->rw,     RW,    (size_t)q->used*sizeof(float));
+        #undef DSV4_PEND
+    }
+    /* i buffer piccoli sono trattenuti dalla cb finche' non completa */
+    [RES release]; [POST release]; [COMB release]; [SCALE release]; [BASE release]; [NORMW release]; if (EXPB) [EXPB release];
+    if (FN) [FN release]; if (RTW) [RTW release];
+    return rc;
+}
+
 int llm_dsv4_metal_layer_tail(LlmDsv4Metal* b, const LlmDsv4TailParams* q) {
     if (!b || !q) return -1;
     if (!b->pso || !b->pso_rope || !b->pso_hc_post || !b->pso_rms_no_w || !b->pso_gemv_f32 ||
