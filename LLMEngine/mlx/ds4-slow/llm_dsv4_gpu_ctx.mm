@@ -237,7 +237,10 @@ int llm_dsv4_gpu_attn_mid_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights*
 static int dsv4_attn_dev_run(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
         int ratio, int raw_cap, int comp_cap, const float* xn, int pos0, int nt, float* out, const LlmDsv4HcRouteParams* hr) {
     if (!g_on || !g_be || !c || !L || il < 0 || il >= LLM_DSV4_MAX_LAYER || nt <= 0) return 0;
-    if (nt != 1) return 0;   /* device-resident solo per il decode (nt=1); il prefill batch resta per-token (come prima: il project con out=NULL falliva sempre) */
+    /* Ammessi: decode (nt==1, device-resident in cb condivisa) e prefill a chunk GRANDI (nt>=192: project/finish passano dal path
+     * mul_mm f16, che gestisce gia' out=NULL). 2<=nt<192 resta per-token come prima (il fused_batch host-fed per nt piccoli non e' provato).
+     * REGRESSIONE di e40776e (guardia `nt != 1`): disattivava il batch attn anche per nt>=192 -> prefill lungo per-token. */
+    if (nt != 1 && nt < 192) return 0;
     if (ratio != 0 && ratio != 4 && ratio != 128) return 0;
     if (ratio == 0 && !dsv4_raw_attn_gpu()) return 0;
     if (!llm_dsv4_gpu_attn_batch_ready(&g_attn, il)) return 0;
