@@ -3416,7 +3416,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
     /* ── PATH A TOKEN IN GRIGLIA (come ds4: niente catena per token): compressor/indexer a EVENTI su righe lineari [stato | chunk],
      * indexer score/top-k con token in griglia, attenzione con finestra raw lineare a gruppi di 32 token. Stessa matematica del path per-token. ── */
     int use_tok = 0;
-    if (nt >= 8 && b->pso_apart_t && b->pso_amerge_t && b->pso_pool_ev && b->pso_rope_ev && b->pso_iscore_t && b->pso_itopk_t && b->pso_ape_rows &&
+    if (nt >= 1 && b->pso_apart_t && b->pso_amerge_t && b->pso_pool_ev && b->pso_rope_ev && b->pso_iscore_t && b->pso_itopk_t && b->pso_ape_rows &&
         b->pso_rms_rows && b->pso_fp8_rows && (hd % 128) == 0 && hd <= 512) use_tok = 1;
     int nev = 0, ev_first = -1, nevi = 0, ev_first_i = -1, ndue = 0;
     if (use_tok && ratio > 0) {
