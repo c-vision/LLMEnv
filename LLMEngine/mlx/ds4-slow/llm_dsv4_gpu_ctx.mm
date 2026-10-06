@@ -234,6 +234,7 @@ int llm_dsv4_gpu_attn_mid_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights*
 int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
         int ratio, int raw_cap, int comp_cap, const float* xn, int pos0, int nt, float* out) {
     if (!g_on || !g_be || !c || !L || il < 0 || il >= LLM_DSV4_MAX_LAYER || nt <= 0) return 0;
+    if (nt != 1) return 0;   /* device-resident solo per il decode (nt=1); il prefill batch resta per-token (come prima: il project con out=NULL falliva sempre) */
     if (ratio != 0 && ratio != 4 && ratio != 128) return 0;
     if (ratio == 0 && !dsv4_raw_attn_gpu()) return 0;
     if (!llm_dsv4_gpu_attn_batch_ready(&g_attn, il)) return 0;
@@ -267,8 +268,10 @@ int llm_dsv4_gpu_attn_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeight
         if (!ok) heads_dev = NULL;
         if (ok) { m->n_raw = nr; m->n_acomp = na; m->n_icomp = ni; }
     }
-    if (use_shared) llm_dsv4_metal_shared_end(g_be);
+    /* nt==1: anche il finish (RoPE inversa + out_a/out_b) nella STESSA cb condivisa -> UN solo wait per l'attn del layer
+     * (project+mid+finish); il download di `out` avviene in shared_end. */
     if (ok) ok = llm_dsv4_gpu_attn_finish_batch(&g_attn, c, L, il, hds, pos0, nt, out, heads_dev);
+    if (use_shared) llm_dsv4_metal_shared_end(g_be);
     return ok ? 1 : 0;
 }
 
