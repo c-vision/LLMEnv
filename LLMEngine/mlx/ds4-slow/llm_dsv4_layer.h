@@ -212,7 +212,10 @@ static inline void llm_dsv4_layer_forward_cached_pe_pipe(const LlmDsv4Config* c,
                 /* DEVICE-RESIDENT per-token (gated `dsv4_attn_dev`): riusa il percorso del batch con
                  * nt=1 (project->slot device, mid device, out da device) -> 1 cb invece di 3.
                  * Verificare con l'oracolo di parita' (ramo dichiarato non-bit-exact). */
-                int dev = 0; { int v = 0; if (llm_ai_mlx_opt_get_bool("dsv4_attn_dev", &v) == 0) dev = v; }   /* default OFF (bit-exact): device-resident opt-in */
+                /* DEFAULT ON (streaming): project+mid+finish in UNA cb (86 wait/token invece di 172). Verifica: id identici al
+                 * percorso host su essay 24 tok e prompt corto 48 tok; sul prompt lungo (99 tok + 30 gen, attraversa pos 128) il
+                 * device-resident coincide col vendored 30/30 mentre il percorso host diverge al token 14. Opt-out: dsv4_attn_dev=0. */
+                int dev = 1; { int v = 1; if (llm_ai_mlx_opt_get_bool("dsv4_attn_dev", &v) == 0) dev = v; }
                 int attn_done = 0;
                 /* mHC post/pre + route su GPU nella cb dell'attn: opt-in `dsv4_hcroute` (default OFF). MISURATO NEGATIVO
                  * (id identici ma +27 ms/token di GPU: i kernel hc/sinkhorn/rms a 1 threadgroup sono piu' lenti del CPU e i wait
