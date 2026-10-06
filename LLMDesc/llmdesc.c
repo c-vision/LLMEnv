@@ -249,6 +249,16 @@ static void derive_geom(const char* hf_dir, LlmDesc* out) {
     out->geometry.present=1;
     free(cj);
 }
+/* Carica `path` in `out`; con `need_roles` accetta SOLO una name-map (n_roles>0). Serve a
+ * preferire un descrittore COMPLETO (ABI, con ruoli) su uno geometry-only (stub `.gmbarch`
+ * autogenerato in <model>/arch/), che altrimenti lo shadowerebbe. */
+static int llmdesc_load_pref(const char* path, LlmDesc* out, int need_roles) {
+    LlmDesc t;
+    if (llmdesc_load(path, &t) != 0) return 0;
+    if (need_roles && t.n_roles == 0) return 0;
+    *out = t;
+    return 1;
+}
 static int llmdesc_resolve_core(const char* hf_dir, LlmDesc* out, char* out_path, size_t out_path_cap);
 /* Wrapper: risolve + garantisce la `geometry` (dal `.gmbarch` o derivata da config.json). GMAD eliminato. */
 int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out_path_cap) {
@@ -279,39 +289,41 @@ static int llmdesc_resolve_core(const char* hf_dir, LlmDesc* out, char* out_path
     { char exe[2048]; ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
       (void)n; snprintf(d2, sizeof d2, "arch"); dirs[3] = NULL; }
     (void)d3;
-    for (int i = 0; i < 3; i++) {
-        if (!dirs[i]) continue;
-        char path[4096];
-        snprintf(path, sizeof path, "%s/%s.llmarch", dirs[i], slug);
-        if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
-        snprintf(path, sizeof path, "%s/%s.gmbarch", dirs[i], slug);
-        if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
-    }
-    /* ABI/ canonica (anche FRATELLO LLMEnv/ABI via llmdesc_abi_dir; .llmarch O .gmbarch). */
-    char abi[2048];
-    if (llmdesc_abi_dir(abi, sizeof abi)) {
-        char path[4096];
-        snprintf(path, sizeof path, "%s/%s.llmarch", abi, slug);
-        if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
-        snprintf(path, sizeof path, "%s/%s.gmbarch", abi, slug);
-        if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
-    }
-    /* <dir>/arch/ risalendo dagli antenati della cwd (.llmarch O .gmbarch). */
-    char cwd[2048];
-    if (getcwd(cwd, sizeof cwd) != NULL) {
-        char dir[2048]; snprintf(dir, sizeof dir, "%s", cwd);
-        for (int up = 0; up < 12 && dir[0]; ++up) {
-            char path[4096];
-            snprintf(path, sizeof path, "%s/arch/%s.llmarch", dir, slug);
-            if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
-            snprintf(path, sizeof path, "%s/arch/%s.gmbarch", dir, slug);
-            if (llmdesc_load(path, out) == 0) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
-            char* sl = strrchr(dir, '/');
-            if (sl == NULL) break;
-            if (sl == dir) { dir[1] = 0; } else *sl = 0;
+    /* Ricerca del descrittore. `.gmbarch` = forma canonica corrente (ruoli+gguf+geometry);
+     * `.llmarch` = legacy/equivalente. DUE FASI: prima si accetta SOLO un descrittore CON
+     * ruoli (name-map completa, es. ABI/), poi uno qualsiasi (geometry-only autogenerato).
+     * Così lo stub `.gmbarch` creato in <model>/arch/ NON shadowa l'ABI completa. */
+    char abi[2048]; int have_abi = llmdesc_abi_dir(abi, sizeof abi);
+    static const char* exts[] = { "gmbarch", "llmarch" };
+    for (int phase = 1; phase >= 0; --phase) {
+        for (int i = 0; i < 3; i++) {
+            if (!dirs[i]) continue;
+            for (int x = 0; x < 2; ++x) {
+                char path[4096]; snprintf(path, sizeof path, "%s/%s.%s", dirs[i], slug, exts[x]);
+                if (llmdesc_load_pref(path, out, phase)) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
+            }
+        }
+        /* ABI/ canonica (via llmdesc_abi_dir; dal fratello GMBasic/ABI o LLMEnv/ABI). */
+        if (have_abi) for (int x = 0; x < 2; ++x) {
+            char path[4096]; snprintf(path, sizeof path, "%s/%s.%s", abi, slug, exts[x]);
+            if (llmdesc_load_pref(path, out, phase)) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
+        }
+        /* <dir>/arch/ risalendo dagli antenati della cwd. */
+        char cwd[2048];
+        if (getcwd(cwd, sizeof cwd) != NULL) {
+            char dir[2048]; snprintf(dir, sizeof dir, "%s", cwd);
+            for (int up = 0; up < 12 && dir[0]; ++up) {
+                for (int x = 0; x < 2; ++x) {
+                    char path[4096]; snprintf(path, sizeof path, "%s/arch/%s.%s", dir, slug, exts[x]);
+                    if (llmdesc_load_pref(path, out, phase)) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
+                }
+                char* sl = strrchr(dir, '/');
+                if (sl == NULL) break;
+                if (sl == dir) { dir[1] = 0; } else *sl = 0;
+            }
         }
     }
-    /* AUTO-BUILD (2026-10-04): nessun `.gmbarch` trovato -> COSTRUISCILO (geometry numerica da
+    /* AUTO-BUILD (2026-10-04): nessun descrittore trovato -> COSTRUISCILO (geometry numerica da
      * config.json + template ABI) in <model>/arch/<arch>.gmbarch, poi caricalo. GMAD eliminato. */
     { char ap[2400]; if (llmdesc_autobuild(hf_dir, ap, sizeof ap) == 1 && llmdesc_load(ap, out) == 0) {
           if (out_path) snprintf(out_path, out_path_cap, "%s", ap); return 0; } }

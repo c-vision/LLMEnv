@@ -217,6 +217,11 @@ static void gguf_target_name(const LlmCodecRoleMap* rm, const char* src, char* o
         else if (hd)       { int L = src_layer_of(src); snprintf(out, cap, g, L); }
         else if (hs)       { snprintf(out, cap, g, src_subrole(src)); }
         else               { snprintf(out, cap, "%s", g); }
+        /* Un BIAS reale (`<x>.bias`, distinto dai `.biases` di quant, gia' saltati) non deve
+         * collidere col `.weight` dello stesso ruolo: sostituisci il suffisso finale. */
+        { size_t sl = strlen(src), ol = strlen(out);
+          if (sl > 5 && strcmp(src + sl - 5, ".bias") == 0 && ol > 7 && strcmp(out + ol - 7, ".weight") == 0)
+              snprintf(out + ol - 7, cap - (ol - 7), ".bias"); }
         return;
     }
     snprintf(out, cap, "%s", src);   /* nessun mapping: nome sorgente VERBATIM (trovabile dal loader) */
