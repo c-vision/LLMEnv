@@ -103,7 +103,11 @@ bool qwen3_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, 
         ok = ok && multishard_get(&m->weights, namebuf, &kn_w);
     }
     const int qn_dim = ok ? (int)mlx_array_size(qn_w) : 0;
-    const bool qk_norm_flat = ok && qn_dim == m->cfg.hidden_size && qn_dim != m->cfg.head_dim;
+    /* QK-norm FLAT (OLMoE: una norm sull'intero q/k, dim = n_heads*head_dim) vs PER-HEAD (dim =
+     * head_dim). Usare n_heads*head_dim, NON hidden_size: dopo un prune delle teste `hidden_size`
+     * NON cambia ma il q/k piatti SÌ (n_keep*head_dim) -> con hidden_size la flat NON veniva
+     * riconosciuta e la norm per-head leggeva un peso di lunghezza sbagliata (crash). */
+    const bool qk_norm_flat = ok && qn_dim == m->cfg.n_heads * m->cfg.head_dim && qn_dim != m->cfg.head_dim;
 
     mlx_array q_pre = q, k_pre = k;
     mlx_array q_flat_n = mlx_array_new(), k_flat_n = mlx_array_new();
