@@ -17,7 +17,7 @@
 /* TEMP (dsv4_profile): tempo GPU REALE (timestamp MSL `GPUStartTime/GPUEndTime` del command
  * buffer), accumulato per classe di op: [0]=altro, [1]=attn, [2]=MoE. Etichettato dal chiamante
  * (llm_dsv4_gpu_ctx.mm) prima della call. Immune al carico CPU. */
-static double g_dsv4_mtl_gpu_ms[4] = {0, 0, 0, 0};
+static double g_dsv4_mtl_gpu_ms[8] = {0};
 static int    g_dsv4_mtl_op = 0;
 static long   g_dsv4_mtl_command_buffers = 0;
 /* TEMP (dsv4_profile): conteggio dispatch Metal (una chiamata setComputePipelineState ~ un dispatch). */
@@ -28,10 +28,10 @@ long llm_dsv4_metal_dispatches(void) { return g_dsv4_dispatchs; }
 long llm_dsv4_metal_res_commits(void) { return g_dsv4_res_commits; }
 long llm_dsv4_metal_res_adds(void) { return g_dsv4_res_adds; }
 long llm_dsv4_metal_command_buffers(void) { return g_dsv4_mtl_command_buffers; }
-static long g_dsv4_mtl_cb_byop[4] = {0, 0, 0, 0};
-long llm_dsv4_metal_command_buffers_op(int op) { return (op >= 0 && op < 4) ? g_dsv4_mtl_cb_byop[op] : 0; }
-double llm_dsv4_metal_gpu_ms_op(int op) { return (op >= 0 && op < 4) ? g_dsv4_mtl_gpu_ms[op] : 0.0; }
-void llm_dsv4_metal_set_op(int op) { g_dsv4_mtl_op = (op >= 0 && op < 4) ? op : 0; }
+static long g_dsv4_mtl_cb_byop[8] = {0};
+long llm_dsv4_metal_command_buffers_op(int op) { return (op >= 0 && op < 8) ? g_dsv4_mtl_cb_byop[op] : 0; }
+double llm_dsv4_metal_gpu_ms_op(int op) { return (op >= 0 && op < 8) ? g_dsv4_mtl_gpu_ms[op] : 0.0; }
+void llm_dsv4_metal_set_op(int op) { g_dsv4_mtl_op = (op >= 0 && op < 8) ? op : 0; }
 void llm_dsv4_metal_gpu_ms(double* attn, double* moe) {
     if (attn) *attn = g_dsv4_mtl_gpu_ms[1];
     if (moe)  *moe  = g_dsv4_mtl_gpu_ms[2];

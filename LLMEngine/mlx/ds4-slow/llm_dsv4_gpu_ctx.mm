@@ -221,7 +221,7 @@ int llm_dsv4_gpu_attn_mid_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights*
     if (!m->inited && !dsv4_mid_init(m, c, L, ratio, raw_cap, comp_cap)) return 0;
     LlmDsv4MidParams p; int nr, na, ni;
     dsv4_mid_fill(m, c, ratio, raw_cap, comp_cap, m->n_raw, m->n_acomp, m->n_icomp, q, kv, qrn, xn, pos, heads, &p, &nr, &na, &ni);
-    llm_dsv4_metal_set_op(1);
+    llm_dsv4_metal_set_op(4);
     { int mr = llm_dsv4_metal_attn_mid(g_be, &p); llm_dsv4_metal_set_op(0); if (mr != 0) return 0; }
     m->n_raw = nr; m->n_acomp = na; m->n_icomp = ni;
     { static int logged = 0; if (!logged) { logged = 1; fprintf(stderr, "DSV4 GPU: middle attenzione eseguito su GPU\n"); } }
