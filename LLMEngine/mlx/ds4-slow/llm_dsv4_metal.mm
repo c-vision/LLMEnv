@@ -16,9 +16,10 @@
 #include "llm_dsv4_actquant.h"   /* riuso: llm_dsv4_q8_K_quantize_row (metodo ds4) */
 
 /* TEMP (dsv4_profile): tempo GPU REALE (timestamp MSL `GPUStartTime/GPUEndTime` del command
- * buffer), accumulato per classe di op: [0]=altro, [1]=attn, [2]=MoE. Etichettato dal chiamante
- * (llm_dsv4_gpu_ctx.mm) prima della call. Immune al carico CPU. */
-static double g_dsv4_mtl_gpu_ms[8] = {0};
+ * buffer), accumulato per classe di op: [0]=altro, [1]=attn, [2]=MoE, [3]=attn-finish, [4]=attn-mid,
+ * [5]=mhc-scale, [6]=mhc-mixes, [7]=mhc-sinkhorn, [8]=mhc-norm, [9]=mhc-post. Etichettato dal
+ * chiamante prima della call. Immune al carico CPU. */
+static double g_dsv4_mtl_gpu_ms[16] = {0};
 static int    g_dsv4_mtl_op = 0;
 static long   g_dsv4_mtl_command_buffers = 0;
 long g_dsv4_waits = 0;
@@ -31,10 +32,17 @@ long llm_dsv4_metal_dispatches(void) { return g_dsv4_dispatchs; }
 long llm_dsv4_metal_res_commits(void) { return g_dsv4_res_commits; }
 long llm_dsv4_metal_res_adds(void) { return g_dsv4_res_adds; }
 long llm_dsv4_metal_command_buffers(void) { return g_dsv4_mtl_command_buffers; }
-static long g_dsv4_mtl_cb_byop[8] = {0};
-long llm_dsv4_metal_command_buffers_op(int op) { return (op >= 0 && op < 8) ? g_dsv4_mtl_cb_byop[op] : 0; }
-double llm_dsv4_metal_gpu_ms_op(int op) { return (op >= 0 && op < 8) ? g_dsv4_mtl_gpu_ms[op] : 0.0; }
-void llm_dsv4_metal_set_op(int op) { g_dsv4_mtl_op = (op >= 0 && op < 8) ? op : 0; }
+static long g_dsv4_mtl_cb_byop[16] = {0};
+long llm_dsv4_metal_command_buffers_op(int op) { return (op >= 0 && op < 16) ? g_dsv4_mtl_cb_byop[op] : 0; }
+double llm_dsv4_metal_gpu_ms_op(int op) { return (op >= 0 && op < 16) ? g_dsv4_mtl_gpu_ms[op] : 0.0; }
+void llm_dsv4_metal_set_op(int op) { g_dsv4_mtl_op = (op >= 0 && op < 16) ? op : 0; }
+/* TEMP (dsv4_profile): quando ON, `hc_pre_batch` emette i 4 sub-kernel in 4 cb separati (per-kernel
+ * GPU ms via op 5..8); `hc_post_batch` tagga il proprio cb con op 9. A profilo OFF: 1 cb come prima. */
+static int dsv4_mhc_prof_split(void) {
+    static int v = -1;
+    if (v < 0) { int x = 0; v = (llm_ai_mlx_opt_get_bool("dsv4_profile", &x) == 0) ? x : 0; }
+    return v;
+}
 void llm_dsv4_metal_gpu_ms(double* attn, double* moe) {
     if (attn) *attn = g_dsv4_mtl_gpu_ms[1];
     if (moe)  *moe  = g_dsv4_mtl_gpu_ms[2];
@@ -2859,27 +2867,36 @@ int llm_dsv4_metal_hc_pre_batch(LlmDsv4Metal* b, int nt, int HC, int D, int iter
     id<MTLBuffer> NWb = [b->dev newBufferWithBytes:norm_w length:(NSUInteger)D * 4 options:MTLResourceStorageModeShared];
     if (!R || !SC || !MX || !SP || !NM || !FNb || !SCb || !BSb || !NWb) { if (FNb) [FNb release]; if (SCb) [SCb release]; if (BSb) [BSb release]; if (NWb) [NWb release]; return -2; }
     memcpy([R contents], res, (size_t)nt * hcd * 4);
+    const int split = dsv4_mhc_prof_split();   /* TEMP: a profilo ON, un cb per sub-kernel (op 5..8) */
+    #define MHC_SPLIT(OP) do { if (split) { [e endEncoding]; dsv4_res_commit(b); [cb commit]; llm_dsv4_metal_set_op(OP); { g_dsv4_waits++; [cb waitUntilCompleted]; } dsv4_gpu_acct(cb); cb = [b->queue commandBuffer]; e = [cb computeCommandEncoder]; } } while (0)
     id<MTLCommandBuffer> cb = [b->queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
     g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hcb_scale];
     [e setBuffer:R offset:0 atIndex:0]; [e setBuffer:SC offset:0 atIndex:1];
     { uint32_t P[1] = { hcd }; [e setBytes:P length:sizeof P atIndex:2]; [e setBytes:&rms_eps length:4 atIndex:3]; }
     [e dispatchThreadgroups:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    MHC_SPLIT(5);
     g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hcb_mixes];
     [e setBuffer:R offset:0 atIndex:0]; [e setBuffer:FNb offset:0 atIndex:1]; [e setBuffer:SC offset:0 atIndex:2]; [e setBuffer:MX offset:0 atIndex:3];
     { uint32_t P[2] = { hcd, size }; [e setBytes:P length:sizeof P atIndex:4]; }
     [e dispatchThreadgroups:MTLSizeMake(size, nt, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    MHC_SPLIT(6);
     g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hcb_sink];
     [e setBuffer:MX offset:0 atIndex:0]; [e setBuffer:SCb offset:0 atIndex:1]; [e setBuffer:BSb offset:0 atIndex:2]; [e setBuffer:SP offset:0 atIndex:3];
     { uint32_t P[3] = { (uint32_t)HC, (uint32_t)iters, size }; [e setBytes:P length:sizeof P atIndex:4]; [e setBytes:&hc_eps length:4 atIndex:5]; }
     [e dispatchThreads:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    MHC_SPLIT(7);
     g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hcb_norm];
     [e setBuffer:R offset:0 atIndex:0]; [e setBuffer:SP offset:0 atIndex:1]; [e setBuffer:NWb offset:0 atIndex:2]; [e setBuffer:NM offset:0 atIndex:3];
     { uint32_t P[3] = { (uint32_t)D, (uint32_t)HC, size }; [e setBytes:P length:sizeof P atIndex:4]; [e setBytes:&rms_eps length:4 atIndex:5]; }
     [e dispatchThreadgroups:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     [e endEncoding];
-    dsv4_res_commit(b); [cb commit];
+    dsv4_res_commit(b);
+    if (split) llm_dsv4_metal_set_op(8);
+    [cb commit];
     { g_dsv4_waits++; [cb waitUntilCompleted]; } dsv4_gpu_acct(cb);
+    if (split) llm_dsv4_metal_set_op(0);
+    #undef MHC_SPLIT
     int rc = cb.error ? -3 : 0;
     if (rc == 0) { memcpy(normed, [NM contents], (size_t)nt * D * 4); memcpy(sp, [SP contents], (size_t)nt * size * 4); }
     [FNb release]; [SCb release]; [BSb release]; [NWb release];
@@ -2903,8 +2920,9 @@ int llm_dsv4_metal_hc_post_batch(LlmDsv4Metal* b, int nt, int HC, int D, const f
     { uint32_t P[3] = { (uint32_t)D, (uint32_t)HC, size }; [e setBytes:P length:sizeof P atIndex:4]; }
     [e dispatchThreads:MTLSizeMake(hcd, nt, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     [e endEncoding];
-    dsv4_res_commit(b); [cb commit];
-    { g_dsv4_waits++; [cb waitUntilCompleted]; } dsv4_gpu_acct(cb);
+    dsv4_res_commit(b);
+    { int _sp = dsv4_mhc_prof_split(); if (_sp) llm_dsv4_metal_set_op(9); [cb commit];
+      { g_dsv4_waits++; [cb waitUntilCompleted]; } dsv4_gpu_acct(cb); if (_sp) llm_dsv4_metal_set_op(0); }
     if (cb.error) return -3;
     memcpy(out, [O contents], (size_t)nt * hcd * 4);
     return 0;

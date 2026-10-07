@@ -36,6 +36,13 @@ static inline void llm_dsv4_pf_dump(const char* tag) {
             "fase3(mHC)=%.1fms | hc gpu/cpu=%ld/%ld attn gpu/cpu=%ld/%ld moe batch/pertok=%ld/%ld\n",
             tag, g_pf_layers, g_pf_t1, g_pf_tmoe, _io, _mm, g_pf_t3,
             g_pf_hc_gpu, g_pf_hc_cpu, g_pf_attn_gpu, g_pf_attn_cpu, g_pf_moe_batch, g_pf_moe_cpu);
+    /* TEMP: split GPU dei 5 sub-kernel mHC (solo a profilo ON, `hc_pre_batch` emette 4 cb). */
+    fprintf(stderr, "[dsv4-prof mhc] scale=%.1f mixes=%.1f sink=%.1f norm=%.1f post=%.1f ms (cb 5..9=%ld/%ld/%ld/%ld/%ld)\n",
+            llm_dsv4_metal_gpu_ms_op(5), llm_dsv4_metal_gpu_ms_op(6), llm_dsv4_metal_gpu_ms_op(7),
+            llm_dsv4_metal_gpu_ms_op(8), llm_dsv4_metal_gpu_ms_op(9),
+            llm_dsv4_metal_command_buffers_op(5), llm_dsv4_metal_command_buffers_op(6),
+            llm_dsv4_metal_command_buffers_op(7), llm_dsv4_metal_command_buffers_op(8),
+            llm_dsv4_metal_command_buffers_op(9));
 }
 typedef struct {
     double gpu_total, gpu_attn, gpu_moe, route, store, metal;
