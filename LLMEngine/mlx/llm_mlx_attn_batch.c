@@ -8,6 +8,7 @@
 #include "llm_mlx_dispatch_profile.h"
 #include "llm_mlx_fused_residual_rms.h"
 #include "llm_mlx_ops.h"
+#include "oss/llm_oss_attn.h"   /* helper attenzione GPT-OSS (sinks/kv-f16/sdpa/oproj) */
 #include "llm_mlx_kv_quant_sdpa_kernel.h"
 #include "llm_mlx_gdn_gate_kernel.h"
 
@@ -119,22 +120,9 @@ static bool llama_attention_block_batch(LlmMlxModel* m, int layer_idx, LlmMlxSes
         mlx_array_free(q_bias); mlx_array_free(k_bias); mlx_array_free(v_bias);
     }
 
-    /* gpt-oss: sinks appresi per-head (self_attn.sinks). Il multishard puo' restituire una
-     * VIEW a stride -> copia contigua (stesso bug/rimedio del path per-sessione). */
+    /* gpt-oss: sinks in oss/ (llm_oss_attn.h). */
     mlx_array sinks = mlx_array_new();
-    if (ok && is_gptoss) {
-        char snb[256];
-        mlx_array sk = mlx_array_new();
-        tname(m->cfg.layer_prefix, layer_idx, "self_attn.sinks", snb, sizeof(snb));
-        ok = multishard_get(&m->weights, snb, &sk);
-        if (ok) {
-            mlx_array sc = mlx_array_new();
-            ok = mlx_contiguous(&sc, sk, /*allow_col_major=*/false, st) == 0;
-            if (ok) mlx_array_set(&sinks, sc);
-            mlx_array_free(sc);
-        }
-        mlx_array_free(sk);
-    }
+    if (ok && is_gptoss) ok = llm_oss_load_sinks(m, layer_idx, st, &sinks);
 
     const int qsh[4] = {1, n_sess, nh, hd};
     const int kvsh[4] = {1, n_sess, nkv, hd};
@@ -193,10 +181,7 @@ static bool llama_attention_block_batch(LlmMlxModel* m, int layer_idx, LlmMlxSes
                  mlx_fast_rope(&kr, ks_e, rope_dims, false, base, 1.0f, co, nof, st) == 0;
             mlx_array_free(nof);
         }
-        const bool kvf16 = is_gptoss
-            ? (llm_mlx_kv_f16_gptoss_enabled() &&
-               !(m->cfg.is_sliding_layer[layer_idx] && m->cfg.sliding_window > 0))
-            : llm_mlx_kv_f16_enabled();
+        const bool kvf16 = is_gptoss ? llm_oss_kv_f16_layer(m, layer_idx) : llm_mlx_kv_f16_enabled();
         if (ok && kvf16 && mlx_array_dtype(kr) != MLX_FLOAT16) {
             mlx_array kr16 = mlx_array_new(), vt16 = mlx_array_new();
             if (mlx_astype(&kr16, kr, MLX_FLOAT16, st) == 0 && mlx_astype(&vt16, vs_e, MLX_FLOAT16, st) == 0) {
@@ -219,11 +204,8 @@ static bool llama_attention_block_batch(LlmMlxModel* m, int layer_idx, LlmMlxSes
         mlx_array attn_s = mlx_array_new();
         if (ok) {
             if (is_gptoss) {
-                int win = (m->cfg.is_sliding_layer[layer_idx] && m->cfg.sliding_window > 0)
-                          ? m->cfg.sliding_window : 0;
-                ok = llm_mlx_gqa_sdpa_sinks(&attn_s, qr, sess[s]->k_cache[layer_idx],
-                                            sess[s]->v_cache[layer_idx],
-                                            1.0f / sqrtf((float)hd), win, sinks, st);
+                ok = llm_oss_attn_sdpa(&attn_s, m, layer_idx, qr, sess[s]->k_cache[layer_idx],
+                                       sess[s]->v_cache[layer_idx], hd, sinks, st);
             } else {
                 ok = llm_mlx_gqa_sdpa(&attn_s, qr, sess[s]->k_cache[layer_idx],
                                       sess[s]->v_cache[layer_idx],
@@ -246,12 +228,7 @@ static bool llama_attention_block_batch(LlmMlxModel* m, int layer_idx, LlmMlxSes
     mlx_array attn_prj = mlx_array_new(), attn_out = mlx_array_new();
     if (ok) ok = quantized_linear_cfg(&attn_prj, attn_flat, ow, os, ob, gsz, bts, m->cfg.quant_mode, st);
     if (ok && is_gptoss) {
-        char obb[256];
-        mlx_array o_lb = mlx_array_new();
-        tname(m->cfg.layer_prefix, layer_idx, "self_attn.o_proj.bias", obb, sizeof(obb));
-        ok = multishard_get(&m->weights, obb, &o_lb);
-        if (ok) ok = mlx_add(&attn_out, attn_prj, o_lb, st) == 0;
-        mlx_array_free(o_lb);
+        ok = llm_oss_oproj_bias(m, layer_idx, attn_prj, &attn_out, st);
     } else if (ok) {
         ok = mlx_array_set(&attn_out, attn_prj) == 0;
     }
