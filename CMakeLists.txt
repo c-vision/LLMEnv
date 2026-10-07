@@ -37,11 +37,11 @@ endif()
 
 # Motore ds4 vendorizzato (antirez): modello+tokenizer+attenzione+MoE+Metal, standalone in C/ObjC.
 # Aggangabile al superbuild con -DLLMENV_BUILD_DS4ENGINE=ON (indipendente da LLMENV_BUILD_ENGINE).
-# API pubblica testo->testo in LLMEngine/ds4engine/ds4_shim.h.
-option(LLMENV_BUILD_DS4ENGINE "Build the vendored ds4 engine (LLMEngine/ds4engine)" OFF)
+# API pubblica testo->testo in backups/ds4engine/ds4_shim.h (vendored ritirato: promosso ds4-slow -> ds4).
+option(LLMENV_BUILD_DS4ENGINE "Build the vendored ds4 engine (backups/ds4engine)" OFF)
 if(LLMENV_BUILD_DS4ENGINE)
   if(APPLE)
     enable_language(OBJC)
   endif()
-  add_subdirectory(LLMEngine/ds4engine)
+  add_subdirectory(backups/ds4engine)
 endif()

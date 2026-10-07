@@ -18,7 +18,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ds4engine (motore ds4 VENDORIZZATO) come subdirectory SOLO quando mlx e' il progetto TOP-LEVEL
 # (build standalone, es. GMBasic `build-gmbasic`): i consumer che lo aggiungono da soli (FastLLM)
 # non lo duplicano. Se il target esiste, in fondo `llm_ai_mlx` lo linka + `LLM_HAVE_DS4ENGINE`,
-# cosi' un DS4 caricato via `llmengine_llm_engine_mlx` usa il VENDORED (piu' veloce), non ds4-slow.
+# cosi' un DS4 caricato via `llmengine_llm_engine_mlx` usa il VENDORED (piu' veloce), non ds4.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR
    AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../ds4engine/CMakeLists.txt")
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ds4engine" "${CMAKE_BINARY_DIR}/ds4engine")
@@ -309,19 +309,19 @@ if(LLM_ENABLE_TRAIN)
     set(LLM_MLX_TRAIN_SRC llm_mlx_diff_forward.c)
 endif()
 
-# ds4-slow (nostro engine DS4 nativo) e' OPZIONALE: se disattivato (LLM_WITH_DS4SLOW=OFF) o se la
+# ds4 (nostro engine DS4 nativo) e' OPZIONALE: se disattivato (LLM_WITH_DS4SLOW=OFF) o se la
 # cartella non c'e', il motore degrada sul vendored `ds4` / su `ds41`. Cosi' la cartella e'
 # cancellabile senza errori di configurazione/compilazione, e un consumer che non vuole il nativo
 # (es. GMBasic, che ha il vendored) non lo compila affatto.
-option(LLM_WITH_DS4SLOW "Compila il motore DS4 nativo (ds4-slow) in llm_ai_mlx" ON)
+option(LLM_WITH_DS4SLOW "Compila il motore DS4 nativo (ds4) in llm_ai_mlx" ON)
 set(GMB_DS4SLOW_SRC "")
 set(GMB_DS4SLOW_INC "")
-if(LLM_WITH_DS4SLOW AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow)
+if(LLM_WITH_DS4SLOW AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ds4)
   list(APPEND GMB_DS4SLOW_SRC
-       ds4-slow/llm_dsv4_metal.mm
-       ds4-slow/llm_dsv4_gpu_ctx.mm
-       ds4-slow/llm_ds4slow_abi.c)
-  set(GMB_DS4SLOW_INC ds4-slow)
+       ds4/llm_dsv4_metal.mm
+       ds4/llm_dsv4_gpu_ctx.mm
+       ds4/llm_ds4slow_abi.c)
+  set(GMB_DS4SLOW_INC ds4)
 endif()
 
 add_library(llm_ai_mlx SHARED
@@ -391,10 +391,10 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_model_lifecycle.c
     llm_kvmetal_bridge.m
     llm_gemvq4_bridge.m
-    # ds4-slow (Metal DS4 IQ2/Q8, contesto GPU, adapter ABI): OPZIONALE (vedi GMB_DS4SLOW_SRC).
+    # ds4 (Metal DS4 IQ2/Q8, contesto GPU, adapter ABI): OPZIONALE (vedi GMB_DS4SLOW_SRC).
     # Se presente: Metal DS4 zero-copy + adapter llmengine_llm_engine_ds4slow.
     ${GMB_DS4SLOW_SRC}
-    # Adapter ds41-native -> ABI LlmEngine (stessi 9 metodi di ds4/ds4-slow).
+    # Adapter ds41-native -> ABI LlmEngine (stessi 9 metodi di ds4/ds4).
     ds41-native/llm_ds41_abi.c
     # P10: GEMM int8-activation x Q4/Q5 sui tensor unit M5 (port oMLX; bridge ABI-C, ObjC/Metal)
     ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8/llmmetal_oq_a8_bridge.mm
@@ -446,10 +446,10 @@ target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../..
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
 target_include_directories(llm_ai_mlx PUBLIC . ${GMB_DS4SLOW_INC} tokenizers ds41-native ../Options)
 
-# FIX dipendenze: gli header ds4-slow/ds41-native sono header-only (NON sono sorgenti) e il tracking
+# FIX dipendenze: gli header ds4/ds41-native sono header-only (NON sono sorgenti) e il tracking
 # automatico non li vede -> una modifica a *.h NON ricompila i TU consumatori (build "verde" ma binario
 # STALE, molto insidioso). Aggiungendoli come SOURCES del target, CMake li traccia come dipendenze.
-file(GLOB LLM_DS4SLOW_HDRS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow/*.h)
+file(GLOB LLM_DS4SLOW_HDRS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ds4/*.h)
 file(GLOB LLM_DS41_HDRS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native/*.h)
 if(LLM_DS4SLOW_HDRS OR LLM_DS41_HDRS)
   target_sources(llm_ai_mlx PRIVATE ${LLM_DS4SLOW_HDRS} ${LLM_DS41_HDRS})
@@ -508,8 +508,8 @@ set_target_properties(llm_ai_mlx PROPERTIES
 option(LLM_BUILD_DSV4_TESTS "Compila i test/bench DS4 come target CMake (dipendenze tracciate, niente stale)" OFF)
 if(LLM_BUILD_DSV4_TESTS)
     file(GLOB DSV4_TEST_SRCS CONFIGURE_DEPENDS
-        ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow/tests/llm_dsv4_*_test.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow/tests/llm_dsv4_prefill_bench.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/ds4/tests/llm_dsv4_*_test.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/ds4/tests/llm_dsv4_prefill_bench.c
         ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native/tests/llm_dsv41_*_test.c
         ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native/tests/llm_dsv41_*_bench.c)
     foreach(_src ${DSV4_TEST_SRCS})
@@ -518,7 +518,7 @@ if(LLM_BUILD_DSV4_TESTS)
         target_link_libraries(${_t} PRIVATE llm_ai_mlx llmcodec_ggml)
         target_include_directories(${_t} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}
-            ${CMAKE_CURRENT_SOURCE_DIR}/ds4-slow
+            ${CMAKE_CURRENT_SOURCE_DIR}/ds4
             ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native
             ${CMAKE_CURRENT_SOURCE_DIR}/../Options
             ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include)

@@ -9,7 +9,7 @@ Uso: ds4_ab_host.py [N=3] [tokens=64]
 """
 import subprocess, re, statistics, sys
 FL   = "/Users/gaetano/Documents/Projects/FastLLM/build-release/fastllm"
-DS4  = "/Users/gaetano/Documents/Projects/LLMEnv/LLMEngine/ds4engine/ds4"
+DS4  = "/Users/gaetano/Documents/Projects/LLMEnv/backups/ds4engine/ds4"
 MDL  = "/Users/gaetano/ds4/ds4flash.gguf"
 P    = "What is the capital of France?"
 TO   = 400
