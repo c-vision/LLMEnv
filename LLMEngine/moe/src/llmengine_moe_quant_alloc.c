@@ -76,7 +76,8 @@ int llmengine_moe_quant_alloc_bits(const uint64_t* nparams, const double* rel, i
  * sulla maggior parte dei tensori). Se il floor da solo supera il budget, scrive il floor e
  * ritorna -2 (infeasible: il chiamante decide, es. alzare il target o ridurre il floor). */
 int llmengine_moe_quant_alloc_bits_min(const uint64_t* nparams, const double* rel, int n, int ncand,
-                         const int* cand, const int* min_cand, double target_avg_bits, int* out_cand) {
+                         const int* cand, const int* min_cand, double target_avg_bits, int* out_cand,
+                         int allow_swap) {
     if (!nparams || !rel || !cand || !min_cand || !out_cand || n <= 0 || ncand <= 0) return -1;
     for (int i = 1; i < ncand; ++i) if (cand[i] <= cand[i - 1]) return -1;  /* bit crescenti */
     uint64_t total = 0;
@@ -106,6 +107,7 @@ int llmengine_moe_quant_alloc_bits_min(const uint64_t* nparams, const double* re
         bits_now += best_cost;
     }
     if (infeasible) return -2;
+    if (!allow_swap) return 0;
     /* §6.1 S3 — DEVIAZIONE VERSO IL BASSO (swap): con l'ancora = baseline non c'e' slack per
      * promuovere; allora si SCENDE di un gradino su un tensore poco sensibile (liberando budget)
      * per SALIRE su uno piu' sensibile, se il guadagno netto e' positivo e il budget resta

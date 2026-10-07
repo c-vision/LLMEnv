@@ -40,7 +40,8 @@ int llmengine_moe_quant_alloc_bits(const uint64_t* nparams, const double* rel, i
  * SOLO sopra il floor entro il budget medio. Ritorna 0 se rispetta il budget, -2 se il floor da
  * solo lo supera (infeasible; `out_cand` resta il floor), -1 su input invalido. */
 int llmengine_moe_quant_alloc_bits_min(const uint64_t* nparams, const double* rel, int n, int ncand,
-                         const int* cand, const int* min_cand, double target_avg_bits, int* out_cand);
+                         const int* cand, const int* min_cand, double target_avg_bits, int* out_cand,
+                         int allow_swap);
 
 #ifdef __cplusplus
 }
