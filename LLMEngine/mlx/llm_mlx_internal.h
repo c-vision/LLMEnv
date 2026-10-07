@@ -19,6 +19,7 @@
 #include "llm_mlx_packed_qkv.h"    /* LlmMlxPackedQkv */
 #include "llm_mlx_qwen4exp.h"      /* LlmQwen4ExpQSACache */
 #include "../../LLMMetal/oq_a8/llmmetal_oq_a8_bridge.h" /* LlmMetalOqA8Ctx (self-test eval) */
+#include "oss/llm_oss.h"           /* dominio GPT-OSS: contratto (struct memo + prototipi) */
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -511,10 +512,6 @@ typedef struct {
 
 typedef struct { const void* key; char name[256]; mlx_array val; } LlmWCacheEnt;
 
-typedef struct { const char* sfx; int sub; mlx_array a; } GptossWE;  /* sub: -1 singolo, 0/1/2 w/s/b */
-
-typedef struct { GptossWE* e; int n; int cap; } GptossLayerWE;
-
 typedef struct { mlx_array guw, gus, uw, us, dw, ds; bool ready; } LlmPad512;
 
 typedef struct { mlx_array w, s, b; bool ready; } LlmGateUp;
@@ -940,13 +937,9 @@ int  llm_mlx_apply_bf16_mode(LlmMlxModel* m, const char* mode, const char* origi
 void llm_mlx_auto_pair_act_dtype(LlmMlxModel* m, bool explicit_requested);
 int  llm_mlx_promote_scales_f32(LlmMlxModel* m);
 
-/* --- dominio GPT-OSS (llm_mlx_gptoss.c) --- */
+/* --- dominio GPT-OSS: contratto in oss/llm_oss.h (incluso in testa) --- */
 /* llm_mlx_wcache_enabled e' definita nel monolite (usata dal dominio). */
 bool llm_mlx_wcache_enabled(void);
-bool llm_mlx_gptoss_bias_prep(LlmMlxModel* m, int layer_idx, int slot, mlx_array src, int dim, mlx_array* out);
-bool llm_mlx_gptoss_get_sfx(LlmMlxModel* m, int layer_idx, const char* sfx, mlx_array* out);
-bool llm_mlx_gptoss_get_triple_sfx(LlmMlxModel* m, int layer_idx, const char* sfx,
-                                   mlx_array* w, mlx_array* s, mlx_array* b);
 
 /* --- dominio ROPE (llm_mlx_rope.c) --- */
 mlx_array llm_mlx_proportional_rope_freqs(int dims, int rotated_dims, float base, float factor);
@@ -1055,15 +1048,11 @@ bool deepseek_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
 /* Definito nel monolite, usato dal dominio GLM/DeepSeek MoE FFN. */
 void llm_mlx_imatrix_accumulate(LlmMlxModel* m, int layer_idx, mlx_array x3d,
                                 mlx_array mid4d, const uint32_t* top_inds, int n_tokens);
-/* --- dominio GPT-OSS FFN/attn (llm_mlx_gptoss_ffn.c) --- */
-bool gpt_oss_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
-                             mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
-bool gpt_oss_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+/* --- dominio GPT-OSS FFN/attn: prototipi in oss/llm_oss.h --- */
 /* Definiti nel monolite, usati dal dominio GPT-OSS. */
 bool llm_mlx_fuse_moe_mxfp4_enabled(void);
 bool llm_mlx_fuse_moe_mxfp4_verify_enabled(void);
 void llm_mlx_imatrix_energy_add(LlmMlxModel* m, float* dst, int cols, mlx_array x3d, int n_tokens);
-bool llm_mlx_kv_f16_gptoss_enabled(void);
 bool llm_mlx_kvmetal_populate_batch(void** kvmetal_ctx_arr, int layer_idx, LlmMlxModel* m,
                                     int cache_offset, int n_tokens, mlx_array k_rope, mlx_array v_t);
 bool llm_mlx_kvmetal_step(void** kvmetal_ctx_arr, int layer_idx, LlmMlxModel* m, int cache_offset,
@@ -1081,9 +1070,7 @@ extern int g_gemvq4_disabled;
 #endif
 bool llm_mlx_mxfp4_act_f16_enabled(void);
 mlx_array llm_mlx_scalar_act(float v, mlx_stream stream);
-/* Definiti in llm_mlx_gptoss_ffn.c, usati dal monolite (session create/destroy). */
-void llm_mlx_pad512_reset(void);
-void llm_mlx_gateup_reset(void);
+/* (llm_mlx_pad512_reset/gateup_reset: prototipi in oss/llm_oss.h) */
 /* --- dominio self-test eval (llm_mlx_selftest_eval.c) --- */
 /* Definito nel monolite, usato dal dominio self-test eval (oQ A8). */
 LlmMetalOqA8Ctx* llm_mlx_oq_a8_ctx(void);
