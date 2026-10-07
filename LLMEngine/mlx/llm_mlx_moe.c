@@ -281,7 +281,7 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
     int* uniq = (int*)malloc((size_t)M * sizeof(int));
     if (!ids || !pos || !uniq) { free(ids); free(pos); free(uniq); return -1; }
     static int seen[8192];
-    for (int i = 0; i < 8192; i++) seen[i] = -1;
+    { int ne = cfg->n_experts; if (ne > 8192) ne = 8192; for (int i = 0; i < ne; i++) seen[i] = -1; }
     for (int i = 0; i < M; i++) ids[i] = (int)idp[i];
     int nu = llm_mlx_stream_unique(ids, M, cfg->n_experts, seen, pos, uniq);
     int rc = -1;
@@ -334,7 +334,7 @@ bool llm_mlx_moe_fused_stream_aware(
     uint32_t* posu = (uint32_t*)malloc((size_t)k * sizeof(uint32_t));
     if (!ids || !pos || !uniq || !posu) { free(ids); free(pos); free(uniq); free(posu); return false; }
     static int seen[8192];
-    for (int i = 0; i < 8192; i++) seen[i] = -1;
+    { int ne = cfg->n_experts; if (ne > 8192) ne = 8192; for (int i = 0; i < ne; i++) seen[i] = -1; }
     for (int i = 0; i < k; i++) ids[i] = (int)idp[i];
     int nu = llm_mlx_stream_unique(ids, k, cfg->n_experts, seen, pos, uniq);
     bool ok = false;
