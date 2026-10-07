@@ -5,7 +5,7 @@ di motori MLX su Apple Silicon) a **due motori** non previsti:
 
 | nome motore | progetto | endpoint OpenAI-compatibile |
 |---|---|---|
-| `ds4`  | motore ds4 vendorizzato (`LLMEngine/ds4engine`) | `ds4-server -m <gguf> --host --port` |
+| `ds4`  | server OpenAI-compatibile per il motore DS4 | `ds4-server -m <gguf> --host --port` |
 | `fmlx` | FastLLM (`fmlx_serve`) | `fastllm serve --host --port` |
 
 Entrambi espongono `/v1/models` e `/v1/chat/completions`, quindi mlx-chronos li misura con lo
@@ -60,7 +60,7 @@ in modo affidabile a runtime.
 ## Stato: OPERATIVO
 - Motori `ds4` e `fmlx` registrati nel fork (`vendor/mlx-chronos`, edit di
   `constants.py`/`schema.py`/`engines.py`).
-- `ds4-server` costruito via CMake (`-DLLMENV_BUILD_DS4ENGINE=ON`, target `ds4-server`).
+- `ds4-server`: server standalone ritirato con il vecchio motore di riferimento.
 - `fastllm` costruito (target FastLLM `fastllm`).
 - **Run ds4 verificato end-to-end** (server + modello + risultato sealato):
   ```

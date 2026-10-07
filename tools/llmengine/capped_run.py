@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """capped_run.py — esegue un comando (es. un test/binario DS4) SOTTO i cap di sicurezza memoria,
 riusando gli helper di ds4_ab_decode.py (RSS albero <=62GB, free >=floor, pre-check, kill-tree).
-Serve per far girare binari che NON hanno un monitor di memoria proprio (es. i test ds4-slow).
+Serve per far girare binari che NON hanno un monitor di memoria proprio (es. i test ds4).
 
 Uso: capped_run.py [floor=30.0] [rss_cap=62.0] [pre=60.0] -- <cmd> [args...]
 Stampa stdout+stderr del comando, poi il riepilogo [rc=.. peakRSS=.. minLibera=.. why=..].

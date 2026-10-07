@@ -42,31 +42,16 @@ extern void* g_primmlx_norm_h;
 static const char kMlxMetaMagic[8] = {'G', 'M', 'B', 'M', 'X', '0', '1', '\0'};
 
 #include <dlfcn.h>
-/* Risolve un accessor d'engine (`llmengine_llm_engine_*`) per NOME: nessuna dipendenza di link
- * (l'engine vendored `ds4engine` e' un target opzionale), e i consumatori scelgono a runtime. */
+/* Risolve un accessor d'engine (`llmengine_llm_engine_*`) per NOME: nessuna dipendenza di link,
+ * i consumatori scelgono a runtime. */
 static const LlmEngineLlmEngine* llm_mlx_engine_symbol(const char* name) {
     const LlmEngineLlmEngine* (*fn)(void);
     *(void**)(&fn) = dlsym(RTLD_DEFAULT, name);
     return fn ? fn() : NULL;
 }
-/* Engine per un modello DS4: vendored (`ds4`) di default, o il nostro nativo (`ds4slow`) con
- * `ds4_backend=slow`. Fallback su ds4slow se il vendored non e' nel build. */
+/* Engine per un modello DS4: il motore unico `llmengine_llm_engine_ds4` (LLMEngine/mlx/ds4). */
 static const LlmEngineLlmEngine* llm_mlx_pick_ds4_engine(void) {
-    char bk[16]; bk[0] = 0;
-    int slow = (llm_ai_mlx_opt_get_str("ds4_backend", bk, sizeof bk) == 0) && strcmp(bk, "slow") == 0;
-#ifdef LLM_HAVE_DS4ENGINE
-    /* Vendored (default, piu' veloce): riferimento DIRETTO -> il linker lo porta DENTRO
-     * libllm_ai_mlx (e quindi e' visibile anche via dlsym ai consumatori, es. GMBasic). */
-    if (!slow) return llmengine_llm_engine_ds4();
-#endif
-    /* Nativo `ds4-slow` (opzionale; dlsym: la cartella resta cancellabile). */
-    {
-        const LlmEngineLlmEngine* e = llm_mlx_engine_symbol("llmengine_llm_engine_ds4slow");
-#ifdef LLM_HAVE_DS4ENGINE
-        if (e == NULL) e = llmengine_llm_engine_ds4();
-#endif
-        return e;
-    }
+    return llm_mlx_engine_symbol("llmengine_llm_engine_ds4");
 }
 
 
@@ -191,7 +176,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
     { char xp[2048]; if (llm_ai_mlx_opt_get_str("expolicy", xp, (int)sizeof xp) == 0 && xp[0]) { if (llm_mlx_expolicy_load(xp) == 0) llm_mlx_expolicy_apply(); } else llm_mlx_expolicy_reset(); }
 
     /* DS4 (DeepSeek V4 Flash): gestito da un engine AUTONOMO (ABI a 9 metodi), non dal forward
-     * MLX generico. Vendored (`ds4`) o nativo (`ds4slow`) scelti con `ds4_backend`. Se il GGUF
+     * MLX generico. Vendored (`ds4`) o nativo (`ds4`) scelti con `ds4_backend`. Se il GGUF
      * non e' un DS4 il load dell'engine fallisce e si prosegue col GGUF generico. */
     {
         size_t dn = strlen(model_dir);
@@ -223,7 +208,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                         /* FALLBACK: se il motore scelto non carica (es. il VENDORED senza la cartella
                          * `metal/` accanto all'eseguibile), prova l'altro DS4 (nativo) prima di
                          * arrendersi: un DS4 non deve fallire per un artefatto di deploy mancante. */
-                        const LlmEngineLlmEngine* alt = llm_mlx_engine_symbol("llmengine_llm_engine_ds4slow");
+                        const LlmEngineLlmEngine* alt = llm_mlx_engine_symbol("llmengine_llm_engine_ds4");
                         if (alt != NULL && alt != eng && alt->load_model != NULL) {
                             fprintf(stderr, "llm_ai_mlx_load_model: engine '%s' non carica -> fallback '%s'\n",
                                     eng->name, alt->name);

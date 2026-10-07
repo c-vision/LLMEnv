@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""ds4_ab_host.py — A/B alternato: HOST fastllm vs ds4 standalone (STESSO engine ds4.c/ds4engine).
-
-Obbiettivo: isolare l'overhead dell'host `fastllm` (LlmEngine wrapper) dall'engine, confrontando
-`fastllm run ds4` con il CLI standalone `ds4` (stesso modello, stesso ds4.c). Ordine BILANCIATO
-(rimuove il bias di warm-up). Valido sotto qualsiasi carico (rapporto, non valore assoluto).
+"""ds4_ab_host.py — A/B alternato: HOST fastllm vs engine DS4 standalone. OBSOLETO: il CLI
+standalone e' stato ritirato (il motore DS4 unico e' LLMEngine/mlx/ds4, caricato via dylib). Tenuto solo
+come riferimento; `DS4` ora e' inefficace.
 
 Uso: ds4_ab_host.py [N=3] [tokens=64]
 """
 import subprocess, re, statistics, sys
 FL   = "/Users/gaetano/Documents/Projects/FastLLM/build-release/fastllm"
-DS4  = "/Users/gaetano/Documents/Projects/LLMEnv/backups/ds4engine/ds4"
+DS4  = ""   # standalone ritirato
 MDL  = "/Users/gaetano/ds4/ds4flash.gguf"
 P    = "What is the capital of France?"
 TO   = 400

@@ -15,15 +15,6 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ds4engine (motore ds4 VENDORIZZATO) come subdirectory SOLO quando mlx e' il progetto TOP-LEVEL
-# (build standalone, es. GMBasic `build-gmbasic`): i consumer che lo aggiungono da soli (FastLLM)
-# non lo duplicano. Se il target esiste, in fondo `llm_ai_mlx` lo linka + `LLM_HAVE_DS4ENGINE`,
-# cosi' un DS4 caricato via `llmengine_llm_engine_mlx` usa il VENDORED (piu' veloce), non ds4.
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR
-   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../ds4engine/CMakeLists.txt")
-  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ds4engine" "${CMAKE_BINARY_DIR}/ds4engine")
-endif()
-
 # Vendoring mlx-c via FetchContent -- stesso approccio "no submodule, nessun
 # checkout manuale" già usato per llama.cpp in native/llm_host_ai/. Pin a un
 # tag di release, mai a `master`, per build riproducibili.
@@ -309,19 +300,19 @@ if(LLM_ENABLE_TRAIN)
     set(LLM_MLX_TRAIN_SRC llm_mlx_diff_forward.c)
 endif()
 
-# ds4 (nostro engine DS4 nativo) e' OPZIONALE: se disattivato (LLM_WITH_DS4SLOW=OFF) o se la
+# ds4 (nostro engine DS4 nativo) e' OPZIONALE: se disattivato (LLM_WITH_DS4=OFF) o se la
 # cartella non c'e', il motore degrada sul vendored `ds4` / su `ds41`. Cosi' la cartella e'
 # cancellabile senza errori di configurazione/compilazione, e un consumer che non vuole il nativo
 # (es. GMBasic, che ha il vendored) non lo compila affatto.
-option(LLM_WITH_DS4SLOW "Compila il motore DS4 nativo (ds4) in llm_ai_mlx" ON)
-set(GMB_DS4SLOW_SRC "")
-set(GMB_DS4SLOW_INC "")
-if(LLM_WITH_DS4SLOW AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ds4)
-  list(APPEND GMB_DS4SLOW_SRC
+option(LLM_WITH_DS4 "Compila il motore DS4 nativo (ds4) in llm_ai_mlx" ON)
+set(GMB_DS4_SRC "")
+set(GMB_DS4_INC "")
+if(LLM_WITH_DS4 AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ds4)
+  list(APPEND GMB_DS4_SRC
        ds4/llm_dsv4_metal.mm
        ds4/llm_dsv4_gpu_ctx.mm
-       ds4/llm_ds4slow_abi.c)
-  set(GMB_DS4SLOW_INC ds4)
+       ds4/llm_ds4_abi.c)
+  set(GMB_DS4_INC ds4)
 endif()
 
 add_library(llm_ai_mlx SHARED
@@ -391,9 +382,9 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_model_lifecycle.c
     llm_kvmetal_bridge.m
     llm_gemvq4_bridge.m
-    # ds4 (Metal DS4 IQ2/Q8, contesto GPU, adapter ABI): OPZIONALE (vedi GMB_DS4SLOW_SRC).
-    # Se presente: Metal DS4 zero-copy + adapter llmengine_llm_engine_ds4slow.
-    ${GMB_DS4SLOW_SRC}
+    # ds4 (Metal DS4 IQ2/Q8, contesto GPU, adapter ABI): OPZIONALE (vedi GMB_DS4_SRC).
+    # Se presente: Metal DS4 zero-copy + adapter llmengine_llm_engine_ds4.
+    ${GMB_DS4_SRC}
     # Adapter ds41-native -> ABI LlmEngine (stessi 9 metodi di ds4/ds4).
     ds41-native/llm_ds41_abi.c
     # P10: GEMM int8-activation x Q4/Q5 sui tensor unit M5 (port oMLX; bridge ABI-C, ObjC/Metal)
@@ -444,25 +435,17 @@ target_link_libraries(llm_ai_mlx PRIVATE mlxc cjson ${METAL_FRAMEWORK} ${FOUNDAT
 target_include_directories(llm_ai_mlx PRIVATE "${cjson_SOURCE_DIR}")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
-target_include_directories(llm_ai_mlx PUBLIC . ${GMB_DS4SLOW_INC} tokenizers ds41-native ../Options)
+target_include_directories(llm_ai_mlx PUBLIC . ${GMB_DS4_INC} tokenizers ds41-native ../Options)
 
 # FIX dipendenze: gli header ds4/ds41-native sono header-only (NON sono sorgenti) e il tracking
 # automatico non li vede -> una modifica a *.h NON ricompila i TU consumatori (build "verde" ma binario
 # STALE, molto insidioso). Aggiungendoli come SOURCES del target, CMake li traccia come dipendenze.
-file(GLOB LLM_DS4SLOW_HDRS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ds4/*.h)
+file(GLOB LLM_DS4_HDRS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ds4/*.h)
 file(GLOB LLM_DS41_HDRS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native/*.h)
-if(LLM_DS4SLOW_HDRS OR LLM_DS41_HDRS)
-  target_sources(llm_ai_mlx PRIVATE ${LLM_DS4SLOW_HDRS} ${LLM_DS41_HDRS})
+if(LLM_DS4_HDRS OR LLM_DS41_HDRS)
+  target_sources(llm_ai_mlx PRIVATE ${LLM_DS4_HDRS} ${LLM_DS41_HDRS})
 endif()
 
-# Se il motore ds4 VENDORIZZATO (ds4engine) è nel build, llm_ai_mlx lo linka: la dylib esporta
-# allora anche `llmengine_llm_engine_ds4`, e i consumatori (GMBasic/FastLLM) possono scegliere tra
-# engine e slow via la STESSA dylib. Se ds4engine non c'è, resta solo `..._ds4slow` (adapter nativo).
-if(TARGET ds4engine)
-  target_link_libraries(llm_ai_mlx PRIVATE ds4engine)
-  # Riferimento diretto all'accessor vendored (default DS4): porta il simbolo DENTRO libllm_ai_mlx.
-  target_compile_definitions(llm_ai_mlx PRIVATE LLM_HAVE_DS4ENGINE=1)
-endif()
 
 # ENGINE container reader (llm_engine_container.c): include + link del container runtime (GGUF) e del
 # codec (dequant di formato). Modifica di infrastruttura autorizzata dall'utente 2026-09-24.

@@ -1,8 +1,8 @@
 /* llm_mlx_dsv4_layer_ops.h — pipeline dei layer DS4 dichiarata dal `.llmarch` (structure `layer`).
  *
- * Stato di COMPOSIZIONE del forward DS4: vive nel motore (non in ds4-slow) cosi' che il wiring
+ * Stato di COMPOSIZIONE del forward DS4: vive nel motore (non in ds4) cosi' che il wiring
  * del `.llmarch` in llm_mlx_model_io.c NON dipenda dalla cartella dell'engine. Il forward DS4
- * (ds4-slow/llm_dsv4_layer.h) LEGGE questo stato: una struttura nuova = una lista di primitive,
+ * (ds4/llm_dsv4_layer.h) LEGGE questo stato: una struttura nuova = una lista di primitive,
  * senza biforcazioni. `static` per-TU, come prima (comportamento invariato). */
 #ifndef LLM_MLX_DSV4_LAYER_OPS_H
 #define LLM_MLX_DSV4_LAYER_OPS_H

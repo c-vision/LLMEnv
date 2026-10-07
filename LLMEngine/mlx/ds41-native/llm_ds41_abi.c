@@ -1,7 +1,7 @@
 /* llm_ds41_abi.c — adapter DS4.1 -> ABI comune LlmEngine.
  *
  * Espone `llmengine_llm_engine_ds41()` con GLI STESSI 9 metodi del vendored `ds4-engine`
- * (`llmengine_llm_engine_ds4`) e di `ds4-slow` (`llmengine_llm_engine_ds4slow`):
+ * (`llmengine_llm_engine_ds4`) e di `ds4` (`llmengine_llm_engine_ds4`):
  *   load_model, free_model, create_session, destroy_session, append_ids, set_sampling,
  *   generate_ids, kv_set_max, set_expert_swap.
  * Cosi' un consumatore (FastLLM/GMBasic) sceglie l'engine per `model_type` e li usa tutti allo

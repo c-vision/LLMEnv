@@ -1,5 +1,5 @@
 /* llm_dsv4_autoswap.h — auto-sizing della cache esperti DS4.
- * Vive con DS4 (non nel motore MLX): l'engine ds4-slow la usa da solo, come fa il ds4 originale.
+ * Vive con DS4 (non nel motore MLX): l'engine ds4 la usa da solo, come fa il ds4 originale.
  * Tutta la RAM utilizzabile DOPO i pesi non-esperto, con i tetti di sicurezza. */
 #ifndef LLM_DSV4_AUTOSWAP_H
 #define LLM_DSV4_AUTOSWAP_H

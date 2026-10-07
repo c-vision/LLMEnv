@@ -755,9 +755,9 @@ struct LlmMlxModel {
     int mem_active_limit_mb; /* guardia saturazione: tetto su mlx active (MB; 0 = off = nessun
                               * check, costo zero in normale operazione) */
     /* Motore ESTERNO (DS4/DS4.1): se non-NULL il modello e' gestito da un engine AUTONOMO
-     * (`llmengine_llm_engine_ds4/ds4slow/ds41`) tramite l'ABI a 9 metodi. Il forward MLX
+     * (`llmengine_llm_engine_ds4/ds41`) tramite l'ABI a 9 metodi. Il forward MLX
      * generico NON e' usato per questo modello. `dsv4`/`dsv41` sono spariti: la logica vive
-     * negli engine (ds4-slow/, ds41-native/, ds4engine/). */
+     * negli engine (ds4/, ds41-native/). */
     const struct LlmEngineLlmEngine* deleg;
     void* deleg_model;
 };

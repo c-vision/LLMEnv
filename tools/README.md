@@ -25,7 +25,7 @@ created: 2026-10-04
 > Alla creazione di un tool, **aggiornare il documento in ENTRAMBE le copie** (vault +
 > `LLMEnv/tools/README.md`) — una voce: cosa fa, per chi, come si usa.
 > **Eccezione** (unica): i tool **accoppiati a un modulo** — **build CMake/codegen/test di quel
-> modulo** (es. `LLMEngine/moe/tools/`, `LLMEngine/mlx/ds4-slow/tools/`) — restano col modulo
+> modulo** (es. `LLMEngine/moe/tools/`, `LLMEngine/mlx/ds4/tools/`) — restano col modulo
 > (spostarli rompe il build) e sono elencati sotto. Vedi AGENTS.md §Tool.
 
 > [!IMPORTANT] Dove vivono i tool (LLMEnv) — consolidato 2026-10-05
@@ -62,8 +62,7 @@ created: 2026-10-04
 | streaming esperti MoE (I/O) | `LLMEnv/tools/llmengine/moe_stream_bench.c`, `GMBasic/tools/moe_stream_bench` |
 | cache esperti (LRU vs routing-aware) | `LLMEnv/LLMEngine/moe/tests/test_moe_cache_bench.c` |
 | spec/decode DFlash2/n-gram | `LLMEnv/tools/llmengine/dflash_*.c`, `GMBasic/tools/gmb_mlx_dflash2_bench.c`, `gmb_mlx_ngram_bench.c` |
-| DS4 prefill/decode (nostro engine) | `LLMEnv/LLMEngine/mlx/ds4-slow/tests/llm_dsv4_prefill_bench.c`, `GMBasic/tools/ds4_ctx_bench.py` |
-| DS4 vendored (bridge) | `LLMEnv/LLMEngine/ds4engine/ds4_bench.c`, `ds4_bridge_bench.c` |
+| DS4 prefill/decode (nostro engine) | `LLMEnv/LLMEngine/mlx/ds4/tests/llm_dsv4_prefill_bench.c`, `GMBasic/tools/ds4_ctx_bench.py` |
 | op singole (kernel) load-free | `GMBasic/tools/decode_bench.c`, `gdn_bench.c`, `gemv_m1_bench.c`, `gmb_mlx_*_bench.c` |
 | statement coverage C99Native | `GMBasic/tools/gmb_stmt_gate.sh` |
 
@@ -94,7 +93,7 @@ created: 2026-10-04
 - **`llm_autotune.sh`** — **autotuner (I5)**: decode su una **griglia** di configurazioni (registro).
 - **`llm_plan_gate.sh`** — **plan/quality gate (§4.5)**: decode **EAGER vs opzioni del registro**.
 - **`scale_sweep.sh`** — **scaling**: batch/ampiezza crescente → **cliff non monotoni**.
-- **`arch_lab.c`** / **`arch_lab.sh`** — **A3-lab (OpenArch)**: funzioni reali del motore (ds4-slow/dsv41, C)
+- **`arch_lab.c`** / **`arch_lab.sh`** — **A3-lab (OpenArch)**: funzioni reali del motore (ds4/dsv41, C)
   vs **riferimento CPU double** — 9 moduli: `linear · rms_norm · qk-norm · rope · gqa · swiglu · router ·
   swa · mla`. Model-free, deterministico.
 - **`oracoli/`** — sonde **model-free** dell'engine (non tracciate). *V. sotto.*
@@ -104,12 +103,8 @@ created: 2026-10-04
   separati** per frontiere di contesto (metodo A/B).
 - **`eval/`** — harness **qualità/fedeltà** (mock o server OpenAI). *V. sotto.*
 
-### `LLMEngine/ds4engine/` (vendored)
-- **`ds4_bench.c`** — bench del motore **ds4 vendorizzato** (profili interni del `ds4`).
-- **`ds4_bridge_bench.c`** — misura **rigorosa via il bridge token-level**: `<gguf> <n_prefill> <ctx> <stream>`.
-
 ### `LLMEngine/mlx/`
-- **`ds4-slow/tests/llm_dsv4_prefill_bench.c`** — **prefill puro a chunk** su N token sintetici (un solo
+- **`ds4/tests/llm_dsv4_prefill_bench.c`** — **prefill puro a chunk** su N token sintetici (un solo
   caricamento), t/s. Supporta il profilo hotness (`dsv4_n_out/n_in/n_topk`).
 - **`goldens/specbench.c`** — **bench dello speculative batching** multi-sessione (B) vs single, a parità
   di token totali.
@@ -126,9 +121,8 @@ created: 2026-10-04
 > **Eccezione alla regola**: sono **accoppiati al modulo** (target CMake / codegen / test di quel modulo);
 > spostarli in `tools/` **romperebbe il build**. Documentati qui per completezza.
 - `LLMEngine/moe/tools/{moe_sim.c, moe_iobw.c}` — replay offline cache + I/O bandwidth (target CMake `moe_sim`/`moe_iobw`).
-- `LLMEngine/mlx/ds4-slow/tools/` — `gen_dsv4_mmid_metal.py`/`gen_dsv4_metal_tables.py` (**codegen** dei header `.h` generati) e `llm_dsv4_store_policy_test.sh` (oracolo policy store).
+- `LLMEngine/mlx/ds4/tools/` — `gen_dsv4_mmid_metal.py`/`gen_dsv4_metal_tables.py` (**codegen** dei header `.h` generati) e `llm_dsv4_store_policy_test.sh` (oracolo policy store).
 - `LLMEngine/mlx/ds41-native/tools/dsv41_dspark_st_test.sh` — build/test DSpark (`mtp.*` + `forward_spec`).
-- `LLMEngine/ds4engine/metal/generate_mxfp4_half_lut.py` — codegen della **LUT MXFP4** Metal (vendored).
 - `LLMEngine/mlx/goldens/dflash2/{dflash_oracle.py, make_round0_bin.py}` — goldens/oracolo **DFlash2** (round 0).
 - `LLMEngine/mlx/gdn_parity.py` — **parità GDN** (nostro kernel vs riferimento MLX).
 
@@ -245,10 +239,9 @@ created: 2026-10-04
 ---
 
 ## Debug/profilo in-process (gated, per-unità)
-- **`ds4-slow`**: opts registro **`dsv4_profile`** → profiler per-fase + **tempo GPU reale** (timestamp cb) +
+- **`ds4`**: opts registro **`dsv4_profile`** → profiler per-fase + **tempo GPU reale** (timestamp cb) +
   sotto-timer host MoE (`route`/`store`/`metal`) + **dispatch count**. *(no-op se 0 — zero overhead)*
 - **Motore MLX/MoE**: opzioni `dsv4_prefill_mm`, `dsv4_gpu_hc`, `dsv4_prefill_chunk`, `dsv4_hotlist_topk` …
 - **GMBasic**: `GMB_DECODE_ATTENTION_BENCH`, harness `mlx_batch_test`, `decode_bench`.
 
-> [!NOTE] Vedi anche: `DS4-slow-Dove-va-il-tempo-Decode.md` (ripartizione CPU/GPU/decode),
-> `BenchChronos-Benchmark-Coerente.md`, AGENTS §0sexies/§0septies.
+> [!NOTE] Vedi anche: `BenchChronos-Benchmark-Coerente.md`, AGENTS §0sexies/§0septies.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ds4_prefill_phase.py — UN run del motore **ds4-slow** su un prompt LUNGO con `dsv4_profile=1`,
+"""ds4_prefill_phase.py — UN run del motore **ds4** su un prompt LUNGO con `dsv4_profile=1`,
 per localizzare il costo del PREFILL BATCH (fase1 mHC+attn / MoE io-vs-gemm / fase3) e contare cb/wait.
 
 Riusa i cap di sicurezza di `ds4_ab_decode.py` (RSS albero, floor memoria libera, pre-check): nessuna
