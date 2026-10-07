@@ -75,21 +75,13 @@ static const char llm_moe_gateup_kernel_src[] =
     "    g = simd_sum(g);\n"
     "    u = simd_sum(u);\n"
     "    if (lane == 0u) {\n"
-    /* Fedelta' bit: l'eager gather_qmm arrotonda l'uscita a T, e OGNI passo dell'attivazione
-     * (sigmoid/silu/act) avviene in T. Senza i round il kernel accumulava f32 fino alla fine
-     * -> rel_rms ~0,005 e IDS divergenti (near-tie flip). Stesso pattern del kernel MXFP4. */
-    "        T gg = (T)g;\n"
-    "        T uu = (T)u;\n"
     "        if (act == 1) {\n"
-    "            T g3 = (T)((float)gg * (float)gg * (float)gg);\n"
-    "            T inner = (T)(0.7978845608028654f * ((float)gg + 0.044715f * (float)g3));\n"
-    "            T gelu = (T)(0.5f * (float)gg * (1.0f + precise::tanh(clamp((float)inner, -20.0f, 20.0f))));\n"
-    "            act_g[eslot * (uint)Dff + f] = (T)((float)gelu * (float)uu);\n"
+    "            float g3 = g * g * g;\n"
+    "            float inner = 0.7978845608028654f * (g + 0.044715f * g3);\n"
+    "            float gelu = 0.5f * g * (1.0f + precise::tanh(clamp(inner, -20.0f, 20.0f)));\n"
+    "            act_g[eslot * (uint)Dff + f] = gelu * u;\n"
     "        } else {\n"
-    "            T sy = 1 / (1 + metal::exp(metal::abs(gg)));\n"
-    "            T sg = (gg < 0) ? sy : (1 - sy);\n"
-    "            T silu = (T)((float)gg * (float)sg);\n"
-    "            act_g[eslot * (uint)Dff + f] = (T)((float)silu * (float)uu);\n"
+    "            act_g[eslot * (uint)Dff + f] = (g / (1.0f + fast::exp(-g))) * u;\n"
     "        }\n"
     "    }\n"
 ;
@@ -109,7 +101,7 @@ static const char llm_moe_down_kernel_src[] =
     "    uint row = e * (uint)Din + h;\n"
     "    const device T*     dsr = down_s + row * Gd;\n"
     "    const device T*     dbr = down_b + row * Gd;\n"
-    "    const device T*     a   = act_g  + eslot * (uint)Dff;\n"
+    "    const device float* a   = act_g  + eslot * (uint)Dff;\n"
     "    float d = 0.0f;\n"
     "\n"
     "    constexpr uint vpw   = 32u / bits;\n"
@@ -127,10 +119,7 @@ static const char llm_moe_down_kernel_src[] =
     "    }\n"
     "    d = simd_sum(d);\n"
     "    if (lane == 0u) {\n"
-    /* Fedelta' bit: gather_qmm arrotonda a T; poi multiply per lo score in T (eager:
-     * `down * probs`, entrambi T). */
-    "        T dd = (T)d;\n"
-    "        out[eslot * (uint)Din + h] = (T)((float)dd * (float)scores[eslot]);\n"
+    "        out[eslot * (uint)Din + h] = (float)scores[eslot] * d;\n"
     "    }\n"
 ;
 
@@ -213,12 +202,8 @@ static bool llm_mlx_moe_fused_decode(
         LLM_KFALLBACK("moe_fused", "dtype scale/bias != attivazione (es. con LLM_F32_SCALES le scale sono f32)");
         return false;
     }
-    /* Fedelta' bit: gli score entrano nel kernel B nel dtype T dell'attivazione (l'eager usa
-     * `probs` in T). Il cast esplicito copre i chiamanti che passano f32; se e' gia' T e' un no-op. */
-    mlx_array scores_t = mlx_array_new();
-    if (mlx_astype(&scores_t, scores, T, stream) != 0) { mlx_array_free(scores_t); return false; }
-    if (llm_mlx_moe_gateup_kernel_build() != 0) { mlx_array_free(scores_t); return false; }
-    if (llm_mlx_moe_down_kernel_build() != 0) { mlx_array_free(scores_t); return false; }
+    if (llm_mlx_moe_gateup_kernel_build() != 0) return false;
+    if (llm_mlx_moe_down_kernel_build() != 0) return false;
 
     /* simdgroups/threadgroup -- 8 era il valore mlxcel per qwen3-30b-a3b su M1 Ultra, non
      * detto sia ottimale su altro hardware. Override runtime per sweep senza ricompilare. */
@@ -252,7 +237,7 @@ static bool llm_mlx_moe_fused_decode(
         mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "group_size", gu_group_size);
         mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "act", act);
         int actg_shape[2] = {k, dff};
-        mlx_fast_metal_kernel_config_add_output_arg(cfg, actg_shape, 2, T);
+        mlx_fast_metal_kernel_config_add_output_arg(cfg, actg_shape, 2, MLX_FLOAT32);
         int dff_pad = ((dff + sgy - 1) / sgy) * sgy;
         mlx_fast_metal_kernel_config_set_grid(cfg, 32, dff_pad, k);
         mlx_fast_metal_kernel_config_set_thread_group(cfg, 32, sgy, 1);
@@ -265,7 +250,7 @@ static bool llm_mlx_moe_fused_decode(
         mlx_fast_metal_kernel_config_free(cfg);
         mlx_vector_array_free(inputs);
         mlx_vector_array_free(outputs);
-        if (!ok) { mlx_array_free(act_g); mlx_array_free(scores_t); return false; }
+        if (!ok) { mlx_array_free(act_g); return false; }
     }
 
     /* Kernel B: down-projection pesata per score -> partial [K, Din] f32 */
@@ -277,7 +262,7 @@ static bool llm_mlx_moe_fused_decode(
         mlx_vector_array_append_value(inputs, down_s);
         mlx_vector_array_append_value(inputs, down_b);
         mlx_vector_array_append_value(inputs, act_g);
-        mlx_vector_array_append_value(inputs, scores_t);
+        mlx_vector_array_append_value(inputs, scores);
 
         mlx_fast_metal_kernel_config cfg = mlx_fast_metal_kernel_config_new();
         mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, "T", T);
@@ -287,7 +272,7 @@ static bool llm_mlx_moe_fused_decode(
         mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "bits", d_bits);
         mlx_fast_metal_kernel_config_add_template_arg_int(cfg, "group_size", d_group_size);
         int out_shape[2] = {k, din};
-        mlx_fast_metal_kernel_config_add_output_arg(cfg, out_shape, 2, T);
+        mlx_fast_metal_kernel_config_add_output_arg(cfg, out_shape, 2, MLX_FLOAT32);
         int din_pad = ((din + sgy - 1) / sgy) * sgy;
         mlx_fast_metal_kernel_config_set_grid(cfg, 32, din_pad, k);
         mlx_fast_metal_kernel_config_set_thread_group(cfg, 32, sgy, 1);
@@ -299,7 +284,7 @@ static bool llm_mlx_moe_fused_decode(
         mlx_fast_metal_kernel_config_free(cfg);
         mlx_vector_array_free(inputs);
         mlx_vector_array_free(outputs);
-        if (!ok) { mlx_array_free(act_g); mlx_array_free(partial); mlx_array_free(scores_t); return false; }
+        if (!ok) { mlx_array_free(act_g); mlx_array_free(partial); return false; }
     }
 
     /* Somma sui K esperti in f32 (un solo arrotondamento al dtype finale, fatto dal
@@ -307,7 +292,6 @@ static bool llm_mlx_moe_fused_decode(
     bool ok = mlx_sum_axis(out_summed, partial, /*axis=*/0, /*keepdims=*/false, stream) == 0;
     mlx_array_free(act_g);
     mlx_array_free(partial);
-    mlx_array_free(scores_t);
     return ok;
 }
 
