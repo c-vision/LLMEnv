@@ -505,7 +505,8 @@ if(LLM_BUILD_DSV4_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/ds4
             ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native
             ${CMAKE_CURRENT_SOURCE_DIR}/../Options
-            ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include)
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
+            $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)   # tutti gli include con cui compila l'engine (mlx-c, cJSON, moe, plugin, LLMDesc, ...)
         set_target_properties(${_t} PROPERTIES LINKER_LANGUAGE CXX)
     endforeach()
 
