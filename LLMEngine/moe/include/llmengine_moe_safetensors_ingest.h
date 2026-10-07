@@ -70,6 +70,10 @@ static inline int llmengine_moe_ts_map(LlmEngineMoeTsIngest* s, const char* path
     struct stat st; if (fstat(fd, &st) != 0) { close(fd); return -1; }
     void* m = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (m == MAP_FAILED) { close(fd); return -1; }
+    /* MADV_RANDOM: gli esperti sono letti in ordine SPARSO (per-token, per-layer), non sequenziale:
+     * disattiva il read-ahead sequenziale, che tirerebbe in cache gli esperti ADIACENTI mai usati
+     * (spreco di I/O su modelli > RAM). Hint puro, nessun cambio di correttezza. */
+    madvise(m, (size_t)st.st_size, MADV_RANDOM);
     s->maps[s->nmaps].fd = fd; s->maps[s->nmaps].base = (const uint8_t*)m; s->maps[s->nmaps].len = (size_t)st.st_size;
     return s->nmaps++;
 }
@@ -173,6 +177,32 @@ static inline const LlmEngineMoeTsSlice* llmengine_moe_ts_slice(const LlmEngineM
     if (layer < 0 || layer >= LLMENGINE_MOE_TS_MAXLAYER || proj < 0 || proj >= LLMENGINE_MOE_TS_NPROJ || kind < 0 || kind >= LLMENGINE_MOE_TS_NKIND) return NULL;
     const LlmEngineMoeTsSlice* t = &s->slice[layer][proj][kind];
     return t->map < 0 ? NULL : t;
+}
+
+/* Hint di page-cache su un range del mapping (prefetch/evict/diradamento). `madvise` vuole indirizzi
+ * allineati a pagina: si arrotonda il range verso il basso/alto. Hint PURO: nessun cambio di valori. */
+static inline void llmengine_moe_ts_advise_range(const LlmEngineMoeTsIngest* s, int map,
+                                                 uint64_t off, uint32_t bytes, int advise) {
+    if (s == NULL || map < 0 || map >= s->nmaps || bytes == 0) return;
+    long pg = sysconf(_SC_PAGESIZE); if (pg <= 0) pg = 4096;
+    const uintptr_t mask = (uintptr_t)pg - 1;
+    uintptr_t start = (uintptr_t)s->maps[map].base + (uintptr_t)off;
+    uintptr_t a0 = start & ~mask;
+    uintptr_t a1 = (start + (uintptr_t)bytes + mask) & ~mask;
+    madvise((void*)a0, (size_t)(a1 - a0), advise);
+}
+
+/* Hint su TUTTE le slice (weight/scales/biases) dell'esperto `e` per (layer,proj):
+ * MADV_WILLNEED = prefetch; MADV_DONTNEED = rilascia le pagine (ri-letture dal file). */
+static inline void llmengine_moe_ts_advise_expert(const LlmEngineMoeTsIngest* s, int layer, int proj,
+                                                  int e, int advise) {
+    if (s == NULL || layer < 0 || layer >= LLMENGINE_MOE_TS_MAXLAYER ||
+        proj < 0 || proj >= LLMENGINE_MOE_TS_NPROJ) return;
+    for (int kind = 0; kind < LLMENGINE_MOE_TS_NKIND; kind++) {
+        const LlmEngineMoeTsSlice* t = &s->slice[layer][proj][kind];
+        if (t->map < 0 || e < 0 || e >= t->n) continue;
+        llmengine_moe_ts_advise_range(s, t->map, t->off + (uint64_t)e * t->stride, t->bytes, advise);
+    }
 }
 
 /* Ausiliario tq per (layer,proj): puntatore mmap + byte/numero elementi, o NULL. */

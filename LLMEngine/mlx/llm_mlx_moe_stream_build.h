@@ -3,7 +3,9 @@
  *
  * NON un formato nuovo: il descrittore `(layer,expert,proj,kind) -> slice` e' UNO (l'ingest);
  * qui c'e' solo il consumo lato MLX (costruzione degli mlx_array per gather_qmm). I bundle sono
- * copiati in buffer RESIDENTI (mlock) -> Metal non fa fault (no Command buffer). */
+ * copiati in buffer RESIDENTI da un POOL riusabile e `mlock`-ato (dtor di MLX = riciclo) -> Metal
+ * non fa fault e niente churn di malloc/free nel hot path. Il routing predice il set del prossimo
+ * token per il prefetch (`MADV_WILLNEED`) e, sotto pressione, evince i sorgenti freddi. */
 #ifndef LLM_MLX_MOE_STREAM_BUILD_H
 #define LLM_MLX_MOE_STREAM_BUILD_H
 #include "mlx/c/array.h"
@@ -11,9 +13,12 @@
 #include "../moe/include/llmengine_moe_safetensors_ingest.h"
 #include "llm_mlx_tq_decode.h"
 #include "llm_mlx_tq_qmv_kernel.h"
+#include "llm_mlx_memgov.h"   /* pressure-gate per l'eviction predittiva (governor) */
 #if defined(__APPLE__)
 #include <dispatch/dispatch.h>   /* popolamento parallelo della cache esperto->affine-2bit */
 #endif
+
+#include "llm_mlx_xs_pool.h"   /* pool riusabile + mlock dei bundle streamed */
 
 /* Costruisce+materializza [k, d1, d2] per (layer, proj, kind) dagli esperti `uniq[]`.
  * kind: 0=weight(U32) 1=scales(BF16) 2=biases(BF16). Ritorna 0 e *out, oppure -1. */
@@ -25,18 +30,24 @@ static inline int llm_mlx_xs_stack(const LlmEngineMoeTsIngest* s, int layer, int
     if (!t || t->d1 <= 0 || t->d2 <= 0) return -1;
     const mlx_dtype dt = (kind == 0) ? MLX_UINT32 : MLX_BFLOAT16;
     const size_t per = (size_t)t->d1 * (size_t)t->d2 * ((kind == 0) ? 4u : 2u);
-    /* UN buffer contiguo [k,d1,d2] + MANAGED (MLX prende ownership, chiama `free` a fine grafo):
-     * una sola copia mmap->buffer, un solo array. (Prima: k array + mlx_stack che ricopiava, e un
-     * eval per-chiamata -> ~1300 sync/token.) */
-    uint8_t* buf = (uint8_t*)malloc(per * (size_t)k);
-    if (!buf) return -1;
+    const size_t need = per * (size_t)k;
+    /* UN buffer contiguo [k,d1,d2] + MANAGED (MLX prende ownership): una sola copia mmap->buffer. Il
+     * buffer è RICICLATO dal pool (diversamente da prima: un malloc per chiamata); se il pool è pieno
+     * si ricade sul malloc singolo con dtor `free`. */
+    LlmXsSlot* sl = NULL;
+    uint8_t* buf = llm_xs_pool_acquire(need, &sl);
+    if (buf == NULL) { buf = (uint8_t*)malloc(need); sl = NULL; }
+    if (buf == NULL) return -1;
     for (int j = 0; j < k; j++) {
         const uint8_t* p = llmengine_moe_ts_get(s, layer, proj, kind, uniq[j], NULL);
-        if (!p) { free(buf); return -1; }
+        if (!p) { if (sl != NULL) llm_xs_slot_dtor(sl); else free(buf); return -1; }
         memcpy(buf + (size_t)j * per, p, per);
     }
     int shp[3] = { k, t->d1, t->d2 };
-    *out = mlx_array_new_data_managed(buf, shp, 3, dt, free);
+    if (sl != NULL)
+        *out = mlx_array_new_data_managed_payload(buf, shp, 3, dt, sl, llm_xs_slot_dtor);
+    else
+        *out = mlx_array_new_data_managed(buf, shp, 3, dt, free);
     return 0;
 }
 
@@ -285,13 +296,16 @@ static inline int llm_mlx_tq_stack(const LlmEngineMoeTsIngest* s, int layer, int
     if (!sgf) return -1;
     for (int i = 0; i < in_dim; i++) sgf[i] = llmcodec_f16_to_f32(sgd[i]);
     const size_t per = (size_t)out_dim * (size_t)in_dim;
-    uint16_t* buf = (uint16_t*)malloc(per * (size_t)k * sizeof(uint16_t));
+    const size_t bneed = per * (size_t)k * sizeof(uint16_t);
+    LlmXsSlot* bsl = NULL;
+    uint16_t* buf = (uint16_t*)llm_xs_pool_acquire(bneed, &bsl);
+    if (buf == NULL) { buf = (uint16_t*)malloc(bneed); bsl = NULL; }
     float* f = (float*)malloc(per * sizeof(float));
-    if (!buf || !f) { free(buf); free(f); free(sgf); return -1; }
+    if (!buf || !f) { if (bsl) llm_xs_slot_dtor(bsl); else free(buf); free(f); free(sgf); return -1; }
     for (int j = 0; j < k; j++) {
         const uint8_t* wp = llmengine_moe_ts_get(s, layer, proj, 0, uniq[j], NULL);
         const uint8_t* scp = llmengine_moe_ts_get(s, layer, proj, 1, uniq[j], NULL);
-        if (!wp || !scp) { free(buf); free(f); free(sgf); return -1; }
+        if (!wp || !scp) { if (bsl) llm_xs_slot_dtor(bsl); else free(buf); free(f); free(sgf); return -1; }
         const uint32_t* wd = (const uint32_t*)(const void*)wp;
         const uint16_t* scd = (const uint16_t*)(const void*)scp;
         for (int r = 0; r < out_dim; r++) {
@@ -303,13 +317,58 @@ static inline int llm_mlx_tq_stack(const LlmEngineMoeTsIngest* s, int layer, int
     }
     free(f); free(sgf);
     int shp[3] = { k, out_dim, in_dim };
-    *out = mlx_array_new_data_managed(buf, shp, 3, MLX_FLOAT16, free);
+    if (bsl != NULL)
+        *out = mlx_array_new_data_managed_payload(buf, shp, 3, MLX_FLOAT16, bsl, llm_xs_slot_dtor);
+    else
+        *out = mlx_array_new_data_managed(buf, shp, 3, MLX_FLOAT16, free);
     return 0;
 }
 
 /* Self-test (env LLM_TQ_QMV_TEST=1, una volta): il kernel polar_qmv deve coincidere col decode di
  * riferimento nel dominio ruotato — kernel(W_rot, x_rot) == dot(unrotate(W_rot), x0). */
 static int g_tq_qmv_tested = 0;
+
+/* ── PREFETCH / EVICT predittivo (streaming esperti) ─────────────────────────────────────────────
+ * Il routing MoE è temporalmente STABILE (stessa conversazione -> stessi esperti): il set del token
+ * precedente per (layer,proj) predice bene il prossimo. Uso:
+ *   - prefetch (MADV_WILLNEED) del set predetto all'inizio di ogni prepare -> maschera la latenza di
+ *     ri-lettura quando le pagine erano state evincite;
+ *   - sotto PRESSIONE (governor) si rilasciano (MADV_DONTNEED) le pagine SORGENTE del set corrente che
+ *     NON erano nel set predetto: l'RSS resta limitato agli esperti "hot" (riusati), i freddi si
+ *     ri-leggono. Fuori pressione non si evince (si lasciano calde per il riuso). Hint puri. */
+#define LLM_XS_PRED_MAXK 32
+static int32_t g_xs_pred[LLMENGINE_MOE_TS_MAXLAYER][LLMENGINE_MOE_TS_NPROJ][LLM_XS_PRED_MAXK];
+static int g_xs_pred_n[LLMENGINE_MOE_TS_MAXLAYER][LLMENGINE_MOE_TS_NPROJ];
+
+static inline void llm_xs_prefetch_predicted(const LlmEngineMoeTsIngest* ing, int layer, int proj) {
+    if (layer < 0 || layer >= LLMENGINE_MOE_TS_MAXLAYER) return;
+    const int n = g_xs_pred_n[layer][proj];
+    for (int i = 0; i < n; i++)
+        llmengine_moe_ts_advise_expert(ing, layer, proj, (int)g_xs_pred[layer][proj][i], MADV_WILLNEED);
+}
+
+static inline void llm_xs_record_predicted(int layer, int proj, const int* uniq, int k) {
+    if (layer < 0 || layer >= LLMENGINE_MOE_TS_MAXLAYER) return;
+    if (k > LLM_XS_PRED_MAXK) k = LLM_XS_PRED_MAXK;
+    for (int i = 0; i < k; i++) g_xs_pred[layer][proj][i] = (int32_t)uniq[i];
+    g_xs_pred_n[layer][proj] = k;
+}
+
+static inline int llm_xs_in_pred(int layer, int proj, int e) {
+    const int n = g_xs_pred_n[layer][proj];
+    for (int i = 0; i < n; i++) if (g_xs_pred[layer][proj][i] == e) return 1;
+    return 0;
+}
+
+static inline void llm_xs_evict_cold(const LlmEngineMoeTsIngest* ing, int layer, int proj,
+                                     const int* uniq, int k) {
+    if (ing == NULL || layer < 0 || layer >= LLMENGINE_MOE_TS_MAXLAYER) return;
+    LlmMemGov g = llm_memgov_from_registry();
+    if (!llm_memgov_should_spill(&g, llm_memgov_system_free_bytes())) return;
+    for (int i = 0; i < k; i++)
+        if (!llm_xs_in_pred(layer, proj, uniq[i]))
+            llmengine_moe_ts_advise_expert(ing, layer, proj, uniq[i], MADV_DONTNEED);
+}
 
 /* Prepara lo stacked [k,d1,d2] del SOLO `proj` richiesto (w/scales/biases). Prima si impilavano
  * TUTTI e 3 i proj e il chiamante ne usava uno: 6 stack su 9 sprecati a ogni chiamata (2/3 del
@@ -323,18 +382,23 @@ static inline int llm_mlx_moe_swap_prepare(const LlmEngineMoeTsIngest* ing, int 
         out->s[p] = mlx_array_new();
         out->b[p] = mlx_array_new();
     }
+    llm_xs_prefetch_predicted(ing, layer, proj);   /* hint puro, nessun cambio di valori */
     /* TurboQuant NON-ternary (tq 3/4-bit): decode F16 in dominio NON ruotato + ramo PLAIN
      * gather_mm (scales/biases vuoti). Il tq TERNARY non passa di qui: usa array pieni residenti
      * con indici globali, gestiti direttamente in llm_mlx_moe_gather_streamed. */
     if (llmengine_moe_ts_is_tq(ing, layer, proj)) {
         if (llm_mlx_tq_stack(ing, layer, proj, uniq, k, str, &out->w[proj]) != 0) return -1;
-        return 0;
+    } else {
+        for (int kd = 0; kd < LLMENGINE_MOE_TS_NKIND; kd++) {
+            mlx_array a = mlx_array_new();
+            if (llm_mlx_xs_stack(ing, layer, proj, kd, uniq, k, str, &a) != 0) return -1;
+            if (kd == 0) out->w[proj] = a; else if (kd == 1) out->s[proj] = a; else out->b[proj] = a;
+        }
     }
-    for (int kd = 0; kd < LLMENGINE_MOE_TS_NKIND; kd++) {
-        mlx_array a = mlx_array_new();
-        if (llm_mlx_xs_stack(ing, layer, proj, kd, uniq, k, str, &a) != 0) return -1;
-        if (kd == 0) out->w[proj] = a; else if (kd == 1) out->s[proj] = a; else out->b[proj] = a;
-    }
+    /* Sotto pressione: rilascia le pagine SORGENTE del set corrente non-predetto (gli hot restano
+     * caldi). Poi aggiorna il predetto col set corrente. */
+    llm_xs_evict_cold(ing, layer, proj, uniq, k);
+    llm_xs_record_predicted(layer, proj, uniq, k);
     return 0;
 }
 

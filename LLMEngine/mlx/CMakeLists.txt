@@ -574,4 +574,9 @@ if(LLM_BUILD_DSV4_TESTS)
     target_link_libraries(llm_mlx_recompute_test PRIVATE llm_ai_mlx)
     target_include_directories(llm_mlx_recompute_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../include)
     set_target_properties(llm_mlx_recompute_test PROPERTIES LINKER_LANGUAGE CXX)
+
+    # Streaming esperti: test MODEL-FREE (solo libc) del pool bundle (llm_mlx_xs_pool.h) + hint ingest.
+    add_executable(llm_mlx_xs_pool_test tests/llm_mlx_xs_pool_test.c)
+    target_include_directories(llm_mlx_xs_pool_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME llm_mlx_xs_pool COMMAND llm_mlx_xs_pool_test)
 endif()
