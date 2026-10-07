@@ -29,7 +29,8 @@ def main():
     mt   = int(sys.argv[2]) if len(sys.argv) > 2 else 1
     reserve = int(sys.argv[3]) if len(sys.argv) > 3 else H.SLOW_RESERVE_MB
     mmap  = int(sys.argv[4]) if len(sys.argv) > 4 else 0   # 1 = --opt dsv4_experts_mmap=1 (opzione 1: esperti dal mmap, no cache bundle)
-    floor, rsscap, pre, to = 30.0, 62.0, 60.0, 600
+    floor = float(sys.argv[5]) if len(sys.argv) > 5 else 30.0   # override SOLO per misure concordate (default: cap 30%)
+    rsscap, pre, to = 62.0, 60.0, 600
     P = long_prompt(ntok)
     f0 = H.free_pct()
     print(f"[ds4_prefill_phase] prompt~{ntok} tok max_new={mt} | libera {f0:.0f}%", flush=True)
@@ -44,15 +45,18 @@ def main():
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     why, peak, minfree = {"v": None}, {"rss": 0.0}, {"f": 100.0}
     stop = threading.Event()
-    err = []
+    err, outb = [], []
 
     def rd():
         for raw in iter(p.stderr.readline, b""):
             err.append(raw.decode("utf-8", "replace").rstrip("\n"))
 
     def ro():
-        while p.stdout.read1(4096):
-            pass
+        while True:
+            chunk = p.stdout.read1(4096)
+            if not chunk:
+                break
+            outb.append(chunk)
 
     def mon():
         t0 = time.time()
@@ -80,6 +84,8 @@ def main():
     for ln in err:
         if ln.lstrip().startswith("[dsv4") or "dsv4-prof" in ln or "dsv4-decode" in ln:
             print(ln)
+    txt = b"".join(outb).decode("utf-8", "replace")
+    print(f"[output generato, {len(txt)} char]: {txt[:300]!r}")
 
 
 if __name__ == "__main__":
