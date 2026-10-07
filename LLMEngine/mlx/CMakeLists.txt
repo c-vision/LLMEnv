@@ -329,7 +329,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_selftest.c
     llm_mlx_stats.c
     llm_mlx_rope.c
-    llm_mlx_gptoss.c
+    oss/llm_mlx_gptoss.c
     llm_mlx_bf16.c
     llm_mlx_gdn_cache.c
     llm_mlx_activation.c
@@ -338,7 +338,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_qwen4exp_ops.c
     llm_mlx_mixtral.c
     llm_mlx_glm_ds_ffn.c
-    llm_mlx_gptoss_ffn.c
+    oss/llm_mlx_gptoss_ffn.c
     llm_mlx_selftest_eval.c
     llm_mlx_sensitivity.c
     llm_mlx_model_ops.c
@@ -435,7 +435,7 @@ target_link_libraries(llm_ai_mlx PRIVATE mlxc cjson ${METAL_FRAMEWORK} ${FOUNDAT
 target_include_directories(llm_ai_mlx PRIVATE "${cjson_SOURCE_DIR}")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
-target_include_directories(llm_ai_mlx PUBLIC . ${LLM_DS4_INC} tokenizers ds41-native ../Options)
+target_include_directories(llm_ai_mlx PUBLIC . oss ${LLM_DS4_INC} tokenizers ds41-native ../Options)
 
 # FIX dipendenze: gli header ds4/ds41-native sono header-only (NON sono sorgenti) e il tracking
 # automatico non li vede -> una modifica a *.h NON ricompila i TU consumatori (build "verde" ma binario
