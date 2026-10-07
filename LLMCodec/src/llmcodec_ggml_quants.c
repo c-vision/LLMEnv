@@ -880,6 +880,18 @@ int llmcodec_ggml_quant_row(int t, const float* src, void* dst, int64_t n, const
     }
     if (t == LLMCODEC_GGML_T_Q4_0) {
         blk_q4_0* y = (blk_q4_0*)dst;
+        if (imatrix) {   /* variante IMATRIX (quantize_row_q4_0_impl): pesi qw·√(σ²+x²) */
+            float sx2 = 0; for (int64_t j = 0; j < n; ++j) sx2 += src[j]*src[j];
+            const float sigma2 = sx2/(float)n;
+            for (int64_t i = 0; i < nb; ++i) {
+                const float* xb = src + 32*i; const float* qw = imatrix + 32*i;
+                float weight[32]; for (int j = 0; j < 32; ++j) weight[j] = qw[j]*sqrtf(sigma2 + xb[j]*xb[j]);
+                int8_t L[32]; float d = llmcodec_make_qx_quants(32, 8, xb, L, 1, weight);
+                y[i].d = llmcodec_f16_from_f32(d);
+                for (int j = 0; j < 16; ++j) y[i].qs[j] = (uint8_t)(L[j] | (L[j+16] << 4));
+            }
+            return 0;
+        }
         for (int64_t i = 0; i < nb; ++i) {
             float amax = 0.0f, max = 0.0f;
             for (int j = 0; j < 32; ++j) {
