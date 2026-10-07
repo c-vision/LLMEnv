@@ -212,6 +212,10 @@ static inline GgufStore* llmengine_moe_gguf_store_open(const char* path, const L
     void* m = mmap(NULL, s->map_len, PROT_READ, MAP_PRIVATE, s->fd, 0);
     if (m == MAP_FAILED) { close(s->fd); free(s->layers); free(s); return NULL; }
     s->base = (const uint8_t*)m;
+    /* MADV_RANDOM: gli esperti sono letti in ordine SPARSO (per-token), non sequenziale: disattiva il
+     * read-ahead che tirerebbe in cache gli esperti adiacenti mai usati. Vale per RESIDENT (mmap
+     * zero-copy) e SWAP (il mmap resta il fallback pointer). Hint puro, nessun cambio di valori. */
+    madvise(m, s->map_len, MADV_RANDOM);
 
     for (uint32_t l = 0; l < n_layers; ++l) {
         char b[160];
