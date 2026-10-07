@@ -84,6 +84,14 @@ static inline float* llm_dsv4_lw(const LlmEngineMoeGguf* g, int il, const char* 
     return x;
 }
 
+/* Come llm_dsv4_lw, ma SOLO per il modo con esperti f32 (test/tiny). Nel modo PACKED (modello reale) i tensori attn/shexp/head vivono
+ * come puntatori Q8_0 nel mmap (pe->q_a/q_b/kv/out_a/out_b/shexp_*, output_p) e i rami f32 dei percorsi CPU (`else` di
+ * `if (pe && pe->q_a ...)` ecc.) non girano mai: la copia dequantizzata a f32 occuperebbe ~25 GB di RAM inutili (misurato con vmmap/
+ * malloc_history: 3x43 regioni da 128 MB + 3x43 da 32 MB ... nel prefill RSS 62 GB contro 35 del ds4 originale). */
+static inline float* llm_dsv4_lw_cpu(const LlmEngineMoeGguf* g, int il, const char* suf, bool required, bool* ok, bool experts_f32) {
+    return experts_f32 ? llm_dsv4_lw(g, il, suf, required, ok) : NULL;
+}
+
 static inline bool llm_dsv4_load_impl(LlmDsv4Weights* w, const LlmEngineMoeGguf* g, bool experts_f32) {
     memset(w, 0, sizeof *w);
     if (!llm_dsv4_config_from_gguf(g, &w->cfg)) return false;
@@ -91,7 +99,8 @@ static inline bool llm_dsv4_load_impl(LlmDsv4Weights* w, const LlmEngineMoeGguf*
     bool ok = true;
     w->token_embd = llm_gguf_load_f32(g, "token_embd.weight", NULL);
     w->output_norm = llm_gguf_load_f32(g, "output_norm.weight", NULL);
-    w->output = llm_gguf_load_f32(g, "output.weight", NULL);
+    /* packed: il lm_head e' output_p (Q8_0 nel mmap): niente copia f32 da 2 GB (llm_dsv4_output_logits usa output_p se presente) */
+    w->output = (experts_f32 || llm_gguf_find_tensor(g, "output.weight") < 0) ? llm_gguf_load_f32(g, "output.weight", NULL) : NULL;
     w->output_hc_base = llm_gguf_load_f32(g, "output_hc_base.weight", NULL);
     w->output_hc_fn = llm_gguf_load_f32(g, "output_hc_fn.weight", NULL);
     w->output_hc_scale = llm_gguf_load_f32(g, "output_hc_scale.weight", NULL);
@@ -110,14 +119,14 @@ static inline bool llm_dsv4_load_impl(LlmDsv4Weights* w, const LlmEngineMoeGguf*
         L->hc_attn_scale = llm_dsv4_lw(g, il, "hc_attn_scale", true, &ok);
         L->hc_attn_base = llm_dsv4_lw(g, il, "hc_attn_base", true, &ok);
         L->attn_norm = llm_dsv4_lw(g, il, "attn_norm", true, &ok);
-        L->attn_q_a = llm_dsv4_lw(g, il, "attn_q_a", true, &ok);
+        L->attn_q_a = llm_dsv4_lw_cpu(g, il, "attn_q_a", true, &ok, experts_f32);
         L->attn_q_a_norm = llm_dsv4_lw(g, il, "attn_q_a_norm", true, &ok);
-        L->attn_q_b = llm_dsv4_lw(g, il, "attn_q_b", true, &ok);
-        L->attn_kv = llm_dsv4_lw(g, il, "attn_kv", true, &ok);
+        L->attn_q_b = llm_dsv4_lw_cpu(g, il, "attn_q_b", true, &ok, experts_f32);
+        L->attn_kv = llm_dsv4_lw_cpu(g, il, "attn_kv", true, &ok, experts_f32);
         L->attn_kv_a_norm = llm_dsv4_lw(g, il, "attn_kv_a_norm", true, &ok);
         L->attn_sinks = llm_dsv4_lw(g, il, "attn_sinks", true, &ok);
-        L->attn_output_a = llm_dsv4_lw(g, il, "attn_output_a", true, &ok);
-        L->attn_output_b = llm_dsv4_lw(g, il, "attn_output_b", true, &ok);
+        L->attn_output_a = llm_dsv4_lw_cpu(g, il, "attn_output_a", true, &ok, experts_f32);
+        L->attn_output_b = llm_dsv4_lw_cpu(g, il, "attn_output_b", true, &ok, experts_f32);
         if (ratio != 0) {
             L->comp_ape = llm_dsv4_lw(g, il, "attn_compressor_ape", false, &ok);
             L->comp_kv = llm_dsv4_lw(g, il, "attn_compressor_kv", false, &ok);
@@ -157,9 +166,9 @@ static inline bool llm_dsv4_load_impl(LlmDsv4Weights* w, const LlmEngineMoeGguf*
             pe->out_a = llm_dsv4_bind_packed(g, il, "attn_output_a",  &pe->out_a_type, &ok);
             pe->out_b = llm_dsv4_bind_packed(g, il, "attn_output_b",  &pe->out_b_type, &ok);
         }
-        L->ffn_gate_shexp = llm_dsv4_lw(g, il, "ffn_gate_shexp", true, &ok);
-        L->ffn_up_shexp = llm_dsv4_lw(g, il, "ffn_up_shexp", true, &ok);
-        L->ffn_down_shexp = llm_dsv4_lw(g, il, "ffn_down_shexp", true, &ok);
+        L->ffn_gate_shexp = llm_dsv4_lw_cpu(g, il, "ffn_gate_shexp", true, &ok, experts_f32);
+        L->ffn_up_shexp = llm_dsv4_lw_cpu(g, il, "ffn_up_shexp", true, &ok, experts_f32);
+        L->ffn_down_shexp = llm_dsv4_lw_cpu(g, il, "ffn_down_shexp", true, &ok, experts_f32);
         if (il < c->n_hash_layer) L->ffn_gate_tid2eid = llm_dsv4_lw(g, il, "ffn_gate_tid2eid", true, &ok);
     }
     if (!ok) { llm_dsv4_weights_free(w); return false; }
