@@ -37,10 +37,8 @@ void llm_mlx_gateup_reset(void);
 bool llm_mlx_kv_f16_gptoss_enabled(void);
 
 /* ── Config + policy GPT-OSS (oss/llm_oss_config.c) ────────────────────────────────────────── */
-/* Parsing del branch config `model_type=="gpt_oss"` (sliding_window + layer_types). Ritorna false
- * se il config è malformato. Sostituisce il branch inline in load_config. */
-struct cJSON;   /* fwd (cJSON) */
-bool llm_oss_parse_config(LlmMlxModel* m, struct cJSON* src);
+/* true se il modello è GPT-OSS (model_type "gpt_oss"). */
+bool llm_oss_is_gptoss(const LlmMlxModel* m);
 /* bf16-promotion gpt-oss (mxfp4 / per-tensor). */
 bool llm_oss_want_bf16(const LlmMlxModel* m);
 /* prefill chunk di default per gpt-oss. */

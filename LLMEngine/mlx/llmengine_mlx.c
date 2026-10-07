@@ -492,11 +492,7 @@ bool llm_mlx_kv_f16_enabled(void) {
  * VERIFICATA su gpt-oss-20b (fp32==fp16, 16/16). Velocita' NON concludente a load 19-21
  * (una finestra dava +39%, tre il contrario) -> GATE SEPARATO, default OFF: non si attiva
  * finche' un A/B a finestra idle non lo promuove. */
-static int g_kvf16_gptoss_state = -1;
-bool llm_mlx_kv_f16_gptoss_enabled(void) {
-    if (g_kvf16_gptoss_state < 0) g_kvf16_gptoss_state = (llm_ai_mlx_opt_env("LLM_KVF16_GPTOSS") != NULL) ? 1 : 0;
-    return g_kvf16_gptoss_state == 1;
-}
+/* llm_mlx_kv_f16_gptoss_enabled: definita in oss/llm_oss_config.c (dominio GPT-OSS). */
 
 /* G1 (piano antigravity 2026-09-08, collo "dispatch-count" di §3.2 Gap-Closure):
  * un solo kernel Metal fonde reshape+transpose+RoPE di Q/K e transpose di V nel

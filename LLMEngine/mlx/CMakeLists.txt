@@ -330,6 +330,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_stats.c
     llm_mlx_rope.c
     oss/llm_mlx_gptoss.c
+    oss/llm_oss_config.c
     llm_mlx_bf16.c
     llm_mlx_gdn_cache.c
     llm_mlx_activation.c

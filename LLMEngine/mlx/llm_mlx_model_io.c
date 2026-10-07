@@ -379,20 +379,9 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
 
     bool want_bf16 = false;
     bool want_f16 = false;   /* FIX 2026-09-17 Mixtral: flavour ACCOPPIATO alle scale F16 del checkpoint */
-    /* bf16 PROMOSSO a default per gpt-oss mxfp4 (causa misurata §L, vault). Il 20b-gpt_oss gira
-     * GIÀ gli esperti mxfp4 sotto bf16 (want_bf16 via per_tensor_quant) ed e' a ~parita' decode
-     * con rapid (123 vs 134): la stessa config e' quindi validata per l'architettura. Il 120b e'
-     * mxfp4-PURO solo perche' NON ha override per-tensore nel config, non perche' il bf16 gli
-     * faccia male; lasciarlo in fp32 paga 1,4x@8K e 1,7x@32K (fp32 vs bf16, misurato sul 20b) --
-     * e' l'unica leva residua dopo che GEMV (v2/v4 a soffitto) e ring in-place (piu' lento) sono
-     * stati esclusi da misura. Le guardie plain-tensor sotto bf16 (:445-451) coprono l'attenzione
-     * plain del 120b. Escape hatch per A/B e kill-switch: LLM_GPTOSS_BF16=0 forza fp32 (= stato
-     * pre-promozione). payoff definitivo da confermare on-load sul 120b. */
-    const char* goss_bf16_env = llm_ai_mlx_opt_env("LLM_GPTOSS_BF16");
-    const bool goss_bf16_off = (goss_bf16_env != NULL && goss_bf16_env[0] == '0');
-    if (strncmp(m->cfg.model_type, "gpt_oss", 7) == 0)
-        want_bf16 = m->cfg.per_tensor_quant
-                 || (strcmp(m->cfg.quant_mode, "mxfp4") == 0 && !goss_bf16_off);
+    /* gpt-oss: bf16-promotion in oss/ (llm_oss_config.c; kill-switch LLM_GPTOSS_BF16=0). */
+    if (llm_oss_is_gptoss(m))
+        want_bf16 = llm_oss_want_bf16(m);
     /* glm4_moe DENTRO dal 2026-09-09: NON c'era, e la cosa era invisibile perche' la riga
      * "[bf16:default] applicato" compariva per mixtral e non per GLM -- cioe' GLM-4.5-Air girava
      * gli ESPERTI in fp32 con le scale BF16 del checkpoint, che e' esattamente il "leak fp32" gia'

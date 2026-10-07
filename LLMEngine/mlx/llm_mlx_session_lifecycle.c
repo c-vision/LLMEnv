@@ -374,20 +374,9 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
              * flash: non-touchati. Override LLM_PREFILL_CHUNK. */
             defc = llm_mlx_flash_prefill_enabled() ? 2048 : 128;
         else if (strcmp(m->cfg.model_type, "gpt_oss") == 0)
-            /* gpt_oss (misurato §V-quater, sweep prefill N=8192): picco a 2048 = +15% vs il
-             * default 8192. ATTENZIONE: la parita' qui e' DIVERSA da qwen3_5_moe/gemma4 (che
-             * erano bit-identici fra chunk). La SDPA flash fusa
-             * (mlx_fast_scaled_dot_product_attention in llm_mlx_gqa_sdpa_sinks) tileggia la
-             * riduzione sul dim-key IN FUNZIONE DELLA FORMA del chunk -> ordine di somma fp32
-             * diverso -> flip di knife-edge (~1 ULP) su una quasi-parita' di argmax a ~N=3000
-             * (decodectx: token 11 = id11 a 8192 vs id8202 a 2048), mentre a N=1500 e N=5000 gli
-             * IDS restano identici. NON e' un bug della finestra (divergerebbe a tutte le
-             * lunghezze). Per scelta del mandante (opzione A) la parita' adottata e' DETERMINISMO
-             * A CONFIG FISSA (stesso prompt -> stesso output al chunk fissato qui), non identicita'
-             * bit fra chunk diversi: renderlo chunk-invariante a bit richiederebbe un kernel
-             * attention custom a ordine fisso = la via gia' dimostrata lenta/inconveniente (#60).
-             * Decode n_tokens=1 non toccato. Override LLM_PREFILL_CHUNK. */
-            defc = 2048;
+            /* gpt_oss: chunk in oss/ (llm_oss_config.c). La parità gpt-oss è chunk-dipendente
+             * (SDPA fusa shape-dependent) -> determinismo a config fissa, non bit fra chunk. */
+            defc = llm_oss_default_prefill_chunk();
         s->prefill_chunk_size = chunk_env > 0 ? chunk_env : defc;
     }
     /* N-Gram: history vuota all'avvio; tabella pre-allocata (ordine default 3, riempita

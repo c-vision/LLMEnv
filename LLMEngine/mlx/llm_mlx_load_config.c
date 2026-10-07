@@ -295,25 +295,9 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
                 }
             }
         }
-    } else if (strcmp(cfg->model_type, "gpt_oss") == 0) {        /* GPT-OSS (es. gpt-oss-20b-MXFP4-Q8): layer alternati sliding(128)/full,
-         * MoE 32 esperti top4, bias lineari su q/k/v/o ed esperti, attention sinks
-         * appresi (self_attn.sinks), SwiGLU speciale (clip + alpha 1.702), lm_head
-         * separato (tie=false). layer_types esplicito nel config (verificato). */
-        OPT_INT(sliding_window, "sliding_window");
-        cJSON* layer_types = cJSON_GetObjectItemCaseSensitive(src, "layer_types");
-        if (!cJSON_IsArray(layer_types) || cJSON_GetArraySize(layer_types) != cfg->n_layers) {
-            fprintf(stderr, "load_config: layer_types assente o di lunghezza diversa da num_hidden_layers\n");
-            cJSON_Delete(j);
-            return false;
-        }
-        cfg->is_sliding_layer = (bool*)malloc((size_t)cfg->n_layers * sizeof(bool));
-        for (int i = 0; i < cfg->n_layers; i++) {
-            cJSON* lt = cJSON_GetArrayItem(layer_types, i);
-            if (!cJSON_IsString(lt)) { fprintf(stderr, "load_config: layer_types[%d] non e' una stringa\n", i); cJSON_Delete(j); free(cfg->is_sliding_layer); cfg->is_sliding_layer = NULL; return false; }
-            if (strcmp(lt->valuestring, "sliding_attention") == 0 || strcmp(lt->valuestring, "linear_attention") == 0) cfg->is_sliding_layer[i] = true;
-            else if (strcmp(lt->valuestring, "full_attention") == 0) cfg->is_sliding_layer[i] = false;
-            else { fprintf(stderr, "load_config: layer_types[%d]=\"%s\" non riconosciuto\n", i, lt->valuestring); cJSON_Delete(j); free(cfg->is_sliding_layer); cfg->is_sliding_layer = NULL; return false; }
-        }
+    } else if (strcmp(cfg->model_type, "gpt_oss") == 0) {
+        /* GPT-OSS: config/policy in oss/ (llm_oss_config.c). Thin-hook: nessuna logica qui. */
+        if (!llm_oss_parse_config(cfg, src)) { cJSON_Delete(j); return false; }
     } else if (strcmp(cfg->model_type, "qwen3_5") == 0 || strcmp(cfg->model_type, "qwen3_5_moe") == 0) {
         /* FASE 1b.5 (Qwen3.8-27B): rope_theta vive in text_config.rope_parameters (piatto,
          * non per-tipo come gemma4). Es. reale: rope_parameters.rope_theta=10000000,

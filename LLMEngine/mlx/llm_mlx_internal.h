@@ -940,6 +940,9 @@ int  llm_mlx_promote_scales_f32(LlmMlxModel* m);
 /* --- dominio GPT-OSS: contratto in oss/llm_oss.h (incluso in testa) --- */
 /* llm_mlx_wcache_enabled e' definita nel monolite (usata dal dominio). */
 bool llm_mlx_wcache_enabled(void);
+/* cfg-branch GPT-OSS (implementato in oss/llm_oss_config.c). ModelConfig è anonimo -> dichiarato qui. */
+struct cJSON;
+bool llm_oss_parse_config(ModelConfig* cfg, struct cJSON* src);
 
 /* --- dominio ROPE (llm_mlx_rope.c) --- */
 mlx_array llm_mlx_proportional_rope_freqs(int dims, int rotated_dims, float base, float factor);
