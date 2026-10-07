@@ -28,6 +28,7 @@ def main():
     ntok = int(sys.argv[1]) if len(sys.argv) > 1 else 900
     mt   = int(sys.argv[2]) if len(sys.argv) > 2 else 1
     reserve = int(sys.argv[3]) if len(sys.argv) > 3 else H.SLOW_RESERVE_MB
+    mmap  = int(sys.argv[4]) if len(sys.argv) > 4 else 0   # 1 = --opt dsv4_experts_mmap=1 (opzione 1: esperti dal mmap, no cache bundle)
     floor, rsscap, pre, to = 30.0, 62.0, 60.0, 600
     P = long_prompt(ntok)
     f0 = H.free_pct()
@@ -39,6 +40,7 @@ def main():
     cmd = [H.FL, "run", "ds4", P, "--max-tokens", str(mt), "--offload-experts",
            "--opt", "temperature=0", "--opt", "ds4_backend=slow",
            "--opt", f"memgov_reserve_mb={reserve}", "--opt", "dsv4_profile=1"]
+    if mmap: cmd += ["--opt", "dsv4_experts_mmap=1"]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     why, peak, minfree = {"v": None}, {"rss": 0.0}, {"f": 100.0}
     stop = threading.Event()

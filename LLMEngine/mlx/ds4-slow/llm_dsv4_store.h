@@ -45,6 +45,9 @@ typedef struct {
     uint32_t* freq;
     int f_layers, f_experts;
     int hotness;
+    int mmap_only;   /* opzione di registro `dsv4_experts_mmap`: esperti via puntatori nel mmap del GGUF
+                      * (resident_base, UNA copia, come il vendored) invece della cache bundle anon (2ª copia).
+                      * Nel prefill a chunk grande la cache LRU e' inutile (tutti gli esperti toccati) -> qui evita solo I/O+copia. */
     /* ARENA per i layer con esperti Q4_K (gate/up/down tutti tipo 12): i tensori di layer con gli esperti IMPILATI
      * (stessa disposizione del GGUF) vivono in un'unica regione anonima, riempita a richiesta con pread. Cosi' il kernel
      * mul_mm_id (src0 = tensore impilato, stride per esperto) li legge senza modifiche; niente LRU per questi layer. */
@@ -156,6 +159,7 @@ static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngin
     s->resident_base = g->buf;
     s->n_layer = c->n_layer;
     s->n_expert = c->n_expert;
+    { int v = 0; if (llm_ai_mlx_opt_get_bool("dsv4_experts_mmap", &v) == 0) s->mmap_only = v; }   /* default OFF */
     s->cap = cap_bundles > 0 ? cap_bundles : 64;
     s->layers = (LlmDsv4StoreLayer*)calloc((size_t)c->n_layer, sizeof(LlmDsv4StoreLayer));
     s->ents = (LlmDsv4StoreEnt*)calloc((size_t)s->cap, sizeof(LlmDsv4StoreEnt));
@@ -196,7 +200,7 @@ static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngin
     }
     /* Arena Q4_K: SPERIMENTALE, DISATTIVA di default (alloca ~21 GB e li rende residenti: sopra il budget di una macchina da 128 GB
      * con la cache esperti da 86 GB). Si attiva solo con l'opzione di registro `dsv4_q4_arena=1` (mai env). */
-    { int v = 0; if (mode == LLM_DSV4_STORE_SWAP && llm_ai_mlx_opt_get_bool("dsv4_q4_arena", &v) == 0 && v) llm_dsv4_store_enable_q4(s, c->n_expert); }
+    { int v = 0; if (mode == LLM_DSV4_STORE_SWAP && !s->mmap_only && llm_ai_mlx_opt_get_bool("dsv4_q4_arena", &v) == 0 && v) llm_dsv4_store_enable_q4(s, c->n_expert); }
     /* item B: se il prefetch mirato e' attivo serve la mappa di hotness (alimentata in claim). */
     { int v = 0; if (mode == LLM_DSV4_STORE_SWAP && llm_ai_mlx_opt_get_int("dsv4_prefetch_hot", &v) == 0 && v > 0) llm_dsv4_store_set_dims(s, c->n_layer, c->n_expert); }
     /* HOTLIST I/O (item B/c): carica la hotness persistita e pre-carica i top-K esperti per layer. */
@@ -320,7 +324,7 @@ static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, i
     const uint8_t* r_u = s->resident_base + L->off_u + (uint64_t)e * L->stride_u;
     const uint8_t* r_d = s->resident_base + L->off_d + (uint64_t)e * L->stride_d;
     *gate = r_g; *up = r_u; *down = r_d;
-    if (s->mode == LLM_DSV4_STORE_RESIDENT) return r_g;
+    if (s->mode == LLM_DSV4_STORE_RESIDENT || s->mmap_only) return r_g;   /* UNA copia: puntatori nel mmap del GGUF */
     if (llm_dsv4_store_q4_stacks(s, layer, NULL, NULL, NULL)) {   /* layer Q4_K: puntatori nell'arena */
         if (llm_dsv4_store_q4_ensure(s, layer, &e, 1) == 0) {
             *gate = s->q4_base + s->q4_off[layer * 3] + (size_t)e * L->nb_g;
@@ -350,7 +354,7 @@ static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, i
  * assegnati in serie (logica LRU), le letture dei record mancanti (3 pread per esperto) girano in parallelo su GCD
  * (l'NVMe/page cache scalano con piu' richieste). Dopo, llm_dsv4_store_expert() e' tutto hit. `n` fino a 4096. */
 static inline void llm_dsv4_store_prefetch(LlmDsv4Store* s, int layer, const int* experts, int n) {
-    if (!s || s->mode != LLM_DSV4_STORE_SWAP || n <= 0) return;
+    if (!s || s->mode != LLM_DSV4_STORE_SWAP || s->mmap_only || n <= 0) return;
     if (llm_dsv4_store_q4_stacks(s, layer, NULL, NULL, NULL)) { llm_dsv4_store_q4_ensure(s, layer, experts, n); return; }
     typedef struct { int e, idx; } Job;
     Job* jobs = (Job*)malloc(sizeof(Job) * (size_t)n);   /* heap: letto dai worker GCD (un __thread non sarebbe condiviso) */
@@ -384,7 +388,7 @@ static inline void llm_dsv4_store_prefetch(LlmDsv4Store* s, int layer, const int
  * top-K per frequenza; senza localita' (token sintetici casuali) freq e' ~uniforme → nessun guadagno
  * atteso (serve testo reale, come la hotlist ds4). Se `freq` non e' allocata → no-op. */
 static inline void llm_dsv4_store_madvise_layer(LlmDsv4Store* s, int layer) {
-    if (!s || s->mode != LLM_DSV4_STORE_SWAP || !s->resident_base || s->freq == NULL) return;
+    if (!s || s->mode != LLM_DSV4_STORE_SWAP || s->mmap_only || !s->resident_base || s->freq == NULL) return;
     if (layer < 0 || layer >= s->f_layers) return;
     if (s->q4_off && s->q4_off[layer * 3] != (size_t)-1) return;   /* arena Q4_K: gestita da q4_ensure */
     int K = 0; { int v; if (llm_ai_mlx_opt_get_int("dsv4_prefetch_hot", &v) == 0) K = v; }
