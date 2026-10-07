@@ -268,9 +268,17 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
     bool moe_fused_done = false;
     /* STREAM-AWARE: nessuna guardia per-modello. Il kernel fuso riceve i tensori giusti in
      * entrambe le modalità (completi se OFF, stacked degli esperti attivi se ON) tramite
-     * `llm_mlx_moe_fused_stream_aware`. */
+     * `llm_mlx_moe_fused_stream_aware`.
+     *
+     * NON-PARITA' VOLUTA (qwen3_5_moe, 2026-10-07): il kernel fuso (scalare/SIMD, f32) NON è
+     * bit-fedele all'eager su M5 — l'eager `gather_qmm` dispatcha a `gather_qmm_nax`
+     * (tensor-core), non replicabile in un kernel scalare; differenza ~0.5% (rel_rms 0.005-0.015)
+     * che flipa i near-tie. Misurato coi tool qualità (`test_mlx_bench ... score`): top-1 vs testo
+     * reale IDENTICO (56/96; 120 vs 119/200 fuso ON vs OFF) e generazione coerente/identica →
+     * nessun degrado di qualità. Decisione: il fuso resta ATTIVO (perf +~3.5%); la parità bit non
+     * è richiesta qui. Doc: Knowledge/MLX-Modello-Qwen3-5-MoE §8, Knowledge/MLX-Parita-Per-Famiglia,
+     * Bugs/(open) - MLX-Qwen3.5-MoE-Parita-Greedy-Diverge.md. NON ri-aggiungere una guardia. */
     if (ok && n_tokens == 1 && !has_moe_down_lora && llm_mlx_fuse_moe_decode_enabled()
-        && strcmp(m->cfg.model_type, "qwen3_5_moe") != 0  /* NON bit-fedele per qwen3_5_moe (bf16): il kernel accumula in f32 con grouping diverso da gather_qmm/qdot (scale*Σ(qx)+bias*Σx, tiling MLX) -> near-tie flip. Bug: Bugs/(open) - MLX-Qwen3.5-MoE-Parita-Greedy-Diverge.md */
         && strcmp(eg_mode, "affine") == 0 && strcmp(eu_mode, "affine") == 0 && strcmp(ed_mode, "affine") == 0
         && eg_bits == eu_bits && eg_group == eu_group
         && (eg_bits == 4 || eg_bits == 8) && (ed_bits == 4 || ed_bits == 8)) {
