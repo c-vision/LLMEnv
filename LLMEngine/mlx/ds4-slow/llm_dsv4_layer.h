@@ -306,27 +306,43 @@ static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const Ll
     float* attn_all   = (float*)llm_dsv4_arena_alloc(sizeof(float) * (size_t)D * N);
     #define SP_POST(sp, t) ((sp) + (size_t)SZ * (t) + HC)
     #define SP_COMB(sp, t) ((sp) + (size_t)SZ * (t) + 2 * HC)
-    /* OPZIONE device-resident (registro `dsv4_batch_dev`, default OFF): res/out su DEVICE (ping-pong) -> elimina
-     * il memcpy host di `res`/`after` (HC*D*N, ~78MB/call a 1275 tok = il grosso di fase1). Tutto-o-niente:
-     * se un pezzo fallisce si prosegue col percorso host sotto. */
+    /* OPZIONE device-resident (registro `dsv4_batch_dev`, default OFF): res/out su DEVICE (ping-pong) -> elimina il
+     * memcpy host di `res`/`after` (HC*D*N, ~78MB/call a 1275 tok = il grosso di fase1).
+     * ATOMICITA' (bug: l'attn AVANZA la cache KV): i passi PRIMA dell'attn possono ripiegare sul percorso host
+     * (KV intatta); DOPO che l'attn e' riuscita NON si ripiega MAI (ri-avanzerebbe la KV) -> il MoE usa il suo
+     * fallback per-token inline e i post-attn restano su device (config pre-verificata: D%4, D<=4096, HC<=16). */
     int batch_dev = 0; { int v = 0; if (llm_ai_mlx_opt_get_bool("dsv4_batch_dev", &v) == 0) batch_dev = v; }
-    if (batch_dev) {
+    if (batch_dev && (D % 4 == 0) && D <= 4096 && HC <= 16) {
         void* d_res = llm_dsv4_gpu_devslot(0, (size_t)hcn * (size_t)N * 4);
         void* d_aft = llm_dsv4_gpu_devslot(1, (size_t)hcn * (size_t)N * 4);
         void* d_sp  = llm_dsv4_gpu_devslot(2, (size_t)SZ * (size_t)N * 4);
         void* d_spf = llm_dsv4_gpu_devslot(3, (size_t)SZ * (size_t)N * 4);
-        int ok = d_res && d_aft && d_sp && d_spf;
-        if (ok) llm_dsv4_gpu_dev_upload(d_res, hc_in, (size_t)hcn * (size_t)N * 4);
-        if (ok) ok = llm_dsv4_gpu_hc_pre_batch_dev_try(c, L->hc_attn_fn, L->hc_attn_scale, L->hc_attn_base, L->attn_norm, d_res, N, normed_all, d_sp);
-        if (ok) ok = llm_dsv4_gpu_attn_batch_try(c, L, il, cache->compress_ratio, cache->raw_cap, cache->comp_cap, normed_all, pos0, N, attn_all);
-        if (ok) ok = llm_dsv4_gpu_hc_post_batch_dev_try(c, attn_all, d_res, d_sp, d_aft, N);
-        if (ok) ok = llm_dsv4_gpu_hc_pre_batch_dev_try(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, d_aft, N, ffn_x, d_spf);
-        if (pf) { double _n = llm_dsv4_pf_now(); g_pf_t1 += _n - _t0; _t0 = _n; g_pf_hc_gpu += 2; g_pf_attn_gpu += ok ? 1 : 0; }
-        if (ok) ok = llm_dsv4_gpu_moe_batch_try(c, L, il, ffn_x, tokens, N, ffn_o);
-        if (pf) { double _n = llm_dsv4_pf_now(); g_pf_tmoe += _n - _t0; _t0 = _n; g_pf_moe_batch += ok ? 1 : 0; }
-        if (ok) ok = llm_dsv4_gpu_hc_post_batch_dev_try(c, ffn_o, d_aft, d_spf, d_res, N);
-        if (pf) g_pf_t3 += llm_dsv4_pf_now() - _t0;
-        if (ok) { llm_dsv4_gpu_dev_download(hc_out, d_res, (size_t)hcn * (size_t)N * 4); return; }
+        if (d_res && d_aft && d_sp && d_spf) {
+            llm_dsv4_gpu_dev_upload(d_res, hc_in, (size_t)hcn * (size_t)N * 4);
+            int ok = llm_dsv4_gpu_hc_pre_batch_dev_try(c, L->hc_attn_fn, L->hc_attn_scale, L->hc_attn_base, L->attn_norm, d_res, N, normed_all, d_sp);
+            if (ok) ok = llm_dsv4_gpu_attn_batch_try(c, L, il, cache->compress_ratio, cache->raw_cap, cache->comp_cap, normed_all, pos0, N, attn_all);
+            if (ok) {
+                /* ── la cache KV e' AVANZATA: da qui in poi NIENTE fallback al percorso host ── */
+                if (pf) { double _n = llm_dsv4_pf_now(); g_pf_t1 += _n - _t0; _t0 = _n; g_pf_hc_gpu += 2; g_pf_attn_gpu += 1; }
+                llm_dsv4_gpu_hc_post_batch_dev_try(c, attn_all, d_res, d_sp, d_aft, N);
+                llm_dsv4_gpu_hc_pre_batch_dev_try(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, d_aft, N, ffn_x, d_spf);
+                int moe_ok = llm_dsv4_gpu_moe_batch_try(c, L, il, ffn_x, tokens, N, ffn_o);
+                if (pf) { double _n = llm_dsv4_pf_now(); g_pf_tmoe += _n - _t0; _t0 = _n; g_pf_moe_batch += moe_ok ? 1 : 0; }
+                if (!moe_ok)   /* fallback per-token del MoE: NON tocca la KV */
+                    for (int t = 0; t < N; t++) {
+                        const float* x = ffn_x + (size_t)D * t; float* o = ffn_o + (size_t)D * t;
+                        if (!llm_dsv4_gpu_moe_try(c, L, il, x, tokens[t], o)) {
+                            if (pe && pe->gate) llm_dsv4_moe_forward_packed(c, L, pe, x, il, tokens[t], o);
+                            else                llm_dsv4_moe_forward(c, L, x, il, tokens[t], o);
+                        }
+                    }
+                llm_dsv4_gpu_hc_post_batch_dev_try(c, ffn_o, d_aft, d_spf, d_res, N);
+                if (pf) g_pf_t3 += llm_dsv4_pf_now() - _t0;
+                llm_dsv4_gpu_dev_download(hc_out, d_res, (size_t)hcn * (size_t)N * 4);
+                return;
+            }
+            /* hc_pre(attn)/attn non riuscite: KV NON avanzata -> si prosegue col percorso host sotto (sicuro) */
+        }
     }
     /* fase 1: mHC pre attn (tutti i token) -> attenzione (chunk su GPU, o per-token) -> mHC post attn + mHC pre ffn */
     int hc_a = gpu_hc && llm_dsv4_gpu_hc_pre_batch_try(c, L->hc_attn_fn, L->hc_attn_scale, L->hc_attn_base, L->attn_norm, hc_in, N, normed_all, sp_a);
