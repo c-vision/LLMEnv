@@ -17,3 +17,6 @@ libs/mlx-deps/precompiled/
 # oracoli: script e binari di misura locali, NON tracciati (vedi
 # AiWiki/01-Projects/LLMEnv/Knowledge/oracoli.md)
 oracoli/
+
+# tool ritirati (A/B vendored+ds-minimal): non tracciati
+backups/tools/
