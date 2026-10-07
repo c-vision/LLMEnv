@@ -15,28 +15,33 @@ created: 2026-10-04
 > 2. **repo**: `LLMEnv/tools/README.md` (accanto ai tool).
 > Devono restare **identiche** (`diff` vuoto). Modificandone una, aggiornare **subito** anche l'altra.
 > (La vecchia copia in `GMBasic/Knowledge/` è stata rimossa.)
-> Scopo: TUTTI gli strumenti della repo `LLMEnv`, cosa fa ognuno, per chi (LLMEngine / FastLLM / entrambi)
-> e quando usarlo.
+> Scopo: TUTTI gli strumenti di **LLMEngine** e **FastLLM** (+ i condivisi in `LLMEnv`), cosa fa ognuno,
+> per chi e quando usarlo.
 
-> [!IMPORTANT] REGOLA (protocollo di startup) — tool nuovi
-> **Ogni nuovo tool va SEMPRE in `LLMEnv/tools/`** (mai nella root, mai in `/tmp`, mai dentro
-> `LLMEngine/`/`FastLLM/`). Posizione: `tools/` per quelli che servono a **entrambi** (LLMEngine e
-> FastLLM); `LLMEngine/tools/` per quelli dell'**engine**; `FastLLM/tools/` per quelli di **FastLLM**.
+> [!IMPORTANT] REGOLA (protocollo di startup) — dove va un tool nuovo (agg. 2026-10-07)
+> **Ogni tool sta nella `tools/` del SUO progetto** (mai in root, mai in `/tmp`):
+> - tool dell'**engine** → **`LLMEngine/tools/`**;
+> - tool di **FastLLM** (server/CLI) → **`FastLLM/tools/`**;
+> - tool **condivisi** (servono a LLMEngine **e** FastLLM) → **`LLMEnv/tools/`**.
 > Alla creazione di un tool, **aggiornare il documento in ENTRAMBE le copie** (vault +
 > `LLMEnv/tools/README.md`) — una voce: cosa fa, per chi, come si usa.
 > **Eccezione** (unica): i tool **accoppiati a un modulo** — **build CMake/codegen/test di quel
-> modulo** (es. `LLMEngine/moe/tools/`, `LLMEngine/mlx/ds4/tools/`) — restano col modulo
-> (spostarli rompe il build) e sono elencati sotto. Vedi AGENTS.md §Tool.
+> modulo** (es. `LLMEngine/moe/tools/`) — restano col modulo (spostarli rompe il build) e sono
+> elencati sotto. Vedi AGENTS.md §Tool.
 
-> [!IMPORTANT] Dove vivono i tool (LLMEnv) — consolidato 2026-10-05
-> **TUTTI i tool di `LLMEnv` stanno sotto `LLMEnv/tools/`**, ripartiti **per motore**:
-> - **`tools/`** (root) = tool per **ENTRAMBI** (LLMEngine **e** FastLLM): `build_ai_libs.sh`,
+> [!IMPORTANT] Dove vivono i tool — consolidato 2026-10-07
+> Per **progetto**:
+> - **`LLMEngine/tools/`** = tool dell'**engine** (LLMEngine): `decode_profile.c`, `kv_restore_bench.c`,
+>   `dflash_*.c`, `mlx_*`, `moe_*`, `llm_autotune.sh`, `llm_plan_gate.sh`, `scale_sweep.sh`, `oracoli/`,
+>   `ds4_prefill_phase.py`, `capped_run.py`, `gdn_parity.py`, `dflash_oracle.py` (ex `LLMEnv/tools/llmengine/`
+>   + i tool-modulo di `LLMEngine/mlx/`).
+> - **`FastLLM/tools/`** = tool del **server/CLI FastLLM**: `ds4_ctx_bench.py`, `eval/`, `bundle.sh`,
+>   `moe_gate.py`, `kernel_tune.py`, `json_oracle.py`, `hf_*_probe.c`, `spec_gate.py`, … (ex
+>   `LLMEnv/tools/fastllm/` + i tool FastLLM).
+> - **`LLMEnv/tools/`** = tool **condivisi** (LLMEngine **e** FastLLM): `build_ai_libs.sh`,
 >   `mlx_parity_run.sh`, `gmb_license_gate.py`, `migrate_env.py`, `llm_env_audit.tsv`, `BenchChronos/`.
-> - **`LLMEngine/tools/`** = tool dell'**engine**: `decode_profile.c`, `kv_restore_bench.c`,
->   `dflash_*.c`, `mlx_*`, `moe_*`, `llm_autotune.sh`, `llm_plan_gate.sh`, `scale_sweep.sh`, `oracoli/`.
-> - **`FastLLM/tools/`** = tool del **server/CLI FastLLM**: `ds4_ctx_bench.py`, `eval/`.
-> Storia: prima `BenchChronos/` e `oracoli/` erano nella root; `oracoli/` è stato spostato sotto
-> `tools/` poi in `LLMEngine/tools/` (LLMEnv commit `fb053d7` e successivo).
+> Storia: fino al 2026-10-07 i tool engine/FastLLM stavano sotto `LLMEnv/tools/{llmengine,fastllm}/`;
+> ora vivono nelle `tools/` del rispettivo progetto (i condivisi restano in `LLMEnv/tools/`).
 
 ## Regole d'uso (trasversali)
 - **Unità-first / branch-first** (AGENTS §0sexies): misura l'**unità** toccata (kernel, una layer, un
@@ -244,4 +249,5 @@ created: 2026-10-04
 - **Motore MLX/MoE**: opzioni `dsv4_prefill_mm`, `dsv4_gpu_hc`, `dsv4_prefill_chunk`, `dsv4_hotlist_topk` …
 - **GMBasic**: `GMB_DECODE_ATTENTION_BENCH`, harness `mlx_batch_test`, `decode_bench`.
 
-> [!NOTE] Vedi anche: `BenchChronos-Benchmark-Coerente.md`, AGENTS §0sexies/§0septies.
+> [!NOTE] Vedi anche: `DS4-slow-Dove-va-il-tempo-Decode.md` (ripartizione CPU/GPU/decode),
+> `BenchChronos-Benchmark-Coerente.md`, AGENTS §0sexies/§0septies.
