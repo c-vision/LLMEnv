@@ -41,7 +41,7 @@ def main():
     if not H.wait_recover(pre):
         return
     cmd = [H.FL, "run", "ds4", P, "--max-tokens", str(mt), "--offload-experts",
-           "--opt", "temperature=0", "--opt", "ds4_backend=slow",
+           "--opt", "temperature=0",
            "--opt", f"memgov_reserve_mb={reserve}", "--opt", "dsv4_profile=1"]
     if mmap: cmd += ["--opt", "dsv4_experts_mmap=1"]
     if batch_dev: cmd += ["--opt", "dsv4_batch_dev=1"]
