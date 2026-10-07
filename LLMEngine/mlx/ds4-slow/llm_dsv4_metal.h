@@ -190,6 +190,10 @@ int llm_dsv4_metal_route_batch(LlmDsv4Metal* b, int nt, int n_expert, int embd, 
 int llm_dsv4_metal_hc_pre_batch(LlmDsv4Metal* b, int nt, int HC, int D, int iters, float hc_eps, float rms_eps, const float* res,
         const float* fn, const float* scale, const float* base, const float* norm_w, float* normed, float* sp);
 int llm_dsv4_metal_hc_post_batch(LlmDsv4Metal* b, int nt, int HC, int D, const float* bo, const float* res, const float* sp, float* out);
+/* Varianti device-resident (batch): res/sp/out restano in buffer DEVICE (niente memcpy host di res/out). */
+int llm_dsv4_metal_hc_pre_batch_dev(LlmDsv4Metal* b, int nt, int HC, int D, int iters, float hc_eps, float rms_eps,
+        void* res_dev, const float* fn, const float* scale, const float* base, const float* norm_w, float* normed_host, void* sp_dev);
+int llm_dsv4_metal_hc_post_batch_dev(LlmDsv4Metal* b, int nt, int HC, int D, const float* bo_host, void* res_dev, void* sp_dev, void* out_dev);
 /* Proiezioni Q-LoRA+KV del chunk via mul_mm_id Q8_0 (come attn_proj_fused_batch; attivazioni half). */
 int llm_dsv4_metal_attn_proj_mm_batch(LlmDsv4Metal* b, int nt, const void* qa_w, size_t qa_row_bytes,
         const void* kv_w, size_t kv_row_bytes, const void* qb_w, size_t qb_row_bytes,

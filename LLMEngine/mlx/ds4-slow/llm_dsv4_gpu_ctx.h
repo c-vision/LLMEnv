@@ -28,6 +28,14 @@ int llm_dsv4_gpu_route_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeigh
 int llm_dsv4_gpu_hc_pre_batch_try(const LlmDsv4Config* c, const float* fn, const float* scale, const float* base, const float* norm_w,
                                   const float* res, int nt, float* normed, float* sp);
 int llm_dsv4_gpu_hc_post_batch_try(const LlmDsv4Config* c, const float* bo, const float* res, const float* sp, int nt, float* out);
+/* mHC device-resident (batch, opzione dsv4_batch_dev): res/sp/out in buffer DEVICE persistenti (una copia).
+ * `llm_dsv4_gpu_devslot` ritorna un buffer device persistente (cresce al bisogno); upload/download host<->device. */
+void* llm_dsv4_gpu_devslot(int slot, size_t bytes);
+void  llm_dsv4_gpu_dev_upload(void* buf, const float* host, size_t bytes);
+void  llm_dsv4_gpu_dev_download(float* host, void* buf, size_t bytes);
+int   llm_dsv4_gpu_hc_pre_batch_dev_try(const LlmDsv4Config* c, const float* fn, const float* scale, const float* base,
+        const float* norm_w, void* res_dev, int nt, float* normed, void* sp_dev);
+int   llm_dsv4_gpu_hc_post_batch_dev_try(const LlmDsv4Config* c, const float* bo, void* res_dev, void* sp_dev, void* out_dev, int nt);
 /* MoE di un chunk di `nt` token in UNA command buffer (1 = eseguito; 0 = usare il per-token). */
 int llm_dsv4_gpu_moe_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                const float* x, const int* tokens, int nt, float* out);

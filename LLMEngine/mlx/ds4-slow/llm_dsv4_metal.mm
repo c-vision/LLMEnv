@@ -2928,6 +2928,77 @@ int llm_dsv4_metal_hc_post_batch(LlmDsv4Metal* b, int nt, int HC, int D, const f
     return 0;
 }
 
+/* ── mHC device-resident (batch): `res`/`sp`/`out` in buffer DEVICE (il chiamante li tiene persistenti).
+ * Elimina il traffico host che domina fase1 (~5s): `res` (HC*D*N) e `out` (HC*D*N) non passano piu' per
+ * l'host; solo `normed` (D*N) e `bo` (D*N) restano host (consumati/prodotti da attn/MoE). 0 = ok. ── */
+int llm_dsv4_metal_hc_pre_batch_dev(LlmDsv4Metal* b, int nt, int HC, int D, int iters, float hc_eps, float rms_eps,
+        void* res_dev, const float* fn, const float* scale, const float* base, const float* norm_w,
+        float* normed_host, void* sp_dev) {
+    if (!b || nt <= 0 || !res_dev || !sp_dev || !b->pso_hcb_scale || !b->pso_hcb_mixes || !b->pso_hcb_sink || !b->pso_hcb_norm || D > 4096 || (D % 4) || HC > 16) return -1;
+    const uint32_t size = (uint32_t)((2 + HC) * HC), hcd = (uint32_t)(HC * D);
+    if ((hcd % 4u)) return -1;
+    id<MTLBuffer> R  = (id<MTLBuffer>)res_dev;
+    id<MTLBuffer> SP = (id<MTLBuffer>)sp_dev;
+    id<MTLBuffer> SC = dsv4_scratch(b, &b->sx[55], &b->sx_cap[55], (size_t)nt * 4);
+    id<MTLBuffer> MX = dsv4_scratch(b, &b->sx[56], &b->sx_cap[56], (size_t)nt * size * 4);
+    id<MTLBuffer> NM = dsv4_scratch(b, &b->sx[58], &b->sx_cap[58], (size_t)nt * D * 4);
+    id<MTLBuffer> FNb = [b->dev newBufferWithBytes:fn length:(NSUInteger)size * hcd * 4 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> SCb = [b->dev newBufferWithBytes:scale length:12 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> BSb = [b->dev newBufferWithBytes:base length:(NSUInteger)size * 4 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> NWb = [b->dev newBufferWithBytes:norm_w length:(NSUInteger)D * 4 options:MTLResourceStorageModeShared];
+    if (!SC || !MX || !NM || !FNb || !SCb || !BSb || !NWb) { if (FNb) [FNb release]; if (SCb) [SCb release]; if (BSb) [BSb release]; if (NWb) [NWb release]; return -2; }
+    id<MTLCommandBuffer> cb = b->sactive ? b->scb : [b->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = b->sactive ? b->se : [cb computeCommandEncoder];
+    g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hcb_scale];
+    [e setBuffer:R offset:0 atIndex:0]; [e setBuffer:SC offset:0 atIndex:1];
+    { uint32_t P[1] = { hcd }; [e setBytes:P length:sizeof P atIndex:2]; [e setBytes:&rms_eps length:4 atIndex:3]; }
+    [e dispatchThreadgroups:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hcb_mixes];
+    [e setBuffer:R offset:0 atIndex:0]; [e setBuffer:FNb offset:0 atIndex:1]; [e setBuffer:SC offset:0 atIndex:2]; [e setBuffer:MX offset:0 atIndex:3];
+    { uint32_t P[2] = { hcd, size }; [e setBytes:P length:sizeof P atIndex:4]; }
+    [e dispatchThreadgroups:MTLSizeMake(size, nt, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hcb_sink];
+    [e setBuffer:MX offset:0 atIndex:0]; [e setBuffer:SCb offset:0 atIndex:1]; [e setBuffer:BSb offset:0 atIndex:2]; [e setBuffer:SP offset:0 atIndex:3];
+    { uint32_t P[3] = { (uint32_t)HC, (uint32_t)iters, size }; [e setBytes:P length:sizeof P atIndex:4]; [e setBytes:&hc_eps length:4 atIndex:5]; }
+    [e dispatchThreads:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hcb_norm];
+    [e setBuffer:R offset:0 atIndex:0]; [e setBuffer:SP offset:0 atIndex:1]; [e setBuffer:NWb offset:0 atIndex:2]; [e setBuffer:NM offset:0 atIndex:3];
+    { uint32_t P[3] = { (uint32_t)D, (uint32_t)HC, size }; [e setBytes:P length:sizeof P atIndex:4]; [e setBytes:&rms_eps length:4 atIndex:5]; }
+    [e dispatchThreadgroups:MTLSizeMake(nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    if (!b->sactive) {
+        [e endEncoding]; dsv4_res_commit(b); [cb commit];
+        { g_dsv4_waits++; [cb waitUntilCompleted]; } dsv4_gpu_acct(cb);
+        if (cb.error) { [FNb release]; [SCb release]; [BSb release]; [NWb release]; return -3; }
+    }
+    if (normed_host) memcpy(normed_host, [NM contents], (size_t)nt * D * 4);
+    [FNb release]; [SCb release]; [BSb release]; [NWb release];
+    return 0;
+}
+
+/* mHC post device-resident: bo (host, D*N) + res/sp/out (device). 0 = ok. */
+int llm_dsv4_metal_hc_post_batch_dev(LlmDsv4Metal* b, int nt, int HC, int D, const float* bo_host, void* res_dev, void* sp_dev, void* out_dev) {
+    if (!b || nt <= 0 || !b->pso_hcb_post || HC > 16 || !res_dev || !sp_dev || !out_dev) return -1;
+    const uint32_t size = (uint32_t)((2 + HC) * HC), hcd = (uint32_t)(HC * D);
+    id<MTLBuffer> BO = dsv4_scratch(b, &b->sx[59], &b->sx_cap[59], (size_t)nt * D * 4);
+    id<MTLBuffer> R  = (id<MTLBuffer>)res_dev;
+    id<MTLBuffer> SP = (id<MTLBuffer>)sp_dev;
+    id<MTLBuffer> O  = (id<MTLBuffer>)out_dev;
+    if (!BO) return -2;
+    memcpy([BO contents], bo_host, (size_t)nt * D * 4);
+    id<MTLCommandBuffer> cb = b->sactive ? b->scb : [b->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = b->sactive ? b->se : [cb computeCommandEncoder];
+    g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_hcb_post];
+    [e setBuffer:BO offset:0 atIndex:0]; [e setBuffer:R offset:0 atIndex:1]; [e setBuffer:SP offset:0 atIndex:2]; [e setBuffer:O offset:0 atIndex:3];
+    { uint32_t P[3] = { (uint32_t)D, (uint32_t)HC, size }; [e setBytes:P length:sizeof P atIndex:4]; }
+    [e dispatchThreads:MTLSizeMake(hcd, nt, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    if (!b->sactive) {
+        [e endEncoding]; dsv4_res_commit(b); [cb commit];
+        { g_dsv4_waits++; [cb waitUntilCompleted]; } dsv4_gpu_acct(cb);
+        if (cb.error) return -3;
+    }
+    return 0;
+}
+
 /* Routing di `nt` token su GPU: logits = gate_inp[n_expert x embd] · x (gemv multi-token), poi top-k/pesi. hsel [nt*used] (esperti da tabella hash) o NULL.
  * bias [n_expert] o NULL. sel [nt*used], wt [nt*used] in uscita. 0 = ok. */
 int llm_dsv4_metal_route_batch(LlmDsv4Metal* b, int nt, int n_expert, int embd, int used, const float* gate_inp, const float* bias,

@@ -20,6 +20,8 @@ static LlmDsv4AttnGpu g_attn;
 static int g_on = 0;
 static int g_ref = 0;
 
+static void llm_dsv4_gpu_dev_free_slots(void);   /* definita sotto (slot device mHC batch) */
+
 /* Argument buffer per layer sugli ESPERTI dello STORE (residenti, veloci); ricostruito solo
  * quando lo store sfratta (epoch). Il mmap sarebbe stabile ma NON residente sotto streaming. */
 static void* g_argp[LLM_DSV4_MAX_LAYER]; static void* g_argd[LLM_DSV4_MAX_LAYER];
@@ -373,6 +375,7 @@ void llm_dsv4_gpu_ctx_close(void) {
     }
     llm_dsv4_gpu_moe_destroy(&g_moe);
     llm_dsv4_gpu_attn_destroy(&g_attn);
+    llm_dsv4_gpu_dev_free_slots();
     llm_dsv4_metal_destroy(g_be);
     g_be = NULL; g_on = 0; g_ref = 0;
 }
@@ -411,6 +414,29 @@ int llm_dsv4_gpu_hc_pre_batch_try(const LlmDsv4Config* c, const float* fn, const
 int llm_dsv4_gpu_hc_post_batch_try(const LlmDsv4Config* c, const float* bo, const float* res, const float* sp, int nt, float* out) {
     if (!g_on || !g_be) return 0;
     return llm_dsv4_metal_hc_post_batch(g_be, nt, c->n_hc, c->n_embd, bo, res, sp, out) == 0;
+}
+/* ── mHC device-resident (opzione dsv4_batch_dev): buffer device persistenti (slot), upload/download espliciti ── */
+static void*  g_devslot[8]; static size_t g_devslot_sz[8];
+void* llm_dsv4_gpu_devslot(int slot, size_t bytes) {
+    if (slot < 0 || slot >= 8 || !g_be || bytes == 0) return NULL;
+    if (g_devslot[slot] && g_devslot_sz[slot] >= bytes) return g_devslot[slot];
+    llm_dsv4_metal_buf_free(g_devslot[slot]); g_devslot[slot] = NULL; g_devslot_sz[slot] = 0;
+    g_devslot[slot] = llm_dsv4_metal_buf_alloc(g_be, bytes);
+    if (g_devslot[slot]) g_devslot_sz[slot] = bytes;
+    return g_devslot[slot];
+}
+void llm_dsv4_gpu_dev_upload(void* buf, const float* host, size_t bytes) { if (buf && host && bytes) llm_dsv4_metal_buf_write(buf, 0, host, bytes); }
+void llm_dsv4_gpu_dev_download(float* host, void* buf, size_t bytes) { if (buf && host && bytes) llm_dsv4_metal_buf_read(buf, 0, host, bytes); }
+static void llm_dsv4_gpu_dev_free_slots(void) { for (int i = 0; i < 8; i++) { llm_dsv4_metal_buf_free(g_devslot[i]); g_devslot[i] = NULL; g_devslot_sz[i] = 0; } }
+int llm_dsv4_gpu_hc_pre_batch_dev_try(const LlmDsv4Config* c, const float* fn, const float* scale, const float* base,
+        const float* norm_w, void* res_dev, int nt, float* normed, void* sp_dev) {
+    if (!g_on || !g_be) return 0;
+    return llm_dsv4_metal_hc_pre_batch_dev(g_be, nt, c->n_hc, c->n_embd, c->n_hc_sinkhorn_iter, c->hc_eps, c->rms_eps,
+                                           res_dev, fn, scale, base, norm_w, normed, sp_dev) == 0;
+}
+int llm_dsv4_gpu_hc_post_batch_dev_try(const LlmDsv4Config* c, const float* bo, void* res_dev, void* sp_dev, void* out_dev, int nt) {
+    if (!g_on || !g_be) return 0;
+    return llm_dsv4_metal_hc_post_batch_dev(g_be, nt, c->n_hc, c->n_embd, bo, res_dev, sp_dev, out_dev) == 0;
 }
 int llm_dsv4_gpu_moe_batch_try(const LlmDsv4Config* c, const LlmDsv4LayerWeights* L, int il,
                                const float* x, const int* tokens, int nt, float* out) {
