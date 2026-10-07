@@ -20,6 +20,9 @@ add_library(llmcodec STATIC
     src/llmcodec_quant_awq.c       # decoder AWQ int4 GEMM (autoawq gemm layout) per l'engine MLX
     src/llmcodec_quant_gptq.c      # decoder GPTQ int2/4/8 (autogptq/gptqmodel) per l'engine MLX
     src/llmcodec_quant_nf4.c       # decoder bitsandbytes NF4 (+double-quant) per l'engine MLX
+    # ENCODE/DEQUANT ggml (CONDIVISO: actquant in inferenza + quant PUL). Nel core STATICO così
+    # i consumatori (gmbllm) li LINKANO invece di ricompilarli (niente fork stale).
+    src/llmcodec_ggml_quants.c src/llmcodec_ggml_iq_grids.c src/llmcodec_make_qp.c
 )
 
 # PLUGIN CODEC (dylib): le IMPLEMENTAZIONI vivono QUI, mai nel core.

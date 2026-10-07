@@ -1525,7 +1525,7 @@ int llmcodec_ggml_type_of_fmt(const char* fmt) {
 }
 
 /* Tabella byte-per-tipo: FORMATO del codec (vive nel plugin, non nel contenitore). */
-static int llmcodec_ggml_block(int t, uint64_t* bb, uint64_t* bv) {
+int llmcodec_ggml_block(int t, uint64_t* bb, uint64_t* bv) {
     switch (t) {
         case 0: *bb=4;   *bv=1;   return 0;  case 1: *bb=2;   *bv=1;   return 0;
         case 2: *bb=18;  *bv=32;  return 0;  case 3: *bb=20;  *bv=32;  return 0;
