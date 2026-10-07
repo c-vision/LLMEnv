@@ -7,7 +7,7 @@
  * Moduli coperti (primitives condivise fra architetture):
  *   linear (matvec) · rms_norm_weight · attention_rows (sink, K=V) · rope_tail_ext (neox tail)
  *
- * Build/uso: clang -O2 -I LLMEngine/mlx/ds4 tools/llmengine/arch_lab.c -lm -o /tmp/arch_lab && /tmp/arch_lab
+ * Build/uso: clang -O2 -I LLMEngine/mlx/ds4 LLMEngine/tools/arch_lab.c -lm -o /tmp/arch_lab && /tmp/arch_lab
  */
 #include "llm_dsv4_attn_fwd.h"   /* llm_dsv4_linear, rms_norm_weight, attention_rows, rope_tail_ext_inplace */
 #include "llm_dsv4_moe_fwd.h"    /* llm_dsv4_swiglu, llm_dsv4_topk_desc (router) */

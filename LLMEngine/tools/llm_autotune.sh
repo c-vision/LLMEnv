@@ -6,8 +6,8 @@
 # Metrica (oracoli.md): **ms/token** (stabile), NON tok/s. Con speculazione ON i tok/s non sono
 # confrontabili tra run diverse; la misura e' ripetuta (REPS) e si riporta min/mediana/max.
 #
-# Uso: MODEL=<dir MLX> [NP=2048] [NG=64] [REPS=2] [OUT=/tmp/opt_record.json] bash tools/llmengine/llm_autotune.sh [cfg ...]
-#   cfg: "nome:k=v,k=v" (vuoto = eager). Es: bash tools/llmengine/llm_autotune.sh "eager:" "spec:spec_ngram=4" "kvq:kvquant=8:512"
+# Uso: MODEL=<dir MLX> [NP=2048] [NG=64] [REPS=2] [OUT=/tmp/opt_record.json] bash LLMEngine/tools/llm_autotune.sh [cfg ...]
+#   cfg: "nome:k=v,k=v" (vuoto = eager). Es: bash LLMEngine/tools/llm_autotune.sh "eager:" "spec:spec_ngram=4" "kvq:kvquant=8:512"
 set -euo pipefail
 export LC_ALL=C
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -15,8 +15,8 @@ DYL="${LLM_MLX_DYLIB:-$ROOT/build/dist/osx-arm64/libllm_ai_mlx.dylib}"
 MDL="${MODEL:-}"; NP="${NP:-2048}"; NG="${NG:-64}"; REPS="${REPS:-2}"; OUT="${OUT:-/tmp/opt_record.json}"
 [ -n "$MDL" ] || { echo "uso: MODEL=<dir MLX> $0 [nome:k=v,.. ...]"; exit 2; }
 BIN=/tmp/decode_profile
-if [ ! -x "$BIN" ] || [ "$ROOT/tools/llmengine/decode_profile.c" -nt "$BIN" ]; then
-  cc -O2 -o "$BIN" "$ROOT/tools/llmengine/decode_profile.c"
+if [ ! -x "$BIN" ] || [ "$ROOT/LLMEngine/tools/decode_profile.c" -nt "$BIN" ]; then
+  cc -O2 -o "$BIN" "$ROOT/LLMEngine/tools/decode_profile.c"
 fi
 # ms/token = campo 4 (nprompt prefill_ms decode_ms ms/token tok/s act peak cache). Minimo su REPS.
 mstok() { "$BIN" "$DYL" "$MDL" "$NP" "$NG" "$@" --quiet 2>/dev/null \

@@ -21,7 +21,7 @@ created: 2026-10-04
 > [!IMPORTANT] REGOLA (protocollo di startup) — tool nuovi
 > **Ogni nuovo tool va SEMPRE in `LLMEnv/tools/`** (mai nella root, mai in `/tmp`, mai dentro
 > `LLMEngine/`/`FastLLM/`). Posizione: `tools/` per quelli che servono a **entrambi** (LLMEngine e
-> FastLLM); `tools/llmengine/` per quelli dell'**engine**; `tools/fastllm/` per quelli di **FastLLM**.
+> FastLLM); `LLMEngine/tools/` per quelli dell'**engine**; `FastLLM/tools/` per quelli di **FastLLM**.
 > Alla creazione di un tool, **aggiornare il documento in ENTRAMBE le copie** (vault +
 > `LLMEnv/tools/README.md`) — una voce: cosa fa, per chi, come si usa.
 > **Eccezione** (unica): i tool **accoppiati a un modulo** — **build CMake/codegen/test di quel
@@ -32,11 +32,11 @@ created: 2026-10-04
 > **TUTTI i tool di `LLMEnv` stanno sotto `LLMEnv/tools/`**, ripartiti **per motore**:
 > - **`tools/`** (root) = tool per **ENTRAMBI** (LLMEngine **e** FastLLM): `build_ai_libs.sh`,
 >   `mlx_parity_run.sh`, `gmb_license_gate.py`, `migrate_env.py`, `llm_env_audit.tsv`, `BenchChronos/`.
-> - **`tools/llmengine/`** = tool dell'**engine**: `decode_profile.c`, `kv_restore_bench.c`,
+> - **`LLMEngine/tools/`** = tool dell'**engine**: `decode_profile.c`, `kv_restore_bench.c`,
 >   `dflash_*.c`, `mlx_*`, `moe_*`, `llm_autotune.sh`, `llm_plan_gate.sh`, `scale_sweep.sh`, `oracoli/`.
-> - **`tools/fastllm/`** = tool del **server/CLI FastLLM**: `ds4_ctx_bench.py`, `eval/`.
+> - **`FastLLM/tools/`** = tool del **server/CLI FastLLM**: `ds4_ctx_bench.py`, `eval/`.
 > Storia: prima `BenchChronos/` e `oracoli/` erano nella root; `oracoli/` è stato spostato sotto
-> `tools/` poi in `tools/llmengine/` (LLMEnv commit `fb053d7` e successivo).
+> `tools/` poi in `LLMEngine/tools/` (LLMEnv commit `fb053d7` e successivo).
 
 ## Regole d'uso (trasversali)
 - **Unità-first / branch-first** (AGENTS §0sexies): misura l'**unità** toccata (kernel, una layer, un
@@ -50,18 +50,18 @@ created: 2026-10-04
 ## Tabella di scelta rapida
 | vuoi misurare… | tool |
 |---|---|
-| prefill/decode di UN modello, tok/s | `GMBasic/test_mlx_bench` (prefill/decode/ctxdecode), `LLMEnv/tools/llmengine/decode_profile.c` |
-| TTFT cold vs warm (KV su disco) | `LLMEnv/tools/llmengine/kv_restore_bench.c` |
+| prefill/decode di UN modello, tok/s | `GMBasic/test_mlx_bench` (prefill/decode/ctxdecode), `LLMEngine/tools/decode_profile.c` |
+| TTFT cold vs warm (KV su disco) | `LLMEngine/tools/kv_restore_bench.c` |
 | parità motore LLMEnv vs GMBasic | `LLMEnv/tools/mlx_parity_run.sh` + `mlx_parity_driver.c` |
 | A/B GMBasic vs mlx_lm / rapidMLX | `GMBasic/tools/ab_*.sh`, `bench*.sh`, `bench_mlxlm.py`, `bench_rapidmlx.py` |
-| autotune griglia configurazioni | `LLMEnv/tools/llmengine/llm_autotune.sh`, `GMBasic/tools/gmb_defaults_sweep.sh` |
-| quality/plan gate (eager vs opzioni) | `LLMEnv/tools/llmengine/llm_plan_gate.sh` |
-| **qualità/fedeltà** (parità greedy, needle; poi HALoGEN/lm-eval) | `LLMEnv/tools/fastllm/eval/` (mock o server OpenAI) |
+| autotune griglia configurazioni | `LLMEngine/tools/llm_autotune.sh`, `GMBasic/tools/gmb_defaults_sweep.sh` |
+| quality/plan gate (eager vs opzioni) | `LLMEngine/tools/llm_plan_gate.sh` |
+| **qualità/fedeltà** (parità greedy, needle; poi HALoGEN/lm-eval) | `FastLLM/tools/eval/` (mock o server OpenAI) |
 | **prestazioni coerenti** ds4 vs fmlx (TTFT cold/warm, throughput, RAM) | `LLMEnv/tools/BenchChronos/` (mlx-chronos) |
-| scalabilità (batch/ampiezza, cliff) | `LLMEnv/tools/llmengine/scale_sweep.sh`, `GMBasic/tools/mlx_batch_test.sh` |
-| streaming esperti MoE (I/O) | `LLMEnv/tools/llmengine/moe_stream_bench.c`, `GMBasic/tools/moe_stream_bench` |
+| scalabilità (batch/ampiezza, cliff) | `LLMEngine/tools/scale_sweep.sh`, `GMBasic/tools/mlx_batch_test.sh` |
+| streaming esperti MoE (I/O) | `LLMEngine/tools/moe_stream_bench.c`, `GMBasic/tools/moe_stream_bench` |
 | cache esperti (LRU vs routing-aware) | `LLMEnv/LLMEngine/moe/tests/test_moe_cache_bench.c` |
-| spec/decode DFlash2/n-gram | `LLMEnv/tools/llmengine/dflash_*.c`, `GMBasic/tools/gmb_mlx_dflash2_bench.c`, `gmb_mlx_ngram_bench.c` |
+| spec/decode DFlash2/n-gram | `LLMEngine/tools/dflash_*.c`, `GMBasic/tools/gmb_mlx_dflash2_bench.c`, `gmb_mlx_ngram_bench.c` |
 | DS4 prefill/decode (nostro engine) | `LLMEnv/LLMEngine/mlx/ds4/tests/llm_dsv4_prefill_bench.c`, `GMBasic/tools/ds4_ctx_bench.py` |
 | op singole (kernel) load-free | `GMBasic/tools/decode_bench.c`, `gdn_bench.c`, `gemv_m1_bench.c`, `gmb_mlx_*_bench.c` |
 | statement coverage C99Native | `GMBasic/tools/gmb_stmt_gate.sh` |
@@ -79,7 +79,7 @@ created: 2026-10-04
 - **`llm_env_audit.tsv`** — dati di audit env → registro.
 - **`BenchChronos/`** — benchmark **prestazioni** (mlx-chronos; motori ds4 + fmlx). *V. sotto.*
 
-### `tools/llmengine/` — tool dell'**ENGINE** (LLMEngine)
+### `LLMEngine/tools/` — tool dell'**ENGINE** (LLMEngine)
 - **`decode_profile.c`** — F18: profilo di decode riutilizzabile (**tok/s + ms/token + memoria MLX**) via ABI.
 - **`kv_restore_bench.c`** — D15: **TTFT cold (prefill) vs warm (restore da cache)**.
 - **`dflash_parity.c`** — parità **DFlash2 vs greedy AR** (unità-first, senza dispatch).
@@ -98,7 +98,7 @@ created: 2026-10-04
   swa · mla`. Model-free, deterministico.
 - **`oracoli/`** — sonde **model-free** dell'engine (non tracciate). *V. sotto.*
 
-### `tools/fastllm/` — tool del **SERVER/CLI FastLLM**
+### `FastLLM/tools/` — tool del **SERVER/CLI FastLLM**
 - **`ds4_ctx_bench.py`** — bench **DS4** (nostro engine via `fastllm`): **prefill t/s e decode tok/s
   separati** per frontiere di contesto (metodo A/B).
 - **`eval/`** — harness **qualità/fedeltà** (mock o server OpenAI). *V. sotto.*
@@ -132,7 +132,7 @@ created: 2026-10-04
   `benchchronos/cli.py` + `serve.sh`. Vedi nota `BenchChronos-Benchmark-Coerente.md`.
   **Asse: prestazioni** (TTFT cold/warm, throughput, decode, RAM/swap).
 
-### `tools/fastllm/eval/` — qualità/fedeltà (NUOVO 2026-10-05; F1–F5)
+### `FastLLM/tools/eval/` — qualità/fedeltà (NUOVO 2026-10-05; F1–F5)
 - Harness Python **stdlib-only** (nessun import del motore; HTTP OpenAI-compatibile o backend `mock`).
   `run_eval.py` — suite: **`local`** (5 gate **deterministici**: `id_parity` testo greedy identico,
   `needle` retrieval, `ppl` perplexità bits/token con **banda**, `parity` greedy vs **reference**,
@@ -143,14 +143,14 @@ created: 2026-10-04
   Guida: `Guide/Eval-Harness-Guida.md`. **Asse ortogonale** a `tools/BenchChronos/`.
   **Nessun impatto sulle prestazioni dell'engine.** Rif.: todo `(solved) - LLM-Eval-Harness-...`.
 
-### `tools/llmengine/oracoli/` — sonde model-free (era `LLMEnv/oracoli/`; NON tracciata)
+### `LLMEngine/tools/oracoli/` — sonde model-free (era `LLMEnv/oracoli/`; NON tracciata)
 
 > **Cos'è.** La raccolta di **sonde-oracolo** dell'engine: programmi **self-contained** che costruiscono
 > grafi sintetici e **non caricano alcun modello** (nessun peso, nessuna run).
 > **A cosa serve.** Misurare e **validare** kernel/scelte di dispatch in modo **deterministico e sicuro**,
 > quando la macchina è carica e i tok/s **non sono interpretabili**. Produce i soli numeri spendibili:
 > conteggi (nodi/byte/token), **parità ID**, picco RSS, coerenza di un kernel contro un riferimento.
-> **Come si usa.** Build **una tantum**: `bash tools/llmengine/oracoli/build_probes.sh [build_dir]`
+> **Come si usa.** Build **una tantum**: `bash LLMEngine/tools/oracoli/build_probes.sh [build_dir]`
 > (default `FastLLM/build-release`; richiede `_deps/mlx_c-build/libmlxc.a` + la dylib in `llmengine_mlx/`),
 > poi si esegue la singola sonda. **Regola**: guardare sempre il **rapporto A/B** tra due misure,
 > mai il valore assoluto isolato. Metodo completo, principi, watchdog e catalogo delle sonde: **[[:oracoli]]**.

@@ -65,7 +65,7 @@ static bool llm_mlx_moe_gateup_fuse_enabled(void) {
 
 /* Guardia NAX #3856 (MLX 0.32.x su M5): gather_qmm(sorted_indices=true) con M>32768 e
  * M%64!=0 corrompe la coda (ultimo blocco parziale di 64 righe). Riprodotto OFFLINE senza
- * modello da `tools/llmengine/oracoli/llm_gather_qmm_sorted_probe` (forme reali esperti GLM-4.5): M<=32768
+ * modello da `LLMEngine/tools/oracoli/llm_gather_qmm_sorted_probe` (forme reali esperti GLM-4.5): M<=32768
  * sempre bit-exact; M>32768 bit-exact sse M%64==0; altrimenti un blocco esperto corrotto
  * (max|diff| ~1.5e3, deterministico su piu' seed). Fix locale: segmentare in slice di
  * <=32768 righe (multiplo di 64) e concatenare. Vale per OGNI MoE sorted (GLM/DS/qwen3/
