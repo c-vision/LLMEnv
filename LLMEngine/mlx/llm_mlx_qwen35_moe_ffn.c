@@ -270,7 +270,6 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
      * entrambe le modalità (completi se OFF, stacked degli esperti attivi se ON) tramite
      * `llm_mlx_moe_fused_stream_aware`. */
     if (ok && n_tokens == 1 && !has_moe_down_lora && llm_mlx_fuse_moe_decode_enabled()
-        && strcmp(m->cfg.model_type, "qwen3_5_moe") != 0  /* NON bit-fedele per qwen3_5_moe (bf16): il kernel accumula in f32 mentre eager/gather (e mlx_lm) arrotondano a bf16 -> diff ~0.5% che flipa i near-tie. Bug: Bugs/(open) - MLX-Qwen3.5-MoE-Parita-Greedy-Diverge.md */
         && strcmp(eg_mode, "affine") == 0 && strcmp(eu_mode, "affine") == 0 && strcmp(ed_mode, "affine") == 0
         && eg_bits == eu_bits && eg_group == eu_group
         && (eg_bits == 4 || eg_bits == 8) && (ed_bits == 4 || ed_bits == 8)) {
