@@ -3505,7 +3505,11 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
      * a contesto corto/medio (n_icomp <= idx_top_k) saltiamo QI/WI/scores/topk (bit-exact:
      * con has_allowed=0 l'attenzione scandisce tutte le compresse come il C). Lo stato
      * dell'indexer (st_ikv/st_isc) continua ad avanzare come prima. */
-    int idx_scores_need = 1;   /* default 1 = nessuno skip (prefill/batch INVARIATI) */
+    /* Query/pesi dell'indexer SOLO per i layer con indexer (ratio 4): QI/WI sono dimensionati nt*(has_idx?..:1)*4, ma pp->idx_nh/idx_hd/qdim
+     * sono valorizzati SEMPRE (dsv4_mid_fill): senza questa guardia i layer ratio 0 (0,1) e HCA (ratio 128) scrivevano idx_nh*idx_hd*nt float
+     * dentro buffer da nt*4 byte (rope_rows/idx_qat/scale su QI/WI) -> scritture GPU fuori buffer: page fault intermittente (il mid batch
+     * dei layer 0-1 cadeva sul path CPU: 2.7 s su 1463 tok) e corruzione silenziosa di buffer adiacenti. */
+    int idx_scores_need = p0->has_idx ? 1 : 0;   /* batch: sempre con indexer (prefill INVARIATO per ratio 4) */
     if (nt == 1)
         idx_scores_need = (ps[0].has_idx && (int)ps[0].n_icomp > (int)p0->idx_top_k) ? 1 : 0;
     /* X/KVC/Q/QRN sono gli STESSI slot (sx[6/8/9/10]) scritti dal project (device-resident, item b):

@@ -20,6 +20,7 @@ static long g_pf_hc_gpu = 0, g_pf_hc_cpu = 0, g_pf_attn_gpu = 0, g_pf_attn_cpu =
 static long g_pf_moe_batch = 0, g_pf_moe_cpu = 0, g_pf_layers = 0;
 static double g_pf_t1 = 0, g_pf_tmoe = 0, g_pf_t3 = 0;
 static double g_pf_d_attn = 0, g_pf_d_moe = 0;   /* DECODE: attn vs MoE per-token */
+static double g_pf_l1[64]; static int g_pf_lg[64];   /* TEMP: fase1 per layer (ms) e flag attn GPU */
 static int g_pf_on = -1;
 static inline int llm_dsv4_pf_on(void) {
     if (g_pf_on < 0) { int v = 0; g_pf_on = (llm_ai_mlx_opt_get_bool("dsv4_profile", &v) == 0) ? v : 0; g_dsv4_prof_global = g_pf_on; }
@@ -37,6 +38,7 @@ static inline void llm_dsv4_pf_dump(const char* tag) {
             tag, g_pf_layers, g_pf_t1, g_pf_tmoe, _io, _mm, g_pf_t3,
             g_pf_hc_gpu, g_pf_hc_cpu, g_pf_attn_gpu, g_pf_attn_cpu, g_pf_moe_batch, g_pf_moe_cpu);
     /* TEMP: split GPU dei 5 sub-kernel mHC (solo a profilo ON, `hc_pre_batch` emette 4 cb). */
+    { fprintf(stderr, "[dsv4-prof l1]"); for (int i = 0; i < 64; i++) if (g_pf_l1[i] > 0) fprintf(stderr, " %d:%.0f%s", i, g_pf_l1[i], g_pf_lg[i] ? "" : "(cpu)"); fprintf(stderr, "\n"); }
     fprintf(stderr, "[dsv4-prof mhc] scale=%.1f mixes=%.1f sink=%.1f norm=%.1f post=%.1f ms (cb 5..9=%ld/%ld/%ld/%ld/%ld)\n",
             llm_dsv4_metal_gpu_ms_op(5), llm_dsv4_metal_gpu_ms_op(6), llm_dsv4_metal_gpu_ms_op(7),
             llm_dsv4_metal_gpu_ms_op(8), llm_dsv4_metal_gpu_ms_op(9),
@@ -363,6 +365,7 @@ static inline void llm_dsv4_layer_forward_batch(const LlmDsv4Config* c, const Ll
         llm_dsv4_block_pre(c, L->hc_ffn_fn, L->hc_ffn_scale, L->hc_ffn_base, L->ffn_norm, after + hcn * t,
                            ffn_x + (size_t)D * t, SP_POST(sp_f, t), SP_COMB(sp_f, t));
     /* sp_a/attn_all/normed_all: arena (nessun free) */
+    if (pf && il >= 0 && il < 64) { g_pf_l1[il] += llm_dsv4_pf_now() - _t0; g_pf_lg[il] = attn_gpu; }
     if (pf) { double _n = llm_dsv4_pf_now(); g_pf_t1 += _n - _t0; _t0 = _n;
               g_pf_hc_gpu += (hc_a?1:0)+(post_a_gpu?1:0)+(hc_f?1:0);
               g_pf_hc_cpu += (!hc_a)+(!post_a_gpu)+(!hc_f);
