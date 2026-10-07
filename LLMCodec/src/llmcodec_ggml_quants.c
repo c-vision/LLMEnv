@@ -928,6 +928,25 @@ int llmcodec_ggml_quant_row(int t, const float* src, void* dst, int64_t n, const
     }
     if (t == LLMCODEC_GGML_T_Q5_0) {
         blk_q5_0* y = (blk_q5_0*)dst;
+        if (imatrix) {   /* variante IMATRIX (quantize_row_q5_0_impl): make_qx_quants(32,16) */
+            float sx2 = 0; for (int64_t j = 0; j < n; ++j) sx2 += src[j]*src[j];
+            const float sigma2 = sx2/(float)n;
+            for (int64_t i = 0; i < nb; ++i) {
+                const float* xb = src + 32*i; const float* qw = imatrix + 32*i;
+                float weight[32]; for (int j = 0; j < 32; ++j) weight[j] = qw[j]*sqrtf(sigma2 + xb[j]*xb[j]);
+                int8_t L[32]; float d = llmcodec_make_qx_quants(32, 16, xb, L, 1, weight);
+                y[i].d = llmcodec_f16_from_f32(d);
+                uint32_t qh = 0;
+                for (int j = 0; j < 16; ++j) {
+                    const uint8_t xi0 = (uint8_t)L[j], xi1 = (uint8_t)L[j+16];
+                    y[i].qs[j] = (uint8_t)((xi0 & 0x0F) | ((xi1 & 0x0F) << 4));
+                    qh |= (uint32_t)(xi0 >> 4) << j;
+                    qh |= (uint32_t)(xi1 >> 4) << (j + 16);
+                }
+                memcpy(y[i].qh, &qh, 4);
+            }
+            return 0;
+        }
         for (int64_t i = 0; i < nb; ++i) {
             float amax = 0.0f, mx = 0.0f;
             for (int j = 0; j < 32; ++j) { float v = src[i*32+j]; if (amax < fabsf(v)) { amax = fabsf(v); mx = v; } }
