@@ -31,10 +31,11 @@ def main():
     mmap  = int(sys.argv[4]) if len(sys.argv) > 4 else 0   # 1 = --opt dsv4_experts_mmap=1 (opzione 1: esperti dal mmap, no cache bundle)
     floor = float(sys.argv[5]) if len(sys.argv) > 5 else 30.0   # override SOLO per misure concordate (default: cap 30%)
     batch_dev = int(sys.argv[6]) if len(sys.argv) > 6 else 0   # 1 = --opt dsv4_batch_dev=1 (mHC device-resident)
-    rsscap, pre, to = 62.0, 60.0, 600
+    to = int(sys.argv[7]) if len(sys.argv) > 7 else 600        # timeout per-run (s)
+    rsscap, pre = 62.0, 60.0
     P = long_prompt(ntok)
     f0 = H.free_pct()
-    print(f"[ds4_prefill_phase] prompt~{ntok} tok max_new={mt} | libera {f0:.0f}%", flush=True)
+    print(f"[ds4_prefill_phase] prompt~{ntok} tok max_new={mt} mmap={mmap} batch_dev={batch_dev} floor={floor} to={to}s | libera {f0:.0f}%", flush=True)
     if f0 < pre:
         print("ABORT: memoria libera bassa. Non lancio."); return
     if not H.wait_recover(pre):
