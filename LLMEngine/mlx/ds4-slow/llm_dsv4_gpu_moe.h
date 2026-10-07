@@ -282,13 +282,30 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
     const int streaming = (pe->store && pe->store_get) != 0;
     /* PUNTATORI STABILI: il batch raccoglie i puntatori di TUTTI gli esperti dell'unione PRIMA di
      * usarli (grandi gp/upp/dp), quindi lo store deve poterli tenere TUTTI senza riusare slot:
-     * serve cap >= used*nt. Se cap e' piu' piccolo (chunk grande, o cap ridotto dalla pressione di
+     * serve cap >= esperti DISTINTI del chunk (<= n_expert; vedi `need` sotto). Se cap e' piu' piccolo (chunk grande, o cap ridotto dalla pressione di
      * memoria -> bug "garbage a freddo", cfr. Bugs/(open) - DS4-Garbage-Cold-Prefill-Batch-Zeri),
      * processa il chunk in SUB-CHUNK di cap/used token (l'unione di ognuno entra nella cache). */
-    if (streaming) {
+    /* PREFILL DAL MMAP (opzione dsv4_experts_mmap): chunk grande sul percorso mul_mm_id con tabella indirizzi -> esperti letti dal mmap del
+     * GGUF (UNA copia, niente cache bundle) con view TRANSIENTI (useResource per la sola cb, fuori dal residency set: niente wiring di 82 GB).
+     * I puntatori sono stabili (mmap) -> niente guardia cap/sub-chunk. Decode e percorsi per-token restano sulla cache bundle. */
+    LlmDsv4Store* const st_mm = streaming ? (LlmDsv4Store*)pe->store : NULL;
+    int mm_elig = 0;
+    if (st_mm && st_mm->mmap_only && nt >= LLM_DSV4_MM_MIN_TOKENS && c->n_expert > 0 && c->n_expert <= 1024 && c->n_expert_used == 6 &&
+        pe->shexp_gate && pe->shexp_up && pe->shexp_down &&
+        ((m->gate[il].type == 16 && m->up[il].type == 16 && m->down[il].type == 10) || (m->gate[il].type == 12 && m->up[il].type == 12 && m->down[il].type == 12))) {
+        int e_mm = 1, e_f16 = 1;
+        { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_mm", &v) == 0) e_mm = v; }
+        { int v; if (llm_ai_mlx_opt_get_bool("dsv4_prefill_f16", &v) == 0) e_f16 = v; }
+        mm_elig = e_mm && e_f16 && !(pe->q4_stacks && pe->q4_stacks(pe->store, il, NULL, NULL, NULL));
+    }
+    if (streaming && !mm_elig) {
         int capn = (int)((const LlmDsv4Store*)pe->store)->cap;
         int used = c->n_expert_used > 0 ? c->n_expert_used : 1;
-        if (capn < nt * used) {
+        /* Puntatori stabili = cap >= esperti DISTINTI del chunk, che sono <= n_expert (non nt*used: i duplicati sono hit sullo stesso slot).
+         * Prima la soglia era nt*used: con cap 5-7k bundle un chunk da ~1000+ token veniva spezzato inutilmente in sub-chunk e OGNI sub-chunk
+         * (>=192 token) rileggeva dal disco quasi tutti gli esperti del layer (I/O raddoppiato). */
+        const int need = (c->n_expert > 0 && c->n_expert < nt * used) ? c->n_expert : nt * used;
+        if (capn < need) {
             int sub = capn / used;
             if (sub < 1) return false;   /* cap < used: puntatori non garantibili -> fallback per-token */
             for (int t0 = 0; t0 < nt; t0 += sub) {
@@ -333,6 +350,7 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
           for (int t = 0; t < nt; t++) llm_dsv4_moe_route(c, L, X + (size_t)t * embd, il, tokens[t], sel_all + (size_t)t * used, w_all + (size_t)t * used); }
     int pf_m = 0; { int v = 0; if (llm_ai_mlx_opt_get_bool("dsv4_profile", &v) == 0) pf_m = v; }
     double _tm0 = 0; if (pf_m) _tm0 = llm_dsv4_gm_now();
+    if (mm_elig) st_mm->mmap_now = 1;   /* store_get -> puntatori nel mmap (vedi sopra) */
     if (streaming && pe->store_prefetch) pe->store_prefetch(pe->store, il, sel_all, nt * used);   /* letture parallele dei mancanti */
     for (int t = 0; ok && t < nt; t++) {
         int* selected = sel_all + (size_t)t * used; float* weight = w_all + (size_t)t * used;
@@ -351,6 +369,7 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
             rw[k] = weight[i];
         }
     }
+    if (mm_elig) st_mm->mmap_now = 0;
     if (pf_m) { double _n = llm_dsv4_gm_now(); g_dsv4_moe_io_ms += _n - _tm0; _tm0 = _n; }
     /* Chunk grande (come ds4: tanti token per esperto): mul_mm_id con tabella di indirizzi degli esperti dello store, shared expert incluso.
      * Sotto la soglia i kernel per-token (slots6) sono piu' veloci. Attivazioni half (opzione dsv4_prefill_f16). */
@@ -366,10 +385,11 @@ static inline bool llm_dsv4_gpu_moe_batch(LlmDsv4MoeGpu* m, const LlmDsv4Config*
             done_mm = llm_dsv4_metal_moe_mm_addr_batch(m->be, nt, ga, ua, da, m->gate[il].type, m->down[il].type, (uint32_t)ne, (uint32_t)embd, (uint32_t)ff,
                                                        (uint32_t)m->gate[il].row_bytes, (uint32_t)m->down[il].row_bytes, sel_all, rw, X, c->swiglu_clamp_exp,
                                                        pe->shexp_gate, pe->shexp_up, pe->shexp_down, (uint32_t)llm_ggml_nbytes(pe->shexp_gate_type, embd),
-                                                       (uint32_t)llm_ggml_nbytes(pe->shexp_down_type, ff), OUT) == 0;
+                                                       (uint32_t)llm_ggml_nbytes(pe->shexp_down_type, ff), OUT, mm_elig) == 0;
         }
         /* arena: nessun free */
     }
+    if (ok && mm_elig && !done_mm) ok = false;   /* mmap: niente fallback (view persistenti = wiring): il chiamante ricade sul per-token (cache bundle) */
     if (ok && !done_mm) {
         const void* sg = (pe->shexp_gate && pe->shexp_up && pe->shexp_down) ? pe->shexp_gate : NULL;
         ok = (is_q4 ? llm_dsv4_metal_moe_q4k_batch : llm_dsv4_metal_moe_iq2_q2k_batch)(m->be, nt, gp, upp, dp, X, rw, used, c->swiglu_clamp_exp, (uint32_t)embd,

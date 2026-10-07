@@ -45,6 +45,8 @@ typedef struct {
     uint32_t* freq;
     int f_layers, f_experts;
     int hotness;
+    int mmap_now;    /* 1 SOLO durante la raccolta puntatori del batch MoE prefill (mm_addr): li' gli esperti si leggono dal mmap; decode e
+                      * percorsi per-token restano sulla cache bundle (nessuna view persistente per esperto nel residency set). */
     int mmap_only;   /* opzione di registro `dsv4_experts_mmap`: esperti via puntatori nel mmap del GGUF
                       * (resident_base, UNA copia, come il vendored) invece della cache bundle anon (2ª copia).
                       * Nel prefill a chunk grande la cache LRU e' inutile (tutti gli esperti toccati) -> qui evita solo I/O+copia. */
@@ -324,7 +326,7 @@ static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, i
     const uint8_t* r_u = s->resident_base + L->off_u + (uint64_t)e * L->stride_u;
     const uint8_t* r_d = s->resident_base + L->off_d + (uint64_t)e * L->stride_d;
     *gate = r_g; *up = r_u; *down = r_d;
-    if (s->mode == LLM_DSV4_STORE_RESIDENT || s->mmap_only) return r_g;   /* UNA copia: puntatori nel mmap del GGUF */
+    if (s->mode == LLM_DSV4_STORE_RESIDENT || (s->mmap_only && s->mmap_now)) return r_g;   /* UNA copia: puntatori nel mmap del GGUF */
     if (llm_dsv4_store_q4_stacks(s, layer, NULL, NULL, NULL)) {   /* layer Q4_K: puntatori nell'arena */
         if (llm_dsv4_store_q4_ensure(s, layer, &e, 1) == 0) {
             *gate = s->q4_base + s->q4_off[layer * 3] + (size_t)e * L->nb_g;
@@ -354,7 +356,7 @@ static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, i
  * assegnati in serie (logica LRU), le letture dei record mancanti (3 pread per esperto) girano in parallelo su GCD
  * (l'NVMe/page cache scalano con piu' richieste). Dopo, llm_dsv4_store_expert() e' tutto hit. `n` fino a 4096. */
 static inline void llm_dsv4_store_prefetch(LlmDsv4Store* s, int layer, const int* experts, int n) {
-    if (!s || s->mode != LLM_DSV4_STORE_SWAP || s->mmap_only || n <= 0) return;
+    if (!s || s->mode != LLM_DSV4_STORE_SWAP || (s->mmap_only && s->mmap_now) || n <= 0) return;
     if (llm_dsv4_store_q4_stacks(s, layer, NULL, NULL, NULL)) { llm_dsv4_store_q4_ensure(s, layer, experts, n); return; }
     typedef struct { int e, idx; } Job;
     Job* jobs = (Job*)malloc(sizeof(Job) * (size_t)n);   /* heap: letto dai worker GCD (un __thread non sarebbe condiviso) */
@@ -388,7 +390,7 @@ static inline void llm_dsv4_store_prefetch(LlmDsv4Store* s, int layer, const int
  * top-K per frequenza; senza localita' (token sintetici casuali) freq e' ~uniforme → nessun guadagno
  * atteso (serve testo reale, come la hotlist ds4). Se `freq` non e' allocata → no-op. */
 static inline void llm_dsv4_store_madvise_layer(LlmDsv4Store* s, int layer) {
-    if (!s || s->mode != LLM_DSV4_STORE_SWAP || s->mmap_only || !s->resident_base || s->freq == NULL) return;
+    if (!s || s->mode != LLM_DSV4_STORE_SWAP || !s->resident_base || s->freq == NULL) return;
     if (layer < 0 || layer >= s->f_layers) return;
     if (s->q4_off && s->q4_off[layer * 3] != (size_t)-1) return;   /* arena Q4_K: gestita da q4_ensure */
     int K = 0; { int v; if (llm_ai_mlx_opt_get_int("dsv4_prefetch_hot", &v) == 0) K = v; }

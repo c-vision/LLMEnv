@@ -1777,6 +1777,16 @@ static id<MTLBuffer> dsv4_nocopy_view(LlmDsv4Metal* b, const void* ptr, size_t b
     return nil;
 }
 
+/* View no-copy TRANSIENTE (esperti dal mmap del GGUF, prefill): NON cached, NON nel residency set (altrimenti ogni esperto toccato
+ * resterebbe wired per sempre: 82 GB). Ritorna +1 posseduto dal chiamante (lo passa a un array e rilascia); la cb la rende accessibile con useResource. */
+static id<MTLBuffer> dsv4_transient_view(LlmDsv4Metal* b, const void* ptr, size_t bytes, size_t* lead) {
+    const size_t page = (size_t)getpagesize();
+    uintptr_t base = (uintptr_t)ptr & ~(uintptr_t)(page - 1);
+    *lead = (size_t)((uintptr_t)ptr - base);
+    size_t len = ((*lead + bytes + page - 1) / page) * page;
+    return [b->dev newBufferWithBytesNoCopy:(void*)base length:len options:MTLResourceStorageModeShared deallocator:nil];
+}
+
 int llm_dsv4_metal_available(void) {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice();
     if (d) { [d release]; return 1; }
@@ -2677,7 +2687,8 @@ int llm_dsv4_metal_moe_mm_batch(LlmDsv4Metal* b, int nt, const void* gate_w, con
 int llm_dsv4_metal_moe_mm_addr_batch(LlmDsv4Metal* b, int nt, const void* const* gate_p, const void* const* up_p, const void* const* down_p,
         int gtype, int dtype, uint32_t n_expert, uint32_t embd, uint32_t ff, uint32_t gu_row_bytes, uint32_t down_row_bytes,
         const int* ids, const float* rws, const float* x, float clamp,
-        const void* sg, const void* su, const void* sd, uint32_t s_nb_g, uint32_t s_nb_d, float* out) {
+        const void* sg, const void* su, const void* sd, uint32_t s_nb_g, uint32_t s_nb_d, float* out, int transient) {
+    @autoreleasepool {   /* le view transienti (array) si rilasciano all'uscita, cb gia' completata */
     if (!b || nt <= 0 || nt > 4096 || !gate_p || !up_p || !down_p || !ids || !rws || !x || !out) return -1;
     id<MTLComputePipelineState> pg = dsv4_mm_pso_addr(b, gtype), pd = dsv4_mm_pso_addr(b, dtype);
     if (!b->pso_mm_map0 || !pg || !pd || !b->pso_swiglu_w || !b->pso_sum_slots6 || n_expert > 1024u) return -1;
@@ -2709,9 +2720,20 @@ int llm_dsv4_metal_moe_mm_addr_batch(LlmDsv4Metal* b, int nt, const void* const*
             tg[ex] = tu[ex] = td[ex] = 0;
             if (!gate_p[ex]) continue;
             size_t l0, l1, l2;
-            id<MTLBuffer> v0 = dsv4_nocopy_view(b, gate_p[ex], (size_t)ff * gu_row_bytes, &l0);
-            id<MTLBuffer> v1 = dsv4_nocopy_view(b, up_p[ex],   (size_t)ff * gu_row_bytes, &l1);
-            id<MTLBuffer> v2 = dsv4_nocopy_view(b, down_p[ex], (size_t)embd * down_row_bytes, &l2);
+            id<MTLBuffer> v0, v1, v2;
+            if (transient) {
+                v0 = dsv4_transient_view(b, gate_p[ex], (size_t)ff * gu_row_bytes, &l0);
+                v1 = dsv4_transient_view(b, up_p[ex],   (size_t)ff * gu_row_bytes, &l1);
+                v2 = dsv4_transient_view(b, down_p[ex], (size_t)embd * down_row_bytes, &l2);
+                if (!v0 || !v1 || !v2) { [v0 release]; [v1 release]; [v2 release]; return -2; }
+                [used_views addObject:v0]; [used_views addObject:v1]; [used_views addObject:v2];
+                [v0 release]; [v1 release]; [v2 release];   /* ora li possiede used_views */
+                tg[ex] = [v0 gpuAddress] + l0; tu[ex] = [v1 gpuAddress] + l1; td[ex] = [v2 gpuAddress] + l2;
+                continue;
+            }
+            v0 = dsv4_nocopy_view(b, gate_p[ex], (size_t)ff * gu_row_bytes, &l0);
+            v1 = dsv4_nocopy_view(b, up_p[ex],   (size_t)ff * gu_row_bytes, &l1);
+            v2 = dsv4_nocopy_view(b, down_p[ex], (size_t)embd * down_row_bytes, &l2);
             if (!v0 || !v1 || !v2) return -2;
             tg[ex] = [v0 gpuAddress] + l0; tu[ex] = [v1 gpuAddress] + l1; td[ex] = [v2 gpuAddress] + l2;
             [used_views addObject:v0]; [used_views addObject:v1]; [used_views addObject:v2];
@@ -2796,6 +2818,7 @@ int llm_dsv4_metal_moe_mm_addr_batch(LlmDsv4Metal* b, int nt, const void* const*
     if (cb.error) return -3;
     memcpy(out, [OUT contents], (size_t)nt * embd * sizeof(float));
     return 0;
+    }   /* @autoreleasepool */
 }
 
 /* Output grouped-LoRA per `nt` token via mul_mm_id Q8_0 (come ds4): out_a con i gruppi come «esperti», out_b a 1 esperto.
