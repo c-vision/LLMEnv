@@ -299,7 +299,10 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
         }
     }
     mlx_array_free(pos_arr);
-    free(ids); free(uniq); /* pos vivo: referenziato da pos_arr (new_data no-copy) */
+    /* `mlx_array_new_data` COPIA (mlx::core::array::init -> std::copy): il commento storico
+     * "no-copy" era errato e `pos` veniva LEAKATO ad ogni chiamata (per layer/proj/token).
+     * Ora si libera come ids/uniq. */
+    free(ids); free(pos); free(uniq);
     return rc;
 }
 
