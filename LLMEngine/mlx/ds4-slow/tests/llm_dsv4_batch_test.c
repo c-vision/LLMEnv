@@ -52,14 +52,19 @@ int main(int argc, char** argv) {
     const int nv = 129280; double ta, tb; int aa, ab;
     llm_ai_mlx_opt_set("dsv4_prefill_f16", "0"); llm_ai_mlx_opt_set("dsv4_gpu_hc", "0"); llm_ai_mlx_opt_set("dsv4_gpu_raw_attn", "1"); llm_ai_mlx_opt_set("dsv4_prefill_mm", "0");
     if (argc > 6) llm_ai_mlx_opt_set("dsv4_comp_fuse", argv[6]);   /* catena compressore fusa (test) */
-    float* A = run(path, tok, n, 1, &ta, &aa);                     /* riferimento: token-per-token, percorso f32 */
+    /* batch HOST (gpu_hc=1, batch_dev=0) vs batch DEVICE (batch_dev=1): stesse kernel/matematica, cambia solo
+     * DOVE vivono res/out -> DEVE essere bit-exact. Per il caso `batchdev`: A = batch host, B = batch device. */
+    int is_batchdev = !strcmp(cs, "batchdev");
+    if (is_batchdev) { llm_ai_mlx_opt_set("dsv4_gpu_hc", "1"); llm_ai_mlx_opt_set("dsv4_batch_dev", "0"); }
+    float* A = run(path, tok, n, is_batchdev ? chunk : 1, &ta, &aa);   /* riferimento (batchdev: batch host) */
     if (!strcmp(cs, "half")) llm_ai_mlx_opt_set("dsv4_prefill_f16", "1");
     if (!strcmp(cs, "hc"))   llm_ai_mlx_opt_set("dsv4_gpu_hc", "1");
     if (!strcmp(cs, "raw"))  llm_ai_mlx_opt_set("dsv4_gpu_raw_attn", "0");
+    if (is_batchdev) llm_ai_mlx_opt_set("dsv4_batch_dev", "1");        /* B = batch device */
     float* B = run(path, tok, n, chunk, &tb, &ab);                 /* chunk con la variante del caso */
     double dab = maxdiff(A, B, nv);
     printf("caso=%s n=%d chunk=%d  A %.1fs  B %.1fs | argmax A=%d B=%d | max|A-B|=%.3e KL(A||B)=%.4f top5=%d/5\n", cs, n, chunk, ta, tb, aa, ab, dab, kl_div(A, B, nv), topk_overlap(A, B, nv, 5));
-    int ok = !strcmp(cs, "f32") ? (aa == ab && dab <= 1e-4) : (aa == ab);
+    int ok = (!strcmp(cs, "f32") || is_batchdev) ? (aa == ab && dab <= 1e-4) : (aa == ab);   /* batchdev: atteso bit-exact */
     printf(ok ? "PASS caso %s\n" : "FAIL caso %s\n", cs);
     return ok ? 0 : 1;
 }
