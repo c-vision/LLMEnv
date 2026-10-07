@@ -6,7 +6,7 @@
 #
 # PERCHÉ QUI. LLMEnv è la SORGENTE UNICA del mondo AI: questo script possiede la
 # build dei motori (MLX, llama.cpp, MoE/streaming) + i plugin del codec + Apple
-# Vision. Gli host (es. GMBasic) NON ricompilano nulla dei motori: consumano solo
+# Vision. Gli host NON ricompilano nulla dei motori: consumano solo
 # gli artefatti stazionati qui (poi li copiano nella propria Resources/libs/<rid>/).
 #
 # USA IL SUPERBUILD del repo (`CMakeLists.txt` con -DLLMENV_BUILD_ENGINE=ON):

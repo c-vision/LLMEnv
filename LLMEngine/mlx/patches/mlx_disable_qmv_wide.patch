@@ -2,7 +2,7 @@
 +++ b/mlx/backend/metal/quantized.cpp
 @@ -298,6 +298,18 @@
  // affine qmv_wide only beats qmv on gen-15+; fp benefits on every gen.
-+// GMBasic patch (2026-10-03): qmv_wide (M>=2) NON bit-identico al qmv -> sul batch rompe la
++//  patch (2026-10-03): qmv_wide (M>=2) NON bit-identico al qmv -> sul batch rompe la
 +// bit-parity di gpt-oss. Controllo via API (NO env): mlx::core::set_qmv_wide(v), v=-1 default(arch),
 +// 0 off, 1 on. L'engine lo imposta dal registro opzioni (`qmv_wide`).
 +int g_qmv_wide_opt = -1;

@@ -1,6 +1,6 @@
 /* llmjinja.h — motore Jinja (subset per i chat-template LLM locali), VERSIONE C.
  *
- * Port di `GMBasic/native/gmb_jinja` (stesso autore, Gaetano Minardi). Contratto identico:
+ * Port di `il motore Jinja originale` (stesso autore, Gaetano Minardi). Contratto identico:
  * llmjinja_render(template, vars) con semantica Jinja2; costrutto non supportato -> errore
  * esplicito (fail-loud, mai output approssimato). Niente stub.
  *

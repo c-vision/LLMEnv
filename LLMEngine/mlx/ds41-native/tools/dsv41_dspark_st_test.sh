@@ -9,9 +9,9 @@
 # Uso: bash tools/dsv41_dspark_st_test.sh
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)                       # LLMEnv
-GEN="${DSV41_GEN:-$HOME/gmbasic-engine/tools/gen_dsv41_dspark_st_ref.py}"
+GEN="${DSV41_GEN:-$HOME/llmenv-engine/tools/gen_dsv41_dspark_st_ref.py}"
 PY="${OMLX_PY:-$HOME/ai/env-omlx/bin/python}"
-MX="$ROOT/LLMEngine/mlx/build-gmbasic"
+MX="$ROOT/LLMEngine/mlx/build-llmenv"
 OUT=/tmp/dsv41_st
 
 [ -f "$GEN" ] || { echo "generator assente: $GEN (imposta DSV41_GEN)"; exit 2; }

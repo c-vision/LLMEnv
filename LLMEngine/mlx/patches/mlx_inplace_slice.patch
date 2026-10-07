@@ -47,7 +47,7 @@
 -      ? CopyType::Vector
 -      : CopyType::General;
 -  copy_gpu(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype, stream());
-+  /* PROTOTIPO GMBASIC (gated MLX_INPLACE_SLICE): append IN-PLACE, senza la copia O(cap) di
++  /* PROTOTIPO (gated MLX_INPLACE_SLICE): append IN-PLACE, senza la copia O(cap) di
 +   * `in`->`out`. `out` ALIASA il buffer di `in` e si scrive solo la regione `upd`, ordinato nello
 +   * stream (nessun round-trip host). Serve per l'append KV O(n). Default OFF: comportamento
 +   * invariato (copia) se l'env e' assente. */
@@ -83,7 +83,7 @@
 +      {src, upd});
 +}
 +
-+/* GMBASIC (2026-10-03): variante IN-PLACE — scrive `update` nella regione `[start,stop)` del
++/* (2026-10-03): variante IN-PLACE — scrive `update` nella regione `[start,stop)` del
 + * buffer di `src` SENZA copiare `src` (O(n) invece di O(cap)). Muta il buffer di `src` in-stream.
 + * Usata SOLO per l'append KV (il chiamante ri-assegna il risultato allo stesso slot). */
 +array slice_update_inplace(
@@ -132,7 +132,7 @@
 +    Shape strides,
 +    StreamOrDevice s = {});
 +
-+/** GMBASIC: update a slice IN-PLACE (no O(cap) copy of src; writes only the region). */
++/** update a slice IN-PLACE (no O(cap) copy of src; writes only the region). */
 +MLX_API array slice_update_inplace(
      const array& src,
      const array& update,

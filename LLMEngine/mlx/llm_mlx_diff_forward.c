@@ -2,7 +2,7 @@
  * llm_mlx_diff_forward.c — ABI Apache dei PRIMITIVI del forward DIFFERENZIABILE
  * (ex llm_mlx_train.c, lato INFERENZA). Esegue il forward del modello (backbone + final_norm +
  * lm_head) dentro il grafo MLX: NON produce/alterà pesi. La LOSS (masked CE), grad, DPO,
- * optimizer e training vivono nel PUL (GMBasic/gmbllm) che chiama questa ABI.
+ * optimizer e training vivono nel PUL (il producer PUL) che chiama questa ABI.
  * Perché Apache: il forward differenziabile è l'unico modo di avere PARITÀ train/inferenza
  * ("una sola sorgente"); il confine è "esegue vs produce" (ADR §4). Il PUL costruisce la loss
  * SOPRA il logits restituito qui.

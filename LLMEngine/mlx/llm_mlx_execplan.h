@@ -4,7 +4,7 @@
  * ESECUTIVO per-layer ingerito a runtime: ogni layer porta la sequenza di op e/o una
  * decisione SKIP (pass-through). Consumato da `layer_forward` (llm_mlx_layer_forward.c).
  *
- * Il piano arriva dal compile-time (GMBasic/gmbllm `LLM TENSOR EXECPLAN`, PUL) come DATO
+ * Il piano arriva dal compile-time (il producer PUL (`LLM TENSOR EXECPLAN`)) come DATO
  * JSON — nessuna dipendenza PUL: il motore Apache lo legge e lo applica.
  * Formato:
  *   {"version":1,

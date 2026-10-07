@@ -1,4 +1,4 @@
-/* llm_mlx_kvformat.h — §9.A M10c: contratto GMB_KV_FORMAT (dtype di STORAGE del KV).
+/* llm_mlx_kvformat.h — §9.A M10c: contratto LLM_KV_FORMAT (dtype di STORAGE del KV).
  *
  * Il KV ha un dtype NATIVO (quello con cui il modello è addestrato/calibrato) e può essere
  * memorizzato in dtype diversi SOLO se ammessi (supportati/quantizzabili/ricostruibili); un

@@ -1,4 +1,4 @@
-/* llm_mlx_kvformat_test.c — §9.A M10c: test MODEL-FREE del contratto GMB_KV_FORMAT. */
+/* llm_mlx_kvformat_test.c — §9.A M10c: test MODEL-FREE del contratto LLM_KV_FORMAT. */
 #include "llm_mlx_kvformat.h"
 
 #include <stdio.h>

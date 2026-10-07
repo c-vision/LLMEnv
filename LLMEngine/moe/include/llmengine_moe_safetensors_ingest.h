@@ -96,7 +96,7 @@ static inline void llmengine_moe_ts_put(LlmEngineMoeTsIngest* s, int map, const 
      * "MLX-Streaming-Esperti-SWAP-Regressione" §Bug 3: senza +data_start ogni lettura finiva
      * `data_start` byte troppo PRESTO nel file (dentro l'header JSON o un tensore precedente),
      * producendo dati apparentemente plausibili ma con bit pattern NaN occasionali (output
-     * degenere, es. token costante). Port del fix GMBasic (gmb_moe_safetensors_ingest.h). */
+     * degenere, es. token costante). Port del fix originale. */
     t->map = map; t->off = (uint64_t)o0 + data_start; t->stride = (uint32_t)((o1 - o0) / e);
     t->bytes = t->stride; t->n = (int)e; t->d1 = (int)d1; t->d2 = (int)d2;
     t->dtype = (kind == 0) ? 0 : 1;

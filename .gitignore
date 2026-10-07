@@ -20,3 +20,12 @@ oracoli/
 
 # tool ritirati (A/B vendored+ds-minimal): non tracciati
 backups/tools/
+
+# Tool cross-progetto GMBasic: NON tracciati (fuori dal repo Apache)
+/tools/mlx_parity_run.sh
+/tools/gmb_license_gate.py
+/LLMEngine/tools/mlx_parity_driver.c
+
+# dipendenze di build (non parte del sorgente pubblicato)
+/libs/mlx-deps
+/libs/mlx-c-src

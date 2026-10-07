@@ -1,6 +1,6 @@
 /* llmjinja.c — motore Jinja VERSIONE C, subset per i chat-template LLM locali.
  *
- * PORT DA GMBasic/native/gmb_jinja (stesso autore, Gaetano Minardi), ricopiato qui come
+ * PORT DEL MOTORE JINJA ORIGINALE (stesso autore, Gaetano Minardi), ricopiato qui come
  * LLMJinja: semantica Jinja2 per i costrutti usati dai template HF, fail-loud (costrutto non
  * supportato -> errore esplicito, mai output approssimato), keep_trailing_newline=false.
  * Niente stub. API pubblica in llmjinja.h.

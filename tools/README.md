@@ -1,7 +1,6 @@
 ---
 tags:
   - project/llmenv
-  - project/gmbasic
   - benchmark
   - tools
 status: active
@@ -14,7 +13,6 @@ created: 2026-10-04
 > 1. **vault**: `AiWiki/01-Projects/LLMEnv/Knowledge/Benchmark-Tools-Catalogo.md` (questa);
 > 2. **repo**: `LLMEnv/tools/README.md` (accanto ai tool).
 > Devono restare **identiche** (`diff` vuoto). Modificandone una, aggiornare **subito** anche l'altra.
-> (La vecchia copia in `GMBasic/Knowledge/` è stata rimossa.)
 > Scopo: TUTTI gli strumenti di **LLMEngine** e **FastLLM** (+ i condivisi in `LLMEnv`), cosa fa ognuno,
 > per chi e quando usarlo.
 
@@ -55,21 +53,17 @@ created: 2026-10-04
 ## Tabella di scelta rapida
 | vuoi misurare… | tool |
 |---|---|
-| prefill/decode di UN modello, tok/s | `GMBasic/test_mlx_bench` (prefill/decode/ctxdecode), `LLMEngine/tools/decode_profile.c` |
+| prefill/decode di UN modello, tok/s | `LLMEngine/tools/decode_profile.c` |
 | TTFT cold vs warm (KV su disco) | `LLMEngine/tools/kv_restore_bench.c` |
-| parità motore LLMEnv vs GMBasic | `LLMEnv/tools/mlx_parity_run.sh` + `mlx_parity_driver.c` |
-| A/B GMBasic vs mlx_lm / rapidMLX | `GMBasic/tools/ab_*.sh`, `bench*.sh`, `bench_mlxlm.py`, `bench_rapidmlx.py` |
-| autotune griglia configurazioni | `LLMEngine/tools/llm_autotune.sh`, `GMBasic/tools/gmb_defaults_sweep.sh` |
+| autotune griglia configurazioni | `LLMEngine/tools/llm_autotune.sh` |
 | quality/plan gate (eager vs opzioni) | `LLMEngine/tools/llm_plan_gate.sh` |
 | **qualità/fedeltà** (parità greedy, needle; poi HALoGEN/lm-eval) | `FastLLM/tools/eval/` (mock o server OpenAI) |
 | **prestazioni coerenti** ds4 vs fmlx (TTFT cold/warm, throughput, RAM) | `LLMEnv/tools/BenchChronos/` (mlx-chronos) |
-| scalabilità (batch/ampiezza, cliff) | `LLMEngine/tools/scale_sweep.sh`, `GMBasic/tools/mlx_batch_test.sh` |
-| streaming esperti MoE (I/O) | `LLMEngine/tools/moe_stream_bench.c`, `GMBasic/tools/moe_stream_bench` |
+| scalabilità (batch/ampiezza, cliff) | `LLMEngine/tools/scale_sweep.sh` |
+| streaming esperti MoE (I/O) | `LLMEngine/tools/moe_stream_bench.c` |
 | cache esperti (LRU vs routing-aware) | `LLMEnv/LLMEngine/moe/tests/test_moe_cache_bench.c` |
-| spec/decode DFlash2/n-gram | `LLMEngine/tools/dflash_*.c`, `GMBasic/tools/gmb_mlx_dflash2_bench.c`, `gmb_mlx_ngram_bench.c` |
-| DS4 prefill/decode (nostro engine) | `LLMEnv/LLMEngine/mlx/ds4/tests/llm_dsv4_prefill_bench.c`, `GMBasic/tools/ds4_ctx_bench.py` |
-| op singole (kernel) load-free | `GMBasic/tools/decode_bench.c`, `gdn_bench.c`, `gemv_m1_bench.c`, `gmb_mlx_*_bench.c` |
-| statement coverage C99Native | `GMBasic/tools/gmb_stmt_gate.sh` |
+| spec/decode DFlash2/n-gram | `LLMEngine/tools/dflash_*.c` |
+| DS4 prefill/decode (nostro engine) | `LLMEnv/LLMEngine/mlx/ds4/tests/llm_dsv4_prefill_bench.c` |
 
 ---
 
@@ -77,7 +71,6 @@ created: 2026-10-04
 
 ### `tools/` (root — tool per **ENTRAMBI**: LLMEngine + FastLLM)
 - **`build_ai_libs.sh`** — costruisce le librerie AI native (static/dylib) per i consumer. *(build, non misura)*
-- **`mlx_parity_run.sh`** — **parità MLX** (LLMEnv vs GMBasic): stesso modello, **stessi prompt ids**,
   confronto degli output (oracolo di parità cross-build).
 - **`gmb_license_gate.py`** — gate **licenza** (perimetro Apache LLMEnv). *(gate, non misura)*
 - **`migrate_env.py`** — migra `getenv` → registro opzioni. *(refactor, non misura)*
@@ -161,7 +154,7 @@ created: 2026-10-04
 > mai il valore assoluto isolato. Metodo completo, principi, watchdog e catalogo delle sonde: **[[:oracoli]]**.
 - Contenuto tipico: parità/algoritmi di kernel (MMA/FA2, gemv/slots, GDN), banda/dispatch, probe di
   coerenza e **self-test** delle unità; `build_probes.sh` le compila con le variabili del build.
-- **Deterministiche, load-free.** Non tracciata in git (come le sonde di GMBasic).
+- **Deterministiche, load-free.** Non tracciata in git ().
 
 ---
 
@@ -189,65 +182,11 @@ created: 2026-10-04
 
 ---
 
-## GMBasic
-
-### `tools/` — A/B e sweep (script)
-- **`ab_all_models.sh`** / **`ab_models_under30g.sh`** — **A/B GMBasic vs rapidMLX** sui modelli locali
-  (entrambi gli ordini, PREFILL+DECODE).
-- **`ab_all_models_mlxlm.sh`** / **`ab_all_ctx_mlxlm.sh`** / **`ab_ctx_mlxlm.py`** — A/B **vs mlx_lm**
-  (per modello / per contesto).
-- **`ab_engine_rapid.sh`** / **`ab_engine_mlxlm.sh`** — A/B **del motore** GMBasic vs rapid / mlx_lm.
-- **`ab_rapid_sweep.sh`** / **`ab_order_control.sh`** / **`ab_models_under30g_rapid.sh`** — sweep A/B
-  appaiato, controllo dell'**ordine** (bias termico), modelli <30GB.
-- **`bench3_compare.sh`** / **`bench4_compare.sh`** — tabella **GMBasic vs mlx_lm vs Rapid-MLX** (prefill+decode).
-- **`bench4_stable.sh`** — confronto **appaiato** stabile (⚠ `bench4_paired.sh` è **SUPERATO**, non usare).
-- **`bench_mlxlm.py` / `bench_rapidmlx.py` / `bench_table.py`** — lati reference (mlx_lm, rapidMLX) +
-  **tabella markdown generata** (mai a mano) + JSON.
-- **`mlx_decode_sweep.sh`** — regression **decode** (solo GMBasic) su tutti i modelli della matrice.
-- **`gmb_defaults_sweep.sh`** — verifica i **DEFAULT** dell'engine (`gmb_host_ai_mlx`).
-- **`decode_bench.c`** — bench **per-funzione del decode**, isolato, **load-free, batched** (NBUF op indip.).
-- **`gdn_bench.c`** — OP del bench per-funzione: **GDN** (nostro kernel vs MLX).
-- **`gemv_m1_bench.c`** — **GEMV 4-bit affine g64 M=1** (decode) vs `gather_qmm` di MLX.
-- **`gmb_mlx_ar_bench.c`** — bench **AR (decode)** parametrizzato sul modello.
-- **`gmb_mlx_dflash2_bench.c`** — **DFlash2 speculativo vs greedy AR**.
-- **`gmb_mlx_ngram_bench.c`** — speedup del path **n-gram self-speculative** vs greedy.
-- **`gmb_qwen4exp_func_bench.c`** — bench del path Qwen4-EXP.
-- **`attn_decode_bench.sh`** — (`GMB_DECODE_ATTENTION_BENCH`, load-free): banda/costo **attenzione+KV** del
-  decode al crescere del contesto.
-- **`mlx_batch_test.sh`** (+ `.c`) — wrapper del probe **continuous batching** (Fase 3).
-- **`minitest_batch.sh`** — harness **MiniTest** batch **senza ricompilazione**.
-- **`gmb_stmt_gate.sh`** — **gate statement-coverage** dell'emitter C99Native (AST C# vs `GMB_STMT_*`).
-- **`gmb_dsv4_engine_real.sh`** / **`gmb_dsv4_parity_test.sh`** — DS4: run reale + **parità**.
-- **`dsv41_engine_test.sh`** / `dsv41_engine_mtp_test.sh` / `dsv41_engine_mtp_spec_test.sh` /
-  `dsv41_mlx_*_test.sh` — DS4.1: integrazione engine + **MTP spec** + CSA.
-- **`engine_smoke_models.sh`**, **`mlx_domain_split.py`**, **`minitest_census.py`** — smoke / censimenti.
-- **`arch_registry.py`** — **OpenArch (A1–A3)**: `build` (spec+contratto da `config.json`), `validate`
-  (config vs registry), `selftest`, `checks <registry.json>` (A3↔A1: golden del lab per contratto),
-  `invariants`. Registry in `GMBasic/common/Registry/architectures/` (17).
-
-### Progetti test (`test_*/`)
-- **`test_mlx_bench`** — **harness MLX principale**: `<modelDir> prefill|decode|ctxdecode|rprefill|rdecode|
-  rdecodectx|score|sampletext|chunkparity|specparity|specbench|rewindtest|budgettest|leaktest|corebench`.
-  Legge via l'ABI (`llm_ai_mlx_*`), stampa tok/s + `IDS=` (oracolo).
-- **`test_ilrun`** / **`test_vmrun`** / **`test_pcode`** / **`test_run_all`** — harness dei backend
-  (IL / VM-C / PCode) su file `.bas`.
-- **`test_ilrun-sweep`** — sweep su molti `.bas`.
-- **`test_gfx_c`** / **`test_graphics_headless`** / **`test_graphics_visible`** — harness grafico (parità).
-- **`test_llm_server`**, **`test_keyboard`**, **`test_editor`**, **`test_astdump`** — harness dedicati.
-
-### Gate canonici (verbatim AGENTS)
-- C99: `dotnet run --project tests/GMBASIC.Backend.C99.Tests -p:GmbEdition=Commercial -p:GmbBackendC99=true [-- <filtro>|--file=<f>]`
-- MiniTest parity: `tools/test_minitests_parity "<dominio>/"`
-- MiniTest C99Native: `GMB_MINI_ONLY="<dominio>/<file>.bas" tools/test_minitests_c99native`
-- Parità 5 backend: `tools/parity5 <sample>.bas` (equivalenti legacy `mlx_parity_*`/`test_ilrun`/`test_vmrun`)
-
----
 
 ## Debug/profilo in-process (gated, per-unità)
 - **`ds4`**: opts registro **`dsv4_profile`** → profiler per-fase + **tempo GPU reale** (timestamp cb) +
   sotto-timer host MoE (`route`/`store`/`metal`) + **dispatch count**. *(no-op se 0 — zero overhead)*
 - **Motore MLX/MoE**: opzioni `dsv4_prefill_mm`, `dsv4_gpu_hc`, `dsv4_prefill_chunk`, `dsv4_hotlist_topk` …
-- **GMBasic**: `GMB_DECODE_ATTENTION_BENCH`, harness `mlx_batch_test`, `decode_bench`.
 
 > [!NOTE] Vedi anche: `DS4-slow-Dove-va-il-tempo-Decode.md` (ripartizione CPU/GPU/decode),
 > `BenchChronos-Benchmark-Coerente.md`, AGENTS §0sexies/§0septies.

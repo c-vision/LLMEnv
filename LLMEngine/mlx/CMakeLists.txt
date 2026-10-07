@@ -146,12 +146,12 @@ endif()
 # FUNZIONALE (+ overwrite_descriptor) => COPIA O(cap) del buffer. Questa la rende una VERA
 # scrittura in-place O(n) via l'op MLX `slice_update_inplace` (patch mlx_inplace_slice.patch):
 # elimina la ricopia O(pos) dell'append KV (misurato 1,6x@16k / 4,4x@32k sul decode, GEN_IDS
-# identici). Idempotente (guard su GMB_SLICEUP_COPY); A/B parity con GMB_SLICEUP_COPY=1.
+# identici). Idempotente (guard su LLM_SLICEUP_COPY); A/B parity con LLM_SLICEUP_COPY=1.
 if(TARGET mlxc)
     get_target_property(LLM_MLXC_SRC_DIR mlxc SOURCE_DIR)
     if(LLM_MLXC_SRC_DIR AND EXISTS "${LLM_MLXC_SRC_DIR}/mlx/c/ops.cpp")
         file(READ "${LLM_MLXC_SRC_DIR}/mlx/c/ops.cpp" LLM_MLXC_OPS2)
-        string(FIND "${LLM_MLXC_OPS2}" "GMB_SLICEUP_COPY" LLM_MLXC2_ALREADY)
+        string(FIND "${LLM_MLXC_OPS2}" "LLM_SLICEUP_COPY" LLM_MLXC2_ALREADY)
         if(NOT LLM_MLXC2_ALREADY EQUAL -1)
             message(STATUS "llmengine_mlx: inplace slice_update gia' presente in ${LLM_MLXC_SRC_DIR} (patch saltata)")
         else()
@@ -303,16 +303,16 @@ endif()
 # ds4 (nostro engine DS4 nativo) e' OPZIONALE: se disattivato (LLM_WITH_DS4=OFF) o se la
 # cartella non c'e', il motore degrada sul vendored `ds4` / su `ds41`. Cosi' la cartella e'
 # cancellabile senza errori di configurazione/compilazione, e un consumer che non vuole il nativo
-# (es. GMBasic, che ha il vendored) non lo compila affatto.
+# (es. chi ha un motore vendorizzato) non lo compila affatto.
 option(LLM_WITH_DS4 "Compila il motore DS4 nativo (ds4) in llm_ai_mlx" ON)
-set(GMB_DS4_SRC "")
-set(GMB_DS4_INC "")
+set(LLM_DS4_SRC "")
+set(LLM_DS4_INC "")
 if(LLM_WITH_DS4 AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ds4)
-  list(APPEND GMB_DS4_SRC
+  list(APPEND LLM_DS4_SRC
        ds4/llm_dsv4_metal.mm
        ds4/llm_dsv4_gpu_ctx.mm
        ds4/llm_ds4_abi.c)
-  set(GMB_DS4_INC ds4)
+  set(LLM_DS4_INC ds4)
 endif()
 
 add_library(llm_ai_mlx SHARED
@@ -382,9 +382,9 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_model_lifecycle.c
     llm_kvmetal_bridge.m
     llm_gemvq4_bridge.m
-    # ds4 (Metal DS4 IQ2/Q8, contesto GPU, adapter ABI): OPZIONALE (vedi GMB_DS4_SRC).
+    # ds4 (Metal DS4 IQ2/Q8, contesto GPU, adapter ABI): OPZIONALE (vedi LLM_DS4_SRC).
     # Se presente: Metal DS4 zero-copy + adapter llmengine_llm_engine_ds4.
-    ${GMB_DS4_SRC}
+    ${LLM_DS4_SRC}
     # Adapter ds41-native -> ABI LlmEngine (stessi 9 metodi di ds4/ds4).
     ds41-native/llm_ds41_abi.c
     # P10: GEMM int8-activation x Q4/Q5 sui tensor unit M5 (port oMLX; bridge ABI-C, ObjC/Metal)
@@ -435,7 +435,7 @@ target_link_libraries(llm_ai_mlx PRIVATE mlxc cjson ${METAL_FRAMEWORK} ${FOUNDAT
 target_include_directories(llm_ai_mlx PRIVATE "${cjson_SOURCE_DIR}")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
-target_include_directories(llm_ai_mlx PUBLIC . ${GMB_DS4_INC} tokenizers ds41-native ../Options)
+target_include_directories(llm_ai_mlx PUBLIC . ${LLM_DS4_INC} tokenizers ds41-native ../Options)
 
 # FIX dipendenze: gli header ds4/ds41-native sono header-only (NON sono sorgenti) e il tracking
 # automatico non li vede -> una modifica a *.h NON ricompila i TU consumatori (build "verde" ma binario
@@ -528,7 +528,7 @@ if(LLM_BUILD_DSV4_TESTS)
     target_include_directories(llm_mlx_kvclasses_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     set_target_properties(llm_mlx_kvclasses_test PROPERTIES LINKER_LANGUAGE CXX)
 
-    # §9.A M10c: test model-free del contratto GMB_KV_FORMAT.
+    # §9.A M10c: test model-free del contratto LLM_KV_FORMAT.
     add_executable(llm_mlx_kvformat_test tests/llm_mlx_kvformat_test.c)
     target_link_libraries(llm_mlx_kvformat_test PRIVATE llm_ai_mlx)
     target_include_directories(llm_mlx_kvformat_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

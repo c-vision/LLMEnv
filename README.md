@@ -1,7 +1,7 @@
 # LLMEnv
 
 **Soluzione C** con **progetti CMake autonomi** (uno per responsabilità, **grafo aciclico**), consumati
-come **librerie statiche** da **GMBasic** e **FastLLM**. C# resta **adapter via P/Invoke**.
+come **librerie statiche** da **host** come FastLLM. C# resta **adapter via P/Invoke**.
 
 > **Ambito = `mlx-lm`** (una *libreria* di inferenza): tokenizer + codec/quant + modelli/runner +
 > sampling. **NON** server HTTP, **NON** agenti, **NON** runtime BASIC — quelli restano nei consumatori.
@@ -32,7 +32,7 @@ common/  → include/build/helper CONDIVISI fra i layer
 
 - Nomi del motore in `llm`/`LLM`; role-map `.llmarch`; env del motore `LLM_*`.
 - `LLMEngine`/`LLMCodec` **non dipendono** dai consumatori. Dipendenza a senso unico:
-  **GMBasic → LLMEnv**, **FastLLM → LLMEnv**.
+  **FastLLM → LLMEnv**.
 
 ## Stato
 

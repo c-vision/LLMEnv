@@ -4,7 +4,7 @@
  * (`llmengine_llm_engine_ds4`) e di `ds4` (`llmengine_llm_engine_ds4`):
  *   load_model, free_model, create_session, destroy_session, append_ids, set_sampling,
  *   generate_ids, kv_set_max, set_expert_swap.
- * Cosi' un consumatore (FastLLM/GMBasic) sceglie l'engine per `model_type` e li usa tutti allo
+ * Cosi' un consumatore (FastLLM e altri) sceglie l'engine per `model_type` e li usa tutti allo
  * stesso modo, senza rami specifici nel codice condiviso. Vive con DS4.1 (ds41-native/). */
 #define LLM_DS41_ABI_IMPL 1
 #include "llm_dsv41_engine.h"

@@ -904,7 +904,7 @@ bool llm_mlx_pretouch_weights_enabled(void) {
      * tensori dello shard (inclusi gli switch_mlp.* degli esperti) vanifica lo SWAP —
      * materializza le decine di GB di esperti in RAM, cioe' esattamente ciò che lo streaming
      * evita (OOM/lockup su modelli >wired-limit tipo Qwen3.8-Flash-Next 104GB). Port del fix
-     * GMBasic 87e75432b. */
+     * il progetto originale 87e75432b. */
     if (llm_mlx_moe_swap_on()) return false;
     return llm_ai_mlx_opt_env("LLM_NO_PRETOUCH_WEIGHTS") == NULL;
 }

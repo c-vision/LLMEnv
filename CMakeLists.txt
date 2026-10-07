@@ -12,7 +12,7 @@ endif()
 # Layer sempre costruibili (nessuna dipendenza da framework LLM pesanti).
 add_subdirectory(LLMToken)    # 1
 add_subdirectory(LLMCodec)    # 2
-add_subdirectory(LLMJinja)    # 2b (motore Jinja chat-template, port di GMBasic/gmb_jinja)
+add_subdirectory(LLMJinja)    # 2b (motore Jinja chat-template, port del motore Jinja originale)
 add_subdirectory(LLMDesc)     # 3
 add_subdirectory(LLMMetal)    # 4
 

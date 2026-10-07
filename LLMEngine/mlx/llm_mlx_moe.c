@@ -23,7 +23,7 @@ int llm_mlx_moe_swap_on(void) { return g_moe_swap_dir[0] != '\0'; }
 const char* llm_mlx_moe_swap_dir(void) { return g_moe_swap_dir; }
 
 /* ── TurboQuant: scelta MEMORIA vs VELOCITÀ per gli esperti ─────────────────────────────────────
- * API del motore (NON env): il consumer (GMBasic via BASIC / FastLLM) la imposta.
+ * API del motore (NON env): il consumer (gli host, via ABI) la imposta.
  *   on=1 (default): esperti PACKED (kernel TQ diretto) -> RSS basso, un po' piu' lento.
  *   on=0          : array affine-2bit residenti + gather_qmm MLX -> velocita' massima, piu' RAM. */
 static int g_tq_mem_opt = 1;
@@ -271,7 +271,7 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
      * (n_tokens, top_k, ...)): va preservata su pos_arr, altrimenti mlx_gather_qmm broadcasta x
      * contro un pos_arr 1-D [M] invece che contro la forma [n_tokens, top_k], producendo un
      * output di batch shape SBAGLIATA (silenzioso su gate/up, esplode in broadcast_shapes al
-     * down). Port del fix GMBasic acacd768a. */
+     * down). Port del fix originale acacd768a. */
     const int idxs_nd = (int)mlx_array_ndim(idxs);
     int idxs_shape[8];
     for (int i = 0; i < idxs_nd && i < 8; i++) idxs_shape[i] = (int)mlx_array_dim(idxs, i);
@@ -625,7 +625,7 @@ bool qwen3_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
     /* Streaming esperti (offload): il kernel fuso usa DIRETTAMENTE i
      * tensori COMPLETI gate/up/down, non gli stacked locali di llm_mlx_moe_gather_streamed ->
      * sotto SWAP non sono i pesi giusti. Stessa guardia gia' in llm_mlx_moe_gateup_gather
-     * (altra fusione, stesso motivo). Port del fix GMBasic acacd768a. */
+     * (altra fusione, stesso motivo). Port del fix originale acacd768a. */
     if (ok && n_tokens == 1 && (bts == 4 || bts == 8) && llm_mlx_fuse_moe_decode_enabled() &&
         !llm_mlx_moe_swap_on()) {
         const int din = m->cfg.hidden_size, dff = m->cfg.moe_intermediate_size;

@@ -1,4 +1,4 @@
-/* llm_mlx_kvformat.c — §9.A M10c: contratto GMB_KV_FORMAT. Vedi llm_mlx_kvformat.h. */
+/* llm_mlx_kvformat.c — §9.A M10c: contratto LLM_KV_FORMAT. Vedi llm_mlx_kvformat.h. */
 #include "llm_mlx_kvformat.h"
 
 #include <stdio.h>

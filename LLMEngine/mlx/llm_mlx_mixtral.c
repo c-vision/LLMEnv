@@ -246,7 +246,7 @@ bool mixtral_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h,
      * schema di qwen3_moe_ffn_block (vedi llm_mlx_moe_fused_kernel.h). */
     bool moe_fused_done = false;
     /* Sotto SWAP il kernel fuso userebbe i tensori completi invece degli stacked locali. Port del
-     * fix GMBasic acacd768a (stessa guardia gia' in llm_mlx_moe_gateup_gather). */
+     * fix originale acacd768a (stessa guardia gia' in llm_mlx_moe_gateup_gather). */
     if (ok && n_tokens == 1 && (bts == 4 || bts == 8) && llm_mlx_fuse_moe_decode_enabled() &&
         !llm_mlx_moe_swap_on()) {
         const int din = m->cfg.hidden_size, dff = m->cfg.moe_intermediate_size;

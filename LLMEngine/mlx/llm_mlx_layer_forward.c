@@ -527,7 +527,7 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
     int NLOP = g_mlx_layer_nops > 0 ? g_mlx_layer_nops : 2;
     /* §9.A M10 EXECUTION PLANNER (runtime manager): se un piano e' attivo e copre questo layer,
      * usa la sua pipeline per-layer; SKIP -> identita' (out = x). Piano ingerito da JSON
-     * (compile-time GMBasic/gmbllm EXECPLAN) via llm_mlx_execplan_load. */
+     * (compile-time EXECPLAN del producer PUL) via llm_mlx_execplan_load. */
     if (llm_mlx_execplan_active()) {
         char ep_buf[LLM_MLX_EXECPLAN_MAX_OPS][LLM_MLX_EXECPLAN_OP_LEN];
         const char* ep_ptrs[LLM_MLX_EXECPLAN_MAX_OPS];

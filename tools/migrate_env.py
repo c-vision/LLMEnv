@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """migrate_env.py — migra i `getenv("X")` di FUNZIONAMENTO a `llm_ai_mlx_opt_env("X")` (registro
 condiviso LLMEngine/Options). I nomi di DEBUG (DBG/DUMP/TRACE/TIME/STATS/VERBOSE/PROBE/...) restano
-env. Backup in /tmp/gmbasic-backup/migrate/ prima di scrivere. Uso: da LLMEnv/  python3 tools/migrate_env.py <glob>..."""
+env. Backup in /tmp/llmenv-backup/migrate/ prima di scrivere. Uso: da LLMEnv/  python3 tools/migrate_env.py <glob>..."""
 import re, pathlib, shutil, sys
 
 DBG = re.compile(r'DBG|DEBUG|DUMP|TRACE|_LOG|_TIME|STATS|VERBOSE|PROBE|DIAG|WIRELOG|ERRTRACE|WHICH_PATH')
-BK = pathlib.Path("/tmp/gmbasic-backup/migrate")
+BK = pathlib.Path("/tmp/llmenv-backup/migrate")
 
 def add_include(ns):
     if 'llm_engine_opts.h' in ns: return ns

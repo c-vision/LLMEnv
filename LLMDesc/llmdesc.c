@@ -303,7 +303,7 @@ static int llmdesc_resolve_core(const char* hf_dir, LlmDesc* out, char* out_path
                 if (llmdesc_load_pref(path, out, phase)) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
             }
         }
-        /* ABI/ canonica (via llmdesc_abi_dir; dal fratello GMBasic/ABI o LLMEnv/ABI). */
+        /* ABI/ canonica (via llmdesc_abi_dir; dall'ABI canonica (LLMEnv/ABI)). */
         if (have_abi) for (int x = 0; x < 2; ++x) {
             char path[4096]; snprintf(path, sizeof path, "%s/%s.%s", abi, slug, exts[x]);
             if (llmdesc_load_pref(path, out, phase)) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
@@ -408,7 +408,7 @@ int llmdesc_autobuild(const char* model_dir, char* out_path, size_t out_cap) {
 /* Cartella ABI/ canonica: risale dal cwd cercando una dir `ABI` (dove vivono le descrizioni).
  * Ritorna 1 e scrive il path in `out` se trovata. Usata da LLM ARCH LIST e dal resolve. */
 /* Risale da `start` (dir o file) cercando <dir>/ABI | <dir>/LLMEnv/ABI | <dir>/../LLMEnv/ABI.
- * (b)/(c): l'engine vive DENTRO LLMEnv ma i consumatori (FastLLM/GMBasic) sono progetti fratelli.
+ * (b)/(c): l'engine vive DENTRO LLMEnv ma i consumatori (FastLLM e altri consumer) sono progetti fratelli.
  * Senza la role map .llmarch il loader GGUF generico cerca i nomi HF (lm_head/embed_tokens/norm)
  * che il GGUF non ha -> "lookup fallito". 1 se trovata (path in `out`). */
 static int abi_search_up(const char* start, char* out, size_t cap) {
