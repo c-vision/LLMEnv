@@ -45,7 +45,10 @@ mlx_array llm_mlx_llama3_freqs_cached(LlmMlxModel* m) {
 static bool llama_try_fused_qkv_rope(LlmMlxModel* m, int cache_offset,
                                      mlx_array q, mlx_array k, mlx_array v,
                                      mlx_array* q_rope, mlx_array* k_rope, mlx_array* v_t) {
-    if (m->cfg.head_dim <= 0 || (m->cfg.head_dim & 1) != 0) return false;
+    /* head_dim MOLTO piccolo (es. 4 — modelli sintetici/test): il kernel Metal
+     * `fused_rope_qkv_layout` non compila per quella specializzazione del template MLX (errore di
+     * address space in utils.h) -> si usa il path NON fuso. Nessun modello reale ha head_dim<8. */
+    if (m->cfg.head_dim <= 0 || (m->cfg.head_dim & 1) != 0 || m->cfg.head_dim < 8) return false;
     mlx_array freqs = mlx_array_new();
     float rope_base = m->cfg.rope_theta;
     if (m->cfg.use_llama3_rope) {
