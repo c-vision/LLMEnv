@@ -219,10 +219,6 @@ int llm_dsv4_metal_attn_proj_fused(LlmDsv4Metal* b, const void* qa_w, size_t qa_
         uint32_t lq, uint32_t hd, uint32_t qd, int n_head, int n_rot,
         const float* rope_cfg, int pos, float eps, float* q_out, float* kv_out, float* qrn_out);
 
-#ifdef __cplusplus
-}
-#endif
-
 /* ── Tail FUSO del layer (ds4): fin + mhc + route + moe in UNA command buffer ── */
 typedef struct {
     const void* outa_w; size_t outa_row_bytes; int ng; uint32_t gd, rank;
@@ -266,5 +262,9 @@ void* llm_dsv4_metal_argbuf_pair(LlmDsv4Metal* b, const void* const* gs, const v
 void* llm_dsv4_metal_argbuf_down(LlmDsv4Metal* b, const void* const* ds, int n, size_t dbytes);
 void  llm_dsv4_metal_argbuf_bind(void* enc, void* handle, int index);
 void  llm_dsv4_metal_argbuf_free(void* handle);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* LLM_DSV4_METAL_H */

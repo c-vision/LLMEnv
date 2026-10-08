@@ -499,7 +499,7 @@ if(LLM_BUILD_DSV4_TESTS)
     foreach(_src ${DSV4_TEST_SRCS})
         get_filename_component(_t ${_src} NAME_WE)
         add_executable(${_t} ${_src})
-        target_link_libraries(${_t} PRIVATE llm_ai_mlx llmcodec_ggml)
+        target_link_libraries(${_t} PRIVATE llm_ai_mlx llmcodec_ggml llmcodec llmcodec_fp8 llmcodec_fp4 llmcodec_mxfp llmcodec_plain llmcodec_mlx_affine)
         target_include_directories(${_t} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/ds4

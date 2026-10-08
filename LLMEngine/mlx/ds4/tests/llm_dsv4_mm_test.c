@@ -52,10 +52,10 @@ int main(int argc, char** argv) {
         const void** ga = calloc((size_t)ne, sizeof(void*)); const void** ua = calloc((size_t)ne, sizeof(void*)); const void** da = calloc((size_t)ne, sizeof(void*));
         for (int k = 0; k < nt * 6; k++) { size_t ex = (size_t)ids[k]; ga[ex] = (const uint8_t*)pe->gate + ex * ff * gnb; ua[ex] = (const uint8_t*)pe->up + ex * ff * gnb; da[ex] = (const uint8_t*)pe->down + ex * embd * dnb; }
         float* got2 = malloc(sizeof(float) * (size_t)nt * embd);
-        int r3 = llm_dsv4_metal_moe_mm_addr_batch(be, nt, ga, ua, da, pe->gate_type, pe->down_type, ne, embd, ff, (uint32_t)gnb, (uint32_t)dnb, ids, rw, x, c->swiglu_clamp_exp, NULL, NULL, NULL, 0, 0, got2);
+        int r3 = llm_dsv4_metal_moe_mm_addr_batch(be, nt, ga, ua, da, pe->gate_type, pe->down_type, ne, embd, ff, (uint32_t)gnb, (uint32_t)dnb, ids, rw, x, c->swiglu_clamp_exp, NULL, NULL, NULL, 0, 0, got2, 0);
         double m2 = 0, s2 = 0, sr2 = 0; int nf = 0; for (int i = 0; i < nt * embd; i++) { nf += !isfinite(got2[i]); double d = fabs((double)ref[i] - got2[i]); if (d > m2) m2 = d; s2 += d*d; sr2 += (double)ref[i]*ref[i]; }
         printf("[MM-ADDR mpp=%d] rc=%d nonfiniti=%d max|diff|=%.3e rel=%.3e\n", mpp, r3, nf, m2, sqrt(s2 / (sr2 > 0 ? sr2 : 1)));
-        double t0 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_moe_mm_addr_batch(be, nt, ga, ua, da, pe->gate_type, pe->down_type, ne, embd, ff, (uint32_t)gnb, (uint32_t)dnb, ids, rw, x, c->swiglu_clamp_exp, NULL, NULL, NULL, 0, 0, got2);
+        double t0 = now(); for (int k = 0; k < 5; k++) llm_dsv4_metal_moe_mm_addr_batch(be, nt, ga, ua, da, pe->gate_type, pe->down_type, ne, embd, ff, (uint32_t)gnb, (uint32_t)dnb, ids, rw, x, c->swiglu_clamp_exp, NULL, NULL, NULL, 0, 0, got2, 0);
         printf("tempo addr mpp=%d (caldo): %.1f ms per chunk di %d token\n", mpp, (now() - t0) * 200, nt);
         if (r3 != 0 || nf) { printf("FAIL mm_addr\n"); return 1; } }
     int ok = r1 == 0 && r2 == 0 && rel < 5e-3;
