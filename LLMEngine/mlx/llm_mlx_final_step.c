@@ -241,6 +241,13 @@ bool final_step(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
     /* Ternary-Bonsai: lm_head e' elencato -> si ruota il suo ingresso. */
     if (ok) ok = llm_bonsai_rotate(&normed, m, -1, "lm_head.weight", false);
     if (ok) ok = quantized_linear_cfg(&logits, normed, out_w, out_s, out_b, m->cfg.quant_group_size, m->cfg.quant_bits, m->cfg.quant_mode, m->stream);
+    if (ok && m->cfg.falcon_h1_out_scale > 0.0f) {
+        mlx_array sc=mlx_array_new_float32(m->cfg.falcon_h1_out_scale);
+        mlx_array l2=mlx_array_new();
+        ok = mlx_multiply(&l2, logits, sc, m->stream) == 0;
+        if (ok) mlx_array_set(&logits, l2);
+        mlx_array_free(sc); mlx_array_free(l2);
+    }
     mlx_array capped = mlx_array_new();
     if (ok && m->cfg.final_logit_softcap > 0.0f) {
         ok = llm_mlx_logit_softcap(&capped, logits, m->cfg.final_logit_softcap, m->stream);
@@ -476,6 +483,13 @@ bool final_step_greedy_batch(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
     /* Ternary-Bonsai: lm_head e' elencato -> si ruota il suo ingresso. */
     if (ok) ok = llm_bonsai_rotate(&normed, m, -1, "lm_head.weight", false);
     if (ok) ok = quantized_linear_cfg(&logits, normed, out_w, out_s, out_b, m->cfg.quant_group_size, m->cfg.quant_bits, m->cfg.quant_mode, m->stream);
+    if (ok && m->cfg.falcon_h1_out_scale > 0.0f) {
+        mlx_array sc=mlx_array_new_float32(m->cfg.falcon_h1_out_scale);
+        mlx_array l2=mlx_array_new();
+        ok = mlx_multiply(&l2, logits, sc, m->stream) == 0;
+        if (ok) mlx_array_set(&logits, l2);
+        mlx_array_free(sc); mlx_array_free(l2);
+    }
     mlx_array capped = mlx_array_new();
     if (ok && m->cfg.final_logit_softcap > 0.0f) {
         ok = llm_mlx_logit_softcap(&capped, logits, m->cfg.final_logit_softcap, m->stream);
@@ -520,6 +534,13 @@ bool final_step_greedy_dev(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
     /* Ternary-Bonsai: lm_head e' elencato -> si ruota il suo ingresso. */
     if (ok) ok = llm_bonsai_rotate(&normed, m, -1, "lm_head.weight", false);
     if (ok) ok = quantized_linear_cfg(&logits, normed, out_w, out_s, out_b, m->cfg.quant_group_size, m->cfg.quant_bits, m->cfg.quant_mode, m->stream);
+    if (ok && m->cfg.falcon_h1_out_scale > 0.0f) {
+        mlx_array sc=mlx_array_new_float32(m->cfg.falcon_h1_out_scale);
+        mlx_array l2=mlx_array_new();
+        ok = mlx_multiply(&l2, logits, sc, m->stream) == 0;
+        if (ok) mlx_array_set(&logits, l2);
+        mlx_array_free(sc); mlx_array_free(l2);
+    }
     mlx_array capped = mlx_array_new();
     if (ok && m->cfg.final_logit_softcap > 0.0f) {
         ok = llm_mlx_logit_softcap(&capped, logits, m->cfg.final_logit_softcap, m->stream);

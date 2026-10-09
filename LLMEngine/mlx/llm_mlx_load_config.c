@@ -254,6 +254,26 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(moe_intermediate_size, "intermediate_size");   /* d_inner (2*d_model) */
         cfg->tie_word_embeddings = true;                       /* nessun lm_head */
         if (strcmp(cfg->model_type, "falcon_mamba") == 0) cfg->mamba_bcdt_rms = 1; /* mlx_lm: falcon_mamba -> use_bcdt_rms=True */
+    } else if (strcmp(cfg->model_type, "falcon_h1") == 0) {
+        /* Falcon-H1 ibrido: attn (num_attention_heads/key_value_heads/head_dim) +
+         * mamba (mamba_n_heads/mamba_d_head/mamba_d_ssm/mamba_n_groups/mamba_d_state/mamba_d_conv). */
+        OPT_INT(n_heads, "num_attention_heads");
+        OPT_INT(n_kv_heads, "num_key_value_heads");
+        OPT_INT(head_dim, "head_dim");
+        OPT_INT(fh1_mamba_heads, "mamba_n_heads");
+        OPT_INT(fh1_mamba_head_dim, "mamba_d_head");
+        OPT_INT(moe_intermediate_size, "mamba_d_ssm");   /* Inner del mixer */
+        OPT_INT(n_group, "mamba_n_groups");
+        OPT_INT(mamba_state_size, "mamba_d_state");
+        OPT_INT(linear_conv_kernel_dim, "mamba_d_conv");
+        OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
+        cfg->mamba_ts_lo = 0.0f; cfg->mamba_ts_hi = 1e30f;
+        cfg->tie_word_embeddings = true;
+        { cJSON* a=cJSON_GetObjectItemCaseSensitive(j,"lm_head_multiplier");
+          cJSON* b=cJSON_GetObjectItemCaseSensitive(j,"embedding_multiplier");
+          float lmh=cJSON_IsNumber(a)?(float)a->valuedouble:0.0f;
+          float emb=cJSON_IsNumber(b)?(float)b->valuedouble:1.0f;
+          cfg->falcon_h1_out_scale = (lmh > 0.0f && emb != 0.0f) ? lmh/emb : 0.0f; }
     } else if (strcmp(cfg->model_type, "mamba2") == 0) {
         /* Mamba2 (SSD): num_heads/head_dim/n_groups/state_size/conv_kernel/time_step_limit. */
         OPT_INT(n_heads, "num_heads");

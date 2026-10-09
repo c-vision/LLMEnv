@@ -153,6 +153,9 @@ typedef struct {
     int mamba_state_size;             /* Mamba: d_state (es. 16) */
     int mamba_bcdt_rms;               /* falcon_mamba: mixer_norm RMSNorm su delta/B/C */
     float mamba_ts_lo, mamba_ts_hi;   /* Mamba2: time_step_limit [lo,hi] */
+    int fh1_mamba_heads;              /* falcon_h1: mamba_n_heads (distinto da n_heads attn) */
+    int fh1_mamba_head_dim;           /* falcon_h1: mamba_d_head */
+    float falcon_h1_out_scale;        /* falcon_h1: lm_head_multiplier/embedding_multiplier (uscita tied) */
     int mamba_dt_rank;                /* Mamba: dt_rank = ceil(d_model/16) */
     /* is_linear_layer[i]=true se layer i e' linear_attn (GDN), false se full_attention. */
     bool* is_linear_layer;
@@ -1261,6 +1264,9 @@ bool mamba_ffn_identity(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
 bool mamba2_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                          mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool mamba2_ffn_identity(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+bool falcon_h1_attn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                                 mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool falcon_h1_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 /* Definiti nel monolite, usati dal dominio Llama. */
 bool llm_mlx_fuse_rope_enabled(void);
 bool llm_mlx_fuse_rope_verify_enabled(void);
