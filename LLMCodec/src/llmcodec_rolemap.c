@@ -428,6 +428,7 @@ int llmcodec_quantcfg_load(const char* config_path, LlmCodecQuantCfg* out) {
 }
 
 static const char* const g_supported_methods[] = {
+    "affine",   /* MLX (Apple) affine group-quant: bits/group_size — formato nativo dei checkpoint MLX */
     "compressed-tensors", "fp8", "gptq", "awq", "bitnet", "mxfp4", "mxfp8", "nvfp4", "turboquant", "bitsandbytes", "hqq", "quanto", "torchao", "autoround", "quark", "aqlm", "vptq", "spqr", "higgs", NULL };
 static const char* const g_known_unsupported[] = {
     "fbgemm",
@@ -526,6 +527,7 @@ int llmcodec_rolemap_unsupported(const LlmCodecRoleMap* m, char* out, size_t cap
      * (`weight_source`): engram->fp8 row (fmt 2), compression/indexer->fp8, vision->plain/fp8.
      * Il COMPUTE (csa/indexer/engram/vit) resta dell'engine. Vedi Converter-DeepSeek-V41-Strutture. */
     static const struct { const char* key; const char* type; } supported[] = {
+        { "layer", "transformer_layer" }, { "layer", "moe_layer" }, { "layer", NULL },
         { "attention", "mla" }, { "attention", "gqa" }, { "moe", NULL }, { "norm", NULL },
         { "compression", "csa" }, { "indexer", "indexer" }, { "engram", "engram" }, { "vision", "vit" },
     };
