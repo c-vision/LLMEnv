@@ -16,6 +16,7 @@
 #include <string.h>
 #include <math.h>
 
+
 bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                         mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool mamba_ffn_identity(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
@@ -98,6 +99,11 @@ bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, 
     mlx_array dtw = mlx_array_new(), dtsc = mlx_array_new(), dtb = mlx_array_new();
     tname(m->cfg.layer_prefix, layer_idx, "mixer.dt_proj", nb, sizeof(nb));
     ok = ok && multishard_get_triple(&m->weights, nb, &dtw, &dtsc, &dtb);
+    /* Bias LINEARE di dt_proj: tensore separato dal zero-point di quantizzazione (.biases)
+     * che il triple carica in dtb. Va aggiunto a parte (dtb non e' il bias lineare). */
+    mlx_array dtblin = mlx_array_new();
+    { char lb[256]; tname(m->cfg.layer_prefix, layer_idx, "mixer.dt_proj.bias", lb, sizeof(lb));
+      multishard_get(&m->weights, lb, &dtblin); }
     mlx_array Alog = mlx_array_new();
     tname(m->cfg.layer_prefix, layer_idx, "mixer.A_log", nb, sizeof(nb));
     ok = ok && multishard_get(&m->weights, nb, &Alog);
@@ -131,6 +137,7 @@ bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, 
         /* delta = softplus(dt_proj(dlt)) */
         mlx_array dlin = mlx_array_new();
         if (ok) ok = quantized_linear_cfg(&dlin, dlt, dtw, dtsc, dtb, gsz, bts, m->cfg.quant_mode, s);
+        if (ok && dtsc.ctx != NULL && mlx_array_size(dtsc) > 0 && dtblin.ctx != NULL && mlx_array_size(dtblin) > 0) { mlx_array dl2 = mlx_array_new(); ok = mlx_add(&dl2, dlin, dtblin, s) == 0; if (ok) mlx_array_set(&dlin, dl2); mlx_array_free(dl2); }
         if (ok) { int zs[1] = {1}; mlx_array zero = mlx_array_new(); mlx_zeros(&zero, zs, 1, MLX_FLOAT32, s);
             mlx_array sp = mlx_array_new(); ok = mlx_logaddexp(&sp, dlin, zero, s) == 0; if (ok) mlx_array_set(&dlt, sp);
             mlx_array_free(zero); mlx_array_free(sp); }
@@ -176,7 +183,7 @@ bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, 
     mlx_array_free(nw); mlx_array_free(h); mlx_array_free(ipw); mlx_array_free(ips); mlx_array_free(ipb);
     mlx_array_free(xz); mlx_array_free(xq); mlx_array_free(zz); mlx_array_free(cw); mlx_array_free(cstate);
     mlx_array_free(cf); mlx_array_free(cout); mlx_array_free(xc); mlx_array_free(cb);
-    mlx_array_free(xpw); mlx_array_free(xps); mlx_array_free(xpb); mlx_array_free(dtw); mlx_array_free(dtsc); mlx_array_free(dtb);
+    mlx_array_free(xpw); mlx_array_free(xps); mlx_array_free(xpb); mlx_array_free(dtw); mlx_array_free(dtsc); mlx_array_free(dtb); mlx_array_free(dtblin);
     mlx_array_free(Alog); mlx_array_free(Aneg); mlx_array_free(Dv); mlx_array_free(state); mlx_array_free(ystack);
     mlx_array_free(ow); mlx_array_free(ows); mlx_array_free(ob); mlx_array_free(sw); mlx_array_free(oo);
     return ok;
