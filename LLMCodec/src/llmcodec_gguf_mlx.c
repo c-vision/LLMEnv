@@ -15,6 +15,62 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+/* ── BACKING DEI DATI TENSORE SU DISCO (streaming) ──────────────────────────────────────────────
+ * Il converter accumula i dati di TUTTI i tensori; per un modello >RAM (qwen3.8 = 104GB) questo
+ * e' OOM. Con `llmcodec_stream_enable()` i buffer dei dati tensore sono presi da un FILE
+ * TEMPORANEO mmap-ato (il SO pagina da disco) invece che dall'heap: il picco RAM scende a ~un
+ * tensore. `llmcodec_stream_alloc` sostituisce `malloc` SOLO per i dati tensore; le strutture
+ * piccole restano su heap. Attivato automaticamente quando il totale supera la RAM fisica. */
+static int      g_str_on = 0;
+static int      g_str_fd = -1;
+static uint8_t* g_str_base = NULL;
+static uint64_t g_str_off = 0, g_str_cap = 0;
+static char     g_str_path[1200];
+
+static uint64_t llmcodec_phys_ram(void) {
+#if defined(__APPLE__)
+    { FILE* f = popen("sysctl -n hw.memsize", "r"); if (f) { unsigned long long v = 0; if (fscanf(f, "%llu", &v) == 1) { pclose(f); return (uint64_t)v; } pclose(f); } }
+    return 0;
+#else
+    long p = sysconf(_SC_PHYS_PAGES); long s = sysconf(_SC_PAGE_SIZE);
+    return (p > 0 && s > 0) ? (uint64_t)p * (uint64_t)s : 0;
+#endif
+}
+static int llmcodec_stream_enable(uint64_t need_bytes) {
+    if (g_str_on || need_bytes == 0) return g_str_on;
+    uint64_t ram = llmcodec_phys_ram();
+    if (ram == 0 || need_bytes < ram * 3 / 5) return 0;            /* sta in RAM: nessun cambiamento */
+    snprintf(g_str_path, sizeof g_str_path, "%s.tmpdata", "/tmp/llmcodec_stream_XXXXXX");
+    char tmpl[1200]; snprintf(tmpl, sizeof tmpl, "%s", g_str_path);
+    int fd = mkstemp(tmpl); if (fd < 0) return 0;
+    uint64_t cap = need_bytes + need_bytes / 8 + (1u << 30);        /* +12.5% + 1GB di slack */
+    if (ftruncate(fd, (off_t)cap) != 0) { close(fd); unlink(tmpl); return 0; }
+    void* b = mmap(NULL, (size_t)cap, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (b == MAP_FAILED) { close(fd); unlink(tmpl); return 0; }
+    snprintf(g_str_path, sizeof g_str_path, "%s", tmpl);
+    g_str_fd = fd; g_str_base = (uint8_t*)b; g_str_cap = cap; g_str_off = 0; g_str_on = 1;
+    return 1;
+}
+static uint8_t* llmcodec_stream_alloc(size_t len) {
+    if (!g_str_on) return (uint8_t*)malloc(len ? len : 1);
+    uint64_t a = ((uint64_t)len + 63) & ~(uint64_t)63;             /* 64B allineato */
+    if (g_str_off + a > g_str_cap) return (uint8_t*)malloc(len ? len : 1);  /* overflow: fallback heap */
+    uint8_t* p = g_str_base + g_str_off; g_str_off += a; return p;
+}
+static void llmcodec_stream_free(uint8_t* p) {
+    if (p == NULL) return;
+    if (g_str_on && p >= g_str_base && p < g_str_base + g_str_cap) return;  /* file-backed: no-op */
+    free(p);
+}
+static void llmcodec_stream_close(void) {
+    if (!g_str_on) return;
+    munmap(g_str_base, (size_t)g_str_cap); close(g_str_fd); unlink(g_str_path);
+    g_str_on = 0; g_str_fd = -1; g_str_base = NULL; g_str_off = g_str_cap = 0;
+}
 
 static uint8_t* llmcodec_slurp_range(const char* path, uint64_t off, uint64_t len) {
     FILE* f = fopen(path, "rb"); if (f == NULL) return NULL;
@@ -273,6 +329,9 @@ int llmcodec_mlx_to_gguf_ex(const char* mlx_dir, const char* out_path, int ggml_
         }
         llmcodec_safetensors_info_free(at);
     }
+    /* Backing su disco se il modello NON entra in RAM (il converter accumula tutti i tensori). */
+    { uint64_t need = 0; for (int sh1 = 0; sh1 < nsh; ++sh1) { char stp[1500]; snprintf(stp, sizeof stp, "%s/%s", mlx_dir, shard[sh1]); struct stat stb; if (stat(stp, &stb) == 0) need += (uint64_t)stb.st_size; }
+      llmcodec_stream_enable(need); }
     LlmCodecQuantCfg qcfg; { char cjp[1200]; snprintf(cjp, sizeof cjp, "%s/config.json", mlx_dir);
                         { int sup=0; const char* qm=llmcodec_quant_method(cjp,&sup);
                           if (qm && !sup) { int known=0; const char* ku[]={"bitsandbytes","hqq","aqlm","vptq","spqr","higgs","quanto","torchao","fbgemm","sinq","autoround","quark","foursoversix","fp-quant",NULL};
@@ -330,7 +389,7 @@ int llmcodec_mlx_to_gguf_ex(const char* mlx_dir, const char* out_path, int ggml_
                 const LlmCodec* gc = llmcodec_resolve("ggml");
                 uint64_t slab_nb=0, aux_nb=0; uint8_t* obuf=NULL; int cerr=1;
                 if (gc && gc->sizes(tt,0,0,rows,cols,&slab_nb,&aux_nb)==0) {
-                    obuf = (uint8_t*)malloc((size_t)slab_nb*(size_t)E);
+                    obuf = llmcodec_stream_alloc((size_t)slab_nb*(size_t)E);
                     if (obuf) { cerr=0; for (int e=0; !cerr && e<E; ++e) { size_t ol=0,al=0;
                         if (gc->encode(f32 + (size_t)e*rows*cols, rows, cols, tt, 0,0, obuf+(size_t)e*slab_nb, (size_t)slab_nb, &ol, NULL,0,&al)!=0) cerr=1; } }
                 }
@@ -340,9 +399,9 @@ int llmcodec_mlx_to_gguf_ex(const char* mlx_dir, const char* out_path, int ggml_
                  * l'errore appare come "dtype non mappato" (es. switch_mlp.down_proj cols=1408, o il
                  * layer denso down_proj cols=10944). */
                 if (cerr) {
-                    free(obuf); obuf = NULL; tt = LLMCODEC_GGML_T_F16;
+                    llmcodec_stream_free(obuf); obuf = NULL; tt = LLMCODEC_GGML_T_F16;
                     if (gc && gc->sizes(tt,0,0,rows,cols,&slab_nb,&aux_nb)==0) {
-                        obuf = (uint8_t*)malloc((size_t)slab_nb*(size_t)E);
+                        obuf = llmcodec_stream_alloc((size_t)slab_nb*(size_t)E);
                         if (obuf) { cerr=0; for (int e=0; !cerr && e<E; ++e) { size_t ol=0,al=0;
                             if (gc->encode(f32 + (size_t)e*rows*cols, rows, cols, tt, 0,0, obuf+(size_t)e*slab_nb, (size_t)slab_nb, &ol, NULL,0,&al)!=0) cerr=1; } }
                     }
@@ -351,7 +410,7 @@ int llmcodec_mlx_to_gguf_ex(const char* mlx_dir, const char* out_path, int ggml_
                 if (!cerr && stack && E == 1) {
                     int e = src_expert_of(t->name);
                     char tname[288]; gguf_target_name(rm, t->name, tname, sizeof tname);
-                    if (e < 0) { free(obuf); free(raw); free(dm); continue; }
+                    if (e < 0) { llmcodec_stream_free(obuf); free(raw); free(dm); continue; }
                     if (np == pcap) { pcap = pcap ? pcap*2 : 256; pend=(PendExp*)realloc(pend,(size_t)pcap*sizeof(PendExp)); }
                     pend[np].cols=cols; pend[np].rows=rows; pend[np].expert=e; pend[np].type=tt;
                     pend[np].n=(size_t)slab_nb; pend[np].data=obuf;
@@ -366,7 +425,7 @@ int llmcodec_mlx_to_gguf_ex(const char* mlx_dir, const char* out_path, int ggml_
                     bufs[nt]=obuf; dmv[nt]=dd; nt++;
                     free(raw); free(dm); goto next_tensor;
                 }
-                free(obuf);
+                llmcodec_stream_free(obuf);
             }
             {
                 int gt = llmcodec_ggml_type_of(t->dtype);
@@ -408,7 +467,7 @@ int llmcodec_mlx_to_gguf_ex(const char* mlx_dir, const char* out_path, int ggml_
         int Emax = -1;
         for (int k = 0; k < np; ++k) if (pend[k].data && strcmp(pend[k].target, pend[i].target) == 0 && pend[k].expert > Emax) Emax = pend[k].expert;
         uint32_t E = (uint32_t)(Emax + 1);
-        size_t per = pend[i].n; uint8_t* big = (uint8_t*)malloc(per * E); int okc = (big != NULL);
+        size_t per = pend[i].n; uint8_t* big = llmcodec_stream_alloc(per * E); int okc = (big != NULL);
         for (uint32_t e = 0; e < E && okc; ++e) {
             int f = -1; for (int k = 0; k < np; ++k) if (pend[k].data && strcmp(pend[k].target,pend[i].target)==0 && pend[k].expert==(int)e) { f=k; break; }
             if (f < 0) { okc = 0; break; }
@@ -430,8 +489,9 @@ int llmcodec_mlx_to_gguf_ex(const char* mlx_dir, const char* out_path, int ggml_
     }
     if (nskip > 0) fprintf(stderr, "[mlx->gguf] ATTENZIONE: %d tensori saltati (dtype non mappato)\n", nskip);
     int rc = llmcodec_gguf_write(out_path, kv, nkv, ts, nt, 32);
+    llmcodec_stream_close();   /* rilascia il backing su disco (se attivo) */
     if (kv) llmcodec_gguf_meta_free_built(kv, nkv);
-    for (int i=0;i<nt;i++){ free((void*)ts[i].name); free(bufs[i]); free(dmv[i]); }
+    for (int i=0;i<nt;i++){ free((void*)ts[i].name); llmcodec_stream_free(bufs[i]); free(dmv[i]); }
     free(ts); free(bufs); free(dmv);
     return rc;
 }
@@ -693,7 +753,7 @@ int llmcodec_gguf_to_mlx_ex(const char* gguf_path, const char* out_dir, uint32_t
                         }
                         free(abuf); free(raw); continue;   /* obuf: liberato dal free comune (bufs) */
                     }
-                    free(obuf); free(abuf);
+                    llmcodec_stream_free(obuf); free(abuf);
                 }
             }
         }
