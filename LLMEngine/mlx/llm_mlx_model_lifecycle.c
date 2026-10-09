@@ -66,6 +66,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "joyai_llm_flash", deepseek_v2_attention_block, deepseek_v2_ffn_block }, /* = deepseek_v3 */
     { "kimi_linear", kimi_linear_attention_dispatch, kimi_linear_ffn_dispatch }, /* MLA assorbita + KDA */
     { "llama",     llama_attention_block,     dense_swiglu_ffn },
+    { "lfm2",      lfm2_attention_dispatch,   lfm2_ffn_block }, /* LFM2 (Liquid): ibrido GQA(+q/k-layerNorm) / ShortConv */
     { "mistral3",  llama_attention_block,     dense_swiglu_ffn }, /* Ministral-3-14B: Mistral denso (GQA + SwiGLU) */
     /* DeepSeek V4.1: forward whole-model (mHC + CSA2 + Engram) con cache 7 slot; attn/ffn NULL,
      * dispatchato per model_type in load/session_append/session_generate. */

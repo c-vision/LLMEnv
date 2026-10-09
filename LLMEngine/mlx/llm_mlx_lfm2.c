@@ -97,12 +97,25 @@ bool lfm2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
         CHK(ok, "rope");
     }
     mlx_array attn = mlx_array_new();
-    if (ok) {
-        ok = llm_mlx_kv_append(k_cache, v_cache, k_r, v_t, cache_offset, n_tokens, m->stream);
-        CHK(ok, "kv append");
+    if (ok) {   /* KV cache: concat su asse 2 (BHTD). Semplice/corretto (non ottimizzato paging). */
+        if (has_cache && mlx_array_size(*k_cache) > 0 && mlx_array_ndim(*k_cache) == 4) {
+            mlx_array kn = mlx_array_new(), vn = mlx_array_new();
+            mlx_vector_array kv = mlx_vector_array_new();
+            mlx_vector_array_append_value(kv, *k_cache); mlx_vector_array_append_value(kv, k_r);
+            ok = mlx_concatenate_axis(&kn, kv, 2, s) == 0; mlx_vector_array_free(kv);
+            mlx_vector_array vv = mlx_vector_array_new();
+            mlx_vector_array_append_value(vv, *v_cache); mlx_vector_array_append_value(vv, v_t);
+            ok = ok && mlx_concatenate_axis(&vn, vv, 2, s) == 0; mlx_vector_array_free(vv);
+            if (ok) { mlx_array_free(*k_cache); *k_cache = kn; mlx_array_free(*v_cache); *v_cache = vn; }
+            else { mlx_array_free(kn); mlx_array_free(vn); }
+        } else {
+            mlx_array_free(*k_cache); mlx_array_free(*v_cache);
+            ok = mlx_array_set(k_cache, k_r) == 0 && mlx_array_set(v_cache, v_t) == 0;
+        }
+        CHK(ok, "kv concat");
     }
     if (ok) {
-        ok = llm_mlx_gqa_sdpa(&attn, q_r, *k_cache, *v_cache, 1.0f / sqrtf((float)hd), 0, m->stream);
+        ok = llm_mlx_gqa_sdpa(&attn, q_r, *k_cache, *v_cache, 1.0f / sqrtf((float)hd), 0, s);
         CHK(ok, "sdpa");
     }
     mlx_array attn_flat = mlx_array_new();
@@ -197,7 +210,8 @@ bool lfm2_conv_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_toke
         int ss[3] = { 0, n_tokens, 0 };
         int se[3] = { 1, n_tokens + nkeep, H };
         (void)st0;
-        ok = mlx_slice(&sl, cinput, ss, 3, se, 3, s) == 0;
+        int sst[3] = {1, 1, 1};
+        ok = mlx_slice(&sl, cinput, ss, 3, se, 3, sst, 3, s) == 0;
         if (ok) { mlx_array_set(v_cache, sl); }
         mlx_array_free(sl);
     }
@@ -260,7 +274,13 @@ bool lfm2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, ml
     mlx_array g = mlx_array_new(), u = mlx_array_new(), sw = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&g, normed, w1, w1s, w1b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "w1"); }
     if (ok) { ok = quantized_linear_cfg(&u, normed, w3, w3s, w3b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "w3"); }
-    if (ok) { ok = llm_mlx_swiglu(&sw, g, u, s) == 0; CHK(ok, "swiglu"); }
+    if (ok) {   /* swiglu = silu(g) * u  (inline: silu(x)=x*sigmoid(x)) */
+        mlx_array sig = mlx_array_new(), silu = mlx_array_new();
+        ok = mlx_sigmoid(&sig, g, s) == 0 && mlx_multiply(&silu, g, sig, s) == 0 &&
+             mlx_multiply(&sw, silu, u, s) == 0;
+        mlx_array_free(sig); mlx_array_free(silu);
+        CHK(ok, "swiglu");
+    }
     mlx_array d = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&d, sw, w2, w2s, w2b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "w2"); }
     if (ok) { ok = mlx_add(out, h, d, s) == 0; CHK(ok, "residual"); }

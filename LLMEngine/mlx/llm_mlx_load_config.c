@@ -224,6 +224,19 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
             else if (strcmp(lt->valuestring, "full_attention") == 0) cfg->is_sliding_layer[i] = false;
             else { fprintf(stderr, "load_config: layer_types[%d]=\"%s\" non riconosciuto\n", i, lt->valuestring); cJSON_Delete(j); free(cfg->is_sliding_layer); cfg->is_sliding_layer = NULL; return false; }
         }
+    } else if (strcmp(cfg->model_type, "lfm2") == 0) {
+        /* LFM2 (Liquid): ibrido. Layer a ShortConv (is_linear_layer=true) alternati a layer a
+         * piena attenzione (indici in full_attn_idxs). conv_L_cache = kernel del conv1d. */
+        cfg->is_linear_layer = (bool*)calloc((size_t)cfg->n_layers, sizeof(bool));
+        if (cfg->is_linear_layer) for (int i = 0; i < cfg->n_layers; i++) cfg->is_linear_layer[i] = true;
+        cJSON* fa = cJSON_GetObjectItemCaseSensitive(src, "full_attn_idxs");
+        if (cJSON_IsArray(fa) && cfg->is_linear_layer)
+            for (int k = 0; k < cJSON_GetArraySize(fa); k++) {
+                cJSON* it = cJSON_GetArrayItem(fa, k);
+                if (cJSON_IsNumber(it)) { int li = (int)it->valuedouble; if (li >= 0 && li < cfg->n_layers) cfg->is_linear_layer[li] = false; }
+            }
+        OPT_INT(linear_conv_kernel_dim, "conv_L_cache");
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");
     } else if (strcmp(cfg->model_type, "glm4_moe") == 0) {
         /* GLM-4.5-Air (glm4_moe): MoE con esperti condivisi, primi layer densi,
          * attenzione con bias + partial rotary 0.5, router BF16 piatto + sigmoid. */
