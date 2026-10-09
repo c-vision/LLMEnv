@@ -383,6 +383,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_mamba.c
     llm_mlx_mamba2.c
     llm_mlx_falcon_h1.c
+    llm_mlx_jamba.c
     llm_mlx_load_config.c
     llm_mlx_imatrix.c
     llm_mlx_model_lifecycle.c

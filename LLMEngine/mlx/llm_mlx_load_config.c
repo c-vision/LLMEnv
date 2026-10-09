@@ -274,6 +274,17 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
           float lmh=cJSON_IsNumber(a)?(float)a->valuedouble:0.0f;
           float emb=cJSON_IsNumber(b)?(float)b->valuedouble:1.0f;
           cfg->falcon_h1_out_scale = (lmh > 0.0f && emb != 0.0f) ? lmh/emb : 0.0f; }
+    } else if (strcmp(cfg->model_type, "jamba") == 0) {
+        /* Jamba ibrido: attn (num_attention_heads/key_value_heads, head_dim derivato) +
+         * mamba S6 (d_state/d_conv/dt_rank) + dispatch layer via attn_layer_period/offset. */
+        OPT_INT(n_kv_heads, "num_key_value_heads");
+        OPT_INT(mamba_state_size, "mamba_d_state");
+        OPT_INT(linear_conv_kernel_dim, "mamba_d_conv");
+        OPT_INT(mamba_dt_rank, "mamba_dt_rank");
+        OPT_INT(attn_layer_period, "attn_layer_period");
+        OPT_INT(attn_layer_offset, "attn_layer_offset");
+        OPT_FLOAT(rms_norm_eps, "rms_norm_eps", 1e-6f);
+        cfg->tie_word_embeddings = true;
     } else if (strcmp(cfg->model_type, "mamba2") == 0) {
         /* Mamba2 (SSD): num_heads/head_dim/n_groups/state_size/conv_kernel/time_step_limit. */
         OPT_INT(n_heads, "num_heads");

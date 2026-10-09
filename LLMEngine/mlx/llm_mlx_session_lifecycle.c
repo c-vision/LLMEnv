@@ -168,7 +168,7 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
          * non `norm` (mlx_lm/lfm2.py: model.embedding_norm). */
         if (strcmp(m->cfg.model_type, "lfm2") == 0)
             snprintf(norm_name, sizeof(norm_name), "%sembedding_norm.weight", prefix);
-        else if (strcmp(m->cfg.model_type, "falcon_h1") == 0)
+        else if (strcmp(m->cfg.model_type, "falcon_h1") == 0 || strcmp(m->cfg.model_type, "jamba") == 0)
             snprintf(norm_name, sizeof(norm_name), "%sfinal_layernorm.weight", prefix);
         else
             snprintf(norm_name, sizeof(norm_name), "%snorm.weight", prefix);
