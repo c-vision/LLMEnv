@@ -1536,13 +1536,27 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
         return ok;
     }
     if (mode != NULL && strcmp(mode, "none") == 0) {
-        return plain_linear(res, x, w, stream);
+        if (!plain_linear(res, x, w, stream)) return false;
+        if (biases.ctx != NULL && mlx_array_size(biases) > 0) {
+            mlx_array yb = mlx_array_new();
+            if (mlx_add(&yb, *res, biases, stream) != 0) { mlx_array_free(yb); return false; }
+            mlx_array_set(res, yb); mlx_array_free(yb);
+        }
+        return true;
     }
     /* Tensore NON quantizzato (scales assente, es. lm_head/embed bf16 plain di
      * gpt-oss-120b-mxfp4-bf16): instrada a plain_linear a prescindere dal quant_mode
      * di config (altrimenti mlx_quantized_matmul con scales vuote fallirebbe). */
     if (scales.ctx == NULL || mlx_array_size(scales) == 0) {
-        return plain_linear(res, x, w, stream);
+        if (!plain_linear(res, x, w, stream)) return false;
+        /* Un bias puo' esistere anche su un peso NON quantizzato (es. Mamba dt_proj
+         * bias=True, scales assenti): il path plain di plain_linear NON lo applica. */
+        if (biases.ctx != NULL && mlx_array_size(biases) > 0) {
+            mlx_array yb = mlx_array_new();
+            if (mlx_add(&yb, *res, biases, stream) != 0) { mlx_array_free(yb); return false; }
+            mlx_array_set(res, yb); mlx_array_free(yb);
+        }
+        return true;
     }
     /* §quant per-tensore (Qwen3.6-35B-A3B, GPT-OSS): derive group/bits/mode dalle
      * shape (es. GPT-OSS: attention/embed/lm_head affine 64/8, SOLO gli esperti

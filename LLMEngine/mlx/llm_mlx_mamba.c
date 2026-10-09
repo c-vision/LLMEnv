@@ -25,6 +25,7 @@ bool mamba_ffn_identity(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
     return mlx_array_set(out, h) == 0;
 }
 
+
 bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                         mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h) {
     (void)cache_offset;
@@ -67,6 +68,9 @@ bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, 
      * ha (d_inner, 1, K) -> trasponi a (d_inner, K, 1) (mlx_lm lo fa in sanitize()). */
     { mlx_array cwt = mlx_array_new(); int ax[3] = {0, 2, 1};
       if (mlx_transpose_axes(&cwt, cw, ax, 3, s) == 0) { mlx_array_free(cw); cw = cwt; } else mlx_array_free(cwt); }
+    mlx_array cb = mlx_array_new();
+    tname(m->cfg.layer_prefix, layer_idx, "mixer.conv1d.bias", nb, sizeof(nb));
+    ok = ok && multishard_get(&m->weights, nb, &cb);
     mlx_array cstate = mlx_array_new();
     if (ok) {
         if (has_cache && mlx_array_size(*v_cache) > 0) mlx_array_set(&cstate, *v_cache);
@@ -80,6 +84,7 @@ bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, 
     mlx_array cout = mlx_array_new();
     if (ok) { int str[1]={1}, pl[1]={0}, ph[1]={0}, kd[1]={1}, id[1]={1};
         ok = mlx_conv_general(&cout, cf, cw, str,1,pl,1,ph,1,kd,1,id,1, Inner, false, s) == 0; CHK(ok, "conv1d"); }
+    if (ok) { mlx_array c2 = mlx_array_new(); ok = mlx_add(&c2, cout, cb, s) == 0; if (ok) mlx_array_set(&cout, c2); mlx_array_free(c2); CHK(ok, "conv+bias"); }
     mlx_array xc = mlx_array_new();
     if (ok) { mlx_array sig = mlx_array_new(); ok = mlx_sigmoid(&sig, cout, s) == 0 && mlx_multiply(&xc, cout, sig, s) == 0; mlx_array_free(sig); CHK(ok, "silu"); }
 
@@ -167,7 +172,7 @@ bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, 
 
     mlx_array_free(nw); mlx_array_free(h); mlx_array_free(ipw); mlx_array_free(ips); mlx_array_free(ipb);
     mlx_array_free(xz); mlx_array_free(xq); mlx_array_free(zz); mlx_array_free(cw); mlx_array_free(cstate);
-    mlx_array_free(cf); mlx_array_free(cout); mlx_array_free(xc);
+    mlx_array_free(cf); mlx_array_free(cout); mlx_array_free(xc); mlx_array_free(cb);
     mlx_array_free(xpw); mlx_array_free(xps); mlx_array_free(xpb); mlx_array_free(dtw); mlx_array_free(dtsc); mlx_array_free(dtb);
     mlx_array_free(Alog); mlx_array_free(Aneg); mlx_array_free(Dv); mlx_array_free(state); mlx_array_free(ystack);
     mlx_array_free(ow); mlx_array_free(ows); mlx_array_free(ob); mlx_array_free(sw); mlx_array_free(oo);
