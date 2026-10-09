@@ -158,7 +158,10 @@ int llmcodec_gguf_write(const char* path, const LlmCodecGgufMetaKV* kv, int n_kv
         const uint64_t data_start = (uint64_t)ftell(f);
         for (int i = 0; i < n_ts && rc == 0; i++) {
             uint64_t written = (uint64_t)ftell(f) - data_start;
-            while (written < ts[i]._offset && rc == 0) { char z = 0; rc |= wr(f, &z, 1); written++; }
+            /* Padding d'allineamento a BLOCCO (era byte-per-byte: un `fwrite` per byte -> su offset
+             * grandi diventava un loop lunghissimo, hang apparente). */
+            if (written < ts[i]._offset) { static const char zb[256] = {0}; uint64_t pad = ts[i]._offset - written;
+                while (pad > 0 && rc == 0) { size_t w = (size_t)(pad < sizeof zb ? pad : sizeof zb); rc |= wr(f, zb, w); pad -= (uint64_t)w; } }
             uint64_t b = ts_bytes(&ts[i]);
             if (getenv("LLMCODEC_GGUF_DEBUG")) fprintf(stderr, "[wr] i=%d name=%s type=%d b=%llu off=%llu pos=%lld\n", i, ts[i].name, ts[i].ggml_type, (unsigned long long)b, (unsigned long long)ts[i]._offset, (long)ftell(f));
             if (!ts[i].data || fwrite(ts[i].data, 1, (size_t)b, f) != (size_t)b) { if (getenv("LLMCODEC_GGUF_DEBUG")) fprintf(stderr, "[wr] FWRITE FAIL i=%d data=%p\n", i, (void*)ts[i].data); rc = -1; }
