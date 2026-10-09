@@ -69,6 +69,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "lfm2",      lfm2_attention_dispatch,   lfm2_ffn_block }, /* LFM2 (Liquid): ibrido GQA(+q/k-layerNorm) / ShortConv */
     { "mamba",      mamba_block,              mamba_ffn_identity }, /* Mamba (SSM selettivo): mixer in slot attn, ffn identita */
     { "falcon_mamba", mamba_block,              mamba_ffn_identity }, /* Falcon-Mamba: stesso blocco (+ mixer_norm, TBD) */
+    { "mamba2",     mamba2_block,             mamba2_ffn_identity }, /* Mamba2 (SSD): in_proj+conv+scan SSD */
     { "olmo3",     olmo3_attention_block,     olmo3_ffn_block }, /* OLMo-3 (AllenAI): dense GQA + q/k-norm flat + POST-norm */
     { "mistral3",  llama_attention_block,     dense_swiglu_ffn }, /* Ministral-3-14B: Mistral denso (GQA + SwiGLU) */
     /* DeepSeek V4.1: forward whole-model (mHC + CSA2 + Engram) con cache 7 slot; attn/ffn NULL,

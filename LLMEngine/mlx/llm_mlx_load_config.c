@@ -254,6 +254,17 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(moe_intermediate_size, "intermediate_size");   /* d_inner (2*d_model) */
         cfg->tie_word_embeddings = true;                       /* nessun lm_head */
         if (strcmp(cfg->model_type, "falcon_mamba") == 0) cfg->mamba_bcdt_rms = 1; /* mlx_lm: falcon_mamba -> use_bcdt_rms=True */
+    } else if (strcmp(cfg->model_type, "mamba2") == 0) {
+        /* Mamba2 (SSD): num_heads/head_dim/n_groups/state_size/conv_kernel/time_step_limit. */
+        OPT_INT(n_heads, "num_heads");
+        OPT_INT(head_dim, "head_dim");
+        OPT_INT(n_group, "n_groups");
+        OPT_INT(mamba_state_size, "state_size");
+        OPT_INT(linear_conv_kernel_dim, "conv_kernel");
+        OPT_FLOAT(rms_norm_eps, "layer_norm_epsilon", 1e-5f);
+        cfg->mamba_ts_lo = 0.0f; cfg->mamba_ts_hi = 1e30f;   /* time_step_limit [0, inf] */
+        cfg->tie_word_embeddings = true;
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "backbone.layers.");
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "backbone.layers.");
     } else if (strcmp(cfg->model_type, "glm4_moe") == 0) {
         /* GLM-4.5-Air (glm4_moe): MoE con esperti condivisi, primi layer densi,
@@ -552,7 +563,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     /* LFM2/Mamba non dichiarano la chiave e sono SEMPRE legati (nessun lm_head): default true. */
     cfg->tie_word_embeddings = cJSON_IsBool(tie) ? cJSON_IsTrue(tie)
         : (strcmp(cfg->model_type, "lfm2") == 0 || strcmp(cfg->model_type, "mamba") == 0
-           || strcmp(cfg->model_type, "falcon_mamba") == 0);
+           || strcmp(cfg->model_type, "falcon_mamba") == 0 || strcmp(cfg->model_type, "mamba2") == 0);
 
     /* FASE 1b.2 (Llama 3.x): rope_scaling.rope_type == "llama3" -- letto dalla radice
      * (mai annidato per questa famiglia), assente/altro valore per ogni altra architettura
@@ -679,7 +690,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
      * (come gemma4). L'override QUI, DOPO il default (che altrimenti lo sovrascriverebbe). */
     llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");
     /* Mamba (HF/MLX): i layer vivono sotto "backbone.layers.". */
-    if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0)
+    if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0
+        || strcmp(cfg->model_type, "mamba2") == 0)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "backbone.layers.");
     if (strcmp(cfg->model_type, "qwen3_5") == 0 || strcmp(cfg->model_type, "qwen3_5_moe") == 0
         || strcmp(cfg->model_type, "qwen4_exp") == 0)
