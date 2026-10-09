@@ -33,13 +33,25 @@ static int llmcodec_ggml_type_of(const char* dt) {
     if (strcmp(dt, "I16") == 0) return 25;
     if (strcmp(dt, "I8") == 0)  return 24;
     if (strcmp(dt, "U8") == 0)  return 24;
+    if (strcmp(dt, "I64") == 0) return 27;   /* GGML_TYPE_I64: tabelle PLE (offsets/vocab_sizes/…) */
     return -1;
 }
 static int llmcodec_dtype_size(const char* dt) {
     if (strcmp(dt, "F32") == 0 || strcmp(dt, "I32") == 0) return 4;
-    if (strcmp(dt, "F64") == 0) return 8;
+    if (strcmp(dt, "F64") == 0 || strcmp(dt, "I64") == 0) return 8;
     if (strcmp(dt, "I16") == 0 || strcmp(dt, "F16") == 0 || strcmp(dt, "BF16") == 0) return 2;
     return 1;
+}
+
+/* AUX GLOBALE (multi-shard): nome tensore ausiliario (`.scales`/`.biases`) -> shard + range.
+ * In un modello SHARDATO il `.weight` e i suoi aux possono stare in shard DIVERSI (qwen3.8: i
+ * `.weight`+`.scales` in `…-0011`, i `.biases` in `…-0012`): l'aux-find non puo' limitarsi allo
+ * shard corrente. Costruita UNA volta prima del ciclo shard (solo header, cheap). */
+typedef struct { char name[300]; char shard[1500]; uint64_t begin, end; } LlmCodecAuxLoc;
+static LlmCodecAuxLoc* g_auxloc = NULL; static int g_nauxloc = 0;
+static const LlmCodecAuxLoc* llmcodec_auxloc_find(const char* nm) {
+    for (int i = 0; i < g_nauxloc; ++i) if (strcmp(g_auxloc[i].name, nm) == 0) return &g_auxloc[i];
+    return NULL;
 }
 
 int llmcodec_conv_ggml_to_mlx(int ggml_type, const void* src, uint32_t rows, uint32_t cols,
@@ -88,6 +100,16 @@ int llmcodec_conv_mlx_to_ggml(const uint32_t* w, const uint16_t* sc, const uint1
 
 /* Decodifica una sorgente nel suo formato dichiarato (dal registry) -> f32 [E,rows,cols].
  * Nessun elenco di codec cablato: family(aux_kind/shape_of/sizes/decode) guida tutto. */
+/* Byte di un tensore ausiliario (`.scales`/`.biases`): prima nello shard corrente (`ti`/`sp`),
+ * poi nella MAPPA GLOBALE (aux in uno shard DIVERSO dal `.weight`). Ritorna malloc'd o NULL. */
+static uint8_t* llmcodec_aux_bytes(const char* sp, uint64_t base, LlmCodecStTensorInfo* ti, int n,
+                                   const char* nm, size_t* outlen) {
+    for (int k = 0; k < n; ++k) if (strcmp(ti[k].name, nm) == 0) { *outlen = (size_t)(ti[k].end - ti[k].begin); return llmcodec_slurp_range(sp, base + ti[k].begin, *outlen); }
+    const LlmCodecAuxLoc* al = llmcodec_auxloc_find(nm);
+    if (al) { *outlen = (size_t)(al->end - al->begin); return llmcodec_slurp_range(al->shard, al->begin, *outlen); }
+    *outlen = 0; return NULL;
+}
+
 static int llmcodec_decode_src(const char* sp, uint64_t base, const uint8_t* raw, uint64_t rawlen, LlmCodecStTensorInfo* ti, int n, LlmCodecStTensorInfo* t,
                           const LlmCodecWeightSource* ws, const LlmCodecRoleMap* rm, uint32_t dg, uint32_t db,
                           float** f_out, size_t* rows_out, size_t* cols_out, int* e_out) {
@@ -111,25 +133,22 @@ static int llmcodec_decode_src(const char* sp, uint64_t base, const uint8_t* raw
         if (sc->aux_kind == LLMCODEC_CODEC_AUX_SCALE) {
             const char* su=(ws&&ws->scale_suffix[0])?ws->scale_suffix:(rm&&rm->scale_suffix[0]?rm->scale_suffix:".scale");
             char scn[300]; snprintf(scn,sizeof scn,"%s%s",bname,su);
-            for (int k=0;k<n;k++) if(strcmp(ti[k].name,scn)==0){ auxlen=(size_t)(ti[k].end-ti[k].begin); aux=llmcodec_slurp_range(sp,base+ti[k].begin,auxlen); break; }
+            aux = llmcodec_aux_bytes(sp,base,ti,n,scn,&auxlen);
             /* 2o livello opzionale (NVFP4 OCP/NVIDIA): global f32 in coda */
             if (aux && ws && ws->global_suffix[0]) {
                 char gsn[300]; snprintf(gsn,sizeof gsn,"%s%s",bname,ws->global_suffix);
-                for (int k=0;k<n;k++) if(strcmp(ti[k].name,gsn)==0){
-                    uint8_t* g=(uint8_t*)llmcodec_slurp_range(sp,base+ti[k].begin,ti[k].end-ti[k].begin);
-                    if (g) { float gv=0.0f; memcpy(&gv,g,4); free(g);
-                             uint8_t* na=(uint8_t*)realloc(aux,auxlen+4); if(na){ memcpy(na+auxlen,&gv,4); aux=na; auxlen+=4; } }
-                    break; }
+                size_t gl=0; uint8_t* g=llmcodec_aux_bytes(sp,base,ti,n,gsn,&gl);
+                if (g) { float gv=0.0f; memcpy(&gv,g,4); free(g);
+                         uint8_t* na=(uint8_t*)realloc(aux,auxlen+4); if(na){ memcpy(na+auxlen,&gv,4); aux=na; auxlen+=4; } }
             }
         } else {
             const char* su=(ws&&ws->scale_suffix[0])?ws->scale_suffix:(rm&&rm->scale_suffix[0]?rm->scale_suffix:".scales");
             const char* bu=(ws&&ws->bias_suffix[0])?ws->bias_suffix:(rm&&rm->bias_suffix[0]?rm->bias_suffix:".biases");
             char scn[300],bsn[300]; snprintf(scn,sizeof scn,"%s%s",bname,su); snprintf(bsn,sizeof bsn,"%s%s",bname,bu);
-            int si=-1,bi=-1; for(int k=0;k<n;k++){ if(strcmp(ti[k].name,scn)==0)si=k; if(strcmp(ti[k].name,bsn)==0)bi=k; }
-            if (si>=0 && bi>=0) {
-                size_t s1=(size_t)(ti[si].end-ti[si].begin), s2=(size_t)(ti[bi].end-ti[bi].begin);
-                uint8_t* p1r=llmcodec_slurp_range(sp,base+ti[si].begin,s1); uint8_t* p2r=llmcodec_slurp_range(sp,base+ti[bi].begin,s2);
-                if (p1r && p2r) {
+            size_t s1=0, s2=0;   /* scales/biases possono stare in SHARD diversi (mappa globale) */
+            uint8_t* p1r=llmcodec_aux_bytes(sp,base,ti,n,scn,&s1); uint8_t* p2r=llmcodec_aux_bytes(sp,base,ti,n,bsn,&s2);
+            if (p1r && p2r) {
+                {
                     /* interleave PER-SLAB: scales[e] ++ biases[e] (l'aux e' per-esperto).
                      * I byte PER ESPERTO si ricavano dal numero di esperti E, non da `ab/2`:
                      * per i tensori esperti 3D `ab` non e' 2*scb e la vecchia formula produceva
@@ -235,6 +254,25 @@ int llmcodec_mlx_to_gguf_ex(const char* mlx_dir, const char* out_path, int ggml_
     if (group == 0) group = 32; if (bits == 0) bits = 4;
     char shard[64][256]; int nsh = llmcodec_list_shards(mlx_dir, shard, 64);
     if (nsh <= 0) return -1;
+    /* MAPPA AUX GLOBALE (tutti gli shard): `.scales`/`.biases` possono stare in uno shard DIVERSO
+     * dal `.weight` (qwen3.8: `.weight`+`.scales` in …-0011, `.biases` in …-0012). Solo header. */
+    free(g_auxloc); g_auxloc = NULL; g_nauxloc = 0;
+    for (int sh0 = 0; sh0 < nsh; ++sh0) {
+        char asp[1500]; snprintf(asp, sizeof asp, "%s/%s", mlx_dir, shard[sh0]);
+        LlmCodecStTensorInfo* at = NULL; int an = 0; uint64_t abase = 0;
+        if (llmcodec_safetensors_read(asp, &at, &an, &abase) != 0) continue;
+        for (int i = 0; i < an; ++i) {
+            const char* nm = at[i].name; size_t l = strlen(nm);
+            if (!((l > 7 && strcmp(nm + l - 7, ".scales") == 0) || (l > 7 && strcmp(nm + l - 7, ".biases") == 0))) continue;
+            LlmCodecAuxLoc* na = (LlmCodecAuxLoc*)realloc(g_auxloc, (size_t)(g_nauxloc + 1) * sizeof(LlmCodecAuxLoc));
+            if (na == NULL) break; g_auxloc = na;
+            snprintf(g_auxloc[g_nauxloc].name, sizeof g_auxloc[g_nauxloc].name, "%s", nm);
+            snprintf(g_auxloc[g_nauxloc].shard, sizeof g_auxloc[g_nauxloc].shard, "%s", asp);
+            g_auxloc[g_nauxloc].begin = abase + at[i].begin; g_auxloc[g_nauxloc].end = abase + at[i].end;
+            g_nauxloc++;
+        }
+        llmcodec_safetensors_info_free(at);
+    }
     LlmCodecQuantCfg qcfg; { char cjp[1200]; snprintf(cjp, sizeof cjp, "%s/config.json", mlx_dir);
                         { int sup=0; const char* qm=llmcodec_quant_method(cjp,&sup);
                           if (qm && !sup) { int known=0; const char* ku[]={"bitsandbytes","hqq","aqlm","vptq","spqr","higgs","quanto","torchao","fbgemm","sinq","autoround","quark","foursoversix","fp-quant",NULL};
