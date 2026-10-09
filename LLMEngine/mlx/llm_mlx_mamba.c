@@ -136,6 +136,20 @@ bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, 
             ok = mlx_split_sections(&v, dbc, sec, 2, -1, s) == 0;
             if (ok) ok = mlx_vector_array_get(&dlt,v,0)==0 && mlx_vector_array_get(&Bv,v,1)==0 && mlx_vector_array_get(&Cv,v,2)==0;
             mlx_vector_array_free(v); }
+        /* falcon_mamba (use_bcdt_rms): mixer_norm = RMSNorm(ones, eps=1e-6) su delta/B/C
+         * (mlx_lm/models/mamba.py: __post_init__ setta use_bcdt_rms per falcon_mamba). */
+        if (m->cfg.mamba_bcdt_rms && ok) {
+            /* mixing RMSNorm weightless: v / sqrt(mean(v^2)+1e-6) (dims [1,D] -> mean su tutta la riga). */
+            mlx_array* tv[3] = { &dlt, &Bv, &Cv };
+            for (int q=0; q<3 && ok; q++) {
+                mlx_array sq=mlx_array_new(), mn=mlx_array_new(), ep=mlx_array_new(), mx=mlx_array_new(), rs=mlx_array_new(), out=mlx_array_new();
+                mlx_array eps=mlx_array_new_float32(1e-6f);
+                ok = mlx_square(&sq,*tv[q],s)==0 && mlx_mean(&mn,sq,true,s)==0 && mlx_add(&mx,mn,eps,s)==0 && mlx_rsqrt(&rs,mx,s)==0 && mlx_multiply(&out,*tv[q],rs,s)==0;
+                mlx_array_free(eps);
+                if (ok) mlx_array_set(tv[q], out);
+                mlx_array_free(sq); mlx_array_free(mn); mlx_array_free(ep); mlx_array_free(mx); mlx_array_free(rs); mlx_array_free(out);
+            }
+        }
         /* delta = softplus(dt_proj(dlt)) */
         mlx_array dlin = mlx_array_new();
         if (ok) ok = quantized_linear_cfg(&dlin, dlt, dtw, dtsc, dtb, gsz, bts, m->cfg.quant_mode, s);

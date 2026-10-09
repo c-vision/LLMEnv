@@ -253,6 +253,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(mamba_dt_rank, "time_step_rank");
         OPT_INT(moe_intermediate_size, "intermediate_size");   /* d_inner (2*d_model) */
         cfg->tie_word_embeddings = true;                       /* nessun lm_head */
+        if (strcmp(cfg->model_type, "falcon_mamba") == 0) cfg->mamba_bcdt_rms = 1; /* mlx_lm: falcon_mamba -> use_bcdt_rms=True */
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "backbone.layers.");
     } else if (strcmp(cfg->model_type, "glm4_moe") == 0) {
         /* GLM-4.5-Air (glm4_moe): MoE con esperti condivisi, primi layer densi,

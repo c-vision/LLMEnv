@@ -151,6 +151,7 @@ typedef struct {
     int linear_value_head_dim;        /* linear_value_head_dim (es. 128) */
     int linear_conv_kernel_dim;       /* linear_conv_kernel_dim (es. 4) */
     int mamba_state_size;             /* Mamba: d_state (es. 16) */
+    int mamba_bcdt_rms;               /* falcon_mamba: mixer_norm RMSNorm su delta/B/C */
     int mamba_dt_rank;                /* Mamba: dt_rank = ceil(d_model/16) */
     /* is_linear_layer[i]=true se layer i e' linear_attn (GDN), false se full_attention. */
     bool* is_linear_layer;
