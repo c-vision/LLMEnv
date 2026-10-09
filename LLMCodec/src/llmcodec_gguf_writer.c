@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -83,8 +84,14 @@ static void* llmcodec_wr_worker(void* arg) {
         const uint8_t* d = (const uint8_t*)j->ts[i].data;
         uint64_t o = j->data_start + j->ts[i]._offset; uint64_t done = 0;
         while (done < b) {
-            ssize_t w = pwrite(j->fd, d + done, (size_t)(b - done), (off_t)(o + done));
-            if (w <= 0) { atomic_store(j->bad, 1); break; }
+            /* Un singolo pwrite NON puo' eccedere ~2 GB su macOS (EINVAL) ne' SSIZE_MAX: i tensori
+             * grandi (embedding/LM-head, >2 GB) fallivano l'INTERA scrittura. Chunk a 1 GiB. */
+            size_t want = (size_t)(b - done);
+            if (want > ((size_t)1 << 30)) want = ((size_t)1 << 30);
+            ssize_t w = pwrite(j->fd, d + done, want, (off_t)(o + done));
+            if (w <= 0) { fprintf(stderr, "[gguf-wr] pwrite fallita: tensor=%s off=%llu len=%zu errno=%d (%s)\n",
+                                  j->ts[i].name ? j->ts[i].name : "?", (unsigned long long)(o + done), want, errno, strerror(errno));
+                          atomic_store(j->bad, 1); break; }
             done += (uint64_t)w;
         }
     }
