@@ -120,8 +120,11 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
 
     REQ_INT(hidden_size, "hidden_size");
     REQ_INT(n_layers, "num_hidden_layers");
-    REQ_INT(n_heads, "num_attention_heads");
-    REQ_INT(n_kv_heads, "num_key_value_heads");
+    /* num_attention_heads/num_key_value_heads sono OPZIONALI: le arch senza attenzione
+     * (es. mamba, SSM) non le dichiarano. Se mancano e head_dim e' assente -> head_dim=0
+     * (non usato dai blocchi SSM); le arch con attenzione le forniscono sempre. */
+    OPT_INT(n_heads, "num_attention_heads");
+    OPT_INT(n_kv_heads, "num_key_value_heads");
     /* FASE 1b (Qwen2): head_dim assente nel config.json reale (verificato su
      * DeepSeek-R1-Distill-Qwen-32B-MLX-8Bit, model_type "qwen2") -- mlx_lm lo
      * deriva come hidden_size/num_attention_heads quando la chiave manca
@@ -132,7 +135,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cJSON* hd = cJSON_GetObjectItemCaseSensitive(src, "head_dim");
         if (cJSON_IsNumber(hd)) cfg->head_dim = (int)hd->valuedouble;
         else if (cfg->n_heads > 0) cfg->head_dim = cfg->hidden_size / cfg->n_heads;
-        else { fprintf(stderr, "load_config: head_dim assente e num_attention_heads invalido\n"); cJSON_Delete(j); return false; }
+        else cfg->head_dim = 0;   /* arch senza attenzione (mamba): head_dim non usato */
     }
     OPT_INT(n_experts, "num_experts");
     /* FASE 1b.3 (Mixtral): la stessa cosa si chiama "num_local_experts" invece di
@@ -543,8 +546,10 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     if (strcmp(cfg->model_type, "kimi_linear") == 0 && !cJSON_IsBool(norm_topk))
         cfg->norm_topk_prob = cfg->moe_renormalize;
     cJSON* tie = cJSON_GetObjectItemCaseSensitive(j, "tie_word_embeddings");
-    /* LFM2 non dichiara la chiave ed e' SEMPRE legato (nessun lm_head): default true. */
-    cfg->tie_word_embeddings = cJSON_IsBool(tie) ? cJSON_IsTrue(tie) : (strcmp(cfg->model_type, "lfm2") == 0);
+    /* LFM2/Mamba non dichiarano la chiave e sono SEMPRE legati (nessun lm_head): default true. */
+    cfg->tie_word_embeddings = cJSON_IsBool(tie) ? cJSON_IsTrue(tie)
+        : (strcmp(cfg->model_type, "lfm2") == 0 || strcmp(cfg->model_type, "mamba") == 0
+           || strcmp(cfg->model_type, "falcon_mamba") == 0);
 
     /* FASE 1b.2 (Llama 3.x): rope_scaling.rope_type == "llama3" -- letto dalla radice
      * (mai annidato per questa famiglia), assente/altro valore per ogni altra architettura
@@ -670,6 +675,9 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
      * "layers." (niente "model."). Qwen3.8-27B (qwen3_5) usa "language_model.model.layers."
      * (come gemma4). L'override QUI, DOPO il default (che altrimenti lo sovrascriverebbe). */
     llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");
+    /* Mamba (HF/MLX): i layer vivono sotto "backbone.layers.". */
+    if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0)
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "backbone.layers.");
     if (strcmp(cfg->model_type, "qwen3_5") == 0 || strcmp(cfg->model_type, "qwen3_5_moe") == 0
         || strcmp(cfg->model_type, "qwen4_exp") == 0)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "language_model.model.layers.");

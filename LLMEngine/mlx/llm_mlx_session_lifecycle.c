@@ -157,13 +157,20 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
                           || strcmp(m->cfg.model_type, "qwen4_exp") == 0
                           || strcmp(m->cfg.model_type, "prism_hadamard_qwen35") == 0) ? "language_model.model." : "model.";
     char embed_name[128], norm_name[128];
-    snprintf(embed_name, sizeof(embed_name), "%sembed_tokens", prefix);
-    /* LFM2: la RMSNorm finale del modello e' `embedding_norm` (verificato sul checkpoint reale),
-     * non `norm` (mlx_lm/lfm2.py: model.embedding_norm). */
-    if (strcmp(m->cfg.model_type, "lfm2") == 0)
-        snprintf(norm_name, sizeof(norm_name), "%sembedding_norm.weight", prefix);
-    else
-        snprintf(norm_name, sizeof(norm_name), "%snorm.weight", prefix);
+    if (strcmp(m->cfg.model_type, "mamba") == 0 || strcmp(m->cfg.model_type, "falcon_mamba") == 0) {
+        /* Mamba (HF/MLX): embed = backbone.embeddings, norm finale = backbone.norm_f
+         * (verificato sul checkpoint mlx-community/mamba-130m-hf-f32). lm_head assente (tied). */
+        snprintf(embed_name, sizeof(embed_name), "backbone.embeddings");
+        snprintf(norm_name, sizeof(norm_name), "backbone.norm_f.weight");
+    } else {
+        snprintf(embed_name, sizeof(embed_name), "%sembed_tokens", prefix);
+        /* LFM2: la RMSNorm finale del modello e' `embedding_norm` (verificato sul checkpoint reale),
+         * non `norm` (mlx_lm/lfm2.py: model.embedding_norm). */
+        if (strcmp(m->cfg.model_type, "lfm2") == 0)
+            snprintf(norm_name, sizeof(norm_name), "%sembedding_norm.weight", prefix);
+        else
+            snprintf(norm_name, sizeof(norm_name), "%snorm.weight", prefix);
+    }
 
     t->embed_w = mlx_array_new(); t->embed_s = mlx_array_new(); t->embed_b = mlx_array_new();
     bool ok = multishard_get_triple(&m->weights, embed_name, &t->embed_w, &t->embed_s, &t->embed_b);
