@@ -241,6 +241,14 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         /* LFM2 non ha lm_head: embedding legato (output = embed). */
         cfg->tie_word_embeddings = true;
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");
+    } else if (strcmp(cfg->model_type, "mamba") == 0) {
+        /* Mamba (state-spaces, HF-converted): SSM selettivo. */
+        OPT_INT(mamba_state_size, "state_size");
+        OPT_INT(linear_conv_kernel_dim, "conv_kernel");
+        OPT_INT(mamba_dt_rank, "time_step_rank");
+        OPT_INT(moe_intermediate_size, "intermediate_size");   /* d_inner (2*d_model) */
+        cfg->tie_word_embeddings = true;                       /* nessun lm_head */
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "backbone.layers.");
     } else if (strcmp(cfg->model_type, "glm4_moe") == 0) {
         /* GLM-4.5-Air (glm4_moe): MoE con esperti condivisi, primi layer densi,
          * attenzione con bias + partial rotary 0.5, router BF16 piatto + sigmoid. */

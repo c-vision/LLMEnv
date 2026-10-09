@@ -150,6 +150,8 @@ typedef struct {
     int linear_key_head_dim;          /* linear_key_head_dim (es. 128) */
     int linear_value_head_dim;        /* linear_value_head_dim (es. 128) */
     int linear_conv_kernel_dim;       /* linear_conv_kernel_dim (es. 4) */
+    int mamba_state_size;             /* Mamba: d_state (es. 16) */
+    int mamba_dt_rank;                /* Mamba: dt_rank = ceil(d_model/16) */
     /* is_linear_layer[i]=true se layer i e' linear_attn (GDN), false se full_attention. */
     bool* is_linear_layer;
     /* FASE 1b.5 (Qwen3.8 / qwen3_5 hybrid GDN): i layer full usano Qwen3NextAttention
@@ -1250,6 +1252,10 @@ bool lfm2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, ml
 bool olmo3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                   mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool olmo3_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+/* Mamba (SSM selettivo): layer ricorrente; ffn = identita'. */
+bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                        mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool mamba_ffn_identity(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 /* Definiti nel monolite, usati dal dominio Llama. */
 bool llm_mlx_fuse_rope_enabled(void);
 bool llm_mlx_fuse_rope_verify_enabled(void);
