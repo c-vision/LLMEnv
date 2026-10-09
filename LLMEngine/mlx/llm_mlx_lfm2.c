@@ -52,7 +52,7 @@ bool lfm2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
     ok = ok && multishard_get_triple(&m->weights, namebuf, &kw, &ksc, &kb);
     tname(m->cfg.layer_prefix, layer_idx, "self_attn.v_proj", namebuf, sizeof(namebuf));
     ok = ok && multishard_get_triple(&m->weights, namebuf, &vw, &vsc, &vb);
-    tname(m->cfg.layer_prefix, layer_idx, "self_attn.o_proj", namebuf, sizeof(namebuf));
+    tname(m->cfg.layer_prefix, layer_idx, "self_attn.out_proj", namebuf, sizeof(namebuf));  /* LFM2 usa out_proj (non o_proj) */
     ok = ok && multishard_get_triple(&m->weights, namebuf, &ow, &osc, &ob);
     CHK(ok, "q/k/v/o_proj lookup");
 
@@ -118,8 +118,9 @@ bool lfm2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
         ok = llm_mlx_gqa_sdpa(&attn, q_r, *k_cache, *v_cache, 1.0f / sqrtf((float)hd), 0, s);
         CHK(ok, "sdpa");
     }
-    mlx_array attn_flat = mlx_array_new();
-    if (ok) { const int p[2] = {1, 0}; ok = mlx_transpose_axes(&attn_flat, attn, p, 2, s) == 0; }
+    mlx_array attn_bld = mlx_array_new(), attn_flat = mlx_array_new();
+    if (ok) { const int p[4] = {0, 2, 1, 3}; ok = mlx_transpose_axes(&attn_bld, attn, p, 4, s) == 0; }
+    if (ok) { int r3[3] = {1, n_tokens, nh * hd}; ok = mlx_reshape(&attn_flat, attn_bld, r3, 3, s) == 0; CHK(ok, "reshape attn"); }
     mlx_array o_out = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&o_out, attn_flat, ow, osc, ob, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "o_proj"); }
 
@@ -134,7 +135,7 @@ bool lfm2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
     mlx_array_free(q_lin); mlx_array_free(k_lin); mlx_array_free(v_lin);
     mlx_array_free(q4); mlx_array_free(k4); mlx_array_free(v4);
     mlx_array_free(q_n); mlx_array_free(k_n); mlx_array_free(q_t); mlx_array_free(k_t); mlx_array_free(v_t);
-    mlx_array_free(q_r); mlx_array_free(k_r); mlx_array_free(attn); mlx_array_free(attn_flat); mlx_array_free(o_out);
+    mlx_array_free(q_r); mlx_array_free(k_r); mlx_array_free(attn); mlx_array_free(attn_bld); mlx_array_free(attn_flat); mlx_array_free(o_out);
     return ok;
 #undef CHK
 }

@@ -236,6 +236,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
                 if (cJSON_IsNumber(it)) { int li = (int)it->valuedouble; if (li >= 0 && li < cfg->n_layers) cfg->is_linear_layer[li] = false; }
             }
         OPT_INT(linear_conv_kernel_dim, "conv_L_cache");
+        /* LFM2 non ha lm_head: embedding legato (output = embed). */
+        cfg->tie_word_embeddings = true;
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");
     } else if (strcmp(cfg->model_type, "glm4_moe") == 0) {
         /* GLM-4.5-Air (glm4_moe): MoE con esperti condivisi, primi layer densi,
@@ -531,7 +533,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     if (strcmp(cfg->model_type, "kimi_linear") == 0 && !cJSON_IsBool(norm_topk))
         cfg->norm_topk_prob = cfg->moe_renormalize;
     cJSON* tie = cJSON_GetObjectItemCaseSensitive(j, "tie_word_embeddings");
-    cfg->tie_word_embeddings = cJSON_IsBool(tie) ? cJSON_IsTrue(tie) : false;
+    /* LFM2 non dichiara la chiave ed e' SEMPRE legato (nessun lm_head): default true. */
+    cfg->tie_word_embeddings = cJSON_IsBool(tie) ? cJSON_IsTrue(tie) : (strcmp(cfg->model_type, "lfm2") == 0);
 
     /* FASE 1b.2 (Llama 3.x): rope_scaling.rope_type == "llama3" -- letto dalla radice
      * (mai annidato per questa famiglia), assente/altro valore per ogni altra architettura
