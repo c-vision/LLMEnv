@@ -379,6 +379,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_qwen35_moe_ffn.c
     llm_mlx_qwen2_attn.c
     llm_mlx_lfm2.c
+    llm_mlx_olmo3.c
     llm_mlx_load_config.c
     llm_mlx_imatrix.c
     llm_mlx_model_lifecycle.c

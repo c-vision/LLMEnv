@@ -1246,6 +1246,10 @@ bool llama_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
 bool lfm2_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                     mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool lfm2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+/* OLMo-3 (AllenAI): dense, GQA + q/k RMSNorm FLAT, layer POST-NORM. */
+bool olmo3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                                  mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool olmo3_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 /* Definiti nel monolite, usati dal dominio Llama. */
 bool llm_mlx_fuse_rope_enabled(void);
 bool llm_mlx_fuse_rope_verify_enabled(void);
