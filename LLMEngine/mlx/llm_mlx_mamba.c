@@ -64,10 +64,13 @@ bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, 
     tname(m->cfg.layer_prefix, layer_idx, "mixer.conv1d.weight", nb, sizeof(nb));
     ok = ok && multishard_get(&m->weights, nb, &cw);
     { mlx_array c32 = mlx_array_new(); if (mlx_astype(&c32, cw, MLX_FLOAT32, s) == 0) { mlx_array_free(cw); cw = c32; } else mlx_array_free(c32); }
-    /* MLX conv e' channels-last: kernel atteso (out, K, in/groups). Il checkpoint HF/mlx
-     * ha (d_inner, 1, K) -> trasponi a (d_inner, K, 1) (mlx_lm lo fa in sanitize()). */
-    { mlx_array cwt = mlx_array_new(); int ax[3] = {0, 2, 1};
-      if (mlx_transpose_axes(&cwt, cw, ax, 3, s) == 0) { mlx_array_free(cw); cw = cwt; } else mlx_array_free(cwt); }
+    /* MLX conv e' channels-last: kernel atteso (out, K, in/groups). Due layout nei checkpoint:
+     *   - HF/mamba-130m: (d_inner, 1, K)     -> trasponi a (d_inner, K, 1);
+     *   - falcon-mamba:  gia' (d_inner, K, 1) -> nessuna trasposizione. */
+    if (mlx_array_ndim(cw) == 3 && mlx_array_shape(cw)[1] == 1) {
+        mlx_array cwt = mlx_array_new(); int ax[3] = {0, 2, 1};
+        if (mlx_transpose_axes(&cwt, cw, ax, 3, s) == 0) { mlx_array_free(cw); cw = cwt; } else mlx_array_free(cwt);
+    }
     mlx_array cb = mlx_array_new();
     tname(m->cfg.layer_prefix, layer_idx, "mixer.conv1d.bias", nb, sizeof(nb));
     ok = ok && multishard_get(&m->weights, nb, &cb);

@@ -246,8 +246,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         /* LFM2 non ha lm_head: embedding legato (output = embed). */
         cfg->tie_word_embeddings = true;
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");
-    } else if (strcmp(cfg->model_type, "mamba") == 0) {
-        /* Mamba (state-spaces, HF-converted): SSM selettivo. */
+    } else if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0) {
+        /* Mamba / Falcon-Mamba (mlx_lm rimappa falcon_mamba->mamba): SSM selettivo. */
         OPT_INT(mamba_state_size, "state_size");
         OPT_INT(linear_conv_kernel_dim, "conv_kernel");
         OPT_INT(mamba_dt_rank, "time_step_rank");
