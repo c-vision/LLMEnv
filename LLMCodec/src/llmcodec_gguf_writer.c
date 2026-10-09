@@ -16,6 +16,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* Tipi valore metadata GGUF. */
 #define LLMCODEC_GGUF_MT_U8     0
@@ -64,6 +67,28 @@ static uint64_t ts_bytes(const LlmCodecGgufTensor* t) {
 
 static int gguf_is_align_kv(const LlmCodecGgufMetaKV* k) {
     return k->key && strcmp(k->key, "general.alignment") == 0;
+}
+
+/* Scrittura dati PARALLELA e DIRETTA: ogni tensore e' indipendente (offeso distinto) -> pwrite
+ * concorrente su fd, niente pad byte-per-byte ne' copia finale. I gap d'allineamento restano
+ * zero via ftruncate. */
+typedef struct { int fd; LlmCodecGgufTensor* ts; int n; uint64_t data_start; atomic_int* idx; atomic_int* bad; } WrJob;
+static void* llmcodec_wr_worker(void* arg) {
+    WrJob* j = (WrJob*)arg;
+    for (;;) {
+        int i = atomic_fetch_add(j->idx, 1);
+        if (i >= j->n || atomic_load(j->bad)) break;
+        uint64_t b = ts_bytes(&j->ts[i]);
+        if (b == 0 || j->ts[i].data == NULL) continue;
+        const uint8_t* d = (const uint8_t*)j->ts[i].data;
+        uint64_t o = j->data_start + j->ts[i]._offset; uint64_t done = 0;
+        while (done < b) {
+            ssize_t w = pwrite(j->fd, d + done, (size_t)(b - done), (off_t)(o + done));
+            if (w <= 0) { atomic_store(j->bad, 1); break; }
+            done += (uint64_t)w;
+        }
+    }
+    return NULL;
 }
 
 int llmcodec_gguf_write(const char* path, const LlmCodecGgufMetaKV* kv, int n_kv,
@@ -153,18 +178,25 @@ int llmcodec_gguf_write(const char* path, const LlmCodecGgufMetaKV* kv, int n_kv
         uint64_t pad = align_up((uint64_t)pos, alignment) - (uint64_t)pos;
         for (uint64_t i = 0; i < pad && rc == 0; i++) { char z = 0; rc |= wr(f, &z, 1); }
     }
-    /* Data section: scrivi i tensori ai loro offset (padding nei gap d'allineamento). */
+    /* Data section: scrittura PARALLELA/DIRETTA (pwrite concorrente; i gap restano zero via
+     * ftruncate -> niente pad byte-per-byte ne' copia finale). */
     if (rc == 0) {
         const uint64_t data_start = (uint64_t)ftell(f);
-        for (int i = 0; i < n_ts && rc == 0; i++) {
-            uint64_t written = (uint64_t)ftell(f) - data_start;
-            /* Padding d'allineamento a BLOCCO (era byte-per-byte: un `fwrite` per byte -> su offset
-             * grandi diventava un loop lunghissimo, hang apparente). */
-            if (written < ts[i]._offset) { static const char zb[256] = {0}; uint64_t pad = ts[i]._offset - written;
-                while (pad > 0 && rc == 0) { size_t w = (size_t)(pad < sizeof zb ? pad : sizeof zb); rc |= wr(f, zb, w); pad -= (uint64_t)w; } }
-            uint64_t b = ts_bytes(&ts[i]);
-            if (getenv("LLMCODEC_GGUF_DEBUG")) fprintf(stderr, "[wr] i=%d name=%s type=%d b=%llu off=%llu pos=%lld\n", i, ts[i].name, ts[i].ggml_type, (unsigned long long)b, (unsigned long long)ts[i]._offset, (long)ftell(f));
-            if (!ts[i].data || fwrite(ts[i].data, 1, (size_t)b, f) != (size_t)b) { if (getenv("LLMCODEC_GGUF_DEBUG")) fprintf(stderr, "[wr] FWRITE FAIL i=%d data=%p\n", i, (void*)ts[i].data); rc = -1; }
+        uint64_t end = 0;
+        for (int i = 0; i < n_ts; i++) { uint64_t e = ts[i]._offset + ts_bytes(&ts[i]); if (e > end) end = e; }
+        if (fflush(f) != 0) rc = -1;
+        int fd = fileno(f);
+        if (rc == 0 && (fd < 0 || ftruncate(fd, (off_t)(data_start + end)) != 0)) rc = -1;
+        if (rc == 0) {
+            int nthreads = (int)sysconf(_SC_NPROCESSORS_ONLN); if (nthreads < 1) nthreads = 1; if (nthreads > 8) nthreads = 8;
+            atomic_int idx; atomic_init(&idx, 0);
+            atomic_int bad; atomic_init(&bad, 0);
+            WrJob job; job.fd = fd; job.ts = ts; job.n = n_ts; job.data_start = data_start; job.idx = &idx; job.bad = &bad;
+            pthread_t th[8]; int made = 0;
+            for (int t = 1; t < nthreads; t++) if (pthread_create(&th[made], NULL, llmcodec_wr_worker, &job) == 0) made++;
+            llmcodec_wr_worker(&job);
+            for (int t = 0; t < made; t++) pthread_join(th[t], NULL);
+            if (atomic_load(&bad)) rc = -1;
         }
     }
     fclose(f);
