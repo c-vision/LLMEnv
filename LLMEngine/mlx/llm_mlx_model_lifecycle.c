@@ -66,6 +66,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "joyai_llm_flash", deepseek_v2_attention_block, deepseek_v2_ffn_block }, /* = deepseek_v3 */
     { "kimi_linear", kimi_linear_attention_dispatch, kimi_linear_ffn_dispatch }, /* MLA assorbita + KDA */
     { "llama",     llama_attention_block,     dense_swiglu_ffn },
+    { "ernie4_5",  llama_attention_block,   dense_swiglu_ffn }, /* ERNIE-4.5 dense: riusa i blocchi llama */
     { "lfm2",      lfm2_attention_dispatch,   lfm2_ffn_block }, /* LFM2 (Liquid): ibrido GQA(+q/k-layerNorm) / ShortConv */
     { "mamba",      mamba_block,              mamba_ffn_identity }, /* Mamba (SSM selettivo): mixer in slot attn, ffn identita */
     { "falcon_mamba", mamba_block,              mamba_ffn_identity }, /* Falcon-Mamba: stesso blocco (+ mixer_norm, TBD) */
