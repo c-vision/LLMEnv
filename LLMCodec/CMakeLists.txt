@@ -7,11 +7,11 @@ project(llmcodec C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# CORE: contenitori + descrizione + registry + converter + bridge. NESSUNA implementazione codec.
+# CORE: contenitori + descrizione + registry + reader/parser. NESSUNA implementazione codec.
+# Il CONVERTER (produce/trasforma pesi) NON vive qui: e' in GMBasic/gmbllm (PUL), che ci linka.
 add_library(llmcodec STATIC
     src/llmcodec_gguf_writer.c     # contenitore GGUF (I/O) + tabella byte-per-tipo
     src/llmcodec_safetensors.c     # contenitore safetensors (I/O)
-    src/llmcodec_gguf_mlx.c        # converter (orchestrazione via registry)
     src/llmcodec_gguf_parse.c      # PARSER GGUF canonico buffer-based (reader unico)
     src/llmcodec_gguf_status.c     # TASSONOMIA D'ERRORE GGUF (asset assorbito da lane_gguf)
     src/llmcodec_gguf_meta.c       # METADATA GGUF (hyperparametri + tokenizer) per il converter
@@ -66,30 +66,9 @@ else()
 endif()
 
 if(LLMCODEC_TESTS)
-    add_executable(llmcodec_ggml_quants_selfcheck tests/test_ggml_quants.c)
-    target_link_libraries(llmcodec_ggml_quants_selfcheck PRIVATE llmcodec llmcodec_ggml)   # encoder IQ vivono nel plugin ggml
-    add_test(NAME llmcodec_ggml_quants_selfcheck COMMAND llmcodec_ggml_quants_selfcheck)
-
-    add_executable(llmcodec_conv_gguf_mlx_selfcheck tests/test_conv_gguf_mlx.c)
-    target_link_libraries(llmcodec_conv_gguf_mlx_selfcheck PRIVATE llmcodec)
-    add_test(NAME llmcodec_conv_gguf_mlx_selfcheck COMMAND llmcodec_conv_gguf_mlx_selfcheck)
-
-    add_executable(llmcodec_conv_sharded_selfcheck tests/test_conv_sharded.c)
-    target_link_libraries(llmcodec_conv_sharded_selfcheck PRIVATE llmcodec)
-    add_test(NAME llmcodec_conv_sharded_selfcheck COMMAND llmcodec_conv_sharded_selfcheck)
-
-    add_executable(llmcodec_rolemap_selfcheck tests/test_rolemap.c)
-    target_link_libraries(llmcodec_rolemap_selfcheck PRIVATE llmcodec)
-    target_compile_definitions(llmcodec_rolemap_selfcheck PRIVATE LLMCODEC_ABI_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ABI")
-    add_test(NAME llmcodec_rolemap_selfcheck COMMAND llmcodec_rolemap_selfcheck)
-
-    add_executable(llmcodec_recipe_selfcheck tests/test_recipe.c)
-    target_link_libraries(llmcodec_recipe_selfcheck PRIVATE llmcodec)
-    add_test(NAME llmcodec_recipe_selfcheck COMMAND llmcodec_recipe_selfcheck)
-
-    add_executable(llmcodec_expert3d_selfcheck tests/test_expert3d.c)
-    target_link_libraries(llmcodec_expert3d_selfcheck PRIVATE llmcodec)
-    add_test(NAME llmcodec_expert3d_selfcheck COMMAND llmcodec_expert3d_selfcheck)
+    # NOTA: i self-check del CONVERTER (ggml_quants, conv_gguf_mlx, conv_sharded, rolemap,
+    # recipe, expert3d, dsv41_source, gguf_map, engram, plugin, a1_fp8, quantcfg) sono stati
+    # spostati in GMBasic/gmbllm/tests/ — il converter appartiene al confine PUL.
 
     add_executable(llmcodec_structs_selfcheck tests/test_structs.c)
     target_link_libraries(llmcodec_structs_selfcheck PRIVATE llmcodec)
@@ -100,43 +79,14 @@ if(LLMCODEC_TESTS)
     target_link_libraries(llmcodec_fp8_fp4_selfcheck PRIVATE llmcodec)
     add_test(NAME llmcodec_fp8_fp4_selfcheck COMMAND llmcodec_fp8_fp4_selfcheck)
 
-    add_executable(llmcodec_dsv41_source_selfcheck tests/test_dsv41_source.c)
-    target_link_libraries(llmcodec_dsv41_source_selfcheck PRIVATE llmcodec)
-    add_test(NAME llmcodec_dsv41_source_selfcheck COMMAND llmcodec_dsv41_source_selfcheck)
-
-    add_executable(llmcodec_gguf_map_selfcheck tests/test_gguf_map.c)
-    target_link_libraries(llmcodec_gguf_map_selfcheck PRIVATE llmcodec llmcodec_ggml llmcodec_fp8)
-    add_test(NAME llmcodec_gguf_map_selfcheck COMMAND llmcodec_gguf_map_selfcheck)
-
     add_executable(llmcodec_abi_all_selfcheck tests/test_abi_all.c)
     target_link_libraries(llmcodec_abi_all_selfcheck PRIVATE llmcodec)
     target_compile_definitions(llmcodec_abi_all_selfcheck PRIVATE LLMCODEC_ABI_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ABI")
     add_test(NAME llmcodec_abi_all_selfcheck COMMAND llmcodec_abi_all_selfcheck)
 
-    add_executable(llmcodec_engram_selfcheck tests/test_engram.c)
-    target_link_libraries(llmcodec_engram_selfcheck PRIVATE llmcodec)
-    add_test(NAME llmcodec_engram_selfcheck COMMAND llmcodec_engram_selfcheck)
-
-    add_library(llmcodec_test_id MODULE tests/plugin_test_id.c)
-    target_include_directories(llmcodec_test_id PRIVATE include)
-    set_target_properties(llmcodec_test_id PROPERTIES PREFIX "lib" OUTPUT_NAME "llmcodec_test_id")
-
-    add_executable(llmcodec_plugin_selfcheck tests/test_plugin.c)
-    target_link_libraries(llmcodec_plugin_selfcheck PRIVATE llmcodec)
-    add_dependencies(llmcodec_plugin_selfcheck llmcodec_test_id)
-    add_test(NAME llmcodec_plugin_selfcheck COMMAND llmcodec_plugin_selfcheck)
-
-    add_executable(llmcodec_a1_fp8_selfcheck tests/test_a1_fp8.c)
-    target_link_libraries(llmcodec_a1_fp8_selfcheck PRIVATE llmcodec)
-    add_test(NAME llmcodec_a1_fp8_selfcheck COMMAND llmcodec_a1_fp8_selfcheck)
-
     add_executable(llmcodec_mlx_mxfp4_selfcheck tests/test_mlx_mxfp4.c)
     target_link_libraries(llmcodec_mlx_mxfp4_selfcheck PRIVATE llmcodec)
     add_test(NAME llmcodec_mlx_mxfp4_selfcheck COMMAND llmcodec_mlx_mxfp4_selfcheck llmcodec_quantcfg_selfcheck llmcodec_formats_p0_selfcheck llmcodec_real_fixtures_selfcheck)
-
-    add_executable(llmcodec_quantcfg_selfcheck tests/test_quantcfg.c)
-    target_link_libraries(llmcodec_quantcfg_selfcheck PRIVATE llmcodec)
-    add_test(NAME llmcodec_quantcfg_selfcheck COMMAND llmcodec_quantcfg_selfcheck llmcodec_formats_p0_selfcheck llmcodec_real_fixtures_selfcheck)
 
     add_executable(llmcodec_formats_p0_selfcheck tests/test_formats_p0.c)
     target_include_directories(llmcodec_formats_p0_selfcheck PRIVATE plugins/higgs)
@@ -156,25 +106,15 @@ endif()
 
 # I test esercitano le funzioni dei codec: linkano i PLUGIN (le impl non sono piu' nel core).
 set(LLMCODEC_CODEC_PLUGIN_LINK llmcodec_ggml llmcodec_mlx_affine llmcodec_fp8 llmcodec_plain llmcodec_mxfp llmcodec_gptq llmcodec_awq llmcodec_bitnet llmcodec_turboquant llmcodec_fp4 llmcodec_nvfp llmcodec_bnb llmcodec_hqq llmcodec_aqlm llmcodec_vptq llmcodec_spqr llmcodec_higgs)
-foreach(t llmcodec_ggml_quants_selfcheck llmcodec_conv_gguf_mlx_selfcheck llmcodec_conv_sharded_selfcheck
-        llmcodec_rolemap_selfcheck llmcodec_recipe_selfcheck llmcodec_expert3d_selfcheck llmcodec_structs_selfcheck
-        llmcodec_fp8_fp4_selfcheck llmcodec_dsv41_source_selfcheck llmcodec_abi_all_selfcheck llmcodec_engram_selfcheck
-        llmcodec_plugin_selfcheck llmcodec_a1_fp8_selfcheck llmcodec_mlx_mxfp4_selfcheck llmcodec_quantcfg_selfcheck llmcodec_formats_p0_selfcheck llmcodec_real_fixtures_selfcheck
+foreach(t llmcodec_structs_selfcheck
+        llmcodec_fp8_fp4_selfcheck llmcodec_abi_all_selfcheck
+        llmcodec_mlx_mxfp4_selfcheck llmcodec_formats_p0_selfcheck llmcodec_real_fixtures_selfcheck
         llmcodec_gguf_status_selfcheck)
     if(TARGET ${t})
         target_link_libraries(${t} PRIVATE ${LLMCODEC_CODEC_PLUGIN_LINK})
     endif()
 endforeach()
 
-# CLI di conversione MLX/safetensors -> GGUF (rename canonico + stacking esperti via .llmarch).
-# La conversione richiede ANCHE il tokenizer per i metadata (tokenizer.ggml.*): il target
-# LIBRERIA resta senza dipendenza dal tokenizer, solo il tool lo linka. Opzionale: di default
-# OFF cosi' LLMCodec builda STANDALONE (solo libm + i suoi plugin dlopen).
-option(LLMCODEC_BUILD_CONVERTER "Build gguf_convert CLI (richiede LLMToken)" OFF)
-if(LLMCODEC_BUILD_CONVERTER)
-    if(NOT TARGET llmtoken)
-        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../LLMToken llmtoken_build)
-    endif()
-    add_executable(gguf_convert tools/gguf_convert.c)
-    target_link_libraries(gguf_convert PRIVATE llmcodec ${LLMCODEC_CODEC_PLUGIN_LINK} llmtoken)
-endif()
+# CLI di conversione MLX/safetensors -> GGUF: SPOSTATA in GMBasic/gmbllm (PUL). Il converter
+# produce/trasforma pesi e appartiene al confine PUL — vedi
+# Decisions/ADR-Confine-Licenza-Engine-Apache-Training-Quant-PUL.md.
