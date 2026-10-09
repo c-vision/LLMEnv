@@ -236,6 +236,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
                 if (cJSON_IsNumber(it)) { int li = (int)it->valuedouble; if (li >= 0 && li < cfg->n_layers) cfg->is_linear_layer[li] = false; }
             }
         OPT_INT(linear_conv_kernel_dim, "conv_L_cache");
+        /* LFM2 dichiara l'eps con la chiave "norm_eps" (non "rms_norm_eps"). */
+        OPT_FLOAT(rms_norm_eps, "norm_eps", 1e-5f);
         /* LFM2 non ha lm_head: embedding legato (output = embed). */
         cfg->tie_word_embeddings = true;
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");

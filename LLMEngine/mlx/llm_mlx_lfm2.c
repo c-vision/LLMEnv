@@ -170,6 +170,10 @@ bool lfm2_conv_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_toke
     tname(m->cfg.layer_prefix, layer_idx, "conv.conv.weight", namebuf, sizeof(namebuf));
     ok = ok && multishard_get(&m->weights, namebuf, &cw);
     CHK(ok, "conv.conv.weight lookup");
+    if (ok) {   /* conv1d.weight e' BF16 (plain): mlx_conv_general richiede un dtype float coerente (come il GDN). */
+        mlx_array cw32 = mlx_array_new();
+        if (mlx_astype(&cw32, cw, MLX_FLOAT32, s) == 0) { mlx_array_free(cw); cw = cw32; } else mlx_array_free(cw32);
+    }
 
     mlx_array bcx = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&bcx, normed, ipw, ips, ipb, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "in_proj"); }
