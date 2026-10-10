@@ -15,6 +15,7 @@ add_library(llmcodec STATIC
     src/llmcodec_gguf_parse.c      # PARSER GGUF canonico buffer-based (reader unico)
     src/llmcodec_gguf_status.c     # TASSONOMIA D'ERRORE GGUF (asset assorbito da lane_gguf)
     src/llmcodec_gguf_meta.c       # METADATA GGUF (hyperparametri + tokenizer) per il converter
+    src/llmcodec_gguf_compare.c    # confronto numerico per-tensore tra due GGUF (lineage/breakdown)
     src/llmcodec_rolemap.c         # descrizione .llmarch
     src/llmcodec.c           # registry PLUGIN (dlopen + cache)
     src/llmcodec_quant_awq.c       # decoder AWQ int4 GEMM (autoawq gemm layout) per l'engine MLX
@@ -102,6 +103,12 @@ if(LLMCODEC_TESTS)
     add_executable(llmcodec_gguf_status_selfcheck tests/test_gguf_status.c)
     target_link_libraries(llmcodec_gguf_status_selfcheck PRIVATE llmcodec)
     add_test(NAME llmcodec_gguf_status_selfcheck COMMAND llmcodec_gguf_status_selfcheck)
+
+    # CONFORMANCE dequant: llmcodec_ggml_dequant_row vs un secondo implementatore indipendente dei
+    # bit-layout GGUF (port verbatim di antirez/gguf-tools gguflib.c, MIT). Una divergenza = bug.
+    add_executable(llmcodec_dequant_conformance_selfcheck tests/test_dequant_conformance.c)
+    target_link_libraries(llmcodec_dequant_conformance_selfcheck PRIVATE llmcodec)
+    add_test(NAME llmcodec_dequant_conformance_selfcheck COMMAND llmcodec_dequant_conformance_selfcheck)
 endif()
 
 # I test esercitano le funzioni dei codec: linkano i PLUGIN (le impl non sono piu' nel core).
