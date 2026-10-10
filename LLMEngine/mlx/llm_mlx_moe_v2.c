@@ -107,50 +107,46 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
         CHK(ok, "router act");
     }
 
-    /* per-token: top-k + renorm + esperti */
-    mlx_vector_array ytok = mlx_vector_array_new();
-    for (int t = 0; t < n_tokens && ok; t++) {
-        /* gt [1,1,E] */
-        mlx_array gt = mlx_array_new();
-        { int a[3]={0,t,0}, b2[3]={1,t+1,E}, st[3]={1,1,1}; ok = mlx_slice(&gt, gates, a,3, b2,3, st,3, s)==0; }
-        /* top-k indici */
-        mlx_array part = mlx_array_new();
-        if (ok) ok = mlx_argpartition_axis(&part, gt, /*kth=*/-K, /*axis=*/-1, s)==0;
-        mlx_array inds = mlx_array_new();
-        if (ok) { int a[3]={0,0,E-K}, b2[3]={1,1,E}, st[3]={1,1,1}; ok = mlx_slice(&inds, part, a,3, b2,3, st,3, s)==0; }
-        mlx_array scores = mlx_array_new();
-        if (ok) ok = mlx_take_along_axis(&scores, gt, inds, -1, s)==0;
-        /* readback inds/scores (K valori, piccolo) */
-        int32_t ii[64]; float sc[64];
-        if (ok) { mlx_array ii32=mlx_array_new(), sc32=mlx_array_new();
-                  ok = mlx_astype(&ii32, inds, MLX_INT32, s)==0 && mlx_astype(&sc32, scores, MLX_FLOAT32, s)==0;
-                  if (ok) ok = mlx_array_eval(ii32)==0 && mlx_array_eval(sc32)==0;
-                  if (ok) { const int32_t* pd=(const int32_t*)mlx_array_data_int32(ii32); const float* pf=mlx_array_data_float32(sc32);
-                            for (int j=0;j<K;j++){ ii[j]=pd[j]; sc[j]=pf[j]; } }
-                  mlx_array_free(ii32); mlx_array_free(sc32); }
-        /* xt [1,1,D] + renorm scores */
-        mlx_array xt = mlx_array_new();
-        { int a[3]={0,t,0}, b2[3]={1,t+1,m->cfg.hidden_size}, st[3]={1,1,1}; ok = ok && mlx_slice(&xt, normed, a,3, b2,3, st,3, s)==0; }
-        float ssum=0.0f; for (int j=0;j<K;j++) ssum+=sc[j]; if (ssum<1e-12f) ssum=1e-12f;
-        mlx_array acc = mlx_array_new(); bool acc_set=false;
-        for (int j=0;j<K && ok;j++) {
-            int e=ii[j]; float wj = m->cfg.norm_topk_prob ? sc[j]/ssum : sc[j];
-            mlx_array ge=mlx_array_new(), ue=mlx_array_new(), ae=mlx_array_new(), de=mlx_array_new();
-            ok = expert_lin(&ge, xt, gw, gs, gb, e, gsz, bts, m->cfg.quant_mode, s);
-            if (ok) ok = expert_lin(&ue, xt, uw, us, ub, e, gsz, bts, m->cfg.quant_mode, s);
-            if (ok) { mlx_array sg=mlx_array_new(), sl=mlx_array_new(); ok = mlx_sigmoid(&sg,ge,s)==0 && mlx_multiply(&sl,ge,sg,s)==0 && mlx_multiply(&ae,sl,ue,s)==0; mlx_array_free(sg); mlx_array_free(sl); }
-            if (ok) ok = expert_lin(&de, ae, dw, ds, db, e, gsz, bts, m->cfg.quant_mode, s);
-            if (ok) { mlx_array wsc=mlx_array_new_float32(wj), de2=mlx_array_new(); ok = mlx_multiply(&de2, de, wsc, s)==0;
-                      if (ok) { if (!acc_set) { mlx_array_set(&acc, de2); acc_set=true; } else { mlx_array na=mlx_array_new(); ok = mlx_add(&na, acc, de2, s)==0; if (ok) mlx_array_set(&acc, na); mlx_array_free(na); } }
-                      mlx_array_free(wsc); mlx_array_free(de2); }
-            mlx_array_free(ge); mlx_array_free(ue); mlx_array_free(ae); mlx_array_free(de);
+    /* top-k + renorm (device, batched) */
+    mlx_array part = mlx_array_new(), inds = mlx_array_new(), scores = mlx_array_new();
+    if (ok) {
+        ok = mlx_argpartition_axis(&part, gates, /*kth=*/-K, /*axis=*/-1, s) == 0;
+        if (ok) { int a[3]={0,0,E-K}, b2[3]={1,n_tokens,E}, st[3]={1,1,1}; ok = mlx_slice(&inds, part, a,3, b2,3, st,3, s)==0; }
+        if (ok) ok = mlx_take_along_axis(&scores, gates, inds, -1, s)==0;
+        if (ok && m->cfg.norm_topk_prob) {
+            mlx_array ssum=mlx_array_new(), rs=mlx_array_new(), sc2=mlx_array_new(); int ax[1]={-1};
+            ok = mlx_sum_axes(&ssum, scores, ax, 1, true, s)==0
+              && mlx_maximum(&rs, ssum, llm_mlx_act_scalar(1e-12f), s)==0
+              && mlx_divide(&sc2, scores, rs, s)==0;
+            if (ok) mlx_array_set(&scores, sc2);
+            mlx_array_free(ssum); mlx_array_free(rs); mlx_array_free(sc2);
         }
-        if (ok) { mlx_array acc_sq = mlx_array_new(); ok = mlx_squeeze_axis(&acc_sq, acc, 1, s) == 0; if (ok) ok = mlx_vector_array_append_value(ytok, acc_sq) == 0; mlx_array_free(acc_sq); }
-        mlx_array_free(gt); mlx_array_free(part); mlx_array_free(inds); mlx_array_free(scores); mlx_array_free(xt); mlx_array_free(acc);
+        CHK(ok, "top-k/renorm");
     }
+    /* gather_qmm batched (come mlx_lm SwitchGLU): x [T,1,1,D] + inds [T,K] -> [T,K,1,*] */
+    mlx_array x1=mlx_array_new(), inds_u=mlx_array_new();
+    if (ok) { int sh[4]={n_tokens,1,1,m->cfg.hidden_size}; ok = mlx_reshape(&x1, normed, sh, 4, s)==0; }
+    if (ok) ok = mlx_astype(&inds_u, inds, MLX_UINT32, s)==0;
+    mlx_array no_lhs=mlx_array_new();
+    mlx_optional_int gsz_o={gsz,true}, bts_o={bts,true};
+    mlx_array g_out=mlx_array_new(), u_out=mlx_array_new(), act=mlx_array_new(), d_out=mlx_array_new();
+    if (ok) ok = llm_mlx_moe_gather_mm(&m->cfg, &g_out, x1, gw, gs, gb, no_lhs, inds_u, true, gsz_o, bts_o, m->cfg.quant_mode, false, s)==0;
+    if (ok) ok = llm_mlx_moe_gather_mm(&m->cfg, &u_out, x1, uw, us, ub, no_lhs, inds_u, true, gsz_o, bts_o, m->cfg.quant_mode, false, s)==0;
+    if (ok) { mlx_array sg=mlx_array_new(), sl=mlx_array_new(); ok = mlx_sigmoid(&sg,g_out,s)==0 && mlx_multiply(&sl,g_out,sg,s)==0 && mlx_multiply(&act,sl,u_out,s)==0; mlx_array_free(sg); mlx_array_free(sl); }
+    if (ok) ok = llm_mlx_moe_gather_mm(&m->cfg, &d_out, act, dw, ds, db, no_lhs, inds_u, true, gsz_o, bts_o, m->cfg.quant_mode, false, s)==0;
+    CHK(ok, "gather_qmm experts");
     mlx_array moe_out = mlx_array_new();
-    if (ok) ok = mlx_stack_axis(&moe_out, ytok, /*axis=*/1, s) == 0;   /* [1,T,D] */
-    mlx_vector_array_free(ytok);
+    if (ok) {
+        int scs[5]={1,n_tokens,K,1,1}; mlx_array sce=mlx_array_new(); ok = mlx_reshape(&sce, scores, scs, 5, s)==0;
+        mlx_array wd=mlx_array_new(); int ax1[1]={2}; mlx_array sm=mlx_array_new();
+        if (ok) ok = mlx_multiply(&wd, d_out, sce, s)==0;
+        if (ok) ok = mlx_sum_axes(&sm, wd, ax1, 1, false, s)==0;
+        if (ok) { int os[3]={1,n_tokens,m->cfg.hidden_size}; ok = mlx_reshape(&moe_out, sm, os, 3, s)==0; }
+        mlx_array_free(sce); mlx_array_free(wd); mlx_array_free(sm);
+        CHK(ok, "moe weighted sum");
+    }
+    mlx_array_free(part); mlx_array_free(inds); mlx_array_free(scores); mlx_array_free(x1); mlx_array_free(inds_u);
+    mlx_array_free(no_lhs); mlx_array_free(g_out); mlx_array_free(u_out); mlx_array_free(act); mlx_array_free(d_out);
 
     /* shared expert (opzionale): base cfg (default "mlp.shared_expert"); gate opzionale */
     if (ok && m->cfg.moe_shared_base[0]) {
