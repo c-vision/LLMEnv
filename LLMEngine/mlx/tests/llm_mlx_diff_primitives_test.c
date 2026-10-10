@@ -68,6 +68,52 @@ static double cosine(mlx_array a, mlx_array b, mlx_stream s) {
     return abv/(sqrt(av>0?av:1.0)*sqrt(bv>0?bv:1.0));
 }
 
+/* ---- M0: gamba "closure mx.compile" (prova del meccanismo di fusione) ----------
+ * Stessa matematica di riferimento di rms_norm, ma calcolata DENTRO una closure compilata
+ * con mlx_compile (equivalente C di @mx.compile). Confronto compiled-vs-ref: se il meccanismo
+ * e' corretto devono coincidere (il grafo fuso e' la stessa formula). */
+static int rms_norm_ref_fn(mlx_vector_array* out, const mlx_vector_array in, void* payload) {
+    (void)payload;
+    mlx_array x = mlx_array_new(), w = mlx_array_new(), eps_a = mlx_array_new();
+    mlx_vector_array_get(&x, in, 0);
+    mlx_vector_array_get(&w, in, 1);
+    mlx_vector_array_get(&eps_a, in, 2);
+    mlx_stream s = mlx_default_gpu_stream_new();
+    mlx_array x2=mlx_array_new(), mean=mlx_array_new(), me=mlx_array_new();
+    mlx_array rr=mlx_array_new(), y=mlx_array_new(), y2=mlx_array_new();
+    bool ok = mlx_square(&x2,x,s)==0 && mlx_mean_axis(&mean,x2,-1,/*keepdims=*/true,s)==0
+           && mlx_add(&me,mean,eps_a,s)==0 && mlx_rsqrt(&rr,me,s)==0
+           && mlx_multiply(&y,x,rr,s)==0 && mlx_multiply(&y2,y,w,s)==0;
+    int rc = 1;
+    if (ok) { mlx_vector_array built = mlx_vector_array_new_data(&y2, 1);
+              rc = mlx_vector_array_set(out, built)==0 ? 0 : 1; mlx_vector_array_free(built); }
+    mlx_stream_free(s);
+    mlx_array_free(x); mlx_array_free(w); mlx_array_free(eps_a); mlx_array_free(x2);
+    mlx_array_free(mean); mlx_array_free(me); mlx_array_free(rr); mlx_array_free(y); mlx_array_free(y2);
+    return rc;
+}
+static mlx_closure g_rmsnorm_closure;
+static bool g_rmsnorm_closure_valid = false;
+static bool rms_norm_compiled(mlx_array* out, mlx_array x, mlx_array w, mlx_array eps_a) {
+    if (!g_rmsnorm_closure_valid) {
+        mlx_closure raw = mlx_closure_new_func_payload(rms_norm_ref_fn, NULL, NULL);
+        mlx_set_compile_mode(MLX_COMPILE_MODE_ENABLED);
+        int rc = mlx_compile(&g_rmsnorm_closure, raw, /*shapeless=*/true);
+        mlx_set_compile_mode(MLX_COMPILE_MODE_NO_FUSE);
+        mlx_closure_free(raw);
+        if (rc != 0) return false;
+        g_rmsnorm_closure_valid = true;
+    }
+    mlx_array ins[3]; ins[0]=x; ins[1]=w; ins[2]=eps_a;
+    mlx_vector_array iv = mlx_vector_array_new_data(ins, 3);
+    mlx_vector_array res = mlx_vector_array_new();
+    int rc = mlx_closure_apply(&res, g_rmsnorm_closure, iv);
+    bool ok = (rc==0) && mlx_vector_array_size(res)==1;
+    if (ok) mlx_vector_array_get(out, res, 0);
+    mlx_vector_array_free(iv); mlx_vector_array_free(res);
+    return ok;
+}
+
 static int test_rms_norm(mlx_dtype dt, const char* name, double tol) {
     const int H = 2048;
     const float eps = 1e-5f;
@@ -107,12 +153,21 @@ static int test_rms_norm(mlx_dtype dt, const char* name, double tol) {
     printf("rms_norm [%-5s] H=%d relL2=%.3e maxabs=%.3e rel=%.3e cos=%.6f match=%d tol=%.1e -> %s\n",
            name, H, rl2, max_abs(y2f,yff,s), rel_max(y2f,yff,s), cosine(y2f,yff,s), output_match(y2f,yff,tol,s), tol, (rl2 <= tol) ? "PASS" : "FAIL");
 
+    /* M0: gamba compilata (mx.compile) vs la STESSA ref esplicita */
+    mlx_array yc = mlx_array_new(), ycf = mlx_array_new();
+    bool cok = rms_norm_compiled(&yc, x, w, eps_a);
+    if (cok) { mlx_astype(&ycf, yc, MLX_FLOAT32, s); mlx_array_eval(ycf); }
+    double rl2c = cok ? rel_l2(y2f, ycf, s) : 1e9;
+    printf("rms_nrmC  [%-5s] H=%d relL2=%.3e cos=%.6f match=%d -> %s (mx.compile vs ref)\n",
+           name, H, rl2c, cok ? cosine(y2f,ycf,s) : 0.0, cok ? output_match(y2f,ycf,tol,s) : 0,
+           (rl2c <= tol) ? "PASS" : "FAIL");
+
     mlx_array_free(x32); mlx_array_free(w32); mlx_array_free(x); mlx_array_free(w);
     mlx_array_free(x2); mlx_array_free(mean); mlx_array_free(mean_eps); mlx_array_free(rr);
     mlx_array_free(y); mlx_array_free(y2); mlx_array_free(eps_a); mlx_array_free(yf);
-    mlx_array_free(y2f); mlx_array_free(yff);
+    mlx_array_free(y2f); mlx_array_free(yff); mlx_array_free(yc); mlx_array_free(ycf);
     mlx_stream_free(s);
-    return (rl2 <= tol) ? 0 : 1;
+    return (rl2 <= tol && rl2c <= tol) ? 0 : 1;
 }
 
 /* ---- rope (neox/traditional=false) ---- */
