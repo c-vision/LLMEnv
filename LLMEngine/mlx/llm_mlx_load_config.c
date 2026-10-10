@@ -246,6 +246,35 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         /* LFM2 non ha lm_head: embedding legato (output = embed). */
         cfg->tie_word_embeddings = true;
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");
+    } else if (strcmp(cfg->model_type, "lfm2_moe") == 0) {
+        /* LFM2-MoE (Liquid): come `lfm2` (layer conv/full_attention via `layer_types`) MA i primi
+         * `num_dense_layers` hanno MLP denso; dal resto FFN MoE (router softmax + `expert_bias`
+         * applicato SOLO alla selezione top-k, `norm_topk_prob`, `routed_scaling_factor`). */
+        cfg->is_linear_layer = (bool*)calloc((size_t)cfg->n_layers, sizeof(bool));
+        if (cfg->is_linear_layer) for (int i = 0; i < cfg->n_layers; i++) cfg->is_linear_layer[i] = true;
+        cJSON* lt = cJSON_GetObjectItemCaseSensitive(src, "layer_types");
+        if (cJSON_IsArray(lt) && cfg->is_linear_layer)
+            for (int k = 0; k < cJSON_GetArraySize(lt); k++) {
+                cJSON* it = cJSON_GetArrayItem(lt, k);
+                if (cJSON_IsString(it) && k < cfg->n_layers && strcmp(it->valuestring, "full_attention") == 0)
+                    cfg->is_linear_layer[k] = false;
+            }
+        OPT_INT(linear_conv_kernel_dim, "conv_L_cache");
+        OPT_FLOAT(rms_norm_eps, "norm_eps", 1e-5f);
+        OPT_INT(n_experts, "num_experts");
+        OPT_INT(top_k, "num_experts_per_tok");
+        OPT_INT(moe_intermediate_size, "moe_intermediate_size");
+        OPT_INT(first_k_dense_replace, "num_dense_layers");
+        OPT_INT(intermediate_size, "intermediate_size");
+        OPT_FLOAT(routed_scaling_factor, "routed_scaling_factor", 1.0f);
+        {
+            cJSON* ntp = cJSON_GetObjectItemCaseSensitive(src, "norm_topk_prob");
+            cfg->norm_topk_prob = cJSON_IsBool(ntp) ? cJSON_IsTrue(ntp) : false;
+            cJSON* ueb = cJSON_GetObjectItemCaseSensitive(src, "use_expert_bias");
+            cfg->use_expert_bias = cJSON_IsBool(ueb) ? cJSON_IsTrue(ueb) : false;
+        }
+        cfg->tie_word_embeddings = true;
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");
     } else if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0) {
         /* Mamba / Falcon-Mamba (mlx_lm rimappa falcon_mamba->mamba): SSM selettivo. */
         OPT_INT(mamba_state_size, "state_size");

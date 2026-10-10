@@ -298,3 +298,128 @@ bool lfm2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, ml
     return ok;
 #undef CHK
 }
+
+/* ============================================================================
+ * lfm2_moe_ffn_block — FFN di LFM2-MoE (Liquid). I primi `first_k_dense_replace` layer hanno MLP
+ * denso (riusa lfm2_ffn_block); dal resto FFN MoE: router SOFTMAX + `expert_bias` applicato SOLO
+ * alla SELEZIONE top-k (non ai pesi), `norm_topk_prob`, `routed_scaling_factor`, esperti SwiGLU
+ * stacked (`feed_forward.switch_mlp.{gate,up,down}_proj`, prodotti da stack_moe_experts).
+ * Rif: transformers/models/lfm2_moe/Lfm2MoeTopKRouter + Lfm2MoeSparseMoeBlock.
+ * ============================================================================ */
+bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out) {
+    if (layer_idx < m->cfg.first_k_dense_replace)
+        return lfm2_ffn_block(m, layer_idx, n_tokens, h, out);
+
+    bool ok = true;
+    const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
+    char namebuf[256];
+    mlx_stream s = m->stream;
+#define MCHK(cond, what) do { if (!(cond)) { fprintf(stderr, "lfm2_moe_ffn[layer=%d]: %s failed\n", layer_idx, (what)); ok = false; } } while (0)
+
+    mlx_array ln_w = mlx_array_new();
+    tname(m->cfg.layer_prefix, layer_idx, "ffn_norm.weight", namebuf, sizeof namebuf);
+    ok = ok && multishard_get(&m->weights, namebuf, &ln_w);
+    mlx_array normed = mlx_array_new();
+    if (ok) { ok = rms_norm_cfg(&normed, h, ln_w, m->cfg.rms_norm_eps, s); MCHK(ok, "ffn_norm"); }
+
+    /* router: feed_forward.gate -> softmax */
+    mlx_array gw = mlx_array_new();
+    tname(m->cfg.layer_prefix, layer_idx, "feed_forward.gate.weight", namebuf, sizeof namebuf);
+    ok = ok && multishard_get(&m->weights, namebuf, &gw);
+    mlx_array gates = mlx_array_new();
+    if (ok) { ok = plain_linear(&gates, normed, gw, s); MCHK(ok, "router matmul"); }
+    mlx_array scores = mlx_array_new();
+    if (ok) { ok = mlx_softmax_axis(&scores, gates, -1, true, s) == 0; MCHK(ok, "router softmax"); }
+
+    /* selezione = scores + expert_bias (il bias NON entra nei pesi) */
+    mlx_array sel = mlx_array_new();
+    if (ok && m->cfg.use_expert_bias) {
+        mlx_array eb = mlx_array_new(), eb2 = mlx_array_new(), sum = mlx_array_new();
+        tname(m->cfg.layer_prefix, layer_idx, "feed_forward.expert_bias", namebuf, sizeof namebuf);
+        ok = ok && multishard_get(&m->weights, namebuf, &eb);
+        if (ok) ok = mlx_astype(&eb2, eb, mlx_array_dtype(scores), s) == 0;
+        if (ok) ok = mlx_add(&sum, scores, eb2, s) == 0;
+        if (ok) mlx_array_set(&sel, sum); else mlx_array_free(sum);
+        mlx_array_free(eb); mlx_array_free(eb2);
+        MCHK(ok, "expert_bias");
+    } else if (ok) { ok = mlx_array_set(&sel, scores) == 0; }
+
+    mlx_array part = mlx_array_new(), top_inds = mlx_array_new();
+    if (ok) {
+        ok = mlx_argpartition_axis(&part, sel, -m->cfg.top_k, -1, s) == 0; MCHK(ok, "argpartition");
+        if (ok) {
+            const int ne = (int)mlx_array_dim(part, 2);
+            int st3[3]={0,0,ne-m->cfg.top_k}, sp3[3]={1,n_tokens,ne}, sv3[3]={1,1,1};
+            mlx_array view = mlx_array_new();
+            ok = mlx_slice(&view, part, st3,3, sp3,3, sv3,3, s) == 0;
+            if (ok) ok = mlx_array_set(&top_inds, view) == 0;
+            mlx_array_free(view);
+        }
+    }
+    mlx_array weights = mlx_array_new();
+    if (ok) {
+        mlx_array tv = mlx_array_new();
+        ok = mlx_take_along_axis(&tv, scores, top_inds, -1, s) == 0;
+        if (ok && m->cfg.norm_topk_prob && m->cfg.top_k > 1) {
+            mlx_array den = mlx_array_new(), tvn = mlx_array_new();
+            ok = mlx_sum_axis(&den, tv, -1, true, s) == 0;
+            if (ok) ok = mlx_divide(&tvn, tv, den, s) == 0;
+            mlx_array_free(den);
+            if (ok) mlx_array_set(&weights, tvn); else mlx_array_free(tvn);
+            mlx_array_free(tv);
+        } else { mlx_array_set(&weights, tv); mlx_array_free(tv); }
+        if (ok && m->cfg.routed_scaling_factor != 1.0f) {
+            mlx_array scf = mlx_array_new_float32(m->cfg.routed_scaling_factor), sc = mlx_array_new(), wsc = mlx_array_new();
+            if (ok) ok = mlx_astype(&sc, scf, mlx_array_dtype(weights), s) == 0;
+            ok = ok && mlx_multiply(&wsc, weights, sc, s) == 0;
+            mlx_array_free(scf); mlx_array_free(sc);
+            if (ok) mlx_array_set(&weights, wsc); else mlx_array_free(wsc);
+        }
+    }
+    MCHK(ok, "top-k weights");
+
+    mlx_array gp_w=mlx_array_new(),gp_s=mlx_array_new(),gp_b=mlx_array_new();
+    mlx_array up_w=mlx_array_new(),up_s=mlx_array_new(),up_b=mlx_array_new();
+    mlx_array dn_w=mlx_array_new(),dn_s=mlx_array_new(),dn_b=mlx_array_new();
+    tname(m->cfg.layer_prefix, layer_idx, "feed_forward.switch_mlp.gate_proj", namebuf, sizeof namebuf);
+    ok = ok && multishard_get_triple(&m->weights, namebuf, &gp_w,&gp_s,&gp_b);
+    tname(m->cfg.layer_prefix, layer_idx, "feed_forward.switch_mlp.up_proj", namebuf, sizeof namebuf);
+    ok = ok && multishard_get_triple(&m->weights, namebuf, &up_w,&up_s,&up_b);
+    tname(m->cfg.layer_prefix, layer_idx, "feed_forward.switch_mlp.down_proj", namebuf, sizeof namebuf);
+    ok = ok && multishard_get_triple(&m->weights, namebuf, &dn_w,&dn_s,&dn_b);
+    int xg=gsz, xb=bts; char xm[16];
+    llm_mlx_quant_derive(gp_w, gp_s, gsz, bts, "affine", &xg, &xb, xm, sizeof xm);
+    MCHK(ok, "switch_mlp lookup");
+    mlx_optional_int xgs={xg,true}, xbs={xb,true};
+
+    mlx_array no_lhs = mlx_array_new(), inds = mlx_array_new();
+    if (ok) {
+        mlx_array tu = mlx_array_new();
+        ok = mlx_astype(&tu, top_inds, MLX_UINT32, s) == 0;
+        if (ok) { const int ts2[2]={n_tokens, m->cfg.top_k}; ok = mlx_reshape(&inds, tu, ts2, 2, s) == 0; }
+        mlx_array_free(tu);
+    }
+    mlx_array x1 = mlx_array_new();
+    if (ok) { const int x1s[4]={n_tokens,1,1,m->cfg.hidden_size}; ok = mlx_reshape(&x1, normed, x1s, 4, s) == 0; }
+
+    mlx_array gate_out=mlx_array_new(), up_out=mlx_array_new(), sig=mlx_array_new(), silu=mlx_array_new(), act=mlx_array_new();
+    mlx_array down_out=mlx_array_new(), w_arr=mlx_array_new(), scaled=mlx_array_new(), summed=mlx_array_new(), moe_out=mlx_array_new();
+    if (ok) ok = llm_mlx_moe_gather_streamed(&m->cfg, layer_idx, 0, &gate_out, x1, gp_w,gp_s,gp_b, no_lhs, inds, true, xgs,xbs,xm, false, s)==0;
+    if (ok) ok = llm_mlx_moe_gather_streamed(&m->cfg, layer_idx, 1, &up_out,   x1, up_w,up_s,up_b, no_lhs, inds, true, xgs,xbs,xm, false, s)==0;
+    if (ok) ok = mlx_sigmoid(&sig, gate_out, s)==0 && mlx_multiply(&silu, gate_out, sig, s)==0 && mlx_multiply(&act, silu, up_out, s)==0;
+    if (ok) ok = llm_mlx_moe_gather_streamed(&m->cfg, layer_idx, 2, &down_out, act, dn_w,dn_s,dn_b, no_lhs, inds, true, xgs,xbs,xm, false, s)==0;
+    MCHK(ok, "routed experts");
+    if (ok) { const int ws[4]={n_tokens, m->cfg.top_k, 1, 1}; ok = mlx_reshape(&w_arr, weights, ws, 4, s)==0; }
+    if (ok) ok = mlx_multiply(&scaled, down_out, w_arr, s)==0;
+    if (ok) ok = mlx_sum_axis(&summed, scaled, 1, false, s)==0;
+    if (ok) { const int o3[3]={1,n_tokens,m->cfg.hidden_size}; ok = mlx_reshape(&moe_out, summed, o3, 3, s)==0; }
+    if (ok) ok = mlx_add(out, h, moe_out, s)==0;
+    MCHK(ok, "final residual");
+
+    mlx_array all[]={ln_w,normed,gw,gates,scores,sel,part,top_inds,weights,
+                     gp_w,gp_s,gp_b,up_w,up_s,up_b,dn_w,dn_s,dn_b,no_lhs,inds,x1,
+                     gate_out,up_out,sig,silu,act,down_out,w_arr,scaled,summed,moe_out};
+    for (size_t i=0;i<sizeof all/sizeof all[0];i++) mlx_array_free(all[i]);
+    return ok;
+#undef MCHK
+}

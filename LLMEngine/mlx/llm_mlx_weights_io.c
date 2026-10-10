@@ -1059,6 +1059,13 @@ bool stack_moe_experts(const ModelConfig* cfg, MultiShardWeights* weights, mlx_s
     bool ok = true;
     char name[256];
     for (int l = 0; ok && l < cfg->n_layers; l++) {
+        /* Layer DENSO (nessun esperto): LFM2-MoE ha i primi `num_dense_layers` layer densi
+         * (`feed_forward.w1/w2/w3`), gli altri MoE (`feed_forward.experts.{e}.*`). Se la layer non
+         * ha `experts.0` NON si stacka (mixtral/olmoe hanno esperti su TUTTI i layer -> nessuno skip). */
+        { char probe[256]; mlx_array p = mlx_array_new();
+          snprintf(probe, sizeof probe, "model.layers.%d.%s.experts.0.%s.weight", l, base, s0);
+          int has = multishard_get(weights, probe, &p); mlx_array_free(p);
+          if (!has) continue; }
         for (int k = 0; ok && k < 3; k++) {
             for (int p = 0; ok && p < 3; p++) {
                 mlx_vector_array vec = mlx_vector_array_new();

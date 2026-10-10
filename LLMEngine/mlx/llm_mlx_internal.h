@@ -92,6 +92,7 @@ typedef struct {
     float rms_norm_eps;
     float rope_theta;
     bool norm_topk_prob;
+    bool use_expert_bias;         /* LFM2-MoE: expert_bias applicato SOLO alla selezione top-k (non ai pesi) */
     bool tie_word_embeddings;
     /* FASE 1b.0: da config.json["model_type"] -- seleziona la entry di ARCH_TABLE
      * (vedi LlmMlxArchOps sotto). Buffer fisso: i valori reali osservati
@@ -1261,6 +1262,10 @@ bool llama_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
 bool lfm2_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                     mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool lfm2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+/* LFM2-MoE: i primi `first_k_dense_replace` layer -> MLP denso (lfm2_ffn_block); dal resto FFN MoE
+ * (router softmax + expert_bias di SELEZIONE + top-k/norm_topk_prob/routed_scaling + esperti swiglu
+ * stacked `feed_forward.switch_mlp.*`). */
+bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 /* OLMo-3 (AllenAI): dense, GQA + q/k RMSNorm FLAT, layer POST-NORM. */
 bool olmo3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                   mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);

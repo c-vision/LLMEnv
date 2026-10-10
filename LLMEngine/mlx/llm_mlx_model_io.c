@@ -822,10 +822,13 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
      * forward) -- vedi commento su stack_mixtral_moe_experts sopra per il perché. */
     const bool is_mixtral_arch = strcmp(m->cfg.model_type, "mixtral") == 0;
     const bool is_olmoe_arch = strcmp(m->cfg.model_type, "olmoe") == 0;
-    if (is_mixtral_arch || is_olmoe_arch) {
+    const bool is_lfm2_moe_arch = strcmp(m->cfg.model_type, "lfm2_moe") == 0;
+    if (is_mixtral_arch || is_olmoe_arch || is_lfm2_moe_arch) {
         bool sok = is_olmoe_arch
             ? stack_moe_experts(&m->cfg, &m->weights, m->stream, "mlp", "gate_proj", "up_proj", "down_proj")
-            : stack_moe_experts(&m->cfg, &m->weights, m->stream, "block_sparse_moe", "w1", "w3", "w2");
+            : (is_lfm2_moe_arch
+                ? stack_moe_experts(&m->cfg, &m->weights, m->stream, "feed_forward", "w1", "w3", "w2")
+                : stack_moe_experts(&m->cfg, &m->weights, m->stream, "block_sparse_moe", "w1", "w3", "w2"));
         if (!sok) {
             fprintf(stderr, "llm_ai_mlx_load_model: stack_moe_experts fallita\n");
             llm_mlx_model_destroy(m);

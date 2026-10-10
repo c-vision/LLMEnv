@@ -68,6 +68,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "llama",     llama_attention_block,     dense_swiglu_ffn },
     { "ernie4_5",  llama_attention_block,   dense_swiglu_ffn }, /* ERNIE-4.5 dense: riusa i blocchi llama */
     { "lfm2",      lfm2_attention_dispatch,   lfm2_ffn_block }, /* LFM2 (Liquid): ibrido GQA(+q/k-layerNorm) / ShortConv */
+    { "lfm2_moe",  lfm2_attention_dispatch,   lfm2_moe_ffn_block }, /* LFM2-MoE (Liquid): come lfm2 + FFN MoE (dense-first, expert_bias) */
     { "mamba",      mamba_block,              mamba_ffn_identity }, /* Mamba (SSM selettivo): mixer in slot attn, ffn identita */
     { "falcon_mamba", mamba_block,              mamba_ffn_identity }, /* Falcon-Mamba: stesso blocco (+ mixer_norm, TBD) */
     { "mamba2",     mamba2_block,             mamba2_ffn_identity }, /* Mamba2 (SSD): in_proj+conv+scan SSD */
