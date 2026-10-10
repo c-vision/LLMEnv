@@ -457,7 +457,6 @@ bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
     { mlx_array d2=mlx_array_new(); const int ds4[4]={n_tokens,m->cfg.top_k,1,m->cfg.hidden_size};
       if (ok) ok = mlx_reshape(&d2, down_out, ds4, 4, s)==0;
       if (ok) mlx_array_set(&down_out, d2); else mlx_array_free(d2); }
-    if (ok) { const int ws[4]={n_tokens, m->cfg.top_k, 1, 1}; ok = mlx_reshape(&w_arr, weights, ws, 4, s)==0; }
     if (ok) ok = mlx_multiply(&scaled, down_out, w_arr, s)==0;
     if (ok) ok = mlx_sum_axis(&summed, scaled, 1, false, s)==0;
     if (ok) { const int o3[3]={1,n_tokens,m->cfg.hidden_size}; ok = mlx_reshape(&moe_out, summed, o3, 3, s)==0; }
