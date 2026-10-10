@@ -115,24 +115,51 @@ void gmb_asr_linear_bf16(float* y, const float* x, const uint16_t* W, const floa
     for (int t = 0; t < nt; t++) pthread_join(th[t], NULL);
 }
 
+typedef struct {
+    float* out; const float* in; const float* w; const float* b;
+    int cin, cout, hin, win, kh, kw, stride, pad, hout, wout, co0, co1;
+} ConvJob;
+static void* conv_worker(void* p) {
+    ConvJob* j = (ConvJob*)p;
+    for (int co = j->co0; co < j->co1; co++) {
+        for (int ho = 0; ho < j->hout; ho++)
+            for (int wo = 0; wo < j->wout; wo++) {
+                float acc = j->b ? j->b[co] : 0.0f;
+                for (int ci = 0; ci < j->cin; ci++)
+                    for (int r = 0; r < j->kh; r++)
+                        for (int c = 0; c < j->kw; c++) {
+                            int hi = ho * j->stride - j->pad + r, wi = wo * j->stride - j->pad + c;
+                            if (hi < 0 || hi >= j->hin || wi < 0 || wi >= j->win) continue;
+                            acc += j->in[((size_t)ci * j->hin + hi) * j->win + wi] * j->w[((size_t)co * j->cin + ci) * j->kh * j->kw + (size_t)r * j->kw + c];
+                        }
+                j->out[((size_t)co * j->hout + ho) * j->wout + wo] = acc;
+            }
+    }
+    return NULL;
+}
+
 void gmb_asr_conv2d(float* out, const float* in, const float* w, const float* b,
                     int cin, int cout, int hin, int win, int kh, int kw, int stride, int pad) {
     int hout = (hin + 2 * pad - kh) / stride + 1;
     int wout = (win + 2 * pad - kw) / stride + 1;
-    for (int co = 0; co < cout; co++) {
-        for (int ho = 0; ho < hout; ho++)
-            for (int wo = 0; wo < wout; wo++) {
-                float acc = b ? b[co] : 0.0f;
-                for (int ci = 0; ci < cin; ci++)
-                    for (int r = 0; r < kh; r++)
-                        for (int c = 0; c < kw; c++) {
-                            int hi = ho * stride - pad + r, wi = wo * stride - pad + c;
-                            if (hi < 0 || hi >= hin || wi < 0 || wi >= win) continue;
-                            acc += in[((size_t)ci * hin + hi) * win + wi] * w[((size_t)co * cin + ci) * kh * kw + (size_t)r * kw + c];
-                        }
-                out[((size_t)co * hout + ho) * wout + wo] = acc;
-            }
+    /* Il conv stem e' il ~75% del costo dell'ASR: lo si parallelizza su `co` (canali di USCITA).
+     * Il calcolo di ciascun output resta IDENTICO al seriale (stesso ordine di accumulo ci,r,c),
+     * solo su thread diversi -> risultato BIT-EXACT. Sotto soglia resta scalare. */
+    long ops = (long)cout * hout * wout * cin * kh * kw;
+    int nth = asr_ncpu();
+    if (nth <= 1 || ops < 4000000L || cout < 2) {
+        ConvJob j = { out, in, w, b, cin, cout, hin, win, kh, kw, stride, pad, hout, wout, 0, cout };
+        conv_worker(&j);
+        return;
     }
+    pthread_t th[31]; ConvJob jobs[31]; int nt = 0, per = (cout + nth - 1) / nth;
+    for (int t = 0; t < nth; t++) {
+        int c0 = t * per, c1 = c0 + per; if (c1 > cout) c1 = cout;
+        if (c0 >= c1) break;
+        jobs[nt] = (ConvJob){ out, in, w, b, cin, cout, hin, win, kh, kw, stride, pad, hout, wout, c0, c1 };
+        pthread_create(&th[nt], NULL, conv_worker, &jobs[nt]); nt++;
+    }
+    for (int t = 0; t < nt; t++) pthread_join(th[t], NULL);
 }
 
 void gmb_asr_layer_norm(float* out, const float* x, const float* w, const float* b, int seq, int hid, float eps) {
