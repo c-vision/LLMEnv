@@ -357,6 +357,12 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_FLOAT(attn_multiplier, "attention_multiplier", 0.0f);
         OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
         cfg->attn_no_rope = 0;   /* granite usa RoPE */
+    } else if (strcmp(cfg->model_type, "glm4") == 0) {
+        /* GLM-4 denso: GQA con bias + RoPE PARZIALE (traditional=true) + MLP fuso (gate_up).
+         * 4 RMSNorm per layer. head_dim/n_heads/n_kv_heads dal parse generico. */
+        OPT_FLOAT(partial_rotary_factor, "partial_rotary_factor", 0.5f);
+        OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
+        cfg->rope_traditional = true;
     } else if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0) {
         /* Mamba / Falcon-Mamba (mlx_lm rimappa falcon_mamba->mamba): SSM selettivo. */
         OPT_INT(mamba_state_size, "state_size");

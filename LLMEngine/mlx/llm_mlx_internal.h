@@ -1294,6 +1294,10 @@ bool olmo_hybrid_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_a
 bool granite_hybrid_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                        mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool granite_hybrid_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+/* GLM-4 denso (model_type "glm4"). */
+bool glm4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                          mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool glm4_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 /* Mamba (SSM selettivo): layer ricorrente; ffn = identita'. */
 bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                         mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
