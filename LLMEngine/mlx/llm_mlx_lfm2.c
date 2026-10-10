@@ -441,11 +441,11 @@ bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
     if (ok) {
         mlx_array tu = mlx_array_new();
         ok = mlx_astype(&tu, top_inds, MLX_UINT32, s) == 0;
-        if (ok) { const int ts2[2]={n_tokens, m->cfg.top_k}; ok = mlx_reshape(&inds, tu, ts2, 2, s) == 0; }
+        if (ok) { const int ts2[3]={1,n_tokens, m->cfg.top_k}; ok = mlx_reshape(&inds, tu, ts2, 3, s) == 0; }
         mlx_array_free(tu);
     }
     mlx_array x1 = mlx_array_new();
-    if (ok) { const int x1s[4]={n_tokens,1,1,m->cfg.hidden_size}; ok = mlx_reshape(&x1, normed, x1s, 4, s) == 0; }
+    if (ok) { const int x1s[5]={1,n_tokens,1,1,m->cfg.hidden_size}; ok = mlx_reshape(&x1, normed, x1s, 5, s) == 0; }
 
     mlx_array gate_out=mlx_array_new(), up_out=mlx_array_new(), sig=mlx_array_new(), silu=mlx_array_new(), act=mlx_array_new();
     mlx_array down_out=mlx_array_new(), w_arr=mlx_array_new(), scaled=mlx_array_new(), summed=mlx_array_new(), moe_out=mlx_array_new();
@@ -454,6 +454,9 @@ bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
     if (ok) ok = mlx_sigmoid(&sig, gate_out, s)==0 && mlx_multiply(&silu, gate_out, sig, s)==0 && mlx_multiply(&act, silu, up_out, s)==0;
     if (ok) ok = llm_mlx_moe_gather_streamed(&m->cfg, layer_idx, 2, &down_out, act, dn_w,dn_s,dn_b, no_lhs, inds, true, xgs,xbs,xm, false, s)==0;
     MCHK(ok, "routed experts");
+    { mlx_array d2=mlx_array_new(); const int ds4[4]={n_tokens,m->cfg.top_k,1,m->cfg.hidden_size};
+      if (ok) ok = mlx_reshape(&d2, down_out, ds4, 4, s)==0;
+      if (ok) mlx_array_set(&down_out, d2); else mlx_array_free(d2); }
     if (ok) { const int ws[4]={n_tokens, m->cfg.top_k, 1, 1}; ok = mlx_reshape(&w_arr, weights, ws, 4, s)==0; }
     if (ok) ok = mlx_multiply(&scaled, down_out, w_arr, s)==0;
     if (ok) ok = mlx_sum_axis(&summed, scaled, 1, false, s)==0;
