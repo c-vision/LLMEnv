@@ -380,6 +380,8 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_qwen2_attn.c
     llm_mlx_lfm2.c
     llm_mlx_olmo3.c
+    llm_mlx_olmo_hybrid.c
+    llm_mlx_granite_hybrid.c
     llm_mlx_mamba.c
     llm_mlx_mamba2.c
     llm_mlx_rwkv7.c

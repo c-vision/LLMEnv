@@ -42,6 +42,15 @@ static int position_logits_host(LlmMlxSession* s, float** out_logits, double* ou
     } else if (ok) {
         ok = mlx_array_set(&capped, logits) == 0;
     }
+    /* Scala dei logits finali (granitemoehybrid: logits_scaling; falcon_h1: lm_head/embed mult).
+     * position_logits_host (topk/logprob/entropy) deve applicarla come final_step. */
+    if (ok && m->cfg.falcon_h1_out_scale > 0.0f && m->cfg.falcon_h1_out_scale != 1.0f) {
+        mlx_array sc = mlx_array_new_float32(m->cfg.falcon_h1_out_scale);
+        mlx_array cc = mlx_array_new();
+        ok = mlx_multiply(&cc, capped, sc, m->stream) == 0;
+        if (ok) mlx_array_set(&capped, cc);
+        mlx_array_free(sc); mlx_array_free(cc);
+    }
     mlx_array capped32 = mlx_array_new();
     if (ok) ok = llm_mlx_logits_f32(&capped32, capped, m->stream);
     if (ok) ok = mlx_array_eval(capped32) == 0;

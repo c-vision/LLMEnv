@@ -290,6 +290,56 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_FLOAT(rms_norm_eps, "norm_eps", 1e-5f);
         cfg->tie_word_embeddings = false;
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");
+    } else if (strcmp(cfg->model_type, "olmo_hybrid") == 0) {
+        /* OLMo-Hybrid (AllenAI): hybrid GDN (linear_attention) + GQA senza RoPE (full_attention).
+         * `layer_types` mappa i layer; parametri GDN `linear_*`; `layer_norm_epsilon` (default 1e-5)
+         * per la gated RMSNorm o_norm; il config ha rope_parameters.rope_theta=null -> NIENTE RoPE
+         * sui layer full (gestito nel blocco dedicato, rope_theta non usato). */
+        OPT_INT(linear_num_key_heads, "linear_num_key_heads");
+        OPT_INT(linear_num_value_heads, "linear_num_value_heads");
+        OPT_INT(linear_key_head_dim, "linear_key_head_dim");
+        OPT_INT(linear_value_head_dim, "linear_value_head_dim");
+        OPT_INT(linear_conv_kernel_dim, "linear_conv_kernel_dim");
+        { cJSON* ane = cJSON_GetObjectItemCaseSensitive(src, "linear_allow_neg_eigval");
+          cfg->linear_allow_neg_eigval = cJSON_IsBool(ane) ? cJSON_IsTrue(ane) : 0; }
+        OPT_FLOAT(layer_norm_epsilon, "layer_norm_epsilon", 1e-5f);
+        cfg->full_attention_interval = 4;   /* soddisfa la validazione; il dispatch usa layer_types */
+        cJSON* lt = cJSON_GetObjectItemCaseSensitive(src, "layer_types");
+        if (cJSON_IsArray(lt) && cJSON_GetArraySize(lt) == cfg->n_layers) {
+            cfg->is_linear_layer = (bool*)malloc((size_t)cfg->n_layers * sizeof(bool));
+            for (int i = 0; i < cfg->n_layers; i++) {
+                cJSON* it = cJSON_GetArrayItem(lt, i);
+                cfg->is_linear_layer[i] = cJSON_IsString(it) && strcmp(it->valuestring, "full_attention") != 0;
+            }
+        }
+    } else if (strcmp(cfg->model_type, "granitemoehybrid") == 0) {
+        /* Granite-MoE-Hybrid (IBM): hybrid Mamba2 (layer "mamba") + GQA senza RoPE ("attention").
+         * Variante DENSE (num_local_experts == 0, es. granite-4.0-h-micro). embedding_multiplier
+         * riusa embed_scale; logits_scaling riusa falcon_h1_out_scale (1/logits_scaling);
+         * residual_multiplier scala il residuo di mixer e mlp. */
+        cJSON* emb = cJSON_GetObjectItemCaseSensitive(src, "embedding_multiplier");
+        cfg->embed_scale = cJSON_IsNumber(emb) ? (float)emb->valuedouble : 1.0f;
+        cJSON* ls = cJSON_GetObjectItemCaseSensitive(src, "logits_scaling");
+        cfg->falcon_h1_out_scale = cJSON_IsNumber(ls) && ls->valuedouble != 0.0 ? (float)(1.0 / ls->valuedouble) : 1.0f;
+        OPT_FLOAT(residual_multiplier, "residual_multiplier", 1.0f);
+        OPT_FLOAT(attn_multiplier, "attention_multiplier", 0.0f);
+        /* Mamba2: teste/head_dim del mixer (SEPARATI da quelli di attention: la hybrid ha attn 32
+         * teste e mamba 64 teste). n_heads/head_dim restano quelli dell'attention (parse generico). */
+        OPT_INT(ssm_n_heads, "mamba_n_heads");
+        OPT_INT(ssm_head_dim, "mamba_d_head");
+        OPT_INT(mamba_state_size, "mamba_d_state");
+        OPT_INT(n_group, "mamba_n_groups");
+        OPT_INT(linear_conv_kernel_dim, "mamba_d_conv");
+        cfg->mamba_ts_lo = 0.0f; cfg->mamba_ts_hi = 1e30f;
+        cfg->full_attention_interval = 4;
+        cJSON* lt = cJSON_GetObjectItemCaseSensitive(src, "layer_types");
+        if (cJSON_IsArray(lt) && cJSON_GetArraySize(lt) == cfg->n_layers) {
+            cfg->is_linear_layer = (bool*)malloc((size_t)cfg->n_layers * sizeof(bool));
+            for (int i = 0; i < cfg->n_layers; i++) {
+                cJSON* it = cJSON_GetArrayItem(lt, i);
+                cfg->is_linear_layer[i] = cJSON_IsString(it) && strcmp(it->valuestring, "attention") != 0;
+            }
+        }
     } else if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0) {
         /* Mamba / Falcon-Mamba (mlx_lm rimappa falcon_mamba->mamba): SSM selettivo. */
         OPT_INT(mamba_state_size, "state_size");

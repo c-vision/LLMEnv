@@ -75,7 +75,7 @@ static bool rw_get(LlmMlxModel* m, int layer_idx, const char* suf, mlx_array* ou
 static bool rw_lin(mlx_array* res, LlmMlxModel* m, mlx_array x, mlx_array w, mlx_array sc, mlx_array bb,
                    int gsz, int bts, mlx_stream s) {
     if (sc.ctx == NULL || mlx_array_size(sc) == 0) return plain_linear(res, x, w, s);
-    return quantized_linear_cfg(res, x, w, sc, bb, gsz, bts, m->cfg.quant_mode, s) == 0;
+    return quantized_linear_cfg(res, x, w, sc, bb, gsz, bts, m->cfg.quant_mode, s);
 }
 
 /* Lineare di un LoRA: lora.2(lora.1(lora.0(x))), activation 0=none 1=sigmoid 2=tanh.

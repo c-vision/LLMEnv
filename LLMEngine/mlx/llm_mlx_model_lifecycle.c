@@ -77,6 +77,8 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "jamba",      jamba_attn_block,         jamba_ffn_block }, /* Jamba: ibrido attn (no-rope) + Mamba S6 + MLP */
     { "olmo3",     olmo3_attention_block,     olmo3_ffn_block }, /* OLMo-3 (AllenAI): dense GQA + q/k-norm flat + POST-norm */
     { "olmo2",     olmo3_attention_block,     olmo3_ffn_block }, /* OLMo-2 (AllenAI): stesso blocco di olmo3 SENZA sliding-window (full causal) */
+    { "olmo_hybrid", olmo_hybrid_attention_dispatch, olmo_hybrid_ffn_dispatch }, /* OLMo-Hybrid: GDN (linear) + GQA no-RoPE (full) */
+    { "granitemoehybrid", granite_hybrid_attention_dispatch, granite_hybrid_ffn_dispatch }, /* Granite-4.0-H: Mamba2 + GQA no-RoPE, residuo scalato */
     { "mistral3",  llama_attention_block,     dense_swiglu_ffn }, /* Ministral-3-14B: Mistral denso (GQA + SwiGLU) */
     /* DeepSeek V4.1: forward whole-model (mHC + CSA2 + Engram) con cache 7 slot; attn/ffn NULL,
      * dispatchato per model_type in load/session_append/session_generate. */

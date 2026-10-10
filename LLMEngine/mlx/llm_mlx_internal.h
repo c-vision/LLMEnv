@@ -157,6 +157,12 @@ typedef struct {
     int linear_key_head_dim;          /* linear_key_head_dim (es. 128) */
     int linear_value_head_dim;        /* linear_value_head_dim (es. 128) */
     int linear_conv_kernel_dim;       /* linear_conv_kernel_dim (es. 4) */
+    int linear_allow_neg_eigval;      /* olmo_hybrid: beta in [0,2] invece di [0,1] (beta*=2) */
+    float layer_norm_epsilon;         /* olmo_hybrid: eps della gated RMSNorm (o_norm), es. 1e-5 */
+    float residual_multiplier;        /* granitemoehybrid: scala del residuo su mixer e mlp (es. 0.22) */
+    float attn_multiplier;            /* granitemoehybrid: scale SDPA (es. 1/64 = 0.015625) */
+    int ssm_n_heads;                  /* granitemoehybrid: teste del mixer Mamba2 (mamba_n_heads, distinte da n_heads attn) */
+    int ssm_head_dim;                 /* granitemoehybrid: head_dim del mixer Mamba2 (mamba_d_head) */
     int mamba_state_size;             /* Mamba: d_state (es. 16) */
     int mamba_bcdt_rms;               /* falcon_mamba: mixer_norm RMSNorm su delta/B/C */
     float mamba_ts_lo, mamba_ts_hi;   /* Mamba2: time_step_limit [lo,hi] */
@@ -1279,6 +1285,14 @@ bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
 bool olmo3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                   mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool olmo3_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+/* OLMo-Hybrid: dispatcher hybrid (linear_attention = GatedDeltaNet, full_attention = GQA senza RoPE). */
+bool olmo_hybrid_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                                    mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool olmo_hybrid_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+/* Granite-MoE-Hybrid (IBM): dispatcher hybrid (mamba = Mamba2 SSD, attention = GQA senza RoPE). */
+bool granite_hybrid_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                                       mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool granite_hybrid_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 /* Mamba (SSM selettivo): layer ricorrente; ffn = identita'. */
 bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                         mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
