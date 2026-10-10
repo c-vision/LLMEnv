@@ -378,8 +378,8 @@ bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
         mlx_array eb = mlx_array_new(), eb2 = mlx_array_new(), sum = mlx_array_new();
         tname(m->cfg.layer_prefix, layer_idx, "feed_forward.expert_bias", namebuf, sizeof namebuf);
         ok = ok && multishard_get(&m->weights, namebuf, &eb);
-        if (ok) ok = mlx_astype(&eb2, eb, mlx_array_dtype(scores), s) == 0;
-        if (ok) ok = mlx_add(&sum, scores, eb2, s) == 0;
+        if (ok) ok = mlx_astype(&eb2, scores, MLX_FLOAT32, s) == 0;   /* mlx_lm: routing.astype(f32) + expert_bias */
+        if (ok) ok = mlx_add(&sum, eb2, eb, s) == 0;
         if (ok) mlx_array_set(&sel, sum); else mlx_array_free(sum);
         mlx_array_free(eb); mlx_array_free(eb2);
         MCHK(ok, "expert_bias");
@@ -404,6 +404,10 @@ bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
         if (ok && m->cfg.norm_topk_prob && m->cfg.top_k > 1) {
             mlx_array den = mlx_array_new(), tvn = mlx_array_new();
             ok = mlx_sum_axis(&den, tv, -1, true, s) == 0;
+            { mlx_array e6 = mlx_array_new_float32(1e-6f), d2 = mlx_array_new();
+              if (ok) { ok = mlx_astype(&d2, den, mlx_array_dtype(tv), s) == 0; mlx_array_free(den); den = d2; }
+              if (ok) { mlx_array d3 = mlx_array_new(); ok = mlx_add(&d3, den, e6, s) == 0; mlx_array_free(den); mlx_array_free(e6); den = d3; }
+              else mlx_array_free(e6); }
             if (ok) ok = mlx_divide(&tvn, tv, den, s) == 0;
             mlx_array_free(den);
             if (ok) mlx_array_set(&weights, tvn); else mlx_array_free(tvn);
