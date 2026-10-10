@@ -323,6 +323,10 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cfg->falcon_h1_out_scale = cJSON_IsNumber(ls) && ls->valuedouble != 0.0 ? (float)(1.0 / ls->valuedouble) : 1.0f;
         OPT_FLOAT(residual_multiplier, "residual_multiplier", 1.0f);
         OPT_FLOAT(attn_multiplier, "attention_multiplier", 0.0f);
+        /* position_embedding_type: "nope" -> attn SENZA RoPE (es. granite-4.0-h-micro); default
+         * (assente) = "rope" come mlx_lm -> RoPE attiva. */
+        { cJSON* pet = cJSON_GetObjectItemCaseSensitive(src, "position_embedding_type");
+          cfg->attn_no_rope = (cJSON_IsString(pet) && strcmp(pet->valuestring, "nope") == 0) ? 1 : 0; }
         /* Mamba2: teste/head_dim del mixer (SEPARATI da quelli di attention: la hybrid ha attn 32
          * teste e mamba 64 teste). n_heads/head_dim restano quelli dell'attention (parse generico). */
         OPT_INT(ssm_n_heads, "mamba_n_heads");
@@ -340,6 +344,19 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
                 cfg->is_linear_layer[i] = cJSON_IsString(it) && strcmp(it->valuestring, "attention") != 0;
             }
         }
+    } else if (strcmp(cfg->model_type, "granite") == 0) {
+        /* Granite (IBM) DENSE: GQA + RoPE (traditional=false) + SwiGLU + multipli. Stessa struttura
+         * del layer di granitemoehybrid, ma TUTTI attention (no mamba) -> riusa i blocchi
+         * granite_hybrid (is_linear_layer NULL = tutti attention). embedding_multiplier -> embed_scale;
+         * logits_scaling -> falcon_h1_out_scale; residual_multiplier; attention_multiplier (scale). */
+        cJSON* emb = cJSON_GetObjectItemCaseSensitive(src, "embedding_multiplier");
+        cfg->embed_scale = cJSON_IsNumber(emb) ? (float)emb->valuedouble : 1.0f;
+        cJSON* ls = cJSON_GetObjectItemCaseSensitive(src, "logits_scaling");
+        cfg->falcon_h1_out_scale = cJSON_IsNumber(ls) && ls->valuedouble != 0.0 ? (float)(1.0 / ls->valuedouble) : 1.0f;
+        OPT_FLOAT(residual_multiplier, "residual_multiplier", 1.0f);
+        OPT_FLOAT(attn_multiplier, "attention_multiplier", 0.0f);
+        OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
+        cfg->attn_no_rope = 0;   /* granite usa RoPE */
     } else if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0) {
         /* Mamba / Falcon-Mamba (mlx_lm rimappa falcon_mamba->mamba): SSM selettivo. */
         OPT_INT(mamba_state_size, "state_size");

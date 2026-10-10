@@ -163,6 +163,7 @@ typedef struct {
     float attn_multiplier;            /* granitemoehybrid: scale SDPA (es. 1/64 = 0.015625) */
     int ssm_n_heads;                  /* granitemoehybrid: teste del mixer Mamba2 (mamba_n_heads, distinte da n_heads attn) */
     int ssm_head_dim;                 /* granitemoehybrid: head_dim del mixer Mamba2 (mamba_d_head) */
+    int attn_no_rope;                 /* granite/granitemoehybrid: 1 = attention SENZA RoPE (position_embedding_type "nope") */
     int mamba_state_size;             /* Mamba: d_state (es. 16) */
     int mamba_bcdt_rms;               /* falcon_mamba: mixer_norm RMSNorm su delta/B/C */
     float mamba_ts_lo, mamba_ts_hi;   /* Mamba2: time_step_limit [lo,hi] */

@@ -31,7 +31,7 @@ bool granite_hybrid_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_
 bool granite_hybrid_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 
 /* attn GQA senza RoPE, ritorna o_proj (NESSUN residuo/norm). */
-static bool granite_attn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array x,
+static bool granite_attn(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                          mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out) {
     bool ok = true;
     const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
@@ -59,6 +59,17 @@ static bool granite_attn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
               ok = mlx_reshape(&q4,ql,qs4,4,st)==0 && mlx_reshape(&k4,kl,ks4,4,st)==0 && mlx_reshape(&v4,vl,ks4,4,st)==0; CHK(ok,"reshape"); }
     mlx_array q_t=mlx_array_new(),k_t=mlx_array_new(),v_t=mlx_array_new();
     if (ok) { const int p[4]={0,2,1,3}; ok = mlx_transpose_axes(&q_t,q4,p,4,st)==0 && mlx_transpose_axes(&k_t,k4,p,4,st)==0 && mlx_transpose_axes(&v_t,v4,p,4,st)==0; CHK(ok,"transpose"); }
+    if (ok && !m->cfg.attn_no_rope) {   /* granite (dense) usa RoPE; granitemoehybrid "nope" no */
+        mlx_optional_float base = { m->cfg.rope_theta, true };
+        mlx_array nf = mlx_array_new();
+        mlx_array qr = mlx_array_new(), kr = mlx_array_new();
+        ok = mlx_fast_rope(&qr, q_t, hd, m->cfg.rope_traditional, base, 1.0f, cache_offset, nf, st)==0 &&
+             mlx_fast_rope(&kr, k_t, hd, m->cfg.rope_traditional, base, 1.0f, cache_offset, nf, st)==0;
+        mlx_array_free(nf);
+        if (ok) { mlx_array_set(&q_t, qr); mlx_array_set(&k_t, kr); }
+        mlx_array_free(qr); mlx_array_free(kr);
+        CHK(ok, "rope");
+    }
     if (ok) {
         if (has_cache && k_cache && k_cache->ctx != NULL && mlx_array_ndim(*k_cache)==4 && mlx_array_size(*k_cache)>0) {
             mlx_array kn=mlx_array_new(), vn=mlx_array_new();
@@ -220,7 +231,6 @@ static bool granite_mamba2(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
 
 bool granite_hybrid_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                        mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h) {
-    (void)cache_offset;
     bool ok = true, lin = m->cfg.is_linear_layer && layer_idx < m->cfg.n_layers && m->cfg.is_linear_layer[layer_idx];
     const float rm = m->cfg.residual_multiplier != 0.0f ? m->cfg.residual_multiplier : 1.0f;
     char nb[256]; mlx_stream s = m->stream;
@@ -232,7 +242,7 @@ bool granite_hybrid_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_
     mlx_array mixout=mlx_array_new();
     if (ok) {
         if (lin) ok = granite_mamba2(m, layer_idx, n_tokens, xl, k_cache, v_cache, has_cache, &mixout);
-        else ok = granite_attn(m, layer_idx, n_tokens, xl, k_cache, v_cache, has_cache, &mixout);
+        else ok = granite_attn(m, layer_idx, cache_offset, n_tokens, xl, k_cache, v_cache, has_cache, &mixout);
     }
     if (ok) { mlx_array sc=mlx_array_new_float32(rm), mo=mlx_array_new(); ok = mlx_multiply(&mo, mixout, sc, s)==0;
               if (ok) ok = mlx_add(out_h, x, mo, s)==0; mlx_array_free(sc); mlx_array_free(mo); }
