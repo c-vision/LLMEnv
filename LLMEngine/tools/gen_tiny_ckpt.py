@@ -20,6 +20,16 @@ from mlx.utils import tree_map, tree_flatten
 # Config TINY per-arch (dim minime; i parametri arch-specifici con valori "reali" scalati).
 # head_dim = hidden/n_heads deve restare sensato per RoPE/GQA.
 TINY = {
+    "ernie4_5_moe": dict(
+        cls="ernie4_5_moe", model_type="ernie4_5_moe",
+        hidden_size=64, intermediate_size=128, num_hidden_layers=4,
+        num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-5,
+        vocab_size=128, max_position_embeddings=512, rope_theta=10000.0,
+        use_bias=False, tie_word_embeddings=False,
+        moe_num_experts=4, moe_k=2, moe_intermediate_size=64,
+        moe_layer_start_index=0, moe_layer_interval=2, moe_num_shared_experts=1,
+        moe_gate_act="softmax", head_dim=16,
+    ),
     "glm4": dict(
         cls="glm4", model_type="glm4",
         hidden_size=64, num_hidden_layers=2, intermediate_size=128,

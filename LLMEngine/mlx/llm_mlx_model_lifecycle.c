@@ -81,6 +81,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "granitemoehybrid", granite_hybrid_attention_dispatch, granite_hybrid_ffn_dispatch }, /* Granite-4.0-H: Mamba2 + GQA no-RoPE, residuo scalato */
     { "granite", granite_hybrid_attention_dispatch, granite_hybrid_ffn_dispatch }, /* Granite denso: GQA + RoPE + multipli (stessa struttura, tutti attention) */
     { "glm4", glm4_attention_block, glm4_ffn_block }, /* GLM-4 denso: GQA+bias + RoPE parziale + MLP fuso (4 norm) */
+    { "ernie4_5_moe", llama_attention_block, moe_v2_ffn_block }, /* ERNIE-4.5-MoE: attn llama + FFN MoE v2 (softmax+shared_experts) */
     { "mistral3",  llama_attention_block,     dense_swiglu_ffn }, /* Ministral-3-14B: Mistral denso (GQA + SwiGLU) */
     /* DeepSeek V4.1: forward whole-model (mHC + CSA2 + Engram) con cache 7 slot; attn/ffn NULL,
      * dispatchato per model_type in load/session_append/session_generate. */

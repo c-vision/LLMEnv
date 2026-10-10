@@ -363,6 +363,24 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_FLOAT(partial_rotary_factor, "partial_rotary_factor", 0.5f);
         OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
         cfg->rope_traditional = true;
+    } else if (strcmp(cfg->model_type, "ernie4_5_moe") == 0) {
+        /* ERNIE-4.5-MoE: MoE con router softmax + top-k + renorm + shared_experts (no gate).
+         * Layer densi/MoE via moe_layer_interval/start/end. FFN = moe_v2_ffn_block. */
+        OPT_INT(n_experts, "moe_num_experts");
+        OPT_INT(top_k, "moe_k");
+        OPT_INT(moe_intermediate_size, "moe_intermediate_size");
+        OPT_INT(moe_layer_start, "moe_layer_start_index");
+        OPT_INT(moe_layer_interval, "moe_layer_interval");
+        { cJSON* me = cJSON_GetObjectItemCaseSensitive(src, "moe_layer_end_index");
+          cfg->moe_layer_end = cJSON_IsNumber(me) ? (int)me->valuedouble : -1; }
+        cfg->moe_shared_base[0] = 0;
+        { cJSON* se = cJSON_GetObjectItemCaseSensitive(src, "moe_num_shared_experts");
+          if (cJSON_IsNumber(se) && se->valuedouble > 0) snprintf(cfg->moe_shared_base, sizeof(cfg->moe_shared_base), "mlp.shared_experts"); }
+        cfg->moe_shared_gate = 0;
+        { cJSON* ga = cJSON_GetObjectItemCaseSensitive(src, "moe_gate_act");
+          cfg->moe_gate_sigmoid = (cJSON_IsString(ga) && strcmp(ga->valuestring, "sigmoid") == 0) ? 1 : 0; }
+        OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
+        cfg->rope_traditional = true;   /* ernie: traditional=true */
     } else if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0) {
         /* Mamba / Falcon-Mamba (mlx_lm rimappa falcon_mamba->mamba): SSM selettivo. */
         OPT_INT(mamba_state_size, "state_size");

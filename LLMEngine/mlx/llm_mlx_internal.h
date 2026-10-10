@@ -93,6 +93,13 @@ typedef struct {
     float rope_theta;
     bool norm_topk_prob;
     bool use_expert_bias;         /* LFM2-MoE: expert_bias applicato SOLO alla selezione top-k (non ai pesi) */
+    /* MoE v2 (percorso parametrizzato): selezione layer densi/MoE + shared-expert + gate act. */
+    int moe_layer_interval;       /* >0: layer MoE se (i+1)%interval==0 && start<=i<=end; 0: usa first_k_dense_replace */
+    int moe_layer_start;          /* ernie: moe_layer_start_index */
+    int moe_layer_end;            /* ernie: moe_layer_end_index (-1 = n_layers-1) */
+    char moe_shared_base[24];     /* base name shared expert (default "mlp.shared_expert"; ernie "mlp.shared_experts") */
+    int moe_shared_gate;          /* 1 = esiste <base>_gate (qwen); 0 = assente (ernie) */
+    int moe_gate_sigmoid;         /* 1 = gate_act sigmoid; 0 = softmax */
     bool tie_word_embeddings;
     /* FASE 1b.0: da config.json["model_type"] -- seleziona la entry di ARCH_TABLE
      * (vedi LlmMlxArchOps sotto). Buffer fisso: i valori reali osservati
@@ -1298,6 +1305,8 @@ bool granite_hybrid_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, ml
 bool glm4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                           mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool glm4_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+/* MoE v2 (parametrizzato): FFN MoE copre piu' famiglie via config. */
+bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 /* Mamba (SSM selettivo): layer ricorrente; ffn = identita'. */
 bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                         mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
