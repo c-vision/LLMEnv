@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+
 bool lfm2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                  mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool lfm2_conv_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
