@@ -622,7 +622,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     cJSON* tie = cJSON_GetObjectItemCaseSensitive(j, "tie_word_embeddings");
     /* LFM2/Mamba non dichiarano la chiave e sono SEMPRE legati (nessun lm_head): default true. */
     cfg->tie_word_embeddings = cJSON_IsBool(tie) ? cJSON_IsTrue(tie)
-        : (strcmp(cfg->model_type, "lfm2") == 0 || strcmp(cfg->model_type, "mamba") == 0
+        : (strcmp(cfg->model_type, "lfm2") == 0 || strcmp(cfg->model_type, "lfm2_moe") == 0
+           || strcmp(cfg->model_type, "mamba") == 0
            || strcmp(cfg->model_type, "falcon_mamba") == 0 || strcmp(cfg->model_type, "mamba2") == 0);
 
     /* FASE 1b.2 (Llama 3.x): rope_scaling.rope_type == "llama3" -- letto dalla radice

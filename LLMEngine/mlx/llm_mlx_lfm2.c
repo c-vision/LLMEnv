@@ -301,14 +301,44 @@ bool lfm2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, ml
 
 /* ============================================================================
  * lfm2_moe_ffn_block — FFN di LFM2-MoE (Liquid). I primi `first_k_dense_replace` layer hanno MLP
- * denso (riusa lfm2_ffn_block); dal resto FFN MoE: router SOFTMAX + `expert_bias` applicato SOLO
+ * denso (riusa lfm2_ffn_block); dal resto FFN MoE: router SIGMOID + `expert_bias` applicato SOLO
  * alla SELEZIONE top-k (non ai pesi), `norm_topk_prob`, `routed_scaling_factor`, esperti SwiGLU
  * stacked (`feed_forward.switch_mlp.{gate,up,down}_proj`, prodotti da stack_moe_experts).
  * Rif: transformers/models/lfm2_moe/Lfm2MoeTopKRouter + Lfm2MoeSparseMoeBlock.
  * ============================================================================ */
 bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out) {
-    if (layer_idx < m->cfg.first_k_dense_replace)
-        return lfm2_ffn_block(m, layer_idx, n_tokens, h, out);
+    if (layer_idx < m->cfg.first_k_dense_replace) {
+        /* Layer denso (LFM2-MoE): ffn_norm -> feed_forward.{gate,up,down}_proj -> swiglu -> +h.
+         * Nomi `*_proj` (convenzione MLX), NON w1/w2/w3 come `lfm2` denso. */
+        bool d = true;
+        char nb[256];
+        const int dgsz = m->cfg.quant_group_size, dbts = m->cfg.quant_bits;
+        mlx_array dln = mlx_array_new();
+        tname(m->cfg.layer_prefix, layer_idx, "ffn_norm.weight", nb, sizeof nb);
+        d = d && multishard_get(&m->weights, nb, &dln);
+        mlx_array dx = mlx_array_new();
+        if (d) d = rms_norm_cfg(&dx, h, dln, m->cfg.rms_norm_eps, m->stream);
+        mlx_array dw1=mlx_array_new(),dw1s=mlx_array_new(),dw1b=mlx_array_new();
+        mlx_array dw2=mlx_array_new(),dw2s=mlx_array_new(),dw2b=mlx_array_new();
+        mlx_array dw3=mlx_array_new(),dw3s=mlx_array_new(),dw3b=mlx_array_new();
+        tname(m->cfg.layer_prefix, layer_idx, "feed_forward.gate_proj", nb, sizeof nb);
+        d = d && multishard_get_triple(&m->weights, nb, &dw1,&dw1s,&dw1b);
+        tname(m->cfg.layer_prefix, layer_idx, "feed_forward.up_proj", nb, sizeof nb);
+        d = d && multishard_get_triple(&m->weights, nb, &dw3,&dw3s,&dw3b);
+        tname(m->cfg.layer_prefix, layer_idx, "feed_forward.down_proj", nb, sizeof nb);
+        d = d && multishard_get_triple(&m->weights, nb, &dw2,&dw2s,&dw2b);
+        mlx_array dg=mlx_array_new(), du=mlx_array_new(), dsw=mlx_array_new(), ddo=mlx_array_new();
+        if (d) { d = quantized_linear_cfg(&dg, dx, dw1,dw1s,dw1b, dgsz,dbts, m->cfg.quant_mode, m->stream); }
+        if (d) { d = quantized_linear_cfg(&du, dx, dw3,dw3s,dw3b, dgsz,dbts, m->cfg.quant_mode, m->stream); }
+        if (d) { mlx_array sg=mlx_array_new(), sl=mlx_array_new();
+                 d = mlx_sigmoid(&sg, dg, m->stream)==0 && mlx_multiply(&sl, dg, sg, m->stream)==0 && mlx_multiply(&dsw, sl, du, m->stream)==0;
+                 mlx_array_free(sg); mlx_array_free(sl); }
+        if (d) { d = quantized_linear_cfg(&ddo, dsw, dw2,dw2s,dw2b, dgsz,dbts, m->cfg.quant_mode, m->stream); }
+        if (d) { d = mlx_add(out, h, ddo, m->stream)==0; }
+        mlx_array dall[]={dln,dx,dw1,dw1s,dw1b,dw2,dw2s,dw2b,dw3,dw3s,dw3b,dg,du,dsw,ddo};
+        for (size_t i=0;i<sizeof dall/sizeof dall[0];i++) mlx_array_free(dall[i]);
+        return d;
+    }
 
     bool ok = true;
     const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
@@ -322,14 +352,23 @@ bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
     mlx_array normed = mlx_array_new();
     if (ok) { ok = rms_norm_cfg(&normed, h, ln_w, m->cfg.rms_norm_eps, s); MCHK(ok, "ffn_norm"); }
 
-    /* router: feed_forward.gate -> softmax */
-    mlx_array gw = mlx_array_new();
-    tname(m->cfg.layer_prefix, layer_idx, "feed_forward.gate.weight", namebuf, sizeof namebuf);
-    ok = ok && multishard_get(&m->weights, namebuf, &gw);
+    /* router: feed_forward.gate -> sigmoid. Il gate e' QUANTIZZATO (nel 4-bit e' 8-bit). */
+    mlx_array gw = mlx_array_new(), gws = mlx_array_new(), gwb = mlx_array_new();
+    tname(m->cfg.layer_prefix, layer_idx, "feed_forward.gate", namebuf, sizeof namebuf);
+    ok = ok && multishard_get_triple(&m->weights, namebuf, &gw, &gws, &gwb);
     mlx_array gates = mlx_array_new();
-    if (ok) { ok = plain_linear(&gates, normed, gw, s); MCHK(ok, "router matmul"); }
+    if (ok) {
+        if (gws.ctx) {
+            int rgg = gsz, rgb = bts; char rgm[16];
+            llm_mlx_quant_derive(gw, gws, gsz, bts, "affine", &rgg, &rgb, rgm, sizeof rgm);
+            ok = quantized_linear_cfg(&gates, normed, gw, gws, gwb, rgg, rgb, rgm, s);
+        } else {
+            ok = plain_linear(&gates, normed, gw, s);
+        }
+        MCHK(ok, "router matmul");
+    }
     mlx_array scores = mlx_array_new();
-    if (ok) { ok = mlx_softmax_axis(&scores, gates, -1, true, s) == 0; MCHK(ok, "router softmax"); }
+    if (ok) { ok = mlx_sigmoid(&scores, gates, s) == 0; MCHK(ok, "router sigmoid"); }
 
     /* selezione = scores + expert_bias (il bias NON entra nei pesi) */
     mlx_array sel = mlx_array_new();
@@ -416,7 +455,7 @@ bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
     if (ok) ok = mlx_add(out, h, moe_out, s)==0;
     MCHK(ok, "final residual");
 
-    mlx_array all[]={ln_w,normed,gw,gates,scores,sel,part,top_inds,weights,
+    mlx_array all[]={ln_w,normed,gw,gws,gwb,gates,scores,sel,part,top_inds,weights,
                      gp_w,gp_s,gp_b,up_w,up_s,up_b,dn_w,dn_s,dn_b,no_lhs,inds,x1,
                      gate_out,up_out,sig,silu,act,down_out,w_arr,scaled,summed,moe_out};
     for (size_t i=0;i<sizeof all/sizeof all[0];i++) mlx_array_free(all[i]);
