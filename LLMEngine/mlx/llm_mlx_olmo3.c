@@ -80,8 +80,8 @@ bool olmo3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
     if (ok) {
         mlx_optional_float base = {m->cfg.rope_theta, true};
         mlx_array nf = mlx_array_new();
-        ok = mlx_fast_rope(&q_r, q_t, hd, false, base, 1.0f, cache_offset, nf, s) == 0 &&
-             mlx_fast_rope(&k_r, k_t, hd, false, base, 1.0f, cache_offset, nf, s) == 0;
+        ok = mlx_fast_rope(&q_r, q_t, hd, m->cfg.rope_traditional, base, 1.0f, cache_offset, nf, s) == 0 &&
+             mlx_fast_rope(&k_r, k_t, hd, m->cfg.rope_traditional, base, 1.0f, cache_offset, nf, s) == 0;
         mlx_array_free(nf);
         CHK(ok, "rope");
     }

@@ -74,6 +74,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "falcon_h1",  falcon_h1_attn_block,     falcon_h1_ffn_block }, /* Falcon-H1: ibrido attn + Mamba2 + MLP */
     { "jamba",      jamba_attn_block,         jamba_ffn_block }, /* Jamba: ibrido attn (no-rope) + Mamba S6 + MLP */
     { "olmo3",     olmo3_attention_block,     olmo3_ffn_block }, /* OLMo-3 (AllenAI): dense GQA + q/k-norm flat + POST-norm */
+    { "olmo2",     olmo3_attention_block,     olmo3_ffn_block }, /* OLMo-2 (AllenAI): stesso blocco di olmo3 SENZA sliding-window (full causal) */
     { "mistral3",  llama_attention_block,     dense_swiglu_ffn }, /* Ministral-3-14B: Mistral denso (GQA + SwiGLU) */
     /* DeepSeek V4.1: forward whole-model (mHC + CSA2 + Engram) con cache 7 slot; attn/ffn NULL,
      * dispatchato per model_type in load/session_append/session_generate. */

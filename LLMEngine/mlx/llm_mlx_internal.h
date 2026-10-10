@@ -128,6 +128,12 @@ typedef struct {
     float llama3_high_freq_factor;  /* rope_scaling.high_freq_factor (default 4.0) */
     float llama3_old_context_len;   /* rope_scaling.original_max_position_embeddings (default 8192) */
 
+    /* RoPE "traditional" (stile Meta/Llama: rotate_half, rotazione a META' testa) vs
+     * default (stile GPT-NeoX: coppie (2i,2i+1)). Default false (tutte le arch verificate
+     * finora usano il default). ERNIE-4.5 lo usa ESPLICITAMENTE (mlx_lm/models/
+     * ernie4_5.py: initialize_rope(..., traditional=True)). */
+    bool rope_traditional;
+
     /* FASE 1b.7 (YaRN, 2026-09-06): rope_scaling.rope_type == "yarn" (replica 1:1
      * YarnRoPE in mlx_lm rope_utils.py). Usato da gpt-oss-20b/120b (factor 32, orig 4096,
      * beta_fast 32/beta_slow 1, base=rope_theta 150000) e Ternary-Bonsai-4B (qwen3, factor 4,

@@ -59,7 +59,7 @@ static bool llama_try_fused_qkv_rope(LlmMlxModel* m, int cache_offset,
     bool fok = llm_mlx_fused_rope_append(
         q_rope, k_rope, v_t, q, k, v,
         m->cfg.n_heads, m->cfg.n_kv_heads, m->cfg.head_dim, m->cfg.head_dim,
-        rope_base, 1.0f, /*traditional=*/false, freqs, cache_offset, m->stream);
+        rope_base, 1.0f, m->cfg.rope_traditional, freqs, cache_offset, m->stream);
     mlx_array_free(freqs);
     return fok;
 }
@@ -187,9 +187,9 @@ bool llama_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
             mlx_array_free(custom_freqs);
         } else {
             mlx_optional_float base = {m->cfg.rope_theta, true};
-            ok = mlx_fast_rope(&q_rope, q_t, m->cfg.head_dim, /*traditional=*/false, base, /*scale=*/1.0f,
+            ok = mlx_fast_rope(&q_rope, q_t, m->cfg.head_dim, m->cfg.rope_traditional, base, /*scale=*/1.0f,
                                 cache_offset, no_freqs, m->stream) == 0 &&
-                 mlx_fast_rope(&k_rope, k_t, m->cfg.head_dim, false, base, 1.0f, cache_offset, no_freqs, m->stream) == 0;
+                 mlx_fast_rope(&k_rope, k_t, m->cfg.head_dim, m->cfg.rope_traditional, base, 1.0f, cache_offset, no_freqs, m->stream) == 0;
             CHK(ok, "rope (default)");
         }
         mlx_array_free(no_freqs);

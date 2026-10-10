@@ -620,6 +620,12 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cfg->llama3_high_freq_factor = cJSON_IsNumber(high) ? (float)high->valuedouble : 4.0f;
         cfg->llama3_old_context_len = cJSON_IsNumber(old_ctx) ? (float)old_ctx->valuedouble : 8192.0f;
     }
+    /* RoPE "traditional" (ERNIE-4.5): stile Meta/Llama (rotate_half). La chiave
+     * `rope_traditional` del config la forza se presente; altrimenti default true SOLO per
+     * model_type=ernie4_5, false per ogni altra architettura. */
+    cJSON* rt = cJSON_GetObjectItemCaseSensitive(j, "rope_traditional");
+    cfg->rope_traditional = cJSON_IsBool(rt) ? cJSON_IsTrue(rt)
+                            : (strcmp(cfg->model_type, "ernie4_5") == 0);
     /* YaRN (FASE 1b.7): rope_scaling.rope_type == "yarn" (o "deepseek_yarn"/"telechat3-yarn",
      * stessi parametri -- mlx_lm initialize_rope li tratta allo stesso modo). Stessa chiave
      * radice `rope_scaling` di llama3. Default: use_yarn_rope=false. */
