@@ -134,7 +134,7 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
         float ssum=0.0f; for (int j=0;j<K;j++) ssum+=sc[j]; if (ssum<1e-12f) ssum=1e-12f;
         mlx_array acc = mlx_array_new(); bool acc_set=false;
         for (int j=0;j<K && ok;j++) {
-            int e=ii[j]; float wj=sc[j]/ssum;
+            int e=ii[j]; float wj = m->cfg.norm_topk_prob ? sc[j]/ssum : sc[j];
             mlx_array ge=mlx_array_new(), ue=mlx_array_new(), ae=mlx_array_new(), de=mlx_array_new();
             ok = expert_lin(&ge, xt, gw, gs, gb, e, gsz, bts, m->cfg.quant_mode, s);
             if (ok) ok = expert_lin(&ue, xt, uw, us, ub, e, gsz, bts, m->cfg.quant_mode, s);

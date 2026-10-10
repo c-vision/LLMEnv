@@ -44,7 +44,7 @@
  * di Qwen2/Qwen3 denso).
  * Le fasi successive aggiungono altre entry, mai toccano le esistenti. */
 static const LlmMlxArchOps ARCH_TABLE[] = {
-    { "qwen3_moe", qwen3_moe_attention_block, qwen3_moe_ffn_block },
+    { "qwen3_moe", qwen3_moe_attention_block, moe_v2_ffn_block }, /* migrato a moe_v2 (ex qwen3_moe_ffn_block, parcheggiato) */
     { "qwen3",     qwen3_moe_attention_block, dense_swiglu_ffn },
     { "qwen3_next", qwen3_next_attention_dispatch, qwen3_5_moe_ffn_block },
     { "qwen4_exp",  qwen4_exp_attention_dispatch, qwen4_exp_ffn_dispatch },
