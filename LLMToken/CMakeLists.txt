@@ -61,7 +61,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(sds)
 
-add_library(llmtoken SHARED llmtoken.c llmtoken_wordpiece.c "${sds_SOURCE_DIR}/sds.c")
+add_library(llmtoken SHARED llmtoken.c llmtoken_sp.c llmtoken_wordpiece.c "${sds_SOURCE_DIR}/sds.c")
 target_include_directories(llmtoken PRIVATE "${sds_SOURCE_DIR}" "${cjson_SOURCE_DIR}")
 target_link_libraries(llmtoken PRIVATE pcre2-8 cjson)
 target_include_directories(llmtoken PUBLIC .)
@@ -70,6 +70,10 @@ set_target_properties(llmtoken PROPERTIES OUTPUT_NAME "llmtoken" POSITION_INDEPE
 # Test del loader TIKTOKEN (Kimi) contro id golden del riferimento `tiktoken`.
 add_executable(llmtoken_tiktoken_test llmtoken_tiktoken_test.c)
 target_link_libraries(llmtoken_tiktoken_test PRIVATE llmtoken)
+
+# Conformance del loader SentencePiece nativo (llmtoken_sp.c) contro sentencepiece/golden id.
+add_executable(llmtoken_sp_selfcheck llmtoken_sp_selfcheck.c)
+target_link_libraries(llmtoken_sp_selfcheck PRIVATE llmtoken)
 
 # Conformance del tokenizer BERT WordPiece C contro il golden HF (tokenizer_golden.json),
 # gia' in questo progetto: TUTTI i tokenizer vivono qui (BPE byte-level, metaspace/SPM,

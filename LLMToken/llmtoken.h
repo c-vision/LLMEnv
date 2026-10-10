@@ -52,6 +52,14 @@ llmtoken_handle llmtoken_load_json(const char* json, size_t len);
  * Todo/(open) - Kimi-Tiktoken-Tokenizer-Nativo.md). Ritorna NULL su errore. */
 llmtoken_handle llmtoken_load_tiktoken(const char* tiktoken_model_path, const char* tokenizer_config_json_path);
 
+/* Carica un tokenizer SentencePiece DIRETTAMENTE dal file `tokenizer.model`
+ * (protobuf ModelProto di sentencepiece, modello BPE con byte_fallback). Nessun
+ * Python e nessun `tokenizer.json`: il loader deriva vocab+merges dal protobuf e
+ * costruisce internamente lo schema JSON del percorso BPE-metaspace gia' validato.
+ * Usato dai modelli che hanno SOLO il tokenizer slow (es. ERNIE-4.5). Ritorna NULL
+ * su errore (file assente/malformato, modello non-BPE). Vedi llmtoken_sp.c. */
+llmtoken_handle llmtoken_load_sp(const char* model_path);
+
 void llmtoken_free(llmtoken_handle handle);
 
 /* Export per i METADATA GGUF (tokenizer.ggml.tokens/merges/model). Unica sorgente
