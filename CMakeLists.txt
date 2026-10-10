@@ -15,6 +15,8 @@ add_subdirectory(LLMCodec)    # 2
 add_subdirectory(LLMJinja)    # 2b (motore Jinja chat-template, port del motore Jinja originale)
 add_subdirectory(LLMDesc)     # 3
 add_subdirectory(LLMMetal)    # 4
+# Engine ASR (Qwen3-ASR, inference-only): leggero (libc/libm/pthread), sempre costruibile.
+add_subdirectory(LLMEngine/asr)  # 4b
 
 # LLMEngine richiede MLX (mlx-c) e/o llama.cpp via FetchContent: pesante e opzionale.
 # Attivare con -DLLMENV_BUILD_ENGINE=ON (sub-layer: plugin, moe, llama, mlx).
