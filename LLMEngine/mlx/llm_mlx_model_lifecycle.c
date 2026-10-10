@@ -72,6 +72,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "mamba",      mamba_block,              mamba_ffn_identity }, /* Mamba (SSM selettivo): mixer in slot attn, ffn identita */
     { "falcon_mamba", mamba_block,              mamba_ffn_identity }, /* Falcon-Mamba: stesso blocco (+ mixer_norm, TBD) */
     { "mamba2",     mamba2_block,             mamba2_ffn_identity }, /* Mamba2 (SSD): in_proj+conv+scan SSD */
+    { "rwkv7",      rwkv7_attn_block,         rwkv7_ffn_block },      /* RWKV7: time-mix (WKV7 ricorrente) + channel-mix */
     { "falcon_h1",  falcon_h1_attn_block,     falcon_h1_ffn_block }, /* Falcon-H1: ibrido attn + Mamba2 + MLP */
     { "jamba",      jamba_attn_block,         jamba_ffn_block }, /* Jamba: ibrido attn (no-rope) + Mamba S6 + MLP */
     { "olmo3",     olmo3_attention_block,     olmo3_ffn_block }, /* OLMo-3 (AllenAI): dense GQA + q/k-norm flat + POST-norm */
@@ -156,6 +157,7 @@ void llm_mlx_model_init(LlmMlxModel* m) {
     }
     m->ngram_fd = -1; /* 0 (da memset) sarebbe stdin -- deve restare "non caricato" finche' non aperto */
     for (int q = 0; q < 16; q++) m->ngram_file[q].fd = -1; /* idem: 0 sarebbe stdin */
+    m->rwkv_v_first = mlx_array_new();   /* RWKV7: carry cross-layer (init esplicito post-memset) */
 }
 
 void llm_mlx_model_destroy(LlmMlxModel* m) {
@@ -217,6 +219,7 @@ void llm_mlx_model_destroy(LlmMlxModel* m) {
         free(m->gdn_dt);
         m->gdn_dt = NULL;
     }
+    mlx_array_free(m->rwkv_v_first);   /* RWKV7: carry cross-layer v_first (no-op se vuoto) */
     if (m->qsa_indexer_cache) {
         for (int l = 0; l < m->qsa_indexer_cache_n; l++) llm_mlx_qwen4exp_qsa_cache_free(&m->qsa_indexer_cache[l]);
         free(m->qsa_indexer_cache);

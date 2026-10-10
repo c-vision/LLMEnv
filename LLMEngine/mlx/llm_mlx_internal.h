@@ -166,6 +166,12 @@ typedef struct {
     int attn_layer_period;            /* jamba: periodo layer attenzione */
     int attn_layer_offset;            /* jamba: offset layer attenzione */
     int mamba_dt_rank;                /* Mamba: dt_rank = ceil(d_model/16) */
+    /* RWKV7 (rwkv7): time-mixing (WKV7 kernel ricorrente + LoRA r/w/a/g) + channel-mixing.
+     * Le LoRA hanno rango separato per ogni proiezione; lo stato WKV e' [B, heads, head_dim, head_dim]. */
+    int rwkv_a_lr;                    /* a_low_rank_dim */
+    int rwkv_v_lr;                    /* v_low_rank_dim */
+    int rwkv_gate_lr;                 /* gate_low_rank_dim */
+    int rwkv_decay_lr;                /* decay_low_rank_dim */
     /* is_linear_layer[i]=true se layer i e' linear_attn (GDN), false se full_attention. */
     bool* is_linear_layer;
     /* FASE 1b.5 (Qwen3.8 / qwen3_5 hybrid GDN): i layer full usano Qwen3NextAttention
@@ -656,6 +662,9 @@ struct LlmMlxModel {
     int gdn_ae_n;
     mlx_array* gdn_dt;         /* cache per-layer di linear_attn.dt_bias */
     int gdn_dt_n;
+    /* RWKV7: carry cross-layer `v_first` (prodotto dal layer 0, letto dai successivi nello
+     * stesso forward). Transiente per-forward: sovrascritto dal layer 0 ad ogni chiamata. */
+    mlx_array rwkv_v_first;
     /* Qwen4-Exp (qwen4_exp): stato persistente dell'indexer QSA per-layer (ring raw +
      * chiavi compresse growable + offset) -- NON e' un mlx_array singolo come k_cache/
      * v_cache (schema diverso, vedi LlmQwen4ExpQSACache in llm_mlx_qwen4exp.h), quindi
@@ -1283,6 +1292,10 @@ bool falcon_h1_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
 bool jamba_attn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                             mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool jamba_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+/* RWKV7: time-mixing ricorrente (WKV7) + channel-mixing. */
+bool rwkv7_attn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                      mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool rwkv7_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 /* Definiti nel monolite, usati dal dominio Llama. */
 bool llm_mlx_fuse_rope_enabled(void);
 bool llm_mlx_fuse_rope_verify_enabled(void);

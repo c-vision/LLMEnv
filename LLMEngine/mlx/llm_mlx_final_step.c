@@ -99,6 +99,15 @@ static int e9_topk_select(int* order, const float* scaled, size_t vocab, int kn)
  * passa da qui invece di rms_norm_cfg diretto, cosi' il branch qwen4_exp e' UNO
  * solo invece di duplicato in ogni variante. */
 bool llm_mlx_final_norm(LlmMlxModel* m, mlx_array h, mlx_array norm_w, mlx_array* out_normed) {
+    /* RWKV7: la norm finale e' un LayerNorm COMPLETO (mean+var) con bias (model.norm.bias),
+     * non una RMSNorm. mlx_lm rwkv7.py: Rwkv7Model.norm = nn.LayerNorm(hidden, eps=norm_eps). */
+    if (strcmp(m->cfg.model_type, "rwkv7") == 0) {
+        mlx_array nb = mlx_array_new();
+        multishard_get(&m->weights, "model.norm.bias", &nb);
+        bool r = mlx_fast_layer_norm(out_normed, h, norm_w, nb, m->cfg.rms_norm_eps, m->stream) == 0;
+        mlx_array_free(nb);
+        return r;
+    }
     if (strcmp(m->cfg.model_type, "qwen4_exp") != 0)
         return rms_norm_cfg(out_normed, h, norm_w, m->cfg.rms_norm_eps, m->stream);
 

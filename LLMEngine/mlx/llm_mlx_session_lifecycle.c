@@ -162,6 +162,11 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
          * (verificato sul checkpoint mlx-community/mamba-130m-hf-f32). lm_head assente (tied). */
         snprintf(embed_name, sizeof(embed_name), "backbone.embeddings");
         snprintf(norm_name, sizeof(norm_name), "backbone.norm_f.weight");
+    } else if (strcmp(m->cfg.model_type, "rwkv7") == 0) {
+        /* RWKV7 (fla-hub): embed = model.embeddings (NON embed_tokens); norm finale = model.norm
+         * (LayerNorm con bias, gestita in llm_mlx_final_norm). lm_head presente (tie=false). */
+        snprintf(embed_name, sizeof(embed_name), "model.embeddings");
+        snprintf(norm_name, sizeof(norm_name), "model.norm.weight");
     } else {
         snprintf(embed_name, sizeof(embed_name), "%sembed_tokens", prefix);
         /* LFM2: la RMSNorm finale del modello e' `embedding_norm` (verificato sul checkpoint reale),
