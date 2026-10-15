@@ -17,10 +17,13 @@ Licenza: **Apache-2.0** (esecuzione/inferenza) — parte di LLMEnv.
 `gemb_kernel.metal` espone 4 kernel:
 | kernel | descrizione |
 |---|---|
-| **`qgemv4`** | **VINCITORE**: 1 threadgroup (256 thread) per riga di output; carichi `uint` coalesced; riduzione per-simdgroup + threadgroup. |
-| `qgemv4s` | 1 simdgroup (32 lane) per riga, 8 righe per threadgroup; riduzione `simd_sum`. |
-| `qgemv4v` | carichi vettoriali `uint4`/`float4`, un gruppo (64 pesi) per iterazione. |
+| **`qgemv4s`** | **VINCITORE**: 1 simdgroup (32 lane) per riga, 8 righe per threadgroup (grid `(N+7)/8`); riduzione `simd_sum`. |
+| `qgemv4` | 1 threadgroup (256 thread) per riga (grid `N`); riduzione per-simdgroup + threadgroup. |
+| `qgemv4v` | carichi vettoriali `uint4`/`float4` — **veloce ma OUTPUT ERRATO (bug), non usare**. |
 | `bcopy` | sanity: copia vettoriale pura (misura la banda reale della macchina). |
+
+> ⚠️ **Attenzione grid**: `qgemv4`/`qgemv4v` richiedono grid `N` (1 riga/TG, `n=tgid`); `qgemv4s`
+> richiede grid `(N+7)/8`. Una grid sbagliata calcola **meno righe** e gonfia la banda misurata.
 
 ### Metodo di misura (CRITICO)
 Misurare **batched/throughput**, non per-chiamata: il decode reale **accoda** i dispatch e **non**
@@ -28,17 +31,18 @@ sincronizza per-op. Una misura per-call (con `commit`+`waitUntilCompleted` ogni 
 ~0.1-0.3 ms di overhead di sync che **oscura il compute** (es. `qgemv4` BATCH=1 = 0.145 ms vs
 BATCH=50 = 0.012 ms). Il bench fa `BATCH` dispatch per command buffer, un solo `waitUntilCompleted`.
 
-### Risultati — `N=4096, K=4096, 4-bit g64` (8 MB di pesi)
+### Risultati — `N=4096, K=4096, 4-bit g64` (8 MB di pesi), grid corretta
 | implementazione | ms/call | banda eff. | note |
 |---|---|---|---|
 | **OLD = MLX** (`llm_ai_mlx_gemv_bench`, `pipe=1`) | **~0.24** | ~35 GB/s | path `quantized_linear_cfg` |
-| **NEW `qgemv4`** | **~0.012-0.015** | **~530-670** | ≈ alla banda |
-| NEW `qgemv4s` | ~0.020-0.028 | ~300-470 | |
-| `bcopy` (riferimento banda reale) | 0.253 | **531 GB/s** | |
+| **NEW `qgemv4s` (vincitore)** | **~0.017-0.019** | **~460** | ≈ 88% del roof |
+| NEW `qgemv4` | ~0.020 | ~420 | |
+| `qgemv4v` | ~0.016 | ~520 | **output errato (bug)** |
+| `bcopy` (riferimento banda reale) | 0.258 | **521 GB/s** | |
 
-→ **NEW ≈ 18× OLD** sulla GEMV. Il kernel `qgemv4` è **alla banda** (il floor a 8 MB / 531 GB/s
-è ~0.015 ms); MLX è ~15-18× sotto. Parte dei picchi (fino a ~900 GB/s) è effetto cache: le rep
-batched rileggono gli stessi pesi.
+→ **NEW ≈ 13× OLD** sulla GEMV. Il kernel `qgemv4s` è **~88% del roof** di banda (521 GB/s);
+MLX è ~13× sotto. (NB: correzione del 2026-10-15 — la prima stesura indicava `qgemv4` come
+vincitore a 0.012 ms / 18×: era un **bug di grid** (calcolava 1/8 delle righe).)
 
 ### Build / run
 ```bash

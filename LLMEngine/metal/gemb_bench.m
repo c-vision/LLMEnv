@@ -65,7 +65,11 @@ int main(int argc, char** argv) {
         id<MTLBuffer> bp = [dev newBufferWithBytes:pr length:8 options:MTLResourceStorageModeShared];
 
         id<MTLCommandQueue> q = [dev newCommandQueue];
-        MTLSize grid    = use_bcopy ? MTLSizeMake((BF4 + 255)/256, 1, 1) : MTLSizeMake((N + 7)/8, 1, 1);
+        /* grid: bcopy = over float4; qgemv4s = 8 righe/TG; qgemv4/qgemv4v = 1 riga/TG (grid N!). */
+        MTLSize grid;
+        if (use_bcopy) grid = MTLSizeMake((BF4 + 255)/256, 1, 1);
+        else if (strcmp(kname, "qgemv4s") == 0) grid = MTLSizeMake((N + 7)/8, 1, 1);
+        else grid = MTLSizeMake(N, 1, 1);
         MTLSize threads = MTLSizeMake(256, 1, 1);
 
         void(^one)(id<MTLCommandBuffer>) = ^(id<MTLCommandBuffer> cb) {
