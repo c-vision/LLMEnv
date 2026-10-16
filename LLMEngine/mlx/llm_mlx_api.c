@@ -590,6 +590,7 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
 
     int64_t capneed = (int64_t)N * ncap * m->cfg.hidden_size;
     float* cap = (float*)malloc((size_t)capneed * sizeof(float));
+    bool s5_used = false;   /* snapshot GDN per-token catturati nel verify (rollback O(1), niente re-forward) */
     mlx_array h = mlx_array_new();
     bool ok;
     if (df2_seq_verify_on()) {
@@ -636,6 +637,16 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
          * ulp bf16 a logit ~25: 13 vs 3294) l'argmax puo' differire dall'AR. E' atteso, non un bug:
          * il contratto e' il determinismo a config fissa, non l'identita' con l'AR. */
         const bool want_cap = caplayers != NULL && ncap > 0 && ncap <= 8;
+        /* S5 (come il verify n-gram): sui modelli ibridi GDN cattura lo stato ricorrente PER-TOKEN durante il
+         * batch (kernel fuso con state_seq, stessa ricorrenza) cosi' su rifiuto si ripristina lo stato dopo
+         * anchor+accettati con un take/slice, SENZA il re-forward dell'intero modello (~55-65 ms/round con rifiuto).
+         * LLM_SPEC_NOCAP=1 ripristina il vecchio rollback+re-append (A/B). */
+        {   bool has_lin = false;
+            if (m->cfg.is_linear_layer != NULL) for (int l = 0; l < NL; l++) if (m->cfg.is_linear_layer[l]) { has_lin = true; break; }
+            s5_used = has_lin && N > 1 && N <= LLM_SPEC_CAP_MAXS && llm_ai_mlx_opt_env("LLM_SPEC_NOCAP") == NULL;
+            if (s5_used && ca != NULL) for (int l = 0; l < NL; l++) if (has_aux[l]) { s5_used = false; break; }   /* stato in aux_cache: non coperto */
+            if (s5_used) for (int l = 0; l < NL && l < LLM_SPEC_MAXL; l++) { mlx_array_free(g_spec_snap_k[l]); g_spec_snap_k[l] = mlx_array_new(); mlx_array_free(g_spec_snap_v[l]); g_spec_snap_v[l] = mlx_array_new(); }
+        }
         void (*saved_hook)(int, mlx_array, int, int) = g_df2_pf_hook;
         int saved_active = g_df2_pf_active;
         if (want_cap) {
@@ -643,8 +654,10 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
             for (int c = 0; c < ncap; c++) { g_df2_vcap.layers[c] = caplayers[c]; g_df2_vcap.snap[c] = mlx_array_new(); }
             g_df2_pf_hook = df2_vcap_hook; g_df2_pf_active = 1;
         }
+        if (s5_used) g_spec_capture = 1;
         ok = forward_tokens_batch(m, s, t.embed_w, t.embed_s, t.embed_b, ids, N, n_prev,
                                   s->k_cache, s->v_cache, s->has_cache, &h);
+        if (s5_used) g_spec_capture = 0;
         if (want_cap) { g_df2_pf_active = saved_active; g_df2_pf_hook = saved_hook; g_df2_vcap.on = 0; }
         if (want_cap) {
             const size_t HH = (size_t)m->cfg.hidden_size;
@@ -703,6 +716,43 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
     if (g_df2_time_on()) g_df2_n_rounds++;
     if (ok && accepted < K) {
         if (g_df2_time_on()) g_df2_n_roll++;
+        bool s5_done = false;
+        if (s5_used) {
+            /* S5: stato dopo anchor+accettati (P token) dal snapshot per-token; attenzione: KV troncata a `keep`. */
+            const int P = accepted + 1;
+            bool sok = true;
+            for (int layer = 0; layer < NL && sok; layer++) {
+                const bool lin = m->cfg.is_linear_layer && m->cfg.is_linear_layer[layer];
+                if (lin) {
+                    if (layer >= LLM_SPEC_MAXL || g_spec_snap_k[layer].ctx == NULL || g_spec_snap_v[layer].ctx == NULL) { sok = false; break; }
+                    int ix[1] = {P - 1}, ish[1] = {1};
+                    mlx_array idx = mlx_array_new_data(ix, ish, 1, MLX_INT32);
+                    mlx_array st = mlx_array_new();
+                    if (mlx_take_axis(&st, g_spec_snap_k[layer], idx, 1, m->stream) == 0) { mlx_array_free(s->k_cache[layer]); s->k_cache[layer] = st; }
+                    else { mlx_array_free(st); sok = false; }
+                    mlx_array_free(idx);
+                    if (sok && mlx_array_ndim(g_spec_snap_v[layer]) == 3) {
+                        const int* cvs = mlx_array_shape(g_spec_snap_v[layer]);
+                        const int csl = cvs[1] - N;
+                        int c0[3] = {0, P, 0}, c1[3] = {1, P + csl, cvs[2]}, cs_[3] = {1, 1, 1};
+                        mlx_array vt = mlx_array_new();
+                        if (mlx_slice(&vt, g_spec_snap_v[layer], c0, 3, c1, 3, cs_, 3, m->stream) == 0) { mlx_array_free(s->v_cache[layer]); s->v_cache[layer] = vt; }
+                        else { mlx_array_free(vt); sok = false; }
+                    }
+                } else {
+                    const int* shape = mlx_array_shape(s->k_cache[layer]);
+                    int sr[4] = {0, 0, 0, 0}, sp[4] = {1, shape[1], keep, shape[3]}, ss[4] = {1, 1, 1, 1};
+                    mlx_array kt = mlx_array_new(), vt = mlx_array_new();
+                    bool kr = mlx_slice(&kt, s->k_cache[layer], sr, 4, sp, 4, ss, 4, m->stream) == 0;
+                    bool vr = mlx_slice(&vt, s->v_cache[layer], sr, 4, sp, 4, ss, 4, m->stream) == 0;
+                    if (kr && vr) { mlx_array_free(s->k_cache[layer]); s->k_cache[layer] = kt; mlx_array_free(s->v_cache[layer]); s->v_cache[layer] = vt; }
+                    else { mlx_array_free(kt); mlx_array_free(vt); sok = false; }
+                }
+            }
+            s5_done = sok;
+            if (!sok) fprintf(stderr, "df2: snapshot GDN mancante/errore -> fallback rollback+re-append\n");
+        }
+        if (!s5_done) {
         /* rollback = ripristino checkpoint + ri-append del SOLO prefisso confermato
          * (anchor + accettati); il rollback per-slice non vale sugli array gdn 3D. */
         for (int l = 0; l < NL; l++) {
@@ -734,6 +784,7 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
             ok = false;
         }
         mlx_array_free(ph);
+        }
         if (g_df2_time_on()) g_df2_t_roll += g_df2_now() - _t0;
     }
     s->cache_offset = keep;
