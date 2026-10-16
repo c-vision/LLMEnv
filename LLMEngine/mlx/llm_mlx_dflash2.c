@@ -462,8 +462,11 @@ static bool df2_attn_layer(DFlash2Runtime* rt, int layer_idx, int cur,
     if (ok) ok = mlx_array_set(&rt->ctx[rt->cur_ctx].vcache[layer_idx], cachev_full) == 0;
     /* ANTI-ACCUMULO (2026-10-01): il concat della cache-ctx e' LAZY -> a ogni span il nuovo
      * array trattiene il vecchio (catena O(n^2)): a 253k lo streaming supera i 50GB (misurato,
-     * watchdog). Un eval ASINCRONO per span materializza il concat e libera il vecchio backing
-     * (non blocca la CPU, a differenza di synchronize). */
+     * watchdog). Un eval per span materializza il concat e libera il vecchio backing.
+     * NB: mlx_array_eval e' BLOCCANTE (attende la GPU; a differenza di synchronize non attende l'intera coda):
+     * 2 attese x 5 layer x round. Misurato 2026-10-16 (Qwen3.8-27B-8bit, GPU quieta, A/B interleaved):
+     * sostituirlo con mlx_async_eval NON da' guadagno (12.6 vs 12.6 ms/token, act/peak MB identici),
+     * quindi resta bloccante: la CPU non e' il collo (build del grafo ~1.5 ms/round). */
     if (ok) { mlx_array_eval(rt->ctx[rt->cur_ctx].kcache[layer_idx]);
               mlx_array_eval(rt->ctx[rt->cur_ctx].vcache[layer_idx]); }
 
