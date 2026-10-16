@@ -347,13 +347,17 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
     /* ★ 2026-10-03 — qmv_wide (kernel MLX per M>=2): -43% a M=8 (il verify DFlash2), ~-7% prefill
      * (misurato con l'oracolo model-free `gemv_bench` + sul modello: +34% sul DFlash2 K=7). Rompe
      * la bit-parity BATCH di gpt-oss -> si controlla dal REGISTRO (opzione `qmv_wide`), NIENTE env.
-     * Default -1 = auto: ON per qwen3_5/_moe (parita' id verificata identica), OFF per gli altri. */
+     * Default -1 = auto: ON per qwen3_5/_moe (parita' id verificata identica) e per qwen3_moe, OFF per
+     * gli altri. qwen3_moe (2026-10-16, TODO MLX-Trace-Matmul-Quantizzata): con qmv_wide OFF la q_proj
+     * 8-bit del Coder-30B differiva di 1 ulp bf16 da mlx_lm (che usa qmv_wide stock), amplificato dalla
+     * q_norm; con ON la q_proj e' bit-exact vs mlx_lm. */
     {
         int qw = -1;
         (void)llm_ai_mlx_opt_get_int("qmv_wide", &qw);
         if (qw < 0) {
             qw = (strcmp(m->cfg.model_type, "qwen3_5") == 0 ||
-                  strcmp(m->cfg.model_type, "qwen3_5_moe") == 0) ? 1 : 0;
+                  strcmp(m->cfg.model_type, "qwen3_5_moe") == 0 ||
+                  strcmp(m->cfg.model_type, "qwen3_moe") == 0) ? 1 : 0;
         }
         mlx_set_qmv_wide(qw);
     }

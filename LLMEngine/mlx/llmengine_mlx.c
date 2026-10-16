@@ -1255,6 +1255,142 @@ int llm_mlx_tq_get_cb(float* out, int cap) {
 }
 int llm_mlx_tq_enabled(void) { return g_tq_cb_n > 0; }
 
+
+/* DIAGNOSTICA (TODO MLX-Trace-Matmul-Quantizzata): LLM_QMM_TRACE=<N> stampa, per le prime N matmul
+ * quantizzate (filtro opzionale LLM_QMM_TRACE_OUT=<righe di w>, es. 4096 = q_proj), dtype/shape/
+ * strides-contiguita' degli argomenti, device/stream, ramo preso, e confronta `res` con tre
+ * ricalcoli: (A) stessi argomenti su un NUOVO stream GPU; (B) x/w/s/b copie contigue con x 2D;
+ * (C) riferimento fp32 (dequantize + matmul in f32). Costo zero quando la env non c'e'. */
+static int qmm_trace_budget(void) {
+    static int b = -2;
+    if (b == -2) { const char* e = getenv("LLM_QMM_TRACE"); b = e ? atoi(e) : 0; }
+    return b;
+}
+static double qmm_trace_cmp(mlx_array a, mlx_array b, size_t* ndiff, mlx_stream s) {
+    mlx_array af = mlx_array_new(), bf = mlx_array_new();
+    double mx = -1; *ndiff = 0;
+    if (mlx_astype(&af, a, MLX_FLOAT32, s) == 0 && mlx_astype(&bf, b, MLX_FLOAT32, s) == 0 &&
+        mlx_array_eval(af) == 0 && mlx_array_eval(bf) == 0 && mlx_array_size(af) == mlx_array_size(bf)) {
+        const float* pa = mlx_array_data_float32(af); const float* pb = mlx_array_data_float32(bf);
+        size_t n = mlx_array_size(af); mx = 0;
+        for (size_t i = 0; i < n; i++) { double d = fabs((double)pa[i] - (double)pb[i]); if (d > mx) mx = d; if (d != 0) (*ndiff)++; }
+    }
+    mlx_array_free(af); mlx_array_free(bf);
+    return mx;
+}
+static void qmm_trace_desc(const char* nm, mlx_array a) {
+    if (a.ctx == NULL || mlx_array_size(a) == 0) { fprintf(stderr, "  %-6s <vuoto>\n", nm); return; }
+    fprintf(stderr, "  %-6s dtype=%d ndim=%zu shape=[", nm, (int)mlx_array_dtype(a), mlx_array_ndim(a));
+    for (size_t i = 0; i < mlx_array_ndim(a); i++) fprintf(stderr, "%s%d", i ? "," : "", mlx_array_shape(a)[i]);
+    fprintf(stderr, "]\n");
+}
+static void qmm_trace(const char* branch, mlx_array res, mlx_array x, mlx_array w, mlx_array scales,
+                      mlx_array biases, int group, int bits, const char* mode, mlx_stream stream) {
+    int bud = qmm_trace_budget();
+    if (bud <= 0 || res.ctx == NULL || w.ctx == NULL || mlx_array_ndim(w) < 2) return;
+    const char* fo = getenv("LLM_QMM_TRACE_OUT");
+    if (fo && atoi(fo) != mlx_array_shape(w)[0]) return;
+    static int printed = 0;
+    if (printed >= bud) return;
+    printed++;
+    mlx_device dev = mlx_device_new(); mlx_device_type dt = MLX_CPU; int sidx = -1;
+    mlx_stream_get_device(&dev, stream); mlx_device_get_type(&dt, dev); mlx_stream_get_index(&sidx, stream);
+    fprintf(stderr, "[qmm-trace #%d] ramo=%s device=%s stream_idx=%d group=%d bits=%d mode=%s g_bf16_all=%d\n",
+            printed, branch, dt == MLX_GPU ? "GPU" : "CPU", sidx, group, bits, mode ? mode : "(null)", (int)g_bf16_all);
+    qmm_trace_desc("x", x); qmm_trace_desc("w", w); qmm_trace_desc("scales", scales);
+    qmm_trace_desc("biases", biases); qmm_trace_desc("res", res);
+    mlx_optional_int gs = {group, true}, bt = {bits, true};
+    mlx_stream g2 = mlx_default_gpu_stream_new();
+    size_t nd = 0; double mx;
+    /* (A) stessi argomenti, nuovo stream GPU */
+    mlx_array a = mlx_array_new();
+    if (mlx_quantized_matmul(&a, x, w, scales, biases, true, gs, bt, mode, g2) == 0) {
+        mx = qmm_trace_cmp(res, a, &nd, g2);
+        fprintf(stderr, "  (A) stessi arg, nuovo stream GPU : maxabs=%.6g ndiff=%zu\n", mx, nd);
+    }
+    /* (B) copie contigue, x 2D [rows,K] */
+    mlx_array xc = mlx_array_new(), wc = mlx_array_new(), sc = mlx_array_new(), bc = mlx_array_new();
+    mlx_array x2 = mlx_array_new(), b2 = mlx_array_new();
+    int xnd = (int)mlx_array_ndim(x), K = mlx_array_shape(x)[xnd - 1];
+    int rows = (int)(mlx_array_size(x) / (size_t)K); int s2[2] = { rows, K };
+    if (mlx_contiguous(&xc, x, false, g2) == 0 && mlx_reshape(&x2, xc, s2, 2, g2) == 0 &&
+        mlx_contiguous(&wc, w, false, g2) == 0 && mlx_contiguous(&sc, scales, false, g2) == 0 &&
+        mlx_contiguous(&bc, biases, false, g2) == 0 &&
+        mlx_quantized_matmul(&b2, x2, wc, sc, bc, true, gs, bt, mode, g2) == 0) {
+        mlx_array resf = mlx_array_new(); int rs[2] = { rows, mlx_array_shape(b2)[1] };
+        mlx_reshape(&resf, res, rs, 2, g2);
+        mx = qmm_trace_cmp(resf, b2, &nd, g2);
+        fprintf(stderr, "  (B) copie contigue, x 2D [%d,%d]  : maxabs=%.6g ndiff=%zu\n", rows, K, mx, nd);
+        mlx_array_free(resf);
+    }
+    /* (C) riferimento fp32: dequantize(w) in f32, x in f32, matmul */
+    mlx_array wd = mlx_array_new(), xf = mlx_array_new(), wt = mlx_array_new(), ref = mlx_array_new(), gsc = mlx_array_new();
+    mlx_optional_dtype f32 = { MLX_FLOAT32, true };
+    mlx_array sf = mlx_array_new(), bf2 = mlx_array_new();
+    if (mlx_astype(&sf, scales, MLX_FLOAT32, g2) == 0 && mlx_astype(&bf2, biases, MLX_FLOAT32, g2) == 0 &&
+        mlx_dequantize(&wd, w, sf, bf2, gs, bt, mode, gsc, f32, g2) == 0 &&
+        mlx_astype(&xf, x2, MLX_FLOAT32, g2) == 0 && mlx_transpose(&wt, wd, g2) == 0 &&
+        mlx_matmul(&ref, xf, wt, g2) == 0) {
+        size_t n1, n2;
+        mlx_array resf = mlx_array_new(); int rs[2] = { rows, mlx_array_shape(ref)[1] };
+        mlx_reshape(&resf, res, rs, 2, g2);
+        double m1 = qmm_trace_cmp(resf, ref, &n1, g2);
+        double m2 = a.ctx ? qmm_trace_cmp(a, ref, &n2, g2) : -1;
+        fprintf(stderr, "  (C) vs ref fp32 (dequant+matmul) : |res-ref| maxabs=%.6g ndiff=%zu | |A-ref| maxabs=%.6g\n", m1, n1, m2);
+        mlx_array_free(resf);
+    }
+    /* (D) LLM_QMM_TRACE_REF=<file.safetensors con w,sc,bi,x>: confronta ogni input con quello del
+     * file (dtype/shape/maxabs) e ricalcola la matmul CON GLI INPUT DEL FILE. */
+    const char* reff = (printed == 1) ? getenv("LLM_QMM_TRACE_REF") : NULL;
+    if (reff) {
+        mlx_stream cpu = mlx_default_cpu_stream_new();
+        mlx_map_string_to_array fm = mlx_map_string_to_array_new();
+        mlx_map_string_to_string fmm = mlx_map_string_to_string_new();
+        if (mlx_load_safetensors(&fm, &fmm, reff, cpu) == 0) {
+            const char* nm[4] = { "x", "w", "sc", "bi" };
+            mlx_array en[4] = { x, w, scales, biases };
+            mlx_array fa[4];
+            for (int i = 0; i < 4; i++) {
+                fa[i] = mlx_array_new();
+                mlx_map_string_to_array_get(&fa[i], fm, nm[i]);
+                (void)mlx_array_eval(fa[i]);
+                size_t ndi; double mdi = qmm_trace_cmp(en[i], fa[i], &ndi, g2);
+                fprintf(stderr, "  (D) input %-2s engine dtype=%d file dtype=%d | maxabs(f32)=%.6g ndiff=%zu\n",
+                        nm[i], (int)mlx_array_dtype(en[i]), (int)mlx_array_dtype(fa[i]), mdi, ndi);
+            }
+            mlx_array rf = mlx_array_new();
+            if (mlx_quantized_matmul(&rf, fa[0], fa[1], fa[2], fa[3], true, gs, bt, mode, g2) == 0) {
+                size_t ndr; double mdr = qmm_trace_cmp(res, rf, &ndr, g2);
+                fprintf(stderr, "  (D) res engine vs matmul(input del FILE): maxabs=%.6g ndiff=%zu | file x shape ndim=%zu\n", mdr, ndr, mlx_array_ndim(fa[0]));
+                mlx_array rfe = mlx_array_new();
+                if (mlx_quantized_matmul(&rfe, x, fa[1], fa[2], fa[3], true, gs, bt, mode, g2) == 0) {
+                    mdr = qmm_trace_cmp(res, rfe, &ndr, g2);
+                    fprintf(stderr, "  (D) res engine vs matmul(x ENGINE, w/sc/bi FILE): maxabs=%.6g ndiff=%zu\n", mdr, ndr);
+                }
+                mlx_array_free(rfe);
+            }
+            mlx_array_free(rf);
+            for (int i = 0; i < 4; i++) mlx_array_free(fa[i]);
+        } else fprintf(stderr, "  (D) load_safetensors(%s) fallita\n", reff);
+        mlx_map_string_to_array_free(fm); mlx_map_string_to_string_free(fmm); mlx_stream_free(cpu);
+    }
+    /* LLM_QMM_TRACE_DUMP=<file>: scrive `res` (prima chiamata tracciata) come float32 grezzo. */
+    const char* dumpf = (printed == 1) ? getenv("LLM_QMM_TRACE_DUMP") : NULL;
+    if (dumpf) {
+        mlx_array rf32 = mlx_array_new();
+        if (mlx_astype(&rf32, res, MLX_FLOAT32, g2) == 0 && mlx_array_eval(rf32) == 0) {
+            FILE* fp = fopen(dumpf, "wb");
+            if (fp) { fwrite(mlx_array_data_float32(rf32), sizeof(float), mlx_array_size(rf32), fp); fclose(fp); }
+        }
+        mlx_array_free(rf32);
+    }
+    mlx_array_free(a); mlx_array_free(xc); mlx_array_free(wc); mlx_array_free(sc); mlx_array_free(bc);
+    mlx_array_free(x2); mlx_array_free(b2); mlx_array_free(wd); mlx_array_free(xf); mlx_array_free(wt);
+    mlx_array_free(ref); mlx_array_free(gsc); mlx_array_free(sf); mlx_array_free(bf2);
+    mlx_stream_free(g2); mlx_device_free(dev);
+}
+
+
 bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases, int group_size, int bits, const char* mode, mlx_stream stream) {
     /* TQ dense (opzione 2, LLM_TQ_DENSE=1): w UINT32 packed + biases=signs (già forniti dal fetch),
      * codebook GLOBALE. Decode: kernel TQ che legge packed (meno traffico memoria del bf16 plain).
@@ -1531,6 +1667,7 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
                 mlx_array_free(gx);
             } else
             if (ok) ok = mlx_quantized_matmul(res, xuse, w, scales, biases, /*transpose=*/true, gsz, bts, e_mode, stream) == 0;
+            if (ok) qmm_trace(aq ? "bf16_all/qqmm" : "bf16_all/quantized_matmul", *res, xuse, w, scales, biases, e_group, e_bits, e_mode, stream);
         }
         mlx_array_free(xb);
         return ok;
@@ -1626,7 +1763,9 @@ bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc
         mlx_array_free(kres);
         /* try fallita: continua col path normale sotto (mai un errore). */
     }
-    return mlx_quantized_matmul(res, x, w, scales, biases, /*transpose=*/true, gsz, bts, e_mode, stream) == 0;
+    bool fin_ok = mlx_quantized_matmul(res, x, w, scales, biases, /*transpose=*/true, gsz, bts, e_mode, stream) == 0;
+    if (fin_ok) qmm_trace("finale/quantized_matmul", *res, x, w, scales, biases, e_group, e_bits, e_mode, stream);
+    return fin_ok;
 }
 
 /* ── FEDELTA' oMLX: Stage A CONDIVISA (qwen35_oq_a8.py: stage_a(x) + apply_plan) ──
