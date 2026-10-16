@@ -151,6 +151,7 @@ llm_ai_mlx_dflash2_handle llm_ai_mlx_dflash2_create(llm_ai_mlx_model_handle targ
 }
 
 void llm_ai_mlx_dflash2_free(llm_ai_mlx_dflash2_handle handle) {
+    df2_q8_reset();
     g_oq_a8_minm_override = -1;   /* fine spec: torna al default (prefill-only W8A8) */
     if (handle == NULL) return;
     DFlash2Runtime* rt = (DFlash2Runtime*)handle;

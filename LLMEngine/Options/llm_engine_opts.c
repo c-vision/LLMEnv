@@ -33,6 +33,7 @@ static Opt g_opts[] = {
     { "kvq_splits_max",   "KV-quant attn fusa: n. massimo di split-K",                 T_INT, 0, 64, 0, 0, 0, 0, {0}, NULL, 0, "64" },
     { "kvq_gqa",          "KV-quant attn fusa: GQA-shared (1/0, sperimentale)",         T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0, "1" },
     { "qmv_wide",          "kernel MLX qmv_wide (M>=2): -1 auto(=on per qwen3_5), 0 off, 1 on", T_INT, -1, -1, 0, 0, 0, 0, {0}, NULL, 0, "1" },
+    { "df2_q8",            "DFlash2: pesi bf16 del draft quantizzati 8-bit g64 al primo uso (meta' dei byte, propose piu' veloce; solo le proposte cambiano, il verify resta esatto): 1 on, 0 off", T_BOOL, 1, 1, 0, 0, 1, 1, {0}, NULL, 0, "1" },
     { "kvdisk",           "tier SSD KV: off|on|<path> (file scratch)",               T_STR,   0, 0, 0, 0, 0, 0, "off", "off", 0, "on" },
     { "kvdisk_cap_mb",    "budget byte VIVI del tier SSD KV in MB (0 = illimitato)", T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0, "8192" },
     { "prefix_cache",     "prefix-cache persistente: auto (=~/.cache/llm_engine, per-modello) | off | <path>", T_STR, 0, 0, 0, 0, 0, 0, "auto", "auto", 0, "auto" },

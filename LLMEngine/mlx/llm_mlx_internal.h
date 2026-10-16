@@ -849,6 +849,7 @@ uint64_t llm_p4_used_sessions(LlmMlxModel* m, const struct LlmMlxSession* exclud
 void df2_mode_enter_draft(DFlash2Runtime* rt, bool* sv_all, mlx_dtype* sv_act);
 void df2_mode_leave_draft(DFlash2Runtime* rt, bool sv_all, mlx_dtype sv_act);
 bool dflash_fetch_target_tensors(DFlash2Runtime* rt);
+void df2_q8_reset(void);   /* libera la cache dei pesi draft quantizzati (opzione df2_q8) */
 bool df2_backbone(DFlash2Runtime* rt, const int32_t* block_ids, int L, mlx_array x_ctx, int S, mlx_array* out_h, mlx_array* layer_out);
 bool df2_selector(DFlash2Runtime* rt, mlx_array hidden_post, mlx_array logits, int K, int32_t anchor, int32_t* out_path);
 double g_df2_now(void);

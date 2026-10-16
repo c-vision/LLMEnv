@@ -33,7 +33,44 @@
 
 /* x @ w.T SENZA astype: i pesi BF16 del draft non si castano (df2_linear e'
  * diverso da plain_linear, che promuove w a float32). */
+/* Opzione `df2_q8` (default ON): i pesi bf16 del draft vengono quantizzati 8-bit g64 al primo uso (cache per puntatore dati)
+ * -> meta' dei byte letti nel propose (misurato su Qwen3.8-27B: PROPOSE 23.9 -> 15.6 ms/round, acceptance 0.373 -> 0.394).
+ * Cambiano solo le PROPOSTE del draft: il verify del target resta esatto. */
+typedef struct { const void* key; mlx_array wq, sc, bi; } Df2QEnt;
+static Df2QEnt g_df2q[96]; static int g_df2q_n = 0;
+void df2_q8_reset(void) {
+    for (int i = 0; i < g_df2q_n; i++) { mlx_array_free(g_df2q[i].wq); mlx_array_free(g_df2q[i].sc); mlx_array_free(g_df2q[i].bi); }
+    g_df2q_n = 0;
+}
+static bool df2_linear_q8(mlx_array* res, mlx_array x, mlx_array w, mlx_stream stream) {
+    if (mlx_array_ndim(w) != 2 || mlx_array_dtype(w) != MLX_BFLOAT16 || (mlx_array_shape(w)[1] % 64) != 0) return false;
+    if (mlx_array_eval(w) != 0) return false;
+    const void* key = (const void*)mlx_array_data_uint16(w);
+    if (!key) return false;
+    int idx = -1; for (int i = 0; i < g_df2q_n; i++) if (g_df2q[i].key == key) { idx = i; break; }
+    mlx_optional_int og = {64, true}, ob = {8, true};
+    if (idx < 0) {
+        if (g_df2q_n >= 96) return false;
+        mlx_array nogs = mlx_array_new(); mlx_vector_array parts = mlx_vector_array_new();
+        if (mlx_quantize(&parts, w, og, ob, "affine", nogs, stream) != 0 || mlx_vector_array_size(parts) < 3) { mlx_vector_array_free(parts); return false; }
+        Df2QEnt* e = &g_df2q[g_df2q_n]; e->key = key; e->wq = mlx_array_new(); e->sc = mlx_array_new(); e->bi = mlx_array_new();
+        mlx_vector_array_get(&e->wq, parts, 0); mlx_vector_array_get(&e->sc, parts, 1); mlx_vector_array_get(&e->bi, parts, 2);
+        mlx_vector_array_free(parts);
+        mlx_array ev[3] = { e->wq, e->sc, e->bi }; mlx_vector_array vv = mlx_vector_array_new_data(ev, 3); mlx_eval(vv); mlx_vector_array_free(vv);
+        idx = g_df2q_n++;
+    }
+    mlx_array xb = mlx_array_new(), yb = mlx_array_new();
+    bool ok = (mlx_array_dtype(x) == MLX_BFLOAT16) ? (mlx_array_set(&xb, x) == 0) : (mlx_astype(&xb, x, MLX_BFLOAT16, stream) == 0);
+    ok = ok && mlx_quantized_matmul(&yb, xb, g_df2q[idx].wq, g_df2q[idx].sc, g_df2q[idx].bi, true, og, ob, "affine", stream) == 0;
+    if (ok) ok = (mlx_array_dtype(x) == MLX_BFLOAT16) ? (mlx_array_set(res, yb) == 0) : (mlx_astype(res, yb, MLX_FLOAT32, stream) == 0);
+    mlx_array_free(xb); mlx_array_free(yb);
+    return ok;
+}
+
 static bool df2_linear(mlx_array* res, mlx_array x, mlx_array w, mlx_stream stream) {
+    { static int s_q8 = -1;
+      if (s_q8 < 0) { int b = 1; s_q8 = (llm_ai_mlx_opt_get_bool("df2_q8", &b) != 0 || b != 0) ? 1 : 0; }
+      if (s_q8 && df2_linear_q8(res, x, w, stream)) return true; }
     mlx_array wt = mlx_array_new();
     bool ok = mlx_transpose(&wt, w, stream) == 0;
     /* Il flusso del draft e' FP32 (ctx fp32 -> residuo fp32). fp32 @ bf16 PROMUOVE il peso: ogni
