@@ -146,12 +146,10 @@ static bool final_step_sampling_dev(LlmMlxModel* m, mlx_array capped,
     if (vocab == 0) return false;
     bool ok = true;
     const char* stp = "logits_f32";
-    mlx_array x = mlx_array_new();
-    mlx_array t = mlx_array_new_float(sp->temperature);
     mlx_array scaled = mlx_array_new();
-    ok = llm_mlx_logits_f32(&x, capped, s);   /* bool: true = successo */
-    if (ok) { stp = "divide"; ok = mlx_divide(&scaled, x, t, s) == 0; }
-    mlx_array_free(x); mlx_array_free(t);
+    /* I5: si lavora sui logit GREZZI; la temperatura si applica ULTIMA (dopo top_k/top_p/min_p),
+     * come il path host e llama.cpp. */
+    ok = llm_mlx_logits_f32(&scaled, capped, s);   /* bool: true = successo */
     /* Appiattisce a 1-D [vocab]: i logit arrivano [1,1,vocab] e le slice/argsort/cumsum
      * sotto usano indici 1-D (stessa convenzione del path host, che legge flat). */
     {
@@ -199,7 +197,28 @@ static bool final_step_sampling_dev(LlmMlxModel* m, mlx_array capped,
         mlx_array_free(cum); mlx_array_free(above); mlx_array_free(thr);
         mlx_array_free(mask); mlx_array_free(neginf); mlx_array_free(masked);
     }
+    /* I5: min_p sulla distribuzione GREZZA (dopo top_p). Azzera i logit con prob < min_p*max(prob). */
+    if (ok && sp->min_p > 0.0f) {
+        mlx_array pmax = mlx_array_new(), scv = mlx_array_new_float(sp->min_p), mthr = mlx_array_new();
+        mlx_array mmask = mlx_array_new(), neginf = mlx_array_new_float(-INFINITY), mmasked = mlx_array_new();
+        stp = "min_p";
+        ok = mlx_max(&pmax, probs, /*keepdims=*/false, s) == 0 &&
+             mlx_multiply(&mthr, pmax, scv, s) == 0 &&
+             mlx_less(&mmask, probs, mthr, s) == 0 &&
+             mlx_where(&mmasked, mmask, neginf, vals, s) == 0;
+        if (ok) mlx_array_set(&vals, mmasked);
+        mlx_array_free(pmax); mlx_array_free(scv); mlx_array_free(mthr);
+        mlx_array_free(mmask); mlx_array_free(neginf); mlx_array_free(mmasked);
+    }
     mlx_array_free(probs);
+    /* I5: temperatura ULTIMA — dividi i logit (post truncation) prima del categorical. */
+    if (ok && sp->temperature != 1.0f) {
+        mlx_array t2 = mlx_array_new_float(sp->temperature), v2 = mlx_array_new();
+        stp = "temp_last";
+        ok = mlx_divide(&v2, vals, t2, s) == 0;
+        if (ok) mlx_array_set(&vals, v2);
+        mlx_array_free(t2); mlx_array_free(v2);
+    }
 
     mlx_array key = mlx_array_new(), pick = mlx_array_new(), id = mlx_array_new();
     if (ok) {
