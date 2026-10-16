@@ -910,6 +910,9 @@ int llm_ai_mlx_session_set_sampling(llm_ai_mlx_session_handle handle,
     s->sampling_temperature = temperature;
     s->sampling_top_p = top_p;
     s->sampling_top_k = top_k;
+    /* min-p dal registro (`minp`, default 0.05). Rende VIVA l'opzione (prima mai letta);
+     * override per-sessione via llm_ai_mlx_session_set_min_p (additiva, dopo set_sampling). */
+    { double mp = 0.0; if (llm_ai_mlx_opt_get_float("minp", &mp) != 0) mp = 0.0; s->sampling_min_p = (float)mp; }
     s->sampling_seed = seed;
     if (s->sampling_repetition_penalty <= 0.0f) s->sampling_repetition_penalty = 1.0f;  /* default off */
         return 0;
@@ -917,6 +920,13 @@ int llm_ai_mlx_session_set_sampling(llm_ai_mlx_session_handle handle,
 
 /* Repetition penalty (>1.0 penalizza i token gia' visti; 1.0 = off). Additiva rispetto a
  * set_sampling (non ne cambia la firma). Usata dal server per `repetition_penalty`. */
+int llm_ai_mlx_session_set_min_p(llm_ai_mlx_session_handle handle, float min_p) {
+    if (handle == NULL) return -1;
+    LlmMlxSession* s = (LlmMlxSession*)handle;
+    s->sampling_min_p = min_p;
+    return 0;
+}
+
 int llm_ai_mlx_session_set_repetition_penalty(llm_ai_mlx_session_handle handle, float penalty) {
     if (handle == NULL) return -1;
     LlmMlxSession* s = (LlmMlxSession*)handle;

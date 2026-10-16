@@ -301,6 +301,7 @@ typedef struct LlmMlxSession {
     float sampling_temperature;
     float sampling_top_p;
     int sampling_top_k;
+    float sampling_min_p;    /* min-p (0 = off). Applicato DOPO top_p e prima della temperatura. */
     int64_t sampling_seed;
     float sampling_repetition_penalty;   /* >1.0 penalizza i token gia' visti (default 1.0) */
     float sampling_frequency_penalty;    /* OpenAI frequency_penalty (default 0 = off) */
@@ -531,6 +532,7 @@ typedef struct {
     float temperature;
     float top_p;
     int top_k;
+    float min_p;                /* min-p (>0 = attivo): azzera p < min_p*max(p). Dopo top_p, prima di temp. */
     int64_t seed;
     float repetition_penalty;   /* >1.0 = penalizza i token gia' visti (CTRL); 1.0 = off */
     float frequency_penalty;    /* OpenAI: logits[t] -= fp * count(t)      (>=0; 0 = off) */

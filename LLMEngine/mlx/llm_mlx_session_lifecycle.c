@@ -261,6 +261,7 @@ llm_mlx_sampling_t llm_mlx_session_sampling(const LlmMlxSession* s) {
         sm.temperature = s->sampling_temperature;
         sm.top_p = s->sampling_top_p;
         sm.top_k = s->sampling_top_k;
+        sm.min_p = s->sampling_min_p;
         sm.seed = s->sampling_seed;
         sm.repetition_penalty = s->sampling_repetition_penalty;
         sm.frequency_penalty = s->sampling_frequency_penalty;

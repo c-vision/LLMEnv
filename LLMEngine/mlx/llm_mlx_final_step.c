@@ -363,8 +363,9 @@ bool final_step(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
             }
         }
 
-        /* 1. temperatura: dividi i logit. */
-        for (size_t i = 0; i < vocab; i++) scaled[i] /= temperature;
+        /* 1. temperatura: applicata ULTIMA (dopo top_k/top_p/min_p), come llama.cpp
+         * (`top_k -> top_p -> min_p -> temp -> dist`, vedi llmengine_llama.c:699). Cosi' il set
+         * di top_p/min_p e' deciso sulla distribuzione GREZZA e non si dissolve alzando la temp. */
 
         /* 2. top_k: tieni solo i k logit piu' alti. O(vocab·log k) via min-heap, con parita'
          * ESATTA col vecchio selection-sort O(k·vocab): stesso order[] (value desc, tie index
@@ -441,7 +442,20 @@ bool final_step(LlmMlxModel* m, mlx_array h, mlx_array norm_w,
                 for (size_t i = 0; i < vocab; i++) if (!outside[i]) probs[i] = 0.0f;
             }
         }
-        /* ricalcola la somma dopo il mask top_p */
+        /* 3b. min_p (opzione `minp`): azzera le probs < min_p * max(probs). Set deciso sulla
+         * distribuzione grezza (top_p prima, temp dopo). No-op con min_p<=0. */
+        if (sampling.min_p > 0.0f) {
+            float pmax = 0.0f;
+            for (size_t i = 0; i < vocab; i++) if (probs[i] > pmax) pmax = probs[i];
+            const float thr = sampling.min_p * pmax;
+            for (size_t i = 0; i < vocab; i++) if (probs[i] < thr) probs[i] = 0.0f;
+        }
+        /* 3c. temperatura ULTIMA: ricalcola le probs dai logit GREZZI (scaled/temperature). */
+        for (size_t i = 0; i < vocab; i++)
+            if (probs[i] > 0.0f)
+                probs[i] = (float)exp((double)scaled[i] / temperature - (double)max_logit / temperature);
+
+        /* ricalcola la somma dopo mask top_p/min_p e temperatura */
         sum = 0.0;
         for (size_t i = 0; i < vocab; i++) sum += probs[i];
 

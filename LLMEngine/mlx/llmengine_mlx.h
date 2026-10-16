@@ -282,6 +282,9 @@ int llm_ai_mlx_session_set_repetition_penalty(llm_ai_mlx_session_handle handle, 
  * Applicate nel path sampling (temperature>0). Valide per la generazione successiva. */
 int llm_ai_mlx_session_set_frequency_penalty(llm_ai_mlx_session_handle handle, float penalty);
 int llm_ai_mlx_session_set_presence_penalty(llm_ai_mlx_session_handle handle, float penalty);
+/* min-p (>0 = attivo; 0 = off). Additiva rispetto a set_sampling (non ne cambia la firma);
+ * default dal registro `minp` (0.05). Applicato DOPO top_p e PRIMA della temperatura. */
+int llm_ai_mlx_session_set_min_p(llm_ai_mlx_session_handle handle, float min_p);
 
 /* Configures the chunked-prefill size for llm_ai_mlx_session_append: prompt
  * tokens beyond this size are processed as a sequence of chunks (KV cache
