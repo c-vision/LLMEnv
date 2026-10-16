@@ -207,6 +207,7 @@ int llm_ai_mlx_dflash2_set_slot(llm_ai_mlx_dflash2_handle handle, int slot) {
 int llm_ai_mlx_dflash2_reset(llm_ai_mlx_dflash2_handle handle) {
     if (handle == NULL) return -1;
     DFlash2Runtime* rt = (DFlash2Runtime*)handle;
+    rt->acc_ema = 0.0;
     Df2CtxState* cs = &rt->ctx[rt->cur_ctx];
     for (int i = 0; i < rt->n_layers; i++) {
         mlx_array_free(cs->kcache[i]); mlx_array_free(cs->vcache[i]);
@@ -1096,6 +1097,7 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
     }
 
     int emitted = 0;
+    if (rt->acc_ema <= 0.0) rt->acc_ema = 5.5;   /* media mobile dei token accettati per round: guida K adattivo (df2_k=0); persiste fra le chiamate */
     int stat_rounds = 0, stat_accepted = 0, stat_K = 0;
     int32_t anchor = s->pending_next_id;   /* bonus = greedy dopo il prompt (o pending in continuazione) */
     float* ctx_r = pctx;
@@ -1112,11 +1114,13 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
 
         int32_t drafts[8];
         LLM_DF2_SP_BEGIN(prop);
-        /* K=7 SEMPRE (2026-10-03): come MLTF/Splash (`DRAFT_PROPOSAL_TOKENS=7`, verify M=8).
-         * Il troncamento adattivo golden (block 4 -> K=3 ai round 1+) era peggiore in token/ciclo
-         * (max 3 proposte): con acceptance ~54% il K=7 da' ~4,8 token/ciclo vs ~2,6. */
+        /* Storico (2026-10-03): K=7 fisso, perche' il troncamento golden (K=3 dai round 1+) era peggiore in token/ciclo. */
+        /* K ADATTIVO (2026-10-16): il costo del verify cresce con le righe (M=4: 65 ms, M=8: 83 ms) e sul testo i rifiuti
+         * cadono a profondita' 0-4 (accettati medi ~1,9): i nodi 5-7 servono nel ~12% dei round. K = ceil(EMA(accettati)+2,5)
+         * in [3,7]: testo ~K=5, codice (accettati ~6-7) K=7. Margine 2,5 scelto da uno sweep (1,5 vinceva sul testo -20% ma perdeva 10-20% sul codice). df2_k=N forza K (A/B). */
         int dall = 8;
-        { int kv=0; if (llm_ai_mlx_opt_get_int("df2_k",&kv)==0 && kv>=1 && kv<=8) dall=kv+1; }  /* A/B: forza K */
+        { int kv=0; if (llm_ai_mlx_opt_get_int("df2_k",&kv)==0 && kv>=1 && kv<=8) dall=kv+1;
+          else { int Ka = (int)ceil(rt->acc_ema + 2.5); if (Ka < 3) Ka = 3; if (Ka > 7) Ka = 7; dall = Ka + 1; } }
         int K = llm_ai_mlx_dflash2_propose(handle, anchor, ctx_r, ctx_n, drafts, dall);
         LLM_DF2_SP_END(prop);
         if (K <= 0) break;
@@ -1134,6 +1138,7 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
         LLM_DF2_SP_END(ver);
         if (accepted < 0 || next_anchor < 0) { free(vctx); break; }
         stat_rounds++; stat_accepted += accepted; stat_K += K;
+        rt->acc_ema = 0.7 * rt->acc_ema + 0.3 * accepted;
         if (g_df2_time_on())
             fprintf(stderr, "[df2time] r=%d acc=%d/%d | ckpt=%.0f fwd=%.0f arg=%.0f roll=%.0f PROP=%.0f (bb=%.0f sel=%.0f wget=%.0f argp=%.0f) ms\n",
                     stat_rounds, accepted, K, g_df2_t_ckpt * 1e3, g_df2_t_fwd * 1e3,

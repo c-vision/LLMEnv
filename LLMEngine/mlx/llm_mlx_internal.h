@@ -819,6 +819,7 @@ typedef struct DFlash2Runtime {
     int last_offset;
     float* retained_ctx;
     int retained_n;
+    double acc_ema;   /* media mobile dei token accettati per round (K adattivo); 0 = non inizializzata */
     /* pesi target referenziati (embed + lm_head), fetch in create */
     mlx_array embed_w, embed_s, embed_b;
     mlx_array lm_w, lm_s, lm_b;
