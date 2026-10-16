@@ -3,8 +3,10 @@
  * Nato per evitare il prompt SINTETICO di decode_profile (id 100,101,...) che falsa l'acceptance.
  *
  * Uso:
- *   llm_spec_check <dylib> <target_dir> <draft_dir> <N> "testo del prompt"
- *   echo "testo" | llm_spec_check <dylib> <target_dir> <draft_dir> <N> -
+ *   llm_spec_check <dylib> <target_dir> <draft_dir> <N> "testo del prompt" [reps]
+ *   echo "testo" | llm_spec_check <dylib> <target_dir> <draft_dir> <N> - [reps]
+ * reps: ripete la misura su sessioni FRESCHE e riporta il MIN (meno rumoroso su GPU condivisa);
+ *       con reps>1 stampa anche la media AR/DF.
  *
  * Build:
  *   cc -O2 -I LLMToken -o llm_spec_check LLMEngine/tools/llm_spec_check.c \
@@ -66,23 +68,33 @@ int main(int argc, char** argv) {
     int32_t* ar = (int32_t*)malloc((size_t)(N + 8) * sizeof(int32_t));
     int32_t* df = (int32_t*)malloc((size_t)(N + 8) * sizeof(int32_t));
     if (!ar || !df) { fprintf(stderr, "malloc\n"); return 5; }
-    S sa = create(m); append(sa, ids, n);
-    double a0 = now_ms();
-    int na = gen(sa, N, -1, ar);
-    double ar_ms = now_ms() - a0;
-
-    S sd = create(m); append(sd, ids, n);
-    DF d = dfcreate(m, argv[3]);
+    int reps = (argc > 6) ? atoi(argv[6]) : 1;
+    if (reps < 1) reps = 1; if (reps > 9) reps = 9;
+    DF d = dfcreate(m, argv[3]);           /* il draft si carica UNA volta */
     if (!d) { fprintf(stderr, "dflash2_create NULL\n"); return 5; }
-    double d0 = now_ms();
-    int nd = dfgen(d, sd, -1, N, df);
-    double df_ms = now_ms() - d0;
 
-    int min = na < nd ? na : nd, first = -1;
-    for (int i = 0; i < min; i++) if (ar[i] != df[i]) { first = i; break; }
-    printf("AR  %7.1f ms  %6.1f tok/s  (%d)\n", ar_ms, na > 0 ? na * 1e3 / ar_ms : 0, na);
-    printf("DF  %7.1f ms  %6.1f tok/s  (%d)  guadagno %+.0f%%\n", df_ms, nd > 0 ? nd * 1e3 / df_ms : 0, nd,
-           ar_ms > 0 && df_ms > 0 ? (ar_ms / df_ms - 1.0) * 100.0 : 0);
+    double arm[9], dfm[9]; int na = 0, nd = 0, first = -1;
+    for (int r = 0; r < reps; r++) {
+        S sa = create(m); append(sa, ids, n);
+        double a0 = now_ms();
+        int nna = gen(sa, N, -1, ar);
+        arm[r] = now_ms() - a0;
+        S sd = create(m); append(sd, ids, n);
+        double d0 = now_ms();
+        int nnd = dfgen(d, sd, -1, N, df);
+        dfm[r] = now_ms() - d0;
+        if (r == 0) { na = nna; nd = nnd; int mn = nna < nnd ? nna : nnd;
+            for (int i = 0; i < mn; i++) if (ar[i] != df[i]) { first = i; break; } }
+    }
+    double sa_ = 0, sd_ = 0;               /* min = meno rumoroso (best-case) su macchina condivisa */
+    for (int r = 0; r < reps; r++) { sa_ = r ? (arm[r] < sa_ ? arm[r] : sa_) : arm[0]; sd_ = r ? (dfm[r] < sd_ ? dfm[r] : sd_) : dfm[0]; }
+    double a_sum = 0, d_sum = 0; for (int r = 0; r < reps; r++) { a_sum += arm[r]; d_sum += dfm[r]; }
+    double a_avg = a_sum / reps, d_avg = d_sum / reps;
+    printf("reps=%d\n", reps);
+    printf("AR  %7.1f ms  %6.1f tok/s  (%d)\n", sa_, na > 0 ? na * 1e3 / sa_ : 0, na);
+    printf("DF  %7.1f ms  %6.1f tok/s  (%d)  guadagno(min) %+.0f%%\n", sd_, nd > 0 ? nd * 1e3 / sd_ : 0, nd,
+           sa_ > 0 && sd_ > 0 ? (sa_ / sd_ - 1.0) * 100.0 : 0);
+    if (reps > 1) printf("    media AR %.1f / DF %.1f ms  (DF min %.1f max %.1f)\n", a_avg, d_avg, sd_, dfm[0] > dfm[1] ? dfm[0] : dfm[1]);
     printf("PARITA: %s (primo diff a %d)\n", (first < 0 && na == nd) ? "OK" : "DIVERGE", first);
     free(ids); free(text); llmtoken_free(tk);
     return 0;
