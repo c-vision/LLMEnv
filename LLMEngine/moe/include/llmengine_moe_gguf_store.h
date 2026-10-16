@@ -43,6 +43,7 @@ typedef struct {
     const uint8_t* base;         /* mmap */
     size_t map_len;
     int fd;
+    int rfd;                     /* I3: fd di LETTURA dedicato con F_NOCACHE (pread esperti senza inquinare il page-cache) */
     uint32_t n_layer;
     GgufStoreLayer* layers;
     GgufStoreEnt* ents;          /* cache bundle (SWAP) */
@@ -200,6 +201,7 @@ static inline GgufStore* llmengine_moe_gguf_store_open(const char* path, const L
     s->n_layer = n_layers;
     s->swap = swap ? 1 : 0;
     s->fd = -1;
+    s->rfd = -1;
     s->layers = (GgufStoreLayer*)calloc(n_layers, sizeof(GgufStoreLayer));
     if (s->layers == NULL) { free(s); return NULL; }
 
@@ -216,6 +218,12 @@ static inline GgufStore* llmengine_moe_gguf_store_open(const char* path, const L
      * read-ahead che tirerebbe in cache gli esperti adiacenti mai usati. Vale per RESIDENT (mmap
      * zero-copy) e SWAP (il mmap resta il fallback pointer). Hint puro, nessun cambio di valori. */
     madvise(m, s->map_len, MADV_RANDOM);
+    /* I3 (ishizuki): le read degli esperti STREAMATI non devono inquinare il page-cache unificato
+     * (un prompt lungo spinge le altre app in memoria compressa). fd di lettura dedicato con
+     * F_NOCACHE: i pread non passano dal UBC; la cache LRU dello store resta la sola cache.
+     * Il mmap (RESIDENT/fallback) usa il fd principale, NON toccato. */
+    s->rfd = open(path, O_RDONLY);
+    if (s->rfd >= 0) { if (fcntl(s->rfd, F_NOCACHE, 1) != 0) { /* hint best-effort */ } }
 
     for (uint32_t l = 0; l < n_layers; ++l) {
         char b[160];
@@ -249,6 +257,7 @@ static inline void llmengine_moe_gguf_store_close(GgufStore* s) {
     if (s->ents) { for (int i = 0; i < s->cap; i++) free(s->ents[i].buf); free(s->ents); }
     if (s->base) munmap((void*)s->base, s->map_len);
     if (s->fd >= 0) close(s->fd);
+    if (s->rfd >= 0) close(s->rfd);
     free(s->freq);
     free(s->layers);
     free(s);
@@ -321,12 +330,15 @@ static inline const uint8_t* llmengine_moe_gguf_store_expert(GgufStore* s, uint3
         GgufStoreEnt* en = &s->ents[idx];
         size_t len = L->g.nb + L->u.nb + L->d.nb;
         if (en->cap < len) { free(en->buf); en->buf = NULL; en->cap = 0; }
-        if (en->buf == NULL) en->buf = (uint8_t*)malloc(len);
+        /* I3: buffer allineato a 16 KB (page-aligned scratch, come ishizuki) -> read coerenti col
+         * page-cache; con F_NOCACHE sul fd dedicato le read streamate non lo inquinano. */
+        if (en->buf == NULL) { if (posix_memalign((void**)&en->buf, 16384, len) != 0) en->buf = NULL; }
         if (en->buf == NULL) { *up = ru; *down = rd; return rg; }   /* fallback mmap */
         en->cap = len; en->len = len;
-        if (pread(s->fd, en->buf, L->g.nb, (off_t)(L->g.off + (uint64_t)e * L->g.nb)) != (ssize_t)L->g.nb ||
-            pread(s->fd, en->buf + L->g.nb, L->u.nb, (off_t)(L->u.off + (uint64_t)e * L->u.nb)) != (ssize_t)L->u.nb ||
-            pread(s->fd, en->buf + L->g.nb + L->u.nb, L->d.nb, (off_t)(L->d.off + (uint64_t)e * L->d.nb)) != (ssize_t)L->d.nb) {
+        const int rfd = (s->rfd >= 0) ? s->rfd : s->fd;
+        if (pread(rfd, en->buf, L->g.nb, (off_t)(L->g.off + (uint64_t)e * L->g.nb)) != (ssize_t)L->g.nb ||
+            pread(rfd, en->buf + L->g.nb, L->u.nb, (off_t)(L->u.off + (uint64_t)e * L->u.nb)) != (ssize_t)L->u.nb ||
+            pread(rfd, en->buf + L->g.nb + L->u.nb, L->d.nb, (off_t)(L->d.off + (uint64_t)e * L->d.nb)) != (ssize_t)L->d.nb) {
             en->valid = 0; *up = ru; *down = rd; return rg;
         }
         s->bytes_read += len;
