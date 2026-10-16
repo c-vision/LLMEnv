@@ -862,6 +862,7 @@ extern int g_df2_n_rounds, g_df2_n_roll;
 bool plain_linear(mlx_array* res, mlx_array x, mlx_array w, mlx_stream stream);
 bool rms_norm_cfg(mlx_array* res, mlx_array x, mlx_array w, float eps, mlx_stream stream);
 bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases, int group_size, int bits, const char* mode, mlx_stream stream);
+void llm_mlx_dbg_dump(const char* name, int layer, mlx_array a);   /* LLM_DBG_DUMP_DIR */
 /* Codebook TurboQuant GLOBALE (identico in tutti i tensori tq, da config.quantization.codebook). */
 void llm_mlx_tq_set_cb(const float* cb, int n);
 int llm_mlx_tq_get_cb(float* out, int cap);

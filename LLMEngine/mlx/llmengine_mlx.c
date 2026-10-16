@@ -1391,6 +1391,23 @@ static void qmm_trace(const char* branch, mlx_array res, mlx_array x, mlx_array 
 }
 
 
+/* DIAGNOSTICA: LLM_DBG_DUMP_DIR=<dir> scrive <dir>/L<layer>_<name>.bin (float32 grezzo, tensore valutato)
+ * per i layer < LLM_DBG_DUMP_LAYERS (default 3). Overwrite ad ogni chiamata (prefill = 1 chiamata/layer). */
+void llm_mlx_dbg_dump(const char* name, int layer, mlx_array a) {
+    static const char* dir = (const char*)1; static int maxl = 3;
+    if (dir == (const char*)1) { dir = getenv("LLM_DBG_DUMP_DIR"); const char* e = getenv("LLM_DBG_DUMP_LAYERS"); if (e) maxl = atoi(e); }
+    if (dir == NULL || a.ctx == NULL || layer < 0 || layer >= maxl) return;
+    mlx_stream s = mlx_default_gpu_stream_new();
+    mlx_array f = mlx_array_new();
+    if (mlx_astype(&f, a, MLX_FLOAT32, s) == 0 && mlx_array_eval(f) == 0) {
+        char p[1024]; snprintf(p, sizeof p, "%s/L%d_%s.bin", dir, layer, name);
+        FILE* fp = fopen(p, "wb");
+        if (fp) { fwrite(mlx_array_data_float32(f), sizeof(float), mlx_array_size(f), fp); fclose(fp); }
+    }
+    mlx_array_free(f); mlx_stream_free(s);
+}
+
+
 bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases, int group_size, int bits, const char* mode, mlx_stream stream) {
     /* TQ dense (opzione 2, LLM_TQ_DENSE=1): w UINT32 packed + biases=signs (già forniti dal fetch),
      * codebook GLOBALE. Decode: kernel TQ che legge packed (meno traffico memoria del bf16 plain).

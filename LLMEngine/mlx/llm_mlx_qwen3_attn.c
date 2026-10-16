@@ -79,10 +79,12 @@ bool qwen3_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, 
         }
     }
 
+    llm_mlx_dbg_dump("normed", layer_idx, normed);
     mlx_array q = mlx_array_new(), k = mlx_array_new(), v = mlx_array_new();
     bool packed = ok && ac && llm_mlx_qkv_apply(&ac->packed_qkv, normed, &q, &k, &v,
         gsz, bts, m->cfg.quant_mode, m->stream, quantized_linear_cfg);
     if (ok && !packed) { ok = quantized_linear_cfg(&q, normed, qw, qs, qb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "q_proj matmul"); }
+    llm_mlx_dbg_dump("q", layer_idx, q);
     { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&q, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     if (ok && !packed) { ok = quantized_linear_cfg(&k, normed, kw, ks, kb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "k_proj matmul"); }
     { int li = llm_mlx_model_lora_get(m, layer_idx, "k_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&k, normed, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
@@ -139,6 +141,7 @@ bool qwen3_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, 
         }
     }
 
+    llm_mlx_dbg_dump("qn", layer_idx, q_normed); llm_mlx_dbg_dump("kn", layer_idx, k_normed);
     mlx_array q_t = mlx_array_new(), k_t = mlx_array_new(), v_t = mlx_array_new();
     if (ok) {
         const int perm[4] = {0, 2, 1, 3};
@@ -171,6 +174,7 @@ bool qwen3_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, 
      * layout [B, n_kv_heads, L, head_dim]) con quanto già accumulato per
      * questo layer. Alla prima chiamata (has_cache=false) il cache è
      * semplicemente k_rope/v_t stessi. */
+    llm_mlx_dbg_dump("qrope", layer_idx, q_rope); llm_mlx_dbg_dump("krope", layer_idx, k_rope); llm_mlx_dbg_dump("v", layer_idx, v_t);
     mlx_array k_full = mlx_array_new(), v_full = mlx_array_new();
     mlx_array attn = mlx_array_new();
     /* LLM_KVSLICE esteso a Qwen3-MoE (2026-09-07 notte fonda): stesso pattern verificato su
@@ -352,6 +356,7 @@ bool qwen3_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, 
     }
     }
 
+    llm_mlx_dbg_dump("sdpa", layer_idx, attn);
     mlx_array attn_bt = mlx_array_new(), attn_flat = mlx_array_new();
     if (ok) {
         const int perm[4] = {0, 2, 1, 3};
@@ -387,6 +392,7 @@ bool qwen3_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, 
     { int li = llm_mlx_model_lora_get(m, layer_idx, "o_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&attn_out, attn_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
 
     if (ok) { ok = mlx_add(out_h, x, attn_out, m->stream) == 0; CHK(ok, "residual add (attn)"); }
+    if (ok) { llm_mlx_dbg_dump("oproj", layer_idx, attn_out); llm_mlx_dbg_dump("h_attn", layer_idx, *out_h); }
 
     mlx_array all[] = {
         ln_w, normed, qw, qs, qb, kw, ks, kb, vw, vs, vb, q, k, v,

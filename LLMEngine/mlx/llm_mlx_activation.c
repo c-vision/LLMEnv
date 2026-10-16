@@ -188,7 +188,15 @@ bool llm_mlx_swiglu_compiled(mlx_array gate_out, mlx_array up_out, mlx_array* ou
     mlx_array ins[2]; ins[0] = gate_out; ins[1] = up_out;
     mlx_vector_array in = mlx_vector_array_new_data(ins, 2);
     mlx_vector_array res = mlx_vector_array_new();
+    /* FUSIONE REALE (2026-10-16, TODO MLX-Trace-Matmul-Quantizzata): la fusione di MLX si decide
+     * a APPLY-time (traccia + compile_fuse al primo apply per firma), NON a mlx_compile-time. Col
+     * modo NO_FUSE globale la closure restava l'eager (sigmoid+mul+mul separati, ciascuno arrotondato
+     * a bf16), mentre mlx_lm (`@mx.compile(shapeless=True) swiglu`) esegue il kernel FUSO: differenza
+     * di 1 ulp bf16 su qualche elemento (Coder-30B 8bit, layer 2: 8/30720), che si propaga ai
+     * logits. Quindi ENABLED solo attorno all'apply, poi si ripristina NO_FUSE. */
+    mlx_set_compile_mode(MLX_COMPILE_MODE_ENABLED);
     int rc = mlx_closure_apply(&res, g_swiglu_closure, in);
+    mlx_set_compile_mode(MLX_COMPILE_MODE_NO_FUSE);
     bool ok = (rc == 0) && mlx_vector_array_size(res) == 1;
     if (ok) mlx_vector_array_get(out_act, res, 0);
     mlx_vector_array_free(in);

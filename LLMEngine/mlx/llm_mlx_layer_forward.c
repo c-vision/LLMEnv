@@ -577,6 +577,7 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
         } else if (strcmp(lopn, "ffn") == 0) {
             if (gprof) clock_gettime(CLOCK_MONOTONIC, &t0);
             ok = m->arch->ffn(m, layer_idx, n_tokens, h, out);
+            if (ok) llm_mlx_dbg_dump("out", layer_idx, *out);
             if (gphase && ok) { clock_gettime(CLOCK_MONOTONIC, &t0); ok = mlx_array_eval(*out) == 0; clock_gettime(CLOCK_MONOTONIC, &t1); ph_ffn += (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9; }
         }
     }

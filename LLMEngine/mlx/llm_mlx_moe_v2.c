@@ -74,9 +74,10 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
         mlx_array g = mlx_array_new(), u = mlx_array_new(), sw = mlx_array_new(), dn = mlx_array_new();
         ok = named_lin(&g, m, layer_idx, "mlp.gate_proj", normed, gsz, bts, s);
         if (ok) ok = named_lin(&u, m, layer_idx, "mlp.up_proj", normed, gsz, bts, s);
-        if (ok) { mlx_array sg=mlx_array_new(), sl=mlx_array_new();
+        if (ok) { bool fused = n_tokens > 1 && llm_mlx_fuse_swiglu_prefill_enabled() && llm_mlx_swiglu_compiled(g, u, &sw, s);
+                  if (!fused) { mlx_array sg=mlx_array_new(), sl=mlx_array_new();
                   ok = mlx_sigmoid(&sg,g,s)==0 && mlx_multiply(&sl,g,sg,s)==0 && mlx_multiply(&sw,sl,u,s)==0;
-                  mlx_array_free(sg); mlx_array_free(sl); }
+                  mlx_array_free(sg); mlx_array_free(sl); } }
         if (ok) ok = named_lin(&dn, m, layer_idx, "mlp.down_proj", sw, gsz, bts, s);
         if (ok) ok = mlx_add(out, h, dn, s) == 0;
         mlx_array_free(g); mlx_array_free(u); mlx_array_free(sw); mlx_array_free(dn);
@@ -107,6 +108,7 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
         CHK(ok, "router act");
     }
 
+    llm_mlx_dbg_dump("ffn_normed", layer_idx, normed); llm_mlx_dbg_dump("gates", layer_idx, gates);
     /* top-k + renorm (device, batched) */
     mlx_array part = mlx_array_new(), inds = mlx_array_new(), scores = mlx_array_new();
     if (ok) {
@@ -132,7 +134,13 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
     mlx_array g_out=mlx_array_new(), u_out=mlx_array_new(), act=mlx_array_new(), d_out=mlx_array_new();
     if (ok) ok = llm_mlx_moe_gather_mm(&m->cfg, &g_out, x1, gw, gs, gb, no_lhs, inds_u, true, gsz_o, bts_o, m->cfg.quant_mode, false, s)==0;
     if (ok) ok = llm_mlx_moe_gather_mm(&m->cfg, &u_out, x1, uw, us, ub, no_lhs, inds_u, true, gsz_o, bts_o, m->cfg.quant_mode, false, s)==0;
-    if (ok) { mlx_array sg=mlx_array_new(), sl=mlx_array_new(); ok = mlx_sigmoid(&sg,g_out,s)==0 && mlx_multiply(&sl,g_out,sg,s)==0 && mlx_multiply(&act,sl,u_out,s)==0; mlx_array_free(sg); mlx_array_free(sl); }
+    /* mlx_lm: swiglu = @mx.compile(shapeless) silu(gate)*up (fusa): differisce di 1 ulp bf16 dall'eager su alcuni
+     * elementi. Prefill (n_tokens>1): closure compilata (stessa politica di qwen3_moe_ffn_block); decode:
+     * eager (il costo fisso di mlx_closure_apply non si ammortizza a n_tokens==1). */
+    if (ok) {
+        bool fused = n_tokens > 1 && llm_mlx_fuse_swiglu_prefill_enabled() && llm_mlx_swiglu_compiled(g_out, u_out, &act, s);
+        if (!fused) { mlx_array sg=mlx_array_new(), sl=mlx_array_new(); ok = mlx_sigmoid(&sg,g_out,s)==0 && mlx_multiply(&sl,g_out,sg,s)==0 && mlx_multiply(&act,sl,u_out,s)==0; mlx_array_free(sg); mlx_array_free(sl); }
+    }
     if (ok) ok = llm_mlx_moe_gather_mm(&m->cfg, &d_out, act, dw, ds, db, no_lhs, inds_u, true, gsz_o, bts_o, m->cfg.quant_mode, false, s)==0;
     CHK(ok, "gather_qmm experts");
     mlx_array moe_out = mlx_array_new();
@@ -145,6 +153,7 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
         mlx_array_free(sce); mlx_array_free(wd); mlx_array_free(sm);
         CHK(ok, "moe weighted sum");
     }
+    llm_mlx_dbg_dump("inds", layer_idx, inds); llm_mlx_dbg_dump("scores", layer_idx, scores); llm_mlx_dbg_dump("g_out", layer_idx, g_out); llm_mlx_dbg_dump("act", layer_idx, act); llm_mlx_dbg_dump("d_out", layer_idx, d_out); llm_mlx_dbg_dump("moe_out", layer_idx, moe_out);
     mlx_array_free(part); mlx_array_free(inds); mlx_array_free(scores); mlx_array_free(x1); mlx_array_free(inds_u);
     mlx_array_free(no_lhs); mlx_array_free(g_out); mlx_array_free(u_out); mlx_array_free(act); mlx_array_free(d_out);
 
