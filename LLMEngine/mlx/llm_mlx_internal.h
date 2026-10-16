@@ -920,6 +920,7 @@ bool forward_tokens_batch_multi_cap(LlmMlxModel* m, LlmMlxSession** sess, const 
 bool llm_mlx_final_norm(LlmMlxModel* m, mlx_array h, mlx_array norm_w, mlx_array* out_normed);
 void llm_mlx_shards_to_gpu(MultiShardWeights* mw, mlx_stream gpu);
 extern int g_oq_a8_minm_override;
+extern int g_qmv_wide_cur;   /* ultimo valore passato a mlx_set_qmv_wide */
 /* Definito in llm_mlx_api.c, usato dal monolite (qwen3_next_linear_block). */
 bool q4_sigmoid_rmsnorm_gated(mlx_array* res, mlx_array hidden, mlx_array gate,
                               mlx_array w, float eps, bool use_silu, mlx_stream s);

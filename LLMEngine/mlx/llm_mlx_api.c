@@ -107,7 +107,11 @@ llm_ai_mlx_dflash2_handle llm_ai_mlx_dflash2_create(llm_ai_mlx_model_handle targ
     /* Salva il modo bf16 del TARGET prima del load del draft (che lo clobbera'). */
     rt->tgt_bf16_all = g_bf16_all; rt->tgt_act16 = g_act16;
     rt->tgt_bf16_input = rt->target->cfg.bfloat16_input;
+    /* Idem per qmv_wide (globale MLX): il load del draft (qwen3 denso -> auto=OFF) lo azzerava e il VERIFY M=8
+     * del target girava col kernel lento (+34 ms/round su Qwen3.8-27B-8bit). */
+    const int tgt_qmv_wide = g_qmv_wide_cur;
     rt->draft = (LlmMlxModel*)llm_ai_mlx_load_model(draft_dir);
+    mlx_set_qmv_wide(tgt_qmv_wide); g_qmv_wide_cur = tgt_qmv_wide;
     if (!rt->draft) { free(rt); return NULL; }
     /* Pesi del draft su GPU: senza, ogni matmul li ri-trasferisce CPU->GPU (~13 ms/proiezione). */
     { const char* e = llm_ai_mlx_opt_env("LLM_DF2_NO_GPU_W");

@@ -360,6 +360,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                   strcmp(m->cfg.model_type, "qwen3_moe") == 0) ? 1 : 0;
         }
         mlx_set_qmv_wide(qw);
+        g_qmv_wide_cur = qw;
     }
 
     /* Attivazioni a 16 bit di DEFAULT (come mlx_lm) dove VALIDATO e vantaggioso:

@@ -1101,6 +1101,9 @@ LlmMetalOqA8Ctx* llm_mlx_oq_a8_ctx(void) {
  * usare la stessa numerica (altrimenti l'acceptance crolla), e la configurazione misurata
  * migliore e' W8A8 a M>=1 (verify 27B-8bit 114,0 -> 97,3 ms/round; AR -10%; spec netto +). */
 int g_oq_a8_minm_override = -1;
+/* Valore corrente di mlx_set_qmv_wide (globale MLX, per-processo): ogni load_model lo riscrive; chi carica un modello
+ * AUSILIARIO (draft DFlash2) lo salva/ripristina cosi' il target non eredita il valore del draft. */
+int g_qmv_wide_cur = -1;
 
 static bool llm_mlx_oq_a8_try(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases,
                               int e_group, int e_bits, const char* e_mode, mlx_stream stream) {
