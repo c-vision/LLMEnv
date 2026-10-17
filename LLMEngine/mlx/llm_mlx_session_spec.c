@@ -829,14 +829,19 @@ static int spec_build_draft(LlmMlxSession* s, int32_t* draft, int max_draft) {
     if (s == NULL || draft == NULL || max_draft <= 0 || s->history_len < 2) return 0;
     int nd = 0;
     if (s->ngram_built && s->ngram.buckets != NULL) {
-        int32_t* ctx = (int32_t*)malloc((s->history_len + (size_t)max_draft + 1) * sizeof(int32_t));
+        /* I8: `llm_mlx_ngram_predict` legge SOLO gli ultimi `order` token (llm_mlx_ngram.h:119).
+         * Prima si copiava tutta la history a ogni token (O(history) malloc+copy): inutile e
+         * pagato anche quando non drafta. Ora un buffer limitato `order + max_draft` (O(order)),
+         * con gli ULTIMI `order` token di history + i draft -> STESSI risultati. */
+        const int ord = s->ngram.order;
+        int hl = s->history_len; if (hl > ord) hl = ord;
+        int32_t* ctx = (int32_t*)malloc((size_t)(hl + max_draft) * sizeof(int32_t));
         if (ctx != NULL) {
-            const int ctx_len = s->history_len;
-            for (int i = 0; i < ctx_len; i++) ctx[i] = s->history[i];
+            if (hl > 0) memcpy(ctx, s->history + (s->history_len - hl), (size_t)hl * sizeof(int32_t));
             for (int i = 0; i < max_draft; i++) {
-                int32_t d = llm_mlx_ngram_predict(&s->ngram, ctx, ctx_len + i);
+                int32_t d = llm_mlx_ngram_predict(&s->ngram, ctx, hl + i);
                 if (d < 0) break;
-                draft[i] = d; ctx[ctx_len + i] = d; nd++;
+                draft[i] = d; ctx[hl + i] = d; nd++;
             }
             free(ctx);
         }
@@ -844,14 +849,16 @@ static int spec_build_draft(LlmMlxSession* s, int32_t* draft, int max_draft) {
     /* Cascade: se l'ordine primario non predice (nd<2), prova la tabella a ordine basso. */
     if (nd < 2 && s->ngram_lo_built && s->ngram_lo.buckets != NULL) {
         nd = 0;
-        int32_t* ctxlo = (int32_t*)malloc((s->history_len + (size_t)max_draft + 1) * sizeof(int32_t));
+        /* I8: stesso fix del ramo primario (buffer limitato `order_lo + max_draft`). */
+        const int ordlo = s->ngram_lo.order;
+        int hl = s->history_len; if (hl > ordlo) hl = ordlo;
+        int32_t* ctxlo = (int32_t*)malloc((size_t)(hl + max_draft) * sizeof(int32_t));
         if (ctxlo != NULL) {
-            const int ctx_len = s->history_len;
-            for (int i = 0; i < ctx_len; i++) ctxlo[i] = s->history[i];
+            if (hl > 0) memcpy(ctxlo, s->history + (s->history_len - hl), (size_t)hl * sizeof(int32_t));
             for (int i = 0; i < max_draft; i++) {
-                int32_t d = llm_mlx_ngram_predict(&s->ngram_lo, ctxlo, ctx_len + i);
+                int32_t d = llm_mlx_ngram_predict(&s->ngram_lo, ctxlo, hl + i);
                 if (d < 0) break;
-                draft[i] = d; ctxlo[ctx_len + i] = d; nd++;
+                draft[i] = d; ctxlo[hl + i] = d; nd++;
             }
             free(ctxlo);
         }
