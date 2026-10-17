@@ -5,6 +5,7 @@
 #include "llmengine_mlx.h"
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
+#include "llm_mlx_qgu4_kernel.h"   /* gate+up+SwiGLU 4-bit in un dispatch (opzione `qgu4`) */
 #include "llm_mlx_ops.h"
 #include "llm_mlx_lora.h"
 #include "llm_mlx_swiglu_kernel.h"
@@ -295,6 +296,30 @@ bool dense_swiglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
      * identica a mlx_lm.models.activations.swiglu. */
     mlx_array sig = mlx_array_new(), silu = mlx_array_new(), act = mlx_array_new();
     bool swiglu_done = false;
+    /* gate+up+SwiGLU fusi in un dispatch (opzione `qgu4`, 4-bit g64, M=2..8): act diretto, gate_out/up_out restano lazy e inutilizzati. */
+    {   static int s_qgu = -1;
+        if (s_qgu < 0) { int b = 0; s_qgu = (llm_ai_mlx_opt_get_bool("qgu4", &b) == 0 && b != 0) ? 1 : 0; }
+        if (ok && s_qgu == 1 && bts == 4 && gsz == 64 && strcmp(m->cfg.quant_mode, "affine") == 0 && m->bonsai_had == NULL &&
+            llm_mlx_model_lora_get(m, layer_idx, "gate_proj") < 0 && llm_mlx_model_lora_get(m, layer_idx, "up_proj") < 0 &&
+            mlx_array_dtype(normed2) == MLX_BFLOAT16 && mlx_array_dtype(gate_w) == MLX_UINT32 && mlx_array_dtype(up_w) == MLX_UINT32 &&
+            gate_s.ctx != NULL && up_s.ctx != NULL && gate_b.ctx != NULL && up_b.ctx != NULL &&
+            mlx_array_dtype(gate_s) == MLX_BFLOAT16 && mlx_array_dtype(up_s) == MLX_BFLOAT16 &&
+            mlx_array_dtype(gate_b) == MLX_BFLOAT16 && mlx_array_dtype(up_b) == MLX_BFLOAT16 &&
+            mlx_array_ndim(gate_w) == 2 && mlx_array_ndim(up_w) == 2 && mlx_array_shape(gate_w)[0] == mlx_array_shape(up_w)[0] &&
+            mlx_array_ndim(normed2) >= 2) {
+            const int xnd = (int)mlx_array_ndim(normed2), qK = mlx_array_shape(normed2)[xnd - 1], qN = mlx_array_shape(gate_w)[0];
+            const int qM = qK > 0 ? (int)(mlx_array_size(normed2) / (size_t)qK) : 0;
+            mlx_array ay = mlx_array_new();
+            if (qM >= 2 && qM <= 8 && llm_qgu4(&ay, normed2, gate_w, gate_s, gate_b, up_w, up_s, up_b, qM, qK, qN, m->stream) == 0) {
+                int osh[8]; for (int i2 = 0; i2 < xnd && i2 < 8; i2++) osh[i2] = mlx_array_shape(normed2)[i2];
+                osh[xnd - 1] = qN;
+                mlx_array ar = mlx_array_new();
+                if (mlx_reshape(&ar, ay, osh, xnd, m->stream) == 0) { mlx_array_set(&act, ar); swiglu_done = true; }
+                mlx_array_free(ar);
+            }
+            mlx_array_free(ay);
+        }
+    }
     /* #86/R4 (2026-10-03): PREFILL BATTEZZATO (n_tokens>1) -> fold `mx.compile`.
      * Oracolo DETERMINISTICO (LLM_DISPATCH, nodi/token sul verify battezzato N=47 di llama1b):
      *   eager=332, kernel Metal=300, fold mx.compile=246. Il fold e' il piu' node-efficiente
