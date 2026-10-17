@@ -341,6 +341,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_lille.c
     llm_mlx_gptneox.c
     llm_mlx_qwen.c
+    llm_mlx_hunyuan.c
     oss/llm_mlx_gptoss_ffn.c
     llm_mlx_selftest_eval.c
     llm_mlx_sensitivity.c

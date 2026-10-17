@@ -528,4 +528,8 @@ bool qwen_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
                           mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool qwen_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 
+/* --- dominio Hunyuan v1 dense (llm_mlx_hunyuan.c) --- */
+bool hunyuan_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                             mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+
 #endif /* LLM_MLX_PROTOS_H */
