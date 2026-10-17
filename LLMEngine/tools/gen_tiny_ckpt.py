@@ -56,6 +56,20 @@ TINY = {
         max_position_embeddings=512, attention_bias=False, mlp_bias=False,
         rope_theta=5000000.0, tie_word_embeddings=True,
     ),
+    # SSM/hybrid: esercita il mixer Mamba2 (granite_hybrid block) + i campi cfg granite.ssm_* e mamba.*
+    "granitemoehybrid": dict(
+        cls="granitemoehybrid", model_type="granitemoehybrid",
+        hidden_size=64, num_hidden_layers=2, intermediate_size=128,
+        num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-5,
+        vocab_size=128, logits_scaling=8.0, attention_multiplier=0.015625,
+        embedding_multiplier=12.0, residual_multiplier=0.22,
+        max_position_embeddings=512, attention_bias=False, mlp_bias=False,
+        rope_theta=10000.0, tie_word_embeddings=True,
+        layer_types=["mamba", "attention"],
+        mamba_n_heads=2, mamba_d_head=32, mamba_d_state=8, mamba_d_conv=2, mamba_n_groups=1,
+        mamba_proj_bias=False, mamba_conv_bias=True,
+        position_embedding_type="nope", time_step_limit=[0.001, 100.0],
+    ),
     # Migrati a moe_v2 (2026-10-17): richiedono il `sanitize` di mlx_lm (espertoni -> switch_mlp),
     # che e' la forma attesa dall'engine per queste due arch.
     "mixtral": dict(
