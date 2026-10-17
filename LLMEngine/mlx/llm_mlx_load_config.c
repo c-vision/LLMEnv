@@ -273,6 +273,17 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
             cJSON* ueb = cJSON_GetObjectItemCaseSensitive(src, "use_expert_bias");
             cfg->use_expert_bias = cJSON_IsBool(ueb) ? cJSON_IsTrue(ueb) : false;
         }
+        /* Migrato a moe_v2_ffn_block: naming ffn_norm/feed_forward, router sigmoid, expert_bias
+         * di selezione, quant PER-TENSORE (router 8-bit in modello 4-bit), layer densi-first. */
+        llm_mlx_mode_set(cfg->moe_norm_name, sizeof cfg->moe_norm_name, "ffn_norm.weight");
+        llm_mlx_mode_set(cfg->moe_router_name, sizeof cfg->moe_router_name, "feed_forward.gate");
+        llm_mlx_mode_set(cfg->moe_experts_base, sizeof cfg->moe_experts_base, "feed_forward.switch_mlp");
+        llm_mlx_mode_set(cfg->moe_dense_base, sizeof cfg->moe_dense_base, "feed_forward");
+        llm_mlx_mode_set(cfg->moe_expert_bias_name, sizeof cfg->moe_expert_bias_name, "feed_forward.expert_bias");
+        cfg->moe_gate_sigmoid = 1;
+        cfg->moe_quant_derive = 1;
+        cfg->moe_layer_interval = 0; cfg->moe_layer_start = 0; cfg->moe_layer_end = -1;
+        cfg->moe_shared_base[0] = 0; cfg->moe_shared_gate = 0;
         cfg->tie_word_embeddings = true;
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");
     } else if (strcmp(cfg->model_type, "rwkv7") == 0) {
@@ -390,6 +401,18 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         if (cfg->moe_layer_interval <= 0) cfg->moe_layer_interval = 1;
         cfg->moe_layer_start = 0; cfg->moe_layer_end = -1;
         cfg->moe_shared_base[0] = 0; cfg->moe_shared_gate = 0; cfg->moe_gate_sigmoid = 0;
+    } else if (strcmp(cfg->model_type, "mixtral") == 0) {
+        /* Mixtral migrato a moe_v2_ffn_block: router PLAIN non quantizzato (block_sparse_moe.gate),
+         * esperti stacked a load (block_sparse_moe.switch_mlp.*), softmax + renorm (= softmax sui
+         * SOLI top-k selezionati), tutti i layer MoE. n_experts/top_k/moe_intermediate_size dal
+         * parse generico (num_local_experts / num_experts_per_tok / intermediate_size). */
+        llm_mlx_mode_set(cfg->moe_router_name, sizeof cfg->moe_router_name, "block_sparse_moe.gate");
+        llm_mlx_mode_set(cfg->moe_experts_base, sizeof cfg->moe_experts_base, "block_sparse_moe.switch_mlp");
+        cfg->moe_router_plain = 1;
+        cfg->moe_layer_interval = 0;
+        cfg->first_k_dense_replace = 0;
+        cfg->moe_shared_base[0] = 0; cfg->moe_shared_gate = 0; cfg->moe_gate_sigmoid = 0;
+        cfg->norm_topk_prob = true;
     } else if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0) {
         /* Mamba / Falcon-Mamba (mlx_lm rimappa falcon_mamba->mamba): SSM selettivo. */
         OPT_INT(mamba_state_size, "state_size");

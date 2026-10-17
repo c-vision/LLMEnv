@@ -100,6 +100,19 @@ typedef struct {
     char moe_shared_base[24];     /* base name shared expert (default "mlp.shared_expert"; ernie "mlp.shared_experts") */
     int moe_shared_gate;          /* 1 = esiste <base>_gate (qwen); 0 = assente (ernie) */
     int moe_gate_sigmoid;         /* 1 = gate_act sigmoid; 0 = softmax */
+    /* MoE v2 — indirezione nomi + router plain + expert_bias di SELEZIONE (Stadio 1, 2026-10-17).
+     * Tutti i campi sono VUOTI/0 di default (memset in load_config) => comportamento attuale
+     * invariato. Servono per assorbire le famiglie con naming/semantica diversi (mixtral/lfm2...). */
+    char moe_norm_name[48];       /* suffix post-norm layer, dopo layer_prefix; vuoto = "post_attention_layernorm.weight" */
+    char moe_router_name[48];     /* nome del router (mlp.gate); vuoto = "mlp.gate" */
+    char moe_experts_base[48];    /* base degli esperti stacked (mlp.switch_mlp); vuoto = "mlp.switch_mlp" */
+    char moe_dense_base[48];      /* base del MLP denso dei layer dense-first (mlp); vuoto = "mlp" */
+    int moe_router_plain;         /* 1 = router NON quantizzato (plain_linear, es. mixtral); 0 = quantizzato */
+    char moe_expert_bias_name[48];/* suffix del tensore expert_bias (es. "feed_forward.expert_bias"); vuoto = assente.
+                                   * Attivo solo se anche use_expert_bias e' true: il bias entra SOLO nella
+                                   * selezione top-k, mai nei pesi (come mlx_lm LFM2-MoE). */
+    int moe_quant_derive;         /* 1 = deriva group/bits/mode PER-TENSORE da scales (router ed esperti),
+                                   * come LFM2-MoE (router 8-bit in modello 4-bit); 0 = usa il quant globale */
     bool tie_word_embeddings;
     /* FASE 1b.0: da config.json["model_type"] -- seleziona la entry di ARCH_TABLE
      * (vedi LlmMlxArchOps sotto). Buffer fisso: i valori reali osservati

@@ -56,6 +56,26 @@ TINY = {
         max_position_embeddings=512, attention_bias=False, mlp_bias=False,
         rope_theta=5000000.0, tie_word_embeddings=True,
     ),
+    # Migrati a moe_v2 (2026-10-17): richiedono il `sanitize` di mlx_lm (espertoni -> switch_mlp),
+    # che e' la forma attesa dall'engine per queste due arch.
+    "mixtral": dict(
+        cls="mixtral", model_type="mixtral",
+        hidden_size=64, intermediate_size=128, num_hidden_layers=4,
+        num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-5,
+        vocab_size=128, rope_theta=10000.0, tie_word_embeddings=False,
+        num_local_experts=4, num_experts_per_tok=2, sanitize=True,
+    ),
+    "lfm2_moe": dict(
+        cls="lfm2_moe", model_type="lfm2_moe",
+        hidden_size=64, intermediate_size=128, moe_intermediate_size=64,
+        num_hidden_layers=4, num_experts=4, num_experts_per_tok=2,
+        norm_topk_prob=True, num_attention_heads=4, num_key_value_heads=2,
+        max_position_embeddings=512, use_expert_bias=True, num_dense_layers=1,
+        norm_eps=1e-5, conv_bias=True, conv_L_cache=4, vocab_size=128,
+        rope_theta=10000.0,
+        layer_types=["conv", "full_attention", "conv", "full_attention"],
+        sanitize=True,
+    ),
 }
 
 
@@ -64,6 +84,7 @@ def build(arch):
         raise SystemExit(f"arch '{arch}' non in TINY (aggiungila)")
     cfg = dict(TINY[arch])
     cls_name = cfg.pop("cls")
+    do_sanitize = cfg.pop("sanitize", False)
     mod = __import__(f"mlx_lm.models.{cls_name}", fromlist=["Model", "ModelArgs"])
     args = mod.ModelArgs(**cfg)
     model = mod.Model(args)
@@ -72,7 +93,7 @@ def build(arch):
     model.update(tree_map(lambda p: mx.random.normal(p.shape, dtype=p.dtype) * 0.05,
                           model.parameters()))
     mx.eval(model.parameters())
-    return model, cfg
+    return model, cfg, do_sanitize
 
 
 def main():
@@ -84,8 +105,12 @@ def main():
         if a == "--ids" and i + 1 < len(sys.argv):
             ids = [int(x) for x in sys.argv[4].split(",")]
     os.makedirs(out, exist_ok=True)
-    model, cfg = build(arch)
+    model, cfg, do_sanitize = build(arch)
     flat = dict(tree_flatten(model.parameters()))
+    # `sanitize` (mlx_lm) fonde gli expertoni in `switch_mlp`: forma attesa dall'engine per le
+    # arch che lo richiedono (mixtral/lfm2_moe). Per le altre la map resta identica.
+    if do_sanitize and hasattr(model, "sanitize"):
+        flat = model.sanitize(flat)
     mx.save_safetensors(os.path.join(out, "model.safetensors"), flat)
     json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=1)
     print(f"tiny '{arch}' -> {out}  ({len(flat)} tensori)")

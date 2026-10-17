@@ -57,7 +57,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "qwen2vl",   qwen2_attention_block,     dense_swiglu_ffn }, /* Qwen2.5-Omni: parte TESTO = qwen2 (vision via llm_host_ai) */
     { "olmoe",     qwen3_moe_attention_block, qwen3_moe_ffn_block }, /* OLMoE-1B-7B: GQA + QK-norm + MoE (gate_inp + *_exps) */
     { "gemma4",    gemma4_attention_block,    dense_geglu_ffn },
-    { "mixtral",   mixtral_attention_block,   mixtral_ffn_block },
+    { "mixtral",   mixtral_attention_block,   moe_v2_ffn_block }, /* migrato a moe_v2 (router plain, block_sparse_moe) */
     { "gpt_oss",   gpt_oss_attention_block,   gpt_oss_ffn_block }, /* GPT-OSS MoE (sinks + sliding 128 + SwiGLU speciale) */
     { "glm4_moe",  glm4_moe_attention_block,  glm4_moe_ffn_block }, /* GLM-4.5 MoE (128 routed + shared, gate sigmoid, primi layer densi) */
     { "deepseek_v2", deepseek_v2_attention_block, deepseek_v2_ffn_block }, /* DeepSeek-V2-Lite (MLA + MoE group-limited-greedy) */
@@ -68,7 +68,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "llama",     llama_attention_block,     dense_swiglu_ffn },
     { "ernie4_5",  llama_attention_block,   dense_swiglu_ffn }, /* ERNIE-4.5 dense: riusa i blocchi llama */
     { "lfm2",      lfm2_attention_dispatch,   lfm2_ffn_block }, /* LFM2 (Liquid): ibrido GQA(+q/k-layerNorm) / ShortConv */
-    { "lfm2_moe",  lfm2_attention_dispatch,   lfm2_moe_ffn_block }, /* LFM2-MoE (Liquid): come lfm2 + FFN MoE (dense-first, expert_bias) */
+    { "lfm2_moe",  lfm2_attention_dispatch,   moe_v2_ffn_block }, /* migrato a moe_v2 (ffn_norm/feed_forward, sigmoid+expert_bias+derive) */
     { "mamba",      mamba_block,              mamba_ffn_identity }, /* Mamba (SSM selettivo): mixer in slot attn, ffn identita */
     { "falcon_mamba", mamba_block,              mamba_ffn_identity }, /* Falcon-Mamba: stesso blocco (+ mixer_norm, TBD) */
     { "mamba2",     mamba2_block,             mamba2_ffn_identity }, /* Mamba2 (SSD): in_proj+conv+scan SSD */
