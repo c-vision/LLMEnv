@@ -2050,7 +2050,6 @@ bool qwen3_next_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offs
 bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out); /* FASE 1b.6: MoE + shared_expert */
 bool dense_swiglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 bool dense_geglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
-bool mixtral_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 bool gpt_oss_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                     mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h); /* GPT-OSS: q/k/v/o bias + sinks + sliding 128 */
 bool gpt_oss_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out); /* GPT-OSS: MoE 32x top4 SwiGLU speciale + bias */

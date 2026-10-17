@@ -249,8 +249,7 @@ bool qwen4_full_qsa_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
                           mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool qwen4_linear_gdn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                             mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
-/* --- dominio Mixtral (llm_mlx_mixtral.c) --- */
-bool mixtral_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+/* --- dominio Mixtral --- */
 /* Definiti nel monolite, usati dal dominio Mixtral. */
 bool llm_env_memprof(void);
 bool llm_env_mixtral_time(void);
@@ -456,10 +455,6 @@ bool llama_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
 bool lfm2_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                     mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool lfm2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
-/* LFM2-MoE: i primi `first_k_dense_replace` layer -> MLP denso (lfm2_ffn_block); dal resto FFN MoE
- * (router softmax + expert_bias di SELEZIONE + top-k/norm_topk_prob/routed_scaling + esperti swiglu
- * stacked `feed_forward.switch_mlp.*`). */
-bool lfm2_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 /* OLMo-3 (AllenAI): dense, GQA + q/k RMSNorm FLAT, layer POST-NORM. */
 bool olmo3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                   mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);

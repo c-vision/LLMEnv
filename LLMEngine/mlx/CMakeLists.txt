@@ -337,7 +337,6 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_moe.c
     llm_mlx_kimi.c
     llm_mlx_qwen4exp_ops.c
-    llm_mlx_mixtral.c
     llm_mlx_glm_ds_ffn.c
     oss/llm_mlx_gptoss_ffn.c
     llm_mlx_selftest_eval.c
