@@ -132,6 +132,12 @@ TINY = {
         num_hidden_layers=2, layer_norm_eps=1e-5, vocab_size=128,
         rotary_emb_base=10000.0, rotary_pct=0.25, use_parallel_residual=True,
     ),
+    "qwen": dict(
+        cls="qwen", model_type="qwen",
+        hidden_size=64, num_attention_heads=4, num_hidden_layers=2, kv_channels=16,
+        max_position_embeddings=512, layer_norm_epsilon=1e-6, intermediate_size=128,
+        no_bias=True, vocab_size=128,
+    ),
 }
 
 

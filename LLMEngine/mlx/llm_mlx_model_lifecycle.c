@@ -83,6 +83,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "granitemoe", granite_hybrid_attention_dispatch, moe_v2_ffn_block }, /* Granite-MoE: attn granite + FFN MoE block_sparse_moe (moe_v2) */
     { "lille-130m", lille_attention_block, lille_ffn_block }, /* Lille-130m (Apple) */
     { "gpt_neox", gpt_neox_attention_block, gpt_neox_ffn_block }, /* GPT-NeoX/Pythia: parallel residual (blocco nell'attn) */
+    { "qwen", qwen_attention_block, qwen_ffn_block }, /* Qwen v1/v1.5: c_attn fuso + MLP 2-proj */
     { "glm4", glm4_attention_block, glm4_ffn_block }, /* GLM-4 denso: GQA+bias + RoPE parziale + MLP fuso (4 norm) */
     { "ernie4_5_moe", llama_attention_block, moe_v2_ffn_block }, /* ERNIE-4.5-MoE: attn llama + FFN MoE v2 (softmax+shared_experts) */
     { "mistral3",  llama_attention_block,     dense_swiglu_ffn }, /* Ministral-3-14B: Mistral denso (GQA + SwiGLU) */

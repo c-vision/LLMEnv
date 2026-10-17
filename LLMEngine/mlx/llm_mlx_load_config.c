@@ -419,6 +419,12 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         { cJSON* pr = cJSON_GetObjectItemCaseSensitive(src, "use_parallel_residual");
           cfg->parallel_residual = cJSON_IsBool(pr) ? (cJSON_IsTrue(pr) ? 1 : 0) : 1; }
         cfg->n_kv_heads = cfg->n_heads;   /* MHA */
+    } else if (strcmp(cfg->model_type, "qwen") == 0) {
+        /* Qwen v1/v1.5: RMSNorm + c_attn fuso + RoPE pieno + MLP 2-proj (w1/w2/c_proj); MHA. */
+        OPT_FLOAT(rms_norm_eps, "layer_norm_epsilon", 1e-6f);
+        OPT_INT(head_dim, "kv_channels");   /* head_dim = kv_channels */
+        if (cfg->head_dim <= 0 && cfg->n_heads > 0) cfg->head_dim = cfg->hidden_size / cfg->n_heads;
+        cfg->n_kv_heads = cfg->n_heads;
     } else if (strcmp(cfg->model_type, "glm4") == 0) {
         /* GLM-4 denso: GQA con bias + RoPE PARZIALE (traditional=true) + MLP fuso (gate_up).
          * 4 RMSNorm per layer. head_dim/n_heads/n_kv_heads dal parse generico. */
@@ -973,6 +979,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "transformer.layers.");
     if (strcmp(cfg->model_type, "gpt_neox") == 0)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.h.");
+    if (strcmp(cfg->model_type, "qwen") == 0)
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "transformer.h.");
     /* DFlash2 DRAFT (config.json ha dflash_config + arch DFlash2DraftModel): prefisso "layers.". */
     if (cJSON_GetObjectItemCaseSensitive(j, "dflash_config") != NULL)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "layers.");

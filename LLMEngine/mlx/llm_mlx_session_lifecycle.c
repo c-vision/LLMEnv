@@ -175,6 +175,10 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
          * gestita in llm_mlx_final_norm); lm_head = model.embed_out (separato). */
         snprintf(embed_name, sizeof(embed_name), "model.embed_in");
         snprintf(norm_name, sizeof(norm_name), "model.final_layer_norm.weight");
+    } else if (strcmp(m->cfg.model_type, "qwen") == 0) {
+        /* Qwen v1/v1.5: embed = transformer.wte; norm finale = transformer.ln_f; lm_head separato. */
+        snprintf(embed_name, sizeof(embed_name), "transformer.wte");
+        snprintf(norm_name, sizeof(norm_name), "transformer.ln_f.weight");
     } else {
         snprintf(embed_name, sizeof(embed_name), "%sembed_tokens", prefix);
         /* LFM2: la RMSNorm finale del modello e' `embedding_norm` (verificato sul checkpoint reale),
