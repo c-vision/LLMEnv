@@ -10,6 +10,7 @@
 
 #include "mlx/c/mlx.h"
 #include "llmengine.h"             /* ABI comune: engine esterni DS4/DS4.1 (deleg) */
+#include "llm_mlx_granite_cfg.h"
 #include "llm_mlx_radix.h"
 #include "llm_mlx_kvpage.h"
 #include "llm_mlx_kvdisk.h"
@@ -182,11 +183,7 @@ typedef struct {
     int linear_conv_kernel_dim;       /* linear_conv_kernel_dim (es. 4) */
     int linear_allow_neg_eigval;      /* olmo_hybrid: beta in [0,2] invece di [0,1] (beta*=2) */
     float layer_norm_epsilon;         /* olmo_hybrid: eps della gated RMSNorm (o_norm), es. 1e-5 */
-    float residual_multiplier;        /* granitemoehybrid: scala del residuo su mixer e mlp (es. 0.22) */
-    float attn_multiplier;            /* granitemoehybrid: scale SDPA (es. 1/64 = 0.015625) */
-    int ssm_n_heads;                  /* granitemoehybrid: teste del mixer Mamba2 (mamba_n_heads, distinte da n_heads attn) */
-    int ssm_head_dim;                 /* granitemoehybrid: head_dim del mixer Mamba2 (mamba_d_head) */
-    int attn_no_rope;                 /* granite/granitemoehybrid: 1 = attention SENZA RoPE (position_embedding_type "nope") */
+    LlmCfgGranite granite;   /* famiglia granite (vedi llm_mlx_granite_cfg.h) */
     int mamba_state_size;             /* Mamba: d_state (es. 16) */
     int mamba_bcdt_rms;               /* falcon_mamba: mixer_norm RMSNorm su delta/B/C */
     float mamba_ts_lo, mamba_ts_hi;   /* Mamba2: time_step_limit [lo,hi] */

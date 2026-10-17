@@ -36,7 +36,7 @@ static bool granite_attn(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
     bool ok = true;
     const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
     const int nh = m->cfg.n_heads, nkv = m->cfg.n_kv_heads, hd = m->cfg.head_dim;
-    const float scale = m->cfg.attn_multiplier > 0.0f ? m->cfg.attn_multiplier : 1.0f / sqrtf((float)hd);
+    const float scale = m->cfg.granite.attn_multiplier > 0.0f ? m->cfg.granite.attn_multiplier : 1.0f / sqrtf((float)hd);
     char nb[256];
     mlx_stream st = m->stream;
 #define CHK(c, w) do { if (!(c)) { fprintf(stderr, "granite.attn[layer=%d]: %s failed\n", layer_idx, (w)); ok = false; } } while (0)
@@ -59,7 +59,7 @@ static bool granite_attn(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
               ok = mlx_reshape(&q4,ql,qs4,4,st)==0 && mlx_reshape(&k4,kl,ks4,4,st)==0 && mlx_reshape(&v4,vl,ks4,4,st)==0; CHK(ok,"reshape"); }
     mlx_array q_t=mlx_array_new(),k_t=mlx_array_new(),v_t=mlx_array_new();
     if (ok) { const int p[4]={0,2,1,3}; ok = mlx_transpose_axes(&q_t,q4,p,4,st)==0 && mlx_transpose_axes(&k_t,k4,p,4,st)==0 && mlx_transpose_axes(&v_t,v4,p,4,st)==0; CHK(ok,"transpose"); }
-    if (ok && !m->cfg.attn_no_rope) {   /* granite (dense) usa RoPE; granitemoehybrid "nope" no */
+    if (ok && !m->cfg.granite.attn_no_rope) {   /* granite (dense) usa RoPE; granitemoehybrid "nope" no */
         mlx_optional_float base = { m->cfg.rope_theta, true };
         mlx_array nf = mlx_array_new();
         mlx_array qr = mlx_array_new(), kr = mlx_array_new();
@@ -101,8 +101,8 @@ static bool granite_mamba2(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
                            mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* mix_out) {
     bool ok = true;
     const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
-    const int H = m->cfg.ssm_n_heads > 0 ? m->cfg.ssm_n_heads : 1;
-    const int Dh = m->cfg.ssm_head_dim > 0 ? m->cfg.ssm_head_dim : 1;
+    const int H = m->cfg.granite.ssm_n_heads > 0 ? m->cfg.granite.ssm_n_heads : 1;
+    const int Dh = m->cfg.granite.ssm_head_dim > 0 ? m->cfg.granite.ssm_head_dim : 1;
     const int Inner = H * Dh;
     const int G = m->cfg.n_group > 0 ? m->cfg.n_group : 1;
     const int Ds = m->cfg.mamba_state_size > 0 ? m->cfg.mamba_state_size : 16;
@@ -232,7 +232,7 @@ static bool granite_mamba2(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
 bool granite_hybrid_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                        mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h) {
     bool ok = true, lin = m->cfg.is_linear_layer && layer_idx < m->cfg.n_layers && m->cfg.is_linear_layer[layer_idx];
-    const float rm = m->cfg.residual_multiplier != 0.0f ? m->cfg.residual_multiplier : 1.0f;
+    const float rm = m->cfg.granite.residual_multiplier != 0.0f ? m->cfg.granite.residual_multiplier : 1.0f;
     char nb[256]; mlx_stream s = m->stream;
     mlx_array lnw=mlx_array_new();
     tname(m->cfg.layer_prefix, layer_idx, "input_layernorm.weight", nb, sizeof(nb));
@@ -253,7 +253,7 @@ bool granite_hybrid_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_
 bool granite_hybrid_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out) {
     bool ok = true;
     const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
-    const float rm = m->cfg.residual_multiplier != 0.0f ? m->cfg.residual_multiplier : 1.0f;
+    const float rm = m->cfg.granite.residual_multiplier != 0.0f ? m->cfg.granite.residual_multiplier : 1.0f;
     char nb[256]; mlx_stream s = m->stream;
 #define CHK(c, w) do { if (!(c)) { fprintf(stderr, "granite.ffn[layer=%d]: %s failed\n", layer_idx, (w)); ok = false; } } while (0)
     mlx_array lnw=mlx_array_new();

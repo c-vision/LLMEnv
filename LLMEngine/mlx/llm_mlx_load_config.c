@@ -332,16 +332,16 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cfg->embed_scale = cJSON_IsNumber(emb) ? (float)emb->valuedouble : 1.0f;
         cJSON* ls = cJSON_GetObjectItemCaseSensitive(src, "logits_scaling");
         cfg->falcon_h1_out_scale = cJSON_IsNumber(ls) && ls->valuedouble != 0.0 ? (float)(1.0 / ls->valuedouble) : 1.0f;
-        OPT_FLOAT(residual_multiplier, "residual_multiplier", 1.0f);
-        OPT_FLOAT(attn_multiplier, "attention_multiplier", 0.0f);
+        OPT_FLOAT(granite.residual_multiplier, "residual_multiplier", 1.0f);
+        OPT_FLOAT(granite.attn_multiplier, "attention_multiplier", 0.0f);
         /* position_embedding_type: "nope" -> attn SENZA RoPE (es. granite-4.0-h-micro); default
          * (assente) = "rope" come mlx_lm -> RoPE attiva. */
         { cJSON* pet = cJSON_GetObjectItemCaseSensitive(src, "position_embedding_type");
-          cfg->attn_no_rope = (cJSON_IsString(pet) && strcmp(pet->valuestring, "nope") == 0) ? 1 : 0; }
+          cfg->granite.attn_no_rope = (cJSON_IsString(pet) && strcmp(pet->valuestring, "nope") == 0) ? 1 : 0; }
         /* Mamba2: teste/head_dim del mixer (SEPARATI da quelli di attention: la hybrid ha attn 32
          * teste e mamba 64 teste). n_heads/head_dim restano quelli dell'attention (parse generico). */
-        OPT_INT(ssm_n_heads, "mamba_n_heads");
-        OPT_INT(ssm_head_dim, "mamba_d_head");
+        OPT_INT(granite.ssm_n_heads, "mamba_n_heads");
+        OPT_INT(granite.ssm_head_dim, "mamba_d_head");
         OPT_INT(mamba_state_size, "mamba_d_state");
         OPT_INT(n_group, "mamba_n_groups");
         OPT_INT(linear_conv_kernel_dim, "mamba_d_conv");
@@ -364,10 +364,10 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cfg->embed_scale = cJSON_IsNumber(emb) ? (float)emb->valuedouble : 1.0f;
         cJSON* ls = cJSON_GetObjectItemCaseSensitive(src, "logits_scaling");
         cfg->falcon_h1_out_scale = cJSON_IsNumber(ls) && ls->valuedouble != 0.0 ? (float)(1.0 / ls->valuedouble) : 1.0f;
-        OPT_FLOAT(residual_multiplier, "residual_multiplier", 1.0f);
-        OPT_FLOAT(attn_multiplier, "attention_multiplier", 0.0f);
+        OPT_FLOAT(granite.residual_multiplier, "residual_multiplier", 1.0f);
+        OPT_FLOAT(granite.attn_multiplier, "attention_multiplier", 0.0f);
         OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
-        cfg->attn_no_rope = 0;   /* granite usa RoPE */
+        cfg->granite.attn_no_rope = 0;   /* granite usa RoPE */
     } else if (strcmp(cfg->model_type, "glm4") == 0) {
         /* GLM-4 denso: GQA con bias + RoPE PARZIALE (traditional=true) + MLP fuso (gate_up).
          * 4 RMSNorm per layer. head_dim/n_heads/n_kv_heads dal parse generico. */
