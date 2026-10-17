@@ -11,6 +11,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+/* time_step_limit: [lo, hi] dal config (mlx_lm mamba2/granitemoehybrid); default per-arch. */
+static void parse_time_step_limit(ModelConfig* cfg, cJSON* src, float def_lo, float def_hi) {
+    cfg->mamba.ts_lo = def_lo; cfg->mamba.ts_hi = def_hi;
+    cJSON* tsl = cJSON_GetObjectItemCaseSensitive(src, "time_step_limit");
+    if (cJSON_IsArray(tsl) && cJSON_GetArraySize(tsl) == 2) {
+        cJSON* lo = cJSON_GetArrayItem(tsl, 0), *hi = cJSON_GetArrayItem(tsl, 1);
+        if (cJSON_IsNumber(lo)) cfg->mamba.ts_lo = (float)lo->valuedouble;
+        if (cJSON_IsNumber(hi)) cfg->mamba.ts_hi = (float)hi->valuedouble;
+    }
+}
 bool load_config(const char* model_dir, ModelConfig* cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
@@ -341,7 +352,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(mamba.state_size, "mamba_d_state");
         OPT_INT(n_group, "mamba_n_groups");
         OPT_INT(linear_conv_kernel_dim, "mamba_d_conv");
-        cfg->mamba.ts_lo = 0.0f; cfg->mamba.ts_hi = 1e30f;
+        parse_time_step_limit(cfg, src, 0.001f, 100.0f);
         cfg->full_attention_interval = 4;
         cJSON* lt = cJSON_GetObjectItemCaseSensitive(src, "layer_types");
         if (cJSON_IsArray(lt) && cJSON_GetArraySize(lt) == cfg->n_layers) {
@@ -456,7 +467,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(mamba.state_size, "state_size");
         OPT_INT(linear_conv_kernel_dim, "conv_kernel");
         OPT_FLOAT(rms_norm_eps, "layer_norm_epsilon", 1e-5f);
-        cfg->mamba.ts_lo = 0.0f; cfg->mamba.ts_hi = 1e30f;   /* time_step_limit [0, inf] */
+        parse_time_step_limit(cfg, src, 0.0f, 1e30f);
         cfg->tie_word_embeddings = true;
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "backbone.layers.");
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "backbone.layers.");
