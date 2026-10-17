@@ -25,11 +25,11 @@ bool falcon_h1_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
 static bool fh1_mamba(LlmMlxModel* m, int li, int n_tokens, mlx_array x, mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out) {
     bool ok = true;
     const int gsz=m->cfg.quant_group_size, bts=m->cfg.quant_bits;
-    const int H=m->cfg.fh1_mamba_heads>0?m->cfg.fh1_mamba_heads:1, Dh=m->cfg.fh1_mamba_head_dim>0?m->cfg.fh1_mamba_head_dim:64;
-    const int Inner=H*Dh, G=m->cfg.n_group>0?m->cfg.n_group:1, Ds=m->cfg.mamba_state_size;
+    const int H=m->cfg.mamba.fh1_heads>0?m->cfg.mamba.fh1_heads:1, Dh=m->cfg.mamba.fh1_head_dim>0?m->cfg.mamba.fh1_head_dim:64;
+    const int Inner=H*Dh, G=m->cfg.n_group>0?m->cfg.n_group:1, Ds=m->cfg.mamba.state_size;
     const int Kc=m->cfg.linear_conv_kernel_dim>0?m->cfg.linear_conv_kernel_dim:4;
     const int Hpg=H/G, ConvDim=Inner+2*G*Ds;
-    const float ts_lo=m->cfg.mamba_ts_lo, ts_hi=m->cfg.mamba_ts_hi;
+    const float ts_lo=m->cfg.mamba.ts_lo, ts_hi=m->cfg.mamba.ts_hi;
     char nb[256]; mlx_stream s=m->stream;
 #define CHK(c,w) do{ if(!(c)){ fprintf(stderr,"falcon_h1[layer=%d]: %s failed\n",li,(w)); ok=false; } }while(0)
     mlx_array ipw=mlx_array_new(),ips=mlx_array_new(),ipb=mlx_array_new();

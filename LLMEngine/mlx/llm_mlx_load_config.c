@@ -342,10 +342,10 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
          * teste e mamba 64 teste). n_heads/head_dim restano quelli dell'attention (parse generico). */
         OPT_INT(granite.ssm_n_heads, "mamba_n_heads");
         OPT_INT(granite.ssm_head_dim, "mamba_d_head");
-        OPT_INT(mamba_state_size, "mamba_d_state");
+        OPT_INT(mamba.state_size, "mamba_d_state");
         OPT_INT(n_group, "mamba_n_groups");
         OPT_INT(linear_conv_kernel_dim, "mamba_d_conv");
-        cfg->mamba_ts_lo = 0.0f; cfg->mamba_ts_hi = 1e30f;
+        cfg->mamba.ts_lo = 0.0f; cfg->mamba.ts_hi = 1e30f;
         cfg->full_attention_interval = 4;
         cJSON* lt = cJSON_GetObjectItemCaseSensitive(src, "layer_types");
         if (cJSON_IsArray(lt) && cJSON_GetArraySize(lt) == cfg->n_layers) {
@@ -415,26 +415,26 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cfg->norm_topk_prob = true;
     } else if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0) {
         /* Mamba / Falcon-Mamba (mlx_lm rimappa falcon_mamba->mamba): SSM selettivo. */
-        OPT_INT(mamba_state_size, "state_size");
+        OPT_INT(mamba.state_size, "state_size");
         OPT_INT(linear_conv_kernel_dim, "conv_kernel");
-        OPT_INT(mamba_dt_rank, "time_step_rank");
+        OPT_INT(mamba.dt_rank, "time_step_rank");
         OPT_INT(moe_intermediate_size, "intermediate_size");   /* d_inner (2*d_model) */
         cfg->tie_word_embeddings = true;                       /* nessun lm_head */
-        if (strcmp(cfg->model_type, "falcon_mamba") == 0) cfg->mamba_bcdt_rms = 1; /* mlx_lm: falcon_mamba -> use_bcdt_rms=True */
+        if (strcmp(cfg->model_type, "falcon_mamba") == 0) cfg->mamba.bcdt_rms = 1; /* mlx_lm: falcon_mamba -> use_bcdt_rms=True */
     } else if (strcmp(cfg->model_type, "falcon_h1") == 0) {
         /* Falcon-H1 ibrido: attn (num_attention_heads/key_value_heads/head_dim) +
          * mamba (mamba_n_heads/mamba_d_head/mamba_d_ssm/mamba_n_groups/mamba_d_state/mamba_d_conv). */
         OPT_INT(n_heads, "num_attention_heads");
         OPT_INT(n_kv_heads, "num_key_value_heads");
         OPT_INT(head_dim, "head_dim");
-        OPT_INT(fh1_mamba_heads, "mamba_n_heads");
-        OPT_INT(fh1_mamba_head_dim, "mamba_d_head");
+        OPT_INT(mamba.fh1_heads, "mamba_n_heads");
+        OPT_INT(mamba.fh1_head_dim, "mamba_d_head");
         OPT_INT(moe_intermediate_size, "mamba_d_ssm");   /* Inner del mixer */
         OPT_INT(n_group, "mamba_n_groups");
-        OPT_INT(mamba_state_size, "mamba_d_state");
+        OPT_INT(mamba.state_size, "mamba_d_state");
         OPT_INT(linear_conv_kernel_dim, "mamba_d_conv");
         OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
-        cfg->mamba_ts_lo = 0.0f; cfg->mamba_ts_hi = 1e30f;
+        cfg->mamba.ts_lo = 0.0f; cfg->mamba.ts_hi = 1e30f;
         cfg->tie_word_embeddings = true;
         { cJSON* a=cJSON_GetObjectItemCaseSensitive(j,"lm_head_multiplier");
           cJSON* b=cJSON_GetObjectItemCaseSensitive(j,"embedding_multiplier");
@@ -445,9 +445,9 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         /* Jamba ibrido: attn (num_attention_heads/key_value_heads, head_dim derivato) +
          * mamba S6 (d_state/d_conv/dt_rank) + dispatch layer via attn_layer_period/offset. */
         OPT_INT(n_kv_heads, "num_key_value_heads");
-        OPT_INT(mamba_state_size, "mamba_d_state");
+        OPT_INT(mamba.state_size, "mamba_d_state");
         OPT_INT(linear_conv_kernel_dim, "mamba_d_conv");
-        OPT_INT(mamba_dt_rank, "mamba_dt_rank");
+        OPT_INT(mamba.dt_rank, "mamba_dt_rank");
         OPT_INT(attn_layer_period, "attn_layer_period");
         OPT_INT(attn_layer_offset, "attn_layer_offset");
         OPT_FLOAT(rms_norm_eps, "rms_norm_eps", 1e-6f);
@@ -457,10 +457,10 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(n_heads, "num_heads");
         OPT_INT(head_dim, "head_dim");
         OPT_INT(n_group, "n_groups");
-        OPT_INT(mamba_state_size, "state_size");
+        OPT_INT(mamba.state_size, "state_size");
         OPT_INT(linear_conv_kernel_dim, "conv_kernel");
         OPT_FLOAT(rms_norm_eps, "layer_norm_epsilon", 1e-5f);
-        cfg->mamba_ts_lo = 0.0f; cfg->mamba_ts_hi = 1e30f;   /* time_step_limit [0, inf] */
+        cfg->mamba.ts_lo = 0.0f; cfg->mamba.ts_hi = 1e30f;   /* time_step_limit [0, inf] */
         cfg->tie_word_embeddings = true;
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "backbone.layers.");
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "backbone.layers.");

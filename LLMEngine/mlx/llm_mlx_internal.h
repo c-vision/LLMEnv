@@ -11,6 +11,7 @@
 #include "mlx/c/mlx.h"
 #include "llmengine.h"             /* ABI comune: engine esterni DS4/DS4.1 (deleg) */
 #include "llm_mlx_granite_cfg.h"
+#include "llm_mlx_mamba_cfg.h"
 #include "llm_mlx_radix.h"
 #include "llm_mlx_kvpage.h"
 #include "llm_mlx_kvdisk.h"
@@ -184,15 +185,10 @@ typedef struct {
     int linear_allow_neg_eigval;      /* olmo_hybrid: beta in [0,2] invece di [0,1] (beta*=2) */
     float layer_norm_epsilon;         /* olmo_hybrid: eps della gated RMSNorm (o_norm), es. 1e-5 */
     LlmCfgGranite granite;   /* famiglia granite (vedi llm_mlx_granite_cfg.h) */
-    int mamba_state_size;             /* Mamba: d_state (es. 16) */
-    int mamba_bcdt_rms;               /* falcon_mamba: mixer_norm RMSNorm su delta/B/C */
-    float mamba_ts_lo, mamba_ts_hi;   /* Mamba2: time_step_limit [lo,hi] */
-    int fh1_mamba_heads;              /* falcon_h1: mamba_n_heads (distinto da n_heads attn) */
-    int fh1_mamba_head_dim;           /* falcon_h1: mamba_d_head */
+    LlmCfgMamba mamba;   /* famiglia SSM/mamba (vedi llm_mlx_mamba_cfg.h) */
     float falcon_h1_out_scale;        /* falcon_h1: lm_head_multiplier/embedding_multiplier (uscita tied) */
     int attn_layer_period;            /* jamba: periodo layer attenzione */
     int attn_layer_offset;            /* jamba: offset layer attenzione */
-    int mamba_dt_rank;                /* Mamba: dt_rank = ceil(d_model/16) */
     /* RWKV7 (rwkv7): time-mixing (WKV7 kernel ricorrente + LoRA r/w/a/g) + channel-mixing.
      * Le LoRA hanno rango separato per ogni proiezione; lo stato WKV e' [B, heads, head_dim, head_dim]. */
     int rwkv_a_lr;                    /* a_low_rank_dim */

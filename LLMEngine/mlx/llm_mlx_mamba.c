@@ -36,9 +36,9 @@ bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, 
     const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
     const int Hid = m->cfg.hidden_size;
     const int Inner = m->cfg.moe_intermediate_size > 0 ? m->cfg.moe_intermediate_size : 2 * Hid;
-    const int St = m->cfg.mamba_state_size > 0 ? m->cfg.mamba_state_size : 16;
+    const int St = m->cfg.mamba.state_size > 0 ? m->cfg.mamba.state_size : 16;
     const int Kc = m->cfg.linear_conv_kernel_dim > 0 ? m->cfg.linear_conv_kernel_dim : 4;
-    const int Rk = m->cfg.mamba_dt_rank > 0 ? m->cfg.mamba_dt_rank : (Hid + 15) / 16;
+    const int Rk = m->cfg.mamba.dt_rank > 0 ? m->cfg.mamba.dt_rank : (Hid + 15) / 16;
     char nb[256];
     mlx_stream s = m->stream;
 #define CHK(c, w) do { if (!(c)) { fprintf(stderr, "mamba[layer=%d]: %s failed\n", layer_idx, (w)); ok = false; } } while (0)
@@ -138,7 +138,7 @@ bool mamba_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, 
             mlx_vector_array_free(v); }
         /* falcon_mamba (use_bcdt_rms): mixer_norm = RMSNorm(ones, eps=1e-6) su delta/B/C
          * (mlx_lm/models/mamba.py: __post_init__ setta use_bcdt_rms per falcon_mamba). */
-        if (m->cfg.mamba_bcdt_rms && ok) {
+        if (m->cfg.mamba.bcdt_rms && ok) {
             /* mixing RMSNorm weightless: v / sqrt(mean(v^2)+1e-6) (dims [1,D] -> mean su tutta la riga). */
             mlx_array* tv[3] = { &dlt, &Bv, &Cv };
             for (int q=0; q<3 && ok; q++) {

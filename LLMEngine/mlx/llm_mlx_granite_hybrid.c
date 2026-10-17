@@ -105,11 +105,11 @@ static bool granite_mamba2(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
     const int Dh = m->cfg.granite.ssm_head_dim > 0 ? m->cfg.granite.ssm_head_dim : 1;
     const int Inner = H * Dh;
     const int G = m->cfg.n_group > 0 ? m->cfg.n_group : 1;
-    const int Ds = m->cfg.mamba_state_size > 0 ? m->cfg.mamba_state_size : 16;
+    const int Ds = m->cfg.mamba.state_size > 0 ? m->cfg.mamba.state_size : 16;
     const int Kc = m->cfg.linear_conv_kernel_dim > 0 ? m->cfg.linear_conv_kernel_dim : 4;
     const int Hpg = H / G;
     const int ConvDim = Inner + 2 * G * Ds;
-    const float ts_lo = m->cfg.mamba_ts_lo, ts_hi = m->cfg.mamba_ts_hi;
+    const float ts_lo = m->cfg.mamba.ts_lo, ts_hi = m->cfg.mamba.ts_hi;
     char nb[256];
     mlx_stream s = m->stream;
 #define CHK(c, w) do { if (!(c)) { fprintf(stderr, "granite.mamba[layer=%d]: %s failed\n", layer_idx, (w)); ok = false; } } while (0)

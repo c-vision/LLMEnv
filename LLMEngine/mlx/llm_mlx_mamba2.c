@@ -38,11 +38,11 @@ bool mamba2_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens,
     const int Dh = m->cfg.head_dim;                    /* head_dim */
     const int Inner = H * Dh;                          /* intermediate_size */
     const int G = m->cfg.n_group > 0 ? m->cfg.n_group : 1;
-    const int Ds = m->cfg.mamba_state_size > 0 ? m->cfg.mamba_state_size : 16;
+    const int Ds = m->cfg.mamba.state_size > 0 ? m->cfg.mamba.state_size : 16;
     const int Kc = m->cfg.linear_conv_kernel_dim > 0 ? m->cfg.linear_conv_kernel_dim : 4;
     const int Hpg = H / G;                             /* heads_per_group */
     const int ConvDim = Inner + 2 * G * Ds;
-    const float ts_lo = m->cfg.mamba_ts_lo, ts_hi = m->cfg.mamba_ts_hi;
+    const float ts_lo = m->cfg.mamba.ts_lo, ts_hi = m->cfg.mamba.ts_hi;
     char nb[256];
     mlx_stream s = m->stream;
 #define CHK(c, w) do { if (!(c)) { fprintf(stderr, "mamba2[layer=%d]: %s failed\n", layer_idx, (w)); ok = false; } } while (0)
