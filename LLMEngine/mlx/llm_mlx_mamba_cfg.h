@@ -11,6 +11,7 @@ typedef struct {
     int   fh1_heads;     /* falcon_h1: mamba_n_heads (distinto da n_heads attn) */
     int   fh1_head_dim;  /* falcon_h1: mamba_d_head */
     int   dt_rank;       /* Mamba: dt_rank = ceil(d_model/16) */
+    float ln_eps;        /* Mamba2 gated RMSNorm (o_norm) eps; default 1e-5 */
 } LlmCfgMamba;
 
 #endif /* LLM_MLX_MAMBA_CFG_H */

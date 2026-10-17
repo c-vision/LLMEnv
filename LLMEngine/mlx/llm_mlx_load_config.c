@@ -309,7 +309,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(linear_conv_kernel_dim, "linear_conv_kernel_dim");
         { cJSON* ane = cJSON_GetObjectItemCaseSensitive(src, "linear_allow_neg_eigval");
           cfg->linear_allow_neg_eigval = cJSON_IsBool(ane) ? cJSON_IsTrue(ane) : 0; }
-        OPT_FLOAT(layer_norm_epsilon, "layer_norm_epsilon", 1e-5f);
+        OPT_FLOAT(mamba.ln_eps, "layer_norm_epsilon", 1e-5f);
         cfg->full_attention_interval = 4;   /* soddisfa la validazione; il dispatch usa layer_types */
         cJSON* lt = cJSON_GetObjectItemCaseSensitive(src, "layer_types");
         if (cJSON_IsArray(lt) && cJSON_GetArraySize(lt) == cfg->n_layers) {

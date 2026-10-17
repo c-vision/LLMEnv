@@ -215,7 +215,7 @@ static bool olmo_hybrid_gdn_block(LlmMlxModel* m, int layer_idx, int n_tokens, m
     mlx_array gen4 = mlx_array_new();
     if (ok) { ok = mlx_reshape(&gen4, gen, zsh, 4, s) == 0; CHK(ok, "reshape gate"); }
     mlx_array y_norm = mlx_array_new();
-    if (ok) { ok = rms_norm_cfg(&y_norm, y_stack, on_w, m->cfg.layer_norm_epsilon, s); CHK(ok, "o_norm"); }
+    if (ok) { ok = rms_norm_cfg(&y_norm, y_stack, on_w, m->cfg.mamba.ln_eps, s); CHK(ok, "o_norm"); }
     mlx_array gated = mlx_array_new();
     if (ok) {
         mlx_array z32=mlx_array_new(), yn32=mlx_array_new(), zs=mlx_array_new(), sl=mlx_array_new(), g32=mlx_array_new();

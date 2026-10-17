@@ -183,7 +183,6 @@ typedef struct {
     int linear_value_head_dim;        /* linear_value_head_dim (es. 128) */
     int linear_conv_kernel_dim;       /* linear_conv_kernel_dim (es. 4) */
     int linear_allow_neg_eigval;      /* olmo_hybrid: beta in [0,2] invece di [0,1] (beta*=2) */
-    float layer_norm_epsilon;         /* olmo_hybrid: eps della gated RMSNorm (o_norm), es. 1e-5 */
     LlmCfgGranite granite;   /* famiglia granite (vedi llm_mlx_granite_cfg.h) */
     LlmCfgMamba mamba;   /* famiglia SSM/mamba (vedi llm_mlx_mamba_cfg.h) */
     float falcon_h1_out_scale;        /* falcon_h1: lm_head_multiplier/embedding_multiplier (uscita tied) */
