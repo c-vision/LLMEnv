@@ -189,12 +189,6 @@ typedef struct {
     float falcon_h1_out_scale;        /* falcon_h1: lm_head_multiplier/embedding_multiplier (uscita tied) */
     int attn_layer_period;            /* jamba: periodo layer attenzione */
     int attn_layer_offset;            /* jamba: offset layer attenzione */
-    /* RWKV7 (rwkv7): time-mixing (WKV7 kernel ricorrente + LoRA r/w/a/g) + channel-mixing.
-     * Le LoRA hanno rango separato per ogni proiezione; lo stato WKV e' [B, heads, head_dim, head_dim]. */
-    int rwkv_a_lr;                    /* a_low_rank_dim */
-    int rwkv_v_lr;                    /* v_low_rank_dim */
-    int rwkv_gate_lr;                 /* gate_low_rank_dim */
-    int rwkv_decay_lr;                /* decay_low_rank_dim */
     /* is_linear_layer[i]=true se layer i e' linear_attn (GDN), false se full_attention. */
     bool* is_linear_layer;
     /* FASE 1b.5 (Qwen3.8 / qwen3_5 hybrid GDN): i layer full usano Qwen3NextAttention

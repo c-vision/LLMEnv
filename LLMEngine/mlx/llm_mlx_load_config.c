@@ -289,15 +289,11 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     } else if (strcmp(cfg->model_type, "rwkv7") == 0) {
         /* RWKV7: time-mixing (WKV7 ricorrente + LoRA r/w/a/g) + channel-mixing (key/value).
          * head_dim=64, num_heads=32 -> lo spazio delle teste e' num_heads*head_dim (2*hidden nel
-         * 0.4B). Ogni LoRA ha rango separato (a/v/gate/decay_low_rank_dim). */
+         * 0.4B). Ogni LoRA ha rango separato (derivato dalle shape dei tensori, non dal cfg). */
         /* mlx_lm deriva num_heads = hidden_size // head_dim (il config dichiara "num_heads":32
          * ma NON viene letto: Rwkv7TimeMixing usa hidden/head_dim). head_dim arriva dal parse
          * generico (64); qui deriviamo n_heads di conseguenza. */
         if (cfg->head_dim > 0) cfg->n_heads = cfg->hidden_size / cfg->head_dim;
-        OPT_INT(rwkv_a_lr, "a_low_rank_dim");
-        OPT_INT(rwkv_v_lr, "v_low_rank_dim");
-        OPT_INT(rwkv_gate_lr, "gate_low_rank_dim");
-        OPT_INT(rwkv_decay_lr, "decay_low_rank_dim");
         OPT_FLOAT(rms_norm_eps, "norm_eps", 1e-5f);
         cfg->tie_word_embeddings = false;
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.layers.");
