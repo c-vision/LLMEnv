@@ -308,7 +308,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(linear_value_head_dim, "linear_value_head_dim");
         OPT_INT(linear_conv_kernel_dim, "linear_conv_kernel_dim");
         { cJSON* ane = cJSON_GetObjectItemCaseSensitive(src, "linear_allow_neg_eigval");
-          cfg->linear_allow_neg_eigval = cJSON_IsBool(ane) ? cJSON_IsTrue(ane) : 0; }
+          cfg->hybrid.allow_neg_eigval = cJSON_IsBool(ane) ? cJSON_IsTrue(ane) : 0; }
         OPT_FLOAT(mamba.ln_eps, "layer_norm_epsilon", 1e-5f);
         cfg->full_attention_interval = 4;   /* soddisfa la validazione; il dispatch usa layer_types */
         cJSON* lt = cJSON_GetObjectItemCaseSensitive(src, "layer_types");
@@ -444,8 +444,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(mamba.state_size, "mamba_d_state");
         OPT_INT(linear_conv_kernel_dim, "mamba_d_conv");
         OPT_INT(mamba.dt_rank, "mamba_dt_rank");
-        OPT_INT(attn_layer_period, "attn_layer_period");
-        OPT_INT(attn_layer_offset, "attn_layer_offset");
+        OPT_INT(hybrid.attn_layer_period, "attn_layer_period");
+        OPT_INT(hybrid.attn_layer_offset, "attn_layer_offset");
         OPT_FLOAT(rms_norm_eps, "rms_norm_eps", 1e-6f);
         cfg->tie_word_embeddings = true;
     } else if (strcmp(cfg->model_type, "mamba2") == 0) {

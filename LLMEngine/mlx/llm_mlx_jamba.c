@@ -243,8 +243,8 @@ bool jamba_attn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tok
     mlx_array h=mlx_array_new(); if(ok) ok=mlx_fast_rms_norm(&h,x,nw,m->cfg.rms_norm_eps,s)==0;
     mlx_array mh=mlx_array_new();
     if(ok){
-        int period=m->cfg.attn_layer_period;
-        bool is_attn = (period>0) ? ((layer_idx % period)==m->cfg.attn_layer_offset) : true;
+        int period=m->cfg.hybrid.attn_layer_period;
+        bool is_attn = (period>0) ? ((layer_idx % period)==m->cfg.hybrid.attn_layer_offset) : true;
         if(is_attn) ok=jamba_attn(m,layer_idx,cache_offset,n_tokens,h,k_cache,v_cache,has_cache,&mh);
         else ok=jamba_mixer(m,layer_idx,n_tokens,h,k_cache,v_cache,has_cache,&mh);
     }

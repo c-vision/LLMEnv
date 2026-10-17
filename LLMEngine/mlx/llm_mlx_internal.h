@@ -12,6 +12,7 @@
 #include "llmengine.h"             /* ABI comune: engine esterni DS4/DS4.1 (deleg) */
 #include "llm_mlx_granite_cfg.h"
 #include "llm_mlx_mamba_cfg.h"
+#include "llm_mlx_hybrid_cfg.h"
 #include "llm_mlx_radix.h"
 #include "llm_mlx_kvpage.h"
 #include "llm_mlx_kvdisk.h"
@@ -182,12 +183,10 @@ typedef struct {
     int linear_key_head_dim;          /* linear_key_head_dim (es. 128) */
     int linear_value_head_dim;        /* linear_value_head_dim (es. 128) */
     int linear_conv_kernel_dim;       /* linear_conv_kernel_dim (es. 4) */
-    int linear_allow_neg_eigval;      /* olmo_hybrid: beta in [0,2] invece di [0,1] (beta*=2) */
     LlmCfgGranite granite;   /* famiglia granite (vedi llm_mlx_granite_cfg.h) */
     LlmCfgMamba mamba;   /* famiglia SSM/mamba (vedi llm_mlx_mamba_cfg.h) */
+    LlmCfgHybrid hybrid; /* jamba/olmo_hybrid (vedi llm_mlx_hybrid_cfg.h) */
     float falcon_h1_out_scale;        /* falcon_h1: lm_head_multiplier/embedding_multiplier (uscita tied) */
-    int attn_layer_period;            /* jamba: periodo layer attenzione */
-    int attn_layer_offset;            /* jamba: offset layer attenzione */
     /* is_linear_layer[i]=true se layer i e' linear_attn (GDN), false se full_attention. */
     bool* is_linear_layer;
     /* FASE 1b.5 (Qwen3.8 / qwen3_5 hybrid GDN): i layer full usano Qwen3NextAttention

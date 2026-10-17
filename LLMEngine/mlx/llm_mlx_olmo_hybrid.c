@@ -147,7 +147,7 @@ static bool olmo_hybrid_gdn_block(LlmMlxModel* m, int layer_idx, int n_tokens, m
     CHK(ok, "A_log/dt_bias");
     mlx_array beta = mlx_array_new(), g = mlx_array_new();
     if (ok) { ok = mlx_sigmoid(&beta, bv, s) == 0; CHK(ok, "beta sigmoid"); }
-    if (ok && m->cfg.linear_allow_neg_eigval) { mlx_array two = llm_mlx_act_scalar(2.0f), b2 = mlx_array_new();
+    if (ok && m->cfg.hybrid.allow_neg_eigval) { mlx_array two = llm_mlx_act_scalar(2.0f), b2 = mlx_array_new();
         ok = mlx_multiply(&b2, beta, two, s) == 0; if (ok) mlx_array_set(&beta, b2); mlx_array_free(b2); mlx_array_free(two); CHK(ok, "beta*2"); }
     if (ok) {
         mlx_array eAlog = mlx_array_new(), apd = mlx_array_new(), spl = mlx_array_new();
