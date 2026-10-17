@@ -272,6 +272,22 @@ llm_mlx_sampling_t llm_mlx_session_sampling(const LlmMlxSession* s) {
     return sm;
 }
 
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#endif
+
+/* I12 (todo Ishizuki): profilo QoS ADATTIVO (opzione di registro `qos` = adaptive|utility) per la
+ * macchina condivisa: abbassa il QoS del thread a UTILITY (cede la CPU alle altre app) e riduce il
+ * chunk di prefill a 1/4 (burst GPU piu' piccoli). Opt-in, default OFF (nessun cambio di default). */
+static int llm_mlx_qos_adaptive(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char* q = llm_ai_mlx_opt_env("qos");
+        v = (q != NULL && (strcmp(q, "adaptive") == 0 || strcmp(q, "utility") == 0)) ? 1 : 0;
+    }
+    return v;
+}
+
 LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
     LlmMlxSession* s = (LlmMlxSession*)calloc(1, sizeof(LlmMlxSession));
     s->model = m;
@@ -280,6 +296,10 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
         s->deleg_sess = m->deleg->create_session ? m->deleg->create_session(m->deleg_model) : NULL;
         return s;
     }
+#if defined(__APPLE__)
+    /* I12: profilo adattivo -> QoS UTILITY sul thread chiamante (cede la CPU alla macchina condivisa). */
+    if (llm_mlx_qos_adaptive()) (void)pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
     s->n_layers = m->cfg.n_layers;
     s->k_cache = (mlx_array*)malloc((size_t)m->cfg.n_layers * sizeof(mlx_array));
     s->v_cache = (mlx_array*)malloc((size_t)m->cfg.n_layers * sizeof(mlx_array));
@@ -397,6 +417,8 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
             /* gpt_oss: chunk in oss/ (llm_oss_config.c). La parità gpt-oss è chunk-dipendente
              * (SDPA fusa shape-dependent) -> determinismo a config fissa, non bit fra chunk. */
             defc = llm_oss_default_prefill_chunk();
+        /* I12: profilo adattivo -> chunk di prefill a 1/4 (burst GPU piu' piccoli, cede la macchina). */
+        if (chunk_env <= 0 && llm_mlx_qos_adaptive() && defc > 512) defc /= 4;
         s->prefill_chunk_size = chunk_env > 0 ? chunk_env : defc;
     }
     /* N-Gram: history vuota all'avvio; tabella pre-allocata (ordine default 3, riempita

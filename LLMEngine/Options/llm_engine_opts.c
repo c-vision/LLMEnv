@@ -28,6 +28,7 @@ static Opt g_opts[] = {
     { "offload",          "streaming/cache esperti MoE da disco",                    T_BOOL,  0, 0, 0, 0, 0, 0, {0}, NULL, 0, "on" },
     { "offload_cache_mb", "RAM per la cache esperti (MB)",                           T_INT,   14336, 14336, 0, 0, 0, 0, {0}, NULL, 0, "16384" },
     { "dtype",            "auto|f16|bf16",                                           T_STR,   0, 0, 0, 0, 0, 0, "auto", "auto", 0, "bf16" },
+    { "qos",              "default|adaptive (QoS UTILITY + prefill chunk/4: cede la macchina condivisa)", T_STR, 0, 0, 0, 0, 0, 0, "", "", 0, "default" },
     { "kvquant",          "off|8[:finestra]|auto[:soglia]|16",                       T_STR,   0, 0, 0, 0, 0, 0, "auto", "auto", 0, "8:8192" },
     { "kvq_split_tokens", "KV-quant attn fusa: token per split-K (piccolo = piu' split)", T_INT, 0, 1024, 0, 0, 0, 0, {0}, NULL, 0, "256" },
     { "kvq_splits_max",   "KV-quant attn fusa: n. massimo di split-K",                 T_INT, 0, 64, 0, 0, 0, 0, {0}, NULL, 0, "64" },
