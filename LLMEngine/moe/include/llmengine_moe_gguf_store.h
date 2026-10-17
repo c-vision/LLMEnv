@@ -254,7 +254,7 @@ static inline GgufStore* llmengine_moe_gguf_store_open(const char* path, const L
 
 static inline void llmengine_moe_gguf_store_close(GgufStore* s) {
     if (s == NULL) return;
-    if (s->ents) { for (int i = 0; i < s->cap; i++) free(s->ents[i].buf); free(s->ents); }
+    if (s->ents) { for (int i = 0; i < s->cap; i++) { if (s->ents[i].buf && s->ents[i].cap) munlock(s->ents[i].buf, s->ents[i].cap); free(s->ents[i].buf); } free(s->ents); }
     if (s->base) munmap((void*)s->base, s->map_len);
     if (s->fd >= 0) close(s->fd);
     if (s->rfd >= 0) close(s->rfd);
@@ -329,10 +329,14 @@ static inline const uint8_t* llmengine_moe_gguf_store_expert(GgufStore* s, uint3
         }
         GgufStoreEnt* en = &s->ents[idx];
         size_t len = L->g.nb + L->u.nb + L->d.nb;
-        if (en->cap < len) { free(en->buf); en->buf = NULL; en->cap = 0; }
+        if (en->cap < len) { if (en->buf) { if (en->cap) munlock(en->buf, en->cap); free(en->buf); } en->buf = NULL; en->cap = 0; }
         /* I3: buffer allineato a 16 KB (page-aligned scratch, come ishizuki) -> read coerenti col
          * page-cache; con F_NOCACHE sul fd dedicato le read streamate non lo inquinano. */
-        if (en->buf == NULL) { if (posix_memalign((void**)&en->buf, 16384, len) != 0) en->buf = NULL; }
+        if (en->buf == NULL) { if (posix_memalign((void**)&en->buf, 16384, len) != 0) en->buf = NULL;
+                               /* I6 (ishizuki): slot residente PINNATO (mlock) -> il SO non lo comprime/pagina:
+                                * un idle-slot compresso costa piu' del read dal disco che rimpiazza. Best-effort
+                                * (se mlock fallisce per il limite wired, si usa comunque il buffer). */
+                               else { (void)mlock(en->buf, len); } }
         if (en->buf == NULL) { *up = ru; *down = rd; return rg; }   /* fallback mmap */
         en->cap = len; en->len = len;
         const int rfd = (s->rfd >= 0) ? s->rfd : s->fd;
