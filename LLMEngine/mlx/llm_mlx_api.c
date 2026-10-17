@@ -208,6 +208,7 @@ int llm_ai_mlx_dflash2_reset(llm_ai_mlx_dflash2_handle handle) {
     if (handle == NULL) return -1;
     DFlash2Runtime* rt = (DFlash2Runtime*)handle;
     rt->acc_ema = 0.0;
+    rt->round_ms_ema = 0.0; rt->rounds_seen = 0;
     Df2CtxState* cs = &rt->ctx[rt->cur_ctx];
     for (int i = 0; i < rt->n_layers; i++) {
         mlx_array_free(cs->kcache[i]); mlx_array_free(cs->vcache[i]);
@@ -1118,6 +1119,7 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
         /* K ADATTIVO (2026-10-16): il costo del verify cresce con le righe (M=4: 65 ms, M=8: 83 ms) e sul testo i rifiuti
          * cadono a profondita' 0-4 (accettati medi ~1,9): i nodi 5-7 servono nel ~12% dei round. K = ceil(EMA(accettati)+2,5)
          * in [3,7]: testo ~K=5, codice (accettati ~6-7) K=7. Margine 2,5 scelto da uno sweep (1,5 vinceva sul testo -20% ma perdeva 10-20% sul codice). df2_k=N forza K (A/B). */
+        const double _round_t0 = g_df2_now();
         int dall = 8;
         { int kv=0; if (llm_ai_mlx_opt_get_int("df2_k",&kv)==0 && kv>=1 && kv<=8) dall=kv+1;
           else { int Ka = (int)ceil(rt->acc_ema + 2.5); if (Ka < 3) Ka = 3; if (Ka > 7) Ka = 7; dall = Ka + 1; } }
@@ -1139,6 +1141,9 @@ int llm_ai_mlx_dflash2_generate(llm_ai_mlx_dflash2_handle handle,
         if (accepted < 0 || next_anchor < 0) { free(vctx); break; }
         stat_rounds++; stat_accepted += accepted; stat_K += K;
         rt->acc_ema = 0.7 * rt->acc_ema + 0.3 * accepted;
+        { double dt = (g_df2_now() - _round_t0) * 1e3;
+          if (rt->rounds_seen >= 2) rt->round_ms_ema = (rt->round_ms_ema <= 0.0) ? dt : 0.8 * rt->round_ms_ema + 0.2 * dt;
+          rt->rounds_seen++; }
         if (g_df2_time_on())
             fprintf(stderr, "[df2time] r=%d acc=%d/%d | ckpt=%.0f fwd=%.0f arg=%.0f roll=%.0f PROP=%.0f (bb=%.0f sel=%.0f wget=%.0f argp=%.0f) ms\n",
                     stat_rounds, accepted, K, g_df2_t_ckpt * 1e3, g_df2_t_fwd * 1e3,
@@ -1565,3 +1570,16 @@ int llm_ai_mlx_state_restore(llm_ai_mlx_session_handle h, llm_ai_mlx_state_handl
     return 0;
 }
 void llm_ai_mlx_state_free(llm_ai_mlx_state_handle st) { free(st); }
+
+/* GUARDIA DI PROFITTABILITA' (2026-10-17): un draft abbinato a un target diverso (es. DFlash2 di Qwen3.8 su Qwen3.6:
+ * acceptance 7-12%) rende la speculazione PIU' LENTA dell'AR (-30/-50%). Il round costa `round_ms_ema`; rende (1 + accettati)
+ * token. L'AR produce 1 token ogni ~ pesi/banda (stima: p4_weights_bytes a ~480 GB/s: 27B-8bit -> 57 ms, reale 54;
+ * 27B-4bit -> 31 ms, reale 30). Si disattiva (latch di sessione, vedi session_generate) se il costo per token della
+ * speculazione supera di >15% quello stimato dell'AR dopo almeno 10 round. Conservativa: per i MoE la stima AR e' alta. */
+bool llm_mlx_df2_unprofitable(void* h, LlmMlxModel* m) {
+    DFlash2Runtime* rt = (DFlash2Runtime*)h;
+    if (rt == NULL || m == NULL || rt->rounds_seen < 10 || rt->round_ms_ema <= 0.0 || m->p4_weights_bytes == 0) return false;
+    const double ar_ms = (double)m->p4_weights_bytes / 480e9 * 1e3;
+    const double spec_ms_per_tok = rt->round_ms_ema / (1.0 + rt->acc_ema);
+    return spec_ms_per_tok > 1.15 * ar_ms;
+}

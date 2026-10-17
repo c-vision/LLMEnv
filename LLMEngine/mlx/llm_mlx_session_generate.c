@@ -465,18 +465,20 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
     /* DFlash2 (A1) greedy: drafter esterno a contesto PERSISTENTE, streaming buffer come MTP. */
     if (!m->deleg) {
         llm_ai_mlx_dflash2_handle dfh = llm_mlx_df2_for(m);
-        if (dfh != NULL) {
+        if (dfh != NULL && !s->df2_off) {
             llm_mlx_sampling_t smd = llm_mlx_session_sampling(s);
             if (!smd.active || smd.temperature <= 0.0f) {
                 int cnt = 0;
                 while (cnt < max_new_tokens) {
                     if (s->spec_buf_pos >= s->spec_buf_len) {
+                        if (s->df2_off) break;   /* speculazione disattivata: svuotato il buffer, si esce (il chiamante richiama e passa ad AR/n-gram) */
                         llm_mlx_session_spec_begin(s);
                         int got = llm_ai_mlx_dflash2_generate(dfh, handle, eos_token_id, 16, s->spec_buf);
                         if (getenv("LLM_SPEC_DEBUG")) fprintf(stderr, "df2_branch: got=%d\n", got);
                         if (got <= 0) break;
                         if (got > 0) llm_mlx_dp_spec_add(got);
                         s->spec_buf_len = got; s->spec_buf_pos = 0;
+                        if (llm_mlx_df2_unprofitable(dfh, m)) { s->df2_off = true; fprintf(stderr, "[df2] speculazione DISATTIVATA: costo per token > AR (draft non abbinato al target?); si prosegue in AR/n-gram\n"); }
                     }
                     int32_t tok = s->spec_buf[s->spec_buf_pos++];
                     out_ids[cnt++] = tok;

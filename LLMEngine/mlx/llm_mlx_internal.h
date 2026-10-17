@@ -347,6 +347,7 @@ typedef struct LlmMlxSession {
     /* Larghezza adattiva del draft (da Gufo DFlashLengthController): EWMA dell'acceptance e streak
      * di full-accept per sondare più largo. Deterministico (nessuna timing della richiesta). */
     float spec_acc_ewma;
+    bool df2_off;   /* latch di sessione: DFlash2 non conviene (abbinamento sbagliato) -> AR/n-gram */
     int spec_full_streak;
     /* F20: acceptance CUMULATIVA per sessione (metrica di primo livello: draft proposti vs
      * accettati dal target). Esposta da llm_ai_mlx_session_spec_stats(). */
@@ -820,6 +821,8 @@ typedef struct DFlash2Runtime {
     float* retained_ctx;
     int retained_n;
     double acc_ema;   /* media mobile dei token accettati per round (K adattivo); 0 = non inizializzata */
+    double round_ms_ema;   /* durata media (ms) di un round propose+verify, dopo i primi 2 */
+    int rounds_seen;      /* round eseguiti dall'ultimo reset (guardia di profittabilita') */
     /* pesi target referenziati (embed + lm_head), fetch in create */
     mlx_array embed_w, embed_s, embed_b;
     mlx_array lm_w, lm_s, lm_b;
@@ -853,6 +856,7 @@ void df2_mode_enter_draft(DFlash2Runtime* rt, bool* sv_all, mlx_dtype* sv_act);
 void df2_mode_leave_draft(DFlash2Runtime* rt, bool sv_all, mlx_dtype sv_act);
 bool dflash_fetch_target_tensors(DFlash2Runtime* rt);
 void df2_q8_reset(void);   /* libera la cache dei pesi draft quantizzati (opzione df2_q8) */
+bool llm_mlx_df2_unprofitable(void* h, LlmMlxModel* m);   /* true se i round costano piu' dell'AR */
 bool df2_backbone(DFlash2Runtime* rt, const int32_t* block_ids, int L, mlx_array x_ctx, int S, mlx_array* out_h, mlx_array* layer_out);
 bool df2_selector(DFlash2Runtime* rt, mlx_array hidden_post, mlx_array logits, int K, int32_t anchor, int32_t* out_path);
 double g_df2_now(void);
