@@ -204,7 +204,6 @@ bool llm_mlx_moe_fused_stream_aware(const ModelConfig* cfg, int layer, mlx_array
     mlx_array uw, mlx_array us, mlx_array ub, mlx_array dw, mlx_array ds, mlx_array db,
     int gu_bits, int gu_group, int d_bits, int d_group, int act,
     mlx_array scores_flat, mlx_array* out_summed, mlx_stream st);
-bool qwen3_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 bool llm_mlx_reshape_canonical_enabled(void);
 GmoeFfnQuant* llm_mlx_moe_ffn_quant(LlmMlxModel* m, int layer_idx);
 /* Definiti nel monolite, usati dal dominio MoE. */

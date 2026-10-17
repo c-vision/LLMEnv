@@ -1,6 +1,6 @@
 /* ============================================================================
- * llm_mlx_moe_v2.c — PERCORSO MoE PARAMETRIZZATO (nuovo, affiancato al vecchio
- * qwen3_moe_ffn_block che resta PARCHEGGIATO). Obiettivo: un solo FFN MoE che copre
+ * llm_mlx_moe_v2.c — PERCORSO MoE PARAMETRIZZATO (unico FFN MoE dopo il ritiro di
+ * qwen3_moe_ffn_block, 2026-10-17). Obiettivo: un solo FFN MoE che copre
  * piu' famiglie via config (nome shared-expert, presenza gate, gate-act, selezione
  * densi/MoE). Correttezza-prima: gather esperti PER-TOKEN/PER-ESPERTO (loop), niente
  * gather_qmm sorted per ora (perf = step successivo). Prima famiglia: ernie4_5_moe.
