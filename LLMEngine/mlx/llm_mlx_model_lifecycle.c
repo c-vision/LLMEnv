@@ -59,7 +59,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "gemma4",    gemma4_attention_block,    dense_geglu_ffn },
     { "mixtral",   mixtral_attention_block,   moe_v2_ffn_block }, /* migrato a moe_v2 (router plain, block_sparse_moe) */
     { "gpt_oss",   gpt_oss_attention_block,   gpt_oss_ffn_block }, /* GPT-OSS MoE (sinks + sliding 128 + SwiGLU speciale) */
-    { "glm4_moe",  glm4_moe_attention_block,  glm4_moe_ffn_block }, /* GLM-4.5 MoE (128 routed + shared, gate sigmoid, primi layer densi) */
+    { "glm4_moe",  glm4_moe_attention_block,  glm4_moe_ffn_block }, /* GLM-4.5 MoE (128 routed + shared, gate sigmoid, primi layer densi). NOTA (2026-10-17): la migrazione a moe_v2 e' pronta (group-prune/e_score/f32) ma NON abilitata: il tiny glm4_moe ha divergenza ATTENTION PREESISTENTE vs mlx_lm (head_dim-sensibile; vecchio blocco == moe_v2 sullo stesso tiny), quindi manca un oracle per validare la gamba MoE. */
     { "deepseek_v2", deepseek_v2_attention_block, deepseek_v2_ffn_block }, /* DeepSeek-V2-Lite (MLA + MoE group-limited-greedy) */
     { "deepseek_v3", deepseek_v2_attention_block, deepseek_v2_ffn_block }, /* DeepSeek-V3 (MLA, q_lora) */
     { "kimi_k2", deepseek_v2_attention_block, deepseek_v2_ffn_block },     /* Kimi K2 = deepseek_v3 */

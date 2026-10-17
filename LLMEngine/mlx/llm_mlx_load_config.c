@@ -473,6 +473,22 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(n_group, "n_group");
         OPT_INT(topk_group, "topk_group");
         OPT_FLOAT(routed_scaling_factor, "routed_scaling_factor", 1.0f);
+        /* Migrato a moe_v2_ffn_block: router sigmoid in f32, e_score_correction_bias (solo selezione),
+         * group-pruning (n_group/topk_group), shared experts "mlp.shared_experts" (senza gate),
+         * primi `first_k_dense_replace` layer densi. Esperti/router mlp.* (default).
+         * NOTA (2026-10-17): questi flag sono PRONTI ma la ARCH_TABLE tiene ancora glm4_moe_ffn_block
+         * (il vecchio blocco ignora questi campi => nessun cambio di comportamento); l'abilitazione a
+         * moe_v2 e' in attesa di un oracle tiny valido (il tiny glm4_moe ha divergenza attention
+         * preesistente vs mlx_lm, non del MoE). */
+        cfg->moe_gate_sigmoid = 1;
+        cfg->moe_gate_f32 = 1;
+        cfg->moe_group_prune = 1;
+        cfg->use_expert_bias = 1;
+        llm_mlx_mode_set(cfg->moe_expert_bias_name, sizeof cfg->moe_expert_bias_name, "mlp.e_score_correction_bias");
+        llm_mlx_mode_set(cfg->moe_expert_bias_alt, sizeof cfg->moe_expert_bias_alt, "mlp.gate.e_score_correction_bias");
+        llm_mlx_mode_set(cfg->moe_shared_base, sizeof cfg->moe_shared_base, "mlp.shared_experts");
+        cfg->moe_shared_gate = 0;
+        cfg->moe_layer_interval = 0; cfg->moe_layer_start = 0; cfg->moe_layer_end = -1;
         cJSON* prf = cJSON_GetObjectItemCaseSensitive(src, "partial_rotary_factor");
         if (cJSON_IsNumber(prf)) cfg->partial_rotary_factor = (float)prf->valuedouble;
     } else if (strcmp(cfg->model_type, "deepseek_v2") == 0 || strcmp(cfg->model_type, "deepseek_v3") == 0 ||

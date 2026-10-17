@@ -143,8 +143,15 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
     }
     if (ok) {
         mlx_array act = mlx_array_new();
-        if (m->cfg.moe_gate_sigmoid) ok = mlx_sigmoid(&act, gates, s) == 0;
-        else ok = mlx_softmax_axis(&act, gates, -1, /*precise=*/true, s) == 0;
+        if (m->cfg.moe_gate_sigmoid) {
+            /* glm4_moe: sigmoid sui logit in f32 (dtype del router). */
+            if (m->cfg.moe_gate_f32 && mlx_array_dtype(gates) != MLX_FLOAT32) {
+                mlx_array gf = mlx_array_new();
+                if (mlx_astype(&gf, gates, MLX_FLOAT32, s) == 0) mlx_array_set(&gates, gf);
+                mlx_array_free(gf);
+            }
+            ok = mlx_sigmoid(&act, gates, s) == 0;
+        } else ok = mlx_softmax_axis(&act, gates, -1, /*precise=*/true, s) == 0;
         if (ok) mlx_array_set(&gates, act);
         mlx_array_free(act);
         CHK(ok, "router act");
@@ -158,7 +165,12 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
     if (ok && m->cfg.use_expert_bias && m->cfg.moe_expert_bias_name[0]) {
         char bb[256]; tname(m->cfg.layer_prefix, layer_idx, m->cfg.moe_expert_bias_name, bb, sizeof(bb));
         mlx_array eb = mlx_array_new();
-        ok = ok && multishard_get(&m->weights, bb, &eb);
+        bool got = multishard_get(&m->weights, bb, &eb);
+        if (!got && m->cfg.moe_expert_bias_alt[0]) {
+            tname(m->cfg.layer_prefix, layer_idx, m->cfg.moe_expert_bias_alt, bb, sizeof(bb));
+            got = multishard_get(&m->weights, bb, &eb);
+        }
+        ok = ok && got;
         if (ok) {
             mlx_array gf = mlx_array_new(), sum = mlx_array_new();
             ok = mlx_astype(&gf, gates, MLX_FLOAT32, s) == 0;
@@ -169,10 +181,54 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
         mlx_array_free(eb);
         CHK(ok, "expert_bias");
     }
+    /* group-pruning router (GLM-4.5): su select (o gates), tiene i topk_group gruppi per
+     * group_score = somma dei top-2 esperti del gruppo; azzera gli altri. [1,T,n_group,epg] -> [1,T,E]. */
+    mlx_array pruned = mlx_array_new();
+    if (ok && m->cfg.moe_group_prune && m->cfg.n_group > 1 && m->cfg.n_experts > 0 &&
+        m->cfg.n_experts % m->cfg.n_group == 0 && m->cfg.topk_group > 0 && m->cfg.topk_group < m->cfg.n_group) {
+        const int ng = m->cfg.n_group, epg = m->cfg.n_experts / ng;
+        mlx_array base = select.ctx != NULL ? select : gates;
+        int us4[4] = {1, n_tokens, ng, epg};
+        mlx_array bu = mlx_array_new();
+        ok = mlx_reshape(&bu, base, us4, 4, s) == 0;
+        mlx_array gs2 = mlx_array_new();
+        if (ok) {
+            mlx_array gtop = mlx_array_new();
+            ok = mlx_topk_axis(&gtop, bu, 2, -1, s) == 0;
+            if (ok) ok = mlx_sum_axis(&gs2, gtop, -1, /*keepdims=*/true, s) == 0;
+            mlx_array_free(gtop);
+        }
+        if (ok) {
+            const int k = ng - m->cfg.topk_group;
+            mlx_array gpart = mlx_array_new();
+            ok = mlx_argpartition_axis(&gpart, gs2, k - 1, /*axis=*/2, s) == 0;
+            if (ok) {
+                int st4[4]={0,0,0,0}, sp4[4]={1,n_tokens,k,1}, sv4[4]={1,1,1,1};
+                mlx_array gview = mlx_array_new();
+                ok = mlx_slice(&gview, gpart, st4,4, sp4,4, sv4,4, s) == 0;
+                mlx_array gidx = mlx_array_new();
+                if (ok) ok = mlx_contiguous(&gidx, gview, /*allow_col_major=*/false, s) == 0;
+                mlx_array_free(gview);
+                if (ok) {
+                    mlx_array zero = mlx_array_new_float32(0.0f), bu2 = mlx_array_new();
+                    ok = mlx_put_along_axis(&bu2, bu, gidx, zero, /*axis=*/2, s) == 0;
+                    mlx_array_free(zero);
+                    if (ok) mlx_array_set(&bu, bu2);
+                    mlx_array_free(bu2);
+                }
+                mlx_array_free(gidx);
+            }
+            mlx_array_free(gpart);
+        }
+        mlx_array_free(gs2);
+        if (ok) { int fs3[3]={1,n_tokens,m->cfg.n_experts}; ok = mlx_reshape(&pruned, bu, fs3, 3, s) == 0; }
+        mlx_array_free(bu);
+        CHK(ok, "group-prune");
+    }
     /* top-k + renorm (device, batched) */
     mlx_array part = mlx_array_new(), inds = mlx_array_new(), scores = mlx_array_new();
     if (ok) {
-        mlx_array arg = select.ctx != NULL ? select : gates;
+        mlx_array arg = pruned.ctx != NULL ? pruned : (select.ctx != NULL ? select : gates);
         ok = mlx_argpartition_axis(&part, arg, /*kth=*/-K, /*axis=*/-1, s) == 0;
         if (ok) { int a[3]={0,0,E-K}, b2[3]={1,n_tokens,E}, st[3]={1,1,1}; ok = mlx_slice(&inds, part, a,3, b2,3, st,3, s)==0; }
         if (ok) ok = mlx_take_along_axis(&scores, gates, inds, -1, s)==0;
@@ -230,7 +286,7 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
     }
     llm_mlx_dbg_dump("inds", layer_idx, inds); llm_mlx_dbg_dump("scores", layer_idx, scores); llm_mlx_dbg_dump("g_out", layer_idx, g_out); llm_mlx_dbg_dump("act", layer_idx, act); llm_mlx_dbg_dump("d_out", layer_idx, d_out); llm_mlx_dbg_dump("moe_out", layer_idx, moe_out);
     mlx_array_free(part); mlx_array_free(inds); mlx_array_free(scores); mlx_array_free(x1); mlx_array_free(inds_u);
-    mlx_array_free(select);
+    mlx_array_free(select); mlx_array_free(pruned);
     mlx_array_free(no_lhs); mlx_array_free(g_out); mlx_array_free(u_out); mlx_array_free(act); mlx_array_free(d_out);
 
     /* shared expert (opzionale): base cfg (default "mlp.shared_expert"); gate opzionale */
