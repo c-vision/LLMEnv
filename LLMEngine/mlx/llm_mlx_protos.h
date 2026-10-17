@@ -518,4 +518,9 @@ bool lille_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
                            mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool lille_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 
+/* --- dominio GPT-NeoX / Pythia (llm_mlx_gptneox.c) --- */
+bool gpt_neox_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                              mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool gpt_neox_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+
 #endif /* LLM_MLX_PROTOS_H */

@@ -120,6 +120,7 @@ typedef struct {
     int moe_quant_derive;         /* 1 = deriva group/bits/mode PER-TENSORE da scales (router ed esperti),
                                    * come LFM2-MoE (router 8-bit in modello 4-bit); 0 = usa il quant globale */
     float moe_residual_multiplier;/* scala del residuo dell'FFN (es. granitemoe 0.22); 0.0 = 1.0 (nessuna scala) */
+    int parallel_residual;        /* 1 = GPT-NeoX parallel residual: out = attn(ln1(x)) + mlp(ln2(x)) + x */
     bool tie_word_embeddings;
     /* FASE 1b.0: da config.json["model_type"] -- seleziona la entry di ARCH_TABLE
      * (vedi LlmMlxArchOps sotto). Buffer fisso: i valori reali osservati

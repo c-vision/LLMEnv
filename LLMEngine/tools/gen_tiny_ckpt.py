@@ -126,6 +126,12 @@ TINY = {
         block_size=512, layer_norm_eps=1e-5, n_embd=64, n_head=4, n_kv_heads=2,
         n_layer=2, rope_theta=10000.0, vocab_size=128, tie_word_embeddings=True,
     ),
+    "gpt_neox": dict(
+        cls="gpt_neox", model_type="gpt_neox",
+        max_position_embeddings=512, hidden_size=64, num_attention_heads=4,
+        num_hidden_layers=2, layer_norm_eps=1e-5, vocab_size=128,
+        rotary_emb_base=10000.0, rotary_pct=0.25, use_parallel_residual=True,
+    ),
 }
 
 

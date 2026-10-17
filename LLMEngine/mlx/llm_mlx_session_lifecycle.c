@@ -170,6 +170,11 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
     } else if (strcmp(m->cfg.model_type, "lille-130m") == 0) {
         snprintf(embed_name, sizeof(embed_name), "transformer.tok_embeddings");
         snprintf(norm_name, sizeof(norm_name), "transformer.norm.weight");
+    } else if (strcmp(m->cfg.model_type, "gpt_neox") == 0) {
+        /* GPT-NeoX/Pythia: embed = model.embed_in; norm finale = model.final_layer_norm (LayerNorm,
+         * gestita in llm_mlx_final_norm); lm_head = model.embed_out (separato). */
+        snprintf(embed_name, sizeof(embed_name), "model.embed_in");
+        snprintf(norm_name, sizeof(norm_name), "model.final_layer_norm.weight");
     } else {
         snprintf(embed_name, sizeof(embed_name), "%sembed_tokens", prefix);
         /* LFM2: la RMSNorm finale del modello e' `embedding_norm` (verificato sul checkpoint reale),
@@ -210,7 +215,10 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
     mlx_array lm_w = mlx_array_new(), lm_s = mlx_array_new(), lm_b = mlx_array_new();
     /* Qwen3.8-27B: lm_head vive sotto language_model.lm_head (verificato). */
     char lm_name[64];
-    snprintf(lm_name, sizeof(lm_name), "%s",
+    if (strcmp(m->cfg.model_type, "gpt_neox") == 0)
+        snprintf(lm_name, sizeof(lm_name), "model.embed_out");
+    else
+        snprintf(lm_name, sizeof(lm_name), "%s",
              (strcmp(m->cfg.model_type, "qwen3_5") == 0 || strcmp(m->cfg.model_type, "qwen3_5_moe") == 0
               || strcmp(m->cfg.model_type, "qwen4_exp") == 0
               || strcmp(m->cfg.model_type, "prism_hadamard_qwen35") == 0)

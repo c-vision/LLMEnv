@@ -339,6 +339,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_qwen4exp_ops.c
     llm_mlx_glm_ds_ffn.c
     llm_mlx_lille.c
+    llm_mlx_gptneox.c
     oss/llm_mlx_gptoss_ffn.c
     llm_mlx_selftest_eval.c
     llm_mlx_sensitivity.c
