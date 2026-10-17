@@ -176,6 +176,9 @@ static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngin
     if (mode == LLM_DSV4_STORE_SWAP) {
         s->fd = open(path, O_RDONLY);
         if (s->fd < 0) { free(s->layers); free(s->ents); free(s); return NULL; }
+        /* I3 (ishizuki): le read streamate degli esperti (pread) non devono inquinare il page-cache
+         * unificato. Il fd e' usato SOLO per i pread dello SWAP (il RESIDENT usa il mmap del GGUF). */
+        if (fcntl(s->fd, F_NOCACHE, 1) != 0) { /* best-effort */ }
     }
     for (int il = 0; il < c->n_layer; il++) {
         char b[160];
@@ -230,7 +233,7 @@ static inline void llm_dsv4_store_free(LlmDsv4Store* s) {
                 (unsigned long long)s->hits, (unsigned long long)s->misses, (unsigned long long)s->evictions); }
     /* HOTLIST I/O: se richiesto, salva la hotness osservata (profilo) per il seed di run successivi. */
     { char p[1024]; if (s->freq && llm_ai_mlx_opt_get_str("dsv4_hotlist_out", p, sizeof p) == 0 && p[0]) llm_dsv4_store_save_hot(s, p); }
-    if (s->ents) { for (int i = 0; i < s->cap; i++) free(s->ents[i].buf); free(s->ents); }
+    if (s->ents) { for (int i = 0; i < s->cap; i++) { if (s->ents[i].buf && s->ents[i].cap) munlock(s->ents[i].buf, s->ents[i].cap); free(s->ents[i].buf); } free(s->ents); }
     free(s->ht_keys); free(s->ht_vals);
     if (s->fd >= 0) close(s->fd);
     if (s->q4_base) munmap(s->q4_base, s->q4_size);
@@ -296,10 +299,12 @@ static inline int llm_dsv4_store_claim(LlmDsv4Store* s, int layer, int e, int* m
     size_t maxlen = len;
     for (int il = 0; il < s->n_layer; il++) { size_t l2 = s->layers[il].nb_g + s->layers[il].nb_u + s->layers[il].nb_d; if (l2 > maxlen) maxlen = l2; }
     size_t padded = ((maxlen + page - 1) / page) * page + page;
-    if (en->cap < padded) { free(en->buf); en->buf = NULL; en->cap = 0; }
+    if (en->cap < padded) { if (en->buf) { if (en->cap) munlock(en->buf, en->cap); free(en->buf); } en->buf = NULL; en->cap = 0; }
     if (!en->buf) {
         void* p = NULL;
         if (posix_memalign(&p, page, padded) == 0) { en->buf = (uint8_t*)p; en->cap = padded; }
+        /* I6 (ishizuki): slot residente PINNATO (mlock) -> il SO non lo comprime/pagina (best-effort). */
+        if (en->buf) (void)mlock(en->buf, en->cap);
     }
     if (!en->buf) { en->valid = 0; return -1; }
     en->len = len;
