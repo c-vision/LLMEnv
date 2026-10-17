@@ -80,6 +80,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "olmo_hybrid", olmo_hybrid_attention_dispatch, olmo_hybrid_ffn_dispatch }, /* OLMo-Hybrid: GDN (linear) + GQA no-RoPE (full) */
     { "granitemoehybrid", granite_hybrid_attention_dispatch, granite_hybrid_ffn_dispatch }, /* Granite-4.0-H: Mamba2 + GQA no-RoPE, residuo scalato */
     { "granite", granite_hybrid_attention_dispatch, granite_hybrid_ffn_dispatch }, /* Granite denso: GQA + RoPE + multipli (stessa struttura, tutti attention) */
+    { "granitemoe", granite_hybrid_attention_dispatch, moe_v2_ffn_block }, /* Granite-MoE: attn granite + FFN MoE block_sparse_moe (moe_v2) */
     { "glm4", glm4_attention_block, glm4_ffn_block }, /* GLM-4 denso: GQA+bias + RoPE parziale + MLP fuso (4 norm) */
     { "ernie4_5_moe", llama_attention_block, moe_v2_ffn_block }, /* ERNIE-4.5-MoE: attn llama + FFN MoE v2 (softmax+shared_experts) */
     { "mistral3",  llama_attention_block,     dense_swiglu_ffn }, /* Ministral-3-14B: Mistral denso (GQA + SwiGLU) */

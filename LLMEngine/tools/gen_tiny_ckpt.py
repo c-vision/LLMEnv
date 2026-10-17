@@ -111,6 +111,16 @@ TINY = {
         norm_topk_prob=False, rope_theta=10000.0, tie_word_embeddings=False,
         attention_bias=False, mlp_bias=False,
     ),
+    # granitemoe: attn granite + FFN MoE (block_sparse_moe.router.layer plain + switch_mlp), residuo scalato.
+    "granitemoe": dict(
+        cls="granitemoe", model_type="granitemoe",
+        hidden_size=64, num_hidden_layers=2, intermediate_size=128,
+        num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-5,
+        vocab_size=128, logits_scaling=8.0, attention_multiplier=0.015625,
+        embedding_multiplier=12.0, residual_multiplier=0.22,
+        max_position_embeddings=512, attention_bias=False, rope_theta=10000.0,
+        num_local_experts=4, num_experts_per_tok=2, tie_word_embeddings=False,
+    ),
 }
 
 

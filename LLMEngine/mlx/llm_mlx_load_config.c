@@ -375,6 +375,26 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_FLOAT(granite.attn_multiplier, "attention_multiplier", 0.0f);
         OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
         cfg->granite.attn_no_rope = 0;   /* granite usa RoPE */
+    } else if (strcmp(cfg->model_type, "granitemoe") == 0) {
+        /* Granite-MoE (IBM): attenzione = granite (GQA + RoPE + multiplier) riusata; FFN MoE con
+         * naming `block_sparse_moe.router.layer` (plain, softmax sui top-k => norm_topk_prob) +
+         * `block_sparse_moe.switch_mlp` (SwitchGLU), tutti i layer MoE, residuo scalato. FFN = moe_v2. */
+        cJSON* emb = cJSON_GetObjectItemCaseSensitive(src, "embedding_multiplier");
+        cfg->embed_scale = cJSON_IsNumber(emb) ? (float)emb->valuedouble : 1.0f;
+        cJSON* ls = cJSON_GetObjectItemCaseSensitive(src, "logits_scaling");
+        cfg->falcon_h1_out_scale = cJSON_IsNumber(ls) && ls->valuedouble != 0.0 ? (float)(1.0 / ls->valuedouble) : 1.0f;
+        OPT_FLOAT(granite.residual_multiplier, "residual_multiplier", 1.0f);
+        OPT_FLOAT(granite.attn_multiplier, "attention_multiplier", 0.0f);
+        OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
+        cfg->granite.attn_no_rope = 0;   /* granite usa RoPE */
+        llm_mlx_mode_set(cfg->moe_router_name, sizeof cfg->moe_router_name, "block_sparse_moe.router.layer");
+        llm_mlx_mode_set(cfg->moe_experts_base, sizeof cfg->moe_experts_base, "block_sparse_moe.switch_mlp");
+        cfg->moe_router_plain = 1;
+        cfg->moe_gate_sigmoid = 0;
+        cfg->norm_topk_prob = true;      /* softmax sui soli top-k selezionati */
+        cfg->moe_layer_interval = 0; cfg->moe_layer_start = 0; cfg->moe_layer_end = -1;
+        cfg->moe_shared_base[0] = 0; cfg->moe_shared_gate = 0;
+        cfg->moe_residual_multiplier = cfg->granite.residual_multiplier;   /* residuo scalato sull'FFN */
     } else if (strcmp(cfg->model_type, "glm4") == 0) {
         /* GLM-4 denso: GQA con bias + RoPE PARZIALE (traditional=true) + MLP fuso (gate_up).
          * 4 RMSNorm per layer. head_dim/n_heads/n_kv_heads dal parse generico. */

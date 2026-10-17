@@ -64,6 +64,7 @@ static bool moe_v2_is_dense(const LlmMlxModel* m, int layer_idx) {
 bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out) {
     bool ok = true;
     const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
+    const float rm = m->cfg.moe_residual_multiplier != 0.0f ? m->cfg.moe_residual_multiplier : 1.0f;
     char nb[256];
     mlx_stream s = m->stream;
 #define CHK(c, w) do { if (!(c)) { fprintf(stderr, "moe_v2[layer=%d]: %s failed\n", layer_idx, (w)); ok = false; } } while (0)
@@ -90,6 +91,9 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
                   mlx_array_free(sg); mlx_array_free(sl); } }
         snprintf(dsuf, sizeof dsuf, "%s.down_proj", dbase);
         if (ok) ok = named_lin(&dn, m, layer_idx, dsuf, sw, gsz, bts, s);
+        if (ok && rm != 1.0f) { mlx_array sc=mlx_array_new_float32(rm), sdn=mlx_array_new();
+                                ok = mlx_multiply(&sdn, dn, sc, s)==0; if (ok) mlx_array_set(&dn, sdn);
+                                mlx_array_free(sc); mlx_array_free(sdn); }
         if (ok) ok = mlx_add(out, h, dn, s) == 0;
         mlx_array_free(g); mlx_array_free(u); mlx_array_free(sw); mlx_array_free(dn);
         mlx_array_free(pal_w); mlx_array_free(normed);
@@ -313,6 +317,9 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
         mlx_array_free(sg_w); mlx_array_free(su); mlx_array_free(sd); mlx_array_free(sh);
     }
 
+    if (ok && rm != 1.0f) { mlx_array sc=mlx_array_new_float32(rm), smo=mlx_array_new();
+                            ok = mlx_multiply(&smo, moe_out, sc, s)==0; if (ok) mlx_array_set(&moe_out, smo);
+                            mlx_array_free(sc); mlx_array_free(smo); }
     if (ok) { ok = mlx_add(out, h, moe_out, s) == 0; CHK(ok, "residual"); }
     mlx_array_free(pal_w); mlx_array_free(normed);
     mlx_array_free(gw);mlx_array_free(gs);mlx_array_free(gb);mlx_array_free(uw);mlx_array_free(us);mlx_array_free(ub);
