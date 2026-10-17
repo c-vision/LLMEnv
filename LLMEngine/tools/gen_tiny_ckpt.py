@@ -88,6 +88,15 @@ TINY = {
         use_qk_norm=True, tie_word_embeddings=False, attention_bias=True,
         partial_rotary_factor=0.5, vocab_size=128, rope_scaling=None,
     ),
+    # olmoe: SwitchGLU gia' stacked (niente sanitize); router plain mlp.gate, softmax, norm_topk_prob=True/Var.
+    "olmoe": dict(
+        cls="olmoe", model_type="olmoe",
+        hidden_size=64, num_hidden_layers=2, intermediate_size=128,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+        rms_norm_eps=1e-5, vocab_size=128, num_experts=4, num_experts_per_tok=2,
+        norm_topk_prob=False, rope_theta=10000.0, tie_word_embeddings=False,
+        attention_bias=False, mlp_bias=False,
+    ),
 }
 
 

@@ -55,7 +55,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "qwen3_5_moe", qwen3_5_attention_block, qwen3_5_moe_ffn_block }, /* FASE 1b.6: Qwen3.6 hybrid GDN + MoE + shared_expert */
     { "qwen2",     qwen2_attention_block,     dense_swiglu_ffn },
     { "qwen2vl",   qwen2_attention_block,     dense_swiglu_ffn }, /* Qwen2.5-Omni: parte TESTO = qwen2 (vision via llm_host_ai) */
-    { "olmoe",     qwen3_moe_attention_block, qwen3_moe_ffn_block }, /* OLMoE-1B-7B: GQA + QK-norm + MoE (gate_inp + *_exps) */
+    { "olmoe",     qwen3_moe_attention_block, moe_v2_ffn_block }, /* OLMoE-1B-7B: GQA + QK-norm + MoE (gate plain + switch_mlp) — migrato a moe_v2 */
     { "gemma4",    gemma4_attention_block,    dense_geglu_ffn },
     { "mixtral",   mixtral_attention_block,   moe_v2_ffn_block }, /* migrato a moe_v2 (router plain, block_sparse_moe) */
     { "gpt_oss",   gpt_oss_attention_block,   gpt_oss_ffn_block }, /* GPT-OSS MoE (sinks + sliding 128 + SwiGLU speciale) */
