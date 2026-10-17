@@ -121,6 +121,11 @@ TINY = {
         max_position_embeddings=512, attention_bias=False, rope_theta=10000.0,
         num_local_experts=4, num_experts_per_tok=2, tie_word_embeddings=False,
     ),
+    "lille-130m": dict(
+        cls="lille-130m", model_type="lille-130m",
+        block_size=512, layer_norm_eps=1e-5, n_embd=64, n_head=4, n_kv_heads=2,
+        n_layer=2, rope_theta=10000.0, vocab_size=128, tie_word_embeddings=True,
+    ),
 }
 
 

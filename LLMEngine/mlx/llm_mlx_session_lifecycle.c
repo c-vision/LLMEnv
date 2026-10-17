@@ -167,6 +167,9 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
          * (LayerNorm con bias, gestita in llm_mlx_final_norm). lm_head presente (tie=false). */
         snprintf(embed_name, sizeof(embed_name), "model.embeddings");
         snprintf(norm_name, sizeof(norm_name), "model.norm.weight");
+    } else if (strcmp(m->cfg.model_type, "lille-130m") == 0) {
+        snprintf(embed_name, sizeof(embed_name), "transformer.tok_embeddings");
+        snprintf(norm_name, sizeof(norm_name), "transformer.norm.weight");
     } else {
         snprintf(embed_name, sizeof(embed_name), "%sembed_tokens", prefix);
         /* LFM2: la RMSNorm finale del modello e' `embedding_norm` (verificato sul checkpoint reale),

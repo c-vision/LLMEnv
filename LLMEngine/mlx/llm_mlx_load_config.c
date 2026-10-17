@@ -68,6 +68,19 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     if (strcmp(cfg->model_type, "prism_hadamard_qwen35") == 0)
         snprintf(cfg->model_type, sizeof(cfg->model_type), "qwen3_5");
 
+    if (strcmp(cfg->model_type, "lille-130m") == 0) {
+        struct { const char* from; const char* to; } lm[] = {
+            {"n_embd","hidden_size"}, {"n_layer","num_hidden_layers"},
+            {"n_head","num_attention_heads"}, {"n_kv_heads","num_key_value_heads"},
+            {"layer_norm_eps","rms_norm_eps"},
+        };
+        for (size_t i = 0; i < sizeof lm/sizeof lm[0]; i++) {
+            cJSON* it = cJSON_GetObjectItemCaseSensitive(j, lm[i].from);
+            if (cJSON_IsNumber(it) && !cJSON_GetObjectItemCaseSensitive(j, lm[i].to))
+                cJSON_AddItemToObject(j, lm[i].to, cJSON_Duplicate(it, 1));
+        }
+    }
+
     /* FASE 1b.4.0 (Gemma4): i campi rilevanti vivono sotto config.json["text_config"], non
      * alla radice come in tutte le altre architetture -- verificato sul config.json reale di
      * gemma-4-31b-it-4bit. `src` è l'oggetto cJSON da cui leggere tutti i campi sotto: la
@@ -395,6 +408,9 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cfg->moe_layer_interval = 0; cfg->moe_layer_start = 0; cfg->moe_layer_end = -1;
         cfg->moe_shared_base[0] = 0; cfg->moe_shared_gate = 0;
         cfg->moe_residual_multiplier = cfg->granite.residual_multiplier;   /* residuo scalato sull'FFN */
+    } else if (strcmp(cfg->model_type, "lille-130m") == 0) {
+        cfg->rope_traditional = true;
+        OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
     } else if (strcmp(cfg->model_type, "glm4") == 0) {
         /* GLM-4 denso: GQA con bias + RoPE PARZIALE (traditional=true) + MLP fuso (gate_up).
          * 4 RMSNorm per layer. head_dim/n_heads/n_kv_heads dal parse generico. */
@@ -836,7 +852,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
      * model_type=ernie4_5, false per ogni altra architettura. */
     cJSON* rt = cJSON_GetObjectItemCaseSensitive(j, "rope_traditional");
     cfg->rope_traditional = cJSON_IsBool(rt) ? cJSON_IsTrue(rt)
-                            : (strcmp(cfg->model_type, "ernie4_5") == 0);
+                            : (strcmp(cfg->model_type, "ernie4_5") == 0
+                               || strcmp(cfg->model_type, "lille-130m") == 0);
     /* YaRN (FASE 1b.7): rope_scaling.rope_type == "yarn" (o "deepseek_yarn"/"telechat3-yarn",
      * stessi parametri -- mlx_lm initialize_rope li tratta allo stesso modo). Stessa chiave
      * radice `rope_scaling` di llama3. Default: use_yarn_rope=false. */
@@ -944,6 +961,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     if (strcmp(cfg->model_type, "qwen3_5") == 0 || strcmp(cfg->model_type, "qwen3_5_moe") == 0
         || strcmp(cfg->model_type, "qwen4_exp") == 0)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "language_model.model.layers.");
+    if (strcmp(cfg->model_type, "lille-130m") == 0)
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "transformer.layers.");
     /* DFlash2 DRAFT (config.json ha dflash_config + arch DFlash2DraftModel): prefisso "layers.". */
     if (cJSON_GetObjectItemCaseSensitive(j, "dflash_config") != NULL)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "layers.");
