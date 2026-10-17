@@ -304,6 +304,14 @@ bool glm4_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
         tname(m->cfg.layer_prefix, layer_idx, "self_attn.v_proj", namebuf, sizeof(namebuf));
         ok = ok && multishard_get_triple(&m->weights, namebuf, &vw, &vs, &vb);
     }
+    /* Tensore PLAIN (scales assente): multishard_get_triple legge `<base>.bias` (bias LINEARE) come
+     * "biases" e quantized_linear_cfg lo applica gia' sul ramo plain -> sotto verrebbe sommato due
+     * volte con q/k/v_lb. Qui il bias lineare e' applicato UNA sola volta, esplicitamente (sui
+     * quantizzati `.biases` e `.bias` sono tensori distinti e questo non scatta). Trovato col tiny
+     * glm4_moe fp32 (Bugs/GLM4MoE-Attention-Divergenza-Tiny). */
+    { mlx_array* sc[3] = {&qs, &ks, &vs}; mlx_array* bi[3] = {&qb, &kb, &vb};
+      for (int pi = 0; pi < 3; pi++)
+          if (sc[pi]->ctx == NULL || mlx_array_size(*sc[pi]) == 0) { mlx_array_free(*bi[pi]); *bi[pi] = mlx_array_new(); } }
     mlx_array normed = mlx_array_new();
     if (ok) { ok = rms_norm_cfg(&normed, x, ln_w, m->cfg.rms_norm_eps, m->stream); CHK(ok, "input_layernorm"); }
     /* Q2-b: energia dell'input condiviso di q/k/v (riga attention, expert=-1). Solo in
@@ -352,6 +360,24 @@ bool glm4_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
              mlx_reshape(&k_heads, k, kv_shape, 4, m->stream) == 0 &&
              mlx_reshape(&v_heads, v, kv_shape, 4, m->stream) == 0;
         CHK(ok, "head reshape");
+    }
+    /* QK-norm (use_qk_norm=true: GLM-4.5 355B; il -Air ha use_qk_norm=false): RMSNorm sull'asse head_dim di q/k
+     * PRIMA del transpose e della RoPE (mlx_lm glm4_moe.Attention). Il flag non e' in cfg: la presenza
+     * di self_attn.q_norm/k_norm.weight nel checkpoint e' equivalente (mlx_lm li crea solo se true). */
+    mlx_array qn_w = mlx_array_new(), kn_w = mlx_array_new();
+    if (ok) {
+        tname(m->cfg.layer_prefix, layer_idx, "self_attn.q_norm.weight", namebuf, sizeof(namebuf));
+        const bool has_qn = multishard_get(&m->weights, namebuf, &qn_w);
+        tname(m->cfg.layer_prefix, layer_idx, "self_attn.k_norm.weight", namebuf, sizeof(namebuf));
+        const bool has_kn = multishard_get(&m->weights, namebuf, &kn_w);
+        if (has_qn && has_kn) {
+            mlx_array qn = mlx_array_new(), kn = mlx_array_new();
+            ok = rms_norm_cfg(&qn, q_heads, qn_w, m->cfg.rms_norm_eps, m->stream) &&
+                 rms_norm_cfg(&kn, k_heads, kn_w, m->cfg.rms_norm_eps, m->stream);
+            CHK(ok, "q/k norm");
+            if (ok) { mlx_array_set(&q_heads, qn); mlx_array_set(&k_heads, kn); }
+            mlx_array_free(qn); mlx_array_free(kn);
+        }
     }
     mlx_array q_t = mlx_array_new(), k_t = mlx_array_new(), v_t = mlx_array_new();
     if (ok) {
@@ -612,7 +638,7 @@ bool glm4_moe_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
     mlx_array all[] = {
         ln_w, normed, qw, qs, qb, kw, ks, kb, vw, vs, vb,
         q_lb, k_lb, v_lb, q0, k0, v0, q, k, v,
-        q_heads, k_heads, v_heads, q_t, k_t, v_t, q_rope, k_rope,
+        qn_w, kn_w, q_heads, k_heads, v_heads, q_t, k_t, v_t, q_rope, k_rope,
         k_full, v_full, k_src, v_src, attn, attn_bt, attn_flat, ow, os, ob, attn_out,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) mlx_array_free(all[i]);
