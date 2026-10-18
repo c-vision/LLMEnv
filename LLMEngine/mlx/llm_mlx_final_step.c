@@ -140,6 +140,14 @@ bool llm_mlx_final_norm(LlmMlxModel* m, mlx_array h, mlx_array norm_w, mlx_array
         mlx_array_free(nb);
         return r;
     }
+    /* StableLM: norm finale = LayerNorm COMPLETO con bias (model.norm.bias). */
+    if (strcmp(m->cfg.model_type, "stablelm") == 0) {
+        mlx_array nb = mlx_array_new();
+        multishard_get(&m->weights, "model.norm.bias", &nb);
+        bool r = mlx_fast_layer_norm(out_normed, h, norm_w, nb, m->cfg.rms_norm_eps, m->stream) == 0;
+        mlx_array_free(nb);
+        return r;
+    }
     /* Gemma3: RMSNorm finale con scala (1+w) (il weight memorizzato e' il delta). */
     if (strcmp(m->cfg.model_type, "gemma3_text") == 0 || strcmp(m->cfg.model_type, "gemma3") == 0) {
         mlx_array w1 = mlx_array_new(), one = mlx_array_new_float32(1.0f);

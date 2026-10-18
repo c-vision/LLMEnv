@@ -572,4 +572,9 @@ bool starcoder2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset,
                                 mlx_array x, mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool starcoder2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 
+/* --- dominio StableLM (llm_mlx_stablelm.c) — LayerNorm + RoPE parziale + qkv bias --- */
+bool stablelm_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens,
+                              mlx_array x, mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool stablelm_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+
 #endif /* LLM_MLX_PROTOS_H */
