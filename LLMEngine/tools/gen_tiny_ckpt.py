@@ -253,7 +253,7 @@ TINY = {
         vocab_size=128, hidden_size=64, num_hidden_layers=2, intermediate_size=128,
         num_attention_heads=4, num_key_value_heads=2, rope_theta=10000.0,
         use_qkv_bias=True, partial_rotary_factor=0.5, layer_norm_eps=1e-5,
-        use_parallel_residual=False, qk_layernorm=False,
+        use_parallel_residual=True, qk_layernorm=True,
     ),
 }
 

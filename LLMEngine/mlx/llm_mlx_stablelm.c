@@ -4,10 +4,14 @@
  * Struttura (mlx_lm `stablelm`, stablelm-2):
  *  - attn: q/k/v/o separati (q/k/v con bias se `use_qkv_bias`, o_proj senza) + **RoPE parziale**
  *    (dims=int(hd*partial_rotary_factor)); LayerNorm (input_layernorm/post_attention_layernorm w+b).
+ *  - `qk_layernorm` (OPT): LayerNormPerHead = `w[H,hd] * layer_norm(x,None,None,eps)` (per-testa,
+ *    SENZA weight/bias nel layer_norm) applicato su q/k [1,L,H,hd] PRIMA del transpose. I pesi
+ *    stanno in `self_attn.{q,k}_layernorm.norms.<i>.weight` (H tensori [hd]).
  *  - mlp: gate/up/down (swiglu, bias=False).
- *  - residuo SERIALE (use_parallel_residual=false): h = x + attn(ln(x)); out = h + mlp(post_ln(h)).
- * NON coperto qui: `qk_layernorm` (LayerNormPerHead) e `use_parallel_residual=true`.
- * TRAP: quantized_linear_cfg/llm_mlx_gqa_sdpa ritornano TRUE=ok.
+ *  - residuo: SERIALE (out = h + mlp(post_ln(h))) oppure PARALLELO
+ *    (`use_parallel_residual`: out = x + attn(ln(x)) + mlp(ln(x)); il blocco intero vive
+ *    nell'attn e l'ffn e' identita', come gpt_neox).
+ * TRAP: quantized_linear_cfg/llm_mlx_gqa_sdpa/mlx_fast_layer_norm ritornano TRUE=ok.
  * ============================================================================ */
 #include "llmengine_mlx.h"
 #include "llm_mlx_internal.h"
@@ -17,6 +21,52 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+/* LayerNormPerHead (mlx_lm stablelm): w[H,hd] * layer_norm(x,None,None,eps). */
+static bool stablelm_ln_per_head(mlx_array* out, LlmMlxModel* m, int layer_idx, const char* base,
+                                 mlx_array x, int nheads, int hd, mlx_stream s) {
+    mlx_vector_array vs = mlx_vector_array_new();
+    bool ok = true;
+    for (int i = 0; i < nheads && ok; i++) {
+        char full[384];
+        snprintf(full, sizeof full, "%s.norms.%d.weight", base, i);   /* base e' gia' il nome completo */
+        mlx_array w = mlx_array_new();
+        ok = multishard_get(&m->weights, full, &w);
+        if (ok) { int sh[2] = {1, hd}; mlx_array wr = mlx_array_new();
+                  ok = mlx_reshape(&wr, w, sh, 2, s)==0 && mlx_vector_array_append_value(vs, wr)==0;
+                  mlx_array_free(wr); }
+        mlx_array_free(w);
+    }
+    mlx_array wcat = mlx_array_new(), ln = mlx_array_new(), none = mlx_array_new();
+    if (ok) ok = mlx_concatenate_axis(&wcat, vs, 0, s)==0;                 /* [nheads, hd] */
+    if (ok) ok = mlx_fast_layer_norm(&ln, x, none, none, m->cfg.rms_norm_eps, s)==0;
+    if (ok) ok = mlx_multiply(out, wcat, ln, s)==0;
+    mlx_array_free(wcat); mlx_array_free(ln); mlx_array_free(none);
+    mlx_vector_array_free(vs);
+    return ok;
+}
+
+/* MLP core (gate/up/down swiglu) dato un input GIA' normalizzato. */
+static bool stablelm_mlp_core(LlmMlxModel* m, int layer_idx, mlx_array normed, mlx_array* dn, mlx_stream s) {
+    const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
+    char nb[256];
+    mlx_array gw=mlx_array_new(), gs=mlx_array_new(), gb=mlx_array_new();
+    mlx_array uw=mlx_array_new(), us=mlx_array_new(), ub=mlx_array_new();
+    mlx_array dyw=mlx_array_new(), dys=mlx_array_new(), dyb=mlx_array_new();
+    tname(m->cfg.layer_prefix, layer_idx, "mlp.gate_proj", nb, sizeof nb); multishard_get_triple(&m->weights, nb, &gw,&gs,&gb);
+    tname(m->cfg.layer_prefix, layer_idx, "mlp.up_proj", nb, sizeof nb);   multishard_get_triple(&m->weights, nb, &uw,&us,&ub);
+    tname(m->cfg.layer_prefix, layer_idx, "mlp.down_proj", nb, sizeof nb); multishard_get_triple(&m->weights, nb, &dyw,&dys,&dyb);
+    mlx_array gate=mlx_array_new(), up=mlx_array_new(), act=mlx_array_new();
+    bool ok = quantized_linear_cfg(&gate, normed, gw,gs,gb, gsz,bts, m->cfg.quant_mode, s) &&
+              quantized_linear_cfg(&up,   normed, uw,us,ub, gsz,bts, m->cfg.quant_mode, s);
+    if (ok) { mlx_array sg=mlx_array_new(), sl=mlx_array_new();
+              ok = mlx_sigmoid(&sg,gate,s)==0 && mlx_multiply(&sl,gate,sg,s)==0 && mlx_multiply(&act,sl,up,s)==0;
+              mlx_array_free(sg); mlx_array_free(sl); }
+    if (ok) ok = quantized_linear_cfg(dn, act, dyw,dys,dyb, gsz,bts, m->cfg.quant_mode, s);
+    mlx_array_free(gw);mlx_array_free(gs);mlx_array_free(gb); mlx_array_free(uw);mlx_array_free(us);mlx_array_free(ub);
+    mlx_array_free(dyw);mlx_array_free(dys);mlx_array_free(dyb); mlx_array_free(gate); mlx_array_free(up); mlx_array_free(act);
+    return ok;
+}
 
 bool stablelm_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                               mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h) {
@@ -44,10 +94,24 @@ bool stablelm_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
     if (ok) { ok = quantized_linear_cfg(&k, normed, kw,ks,kb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"k_proj"); }
     if (ok) { ok = quantized_linear_cfg(&v, normed, vw,vs,vb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"v_proj"); }
 
+    /* reshape [1,L,H,hd]; qk_layernorm (se presente) PRIMA del transpose; poi transpose. */
     mlx_array q_t=mlx_array_new(), k_t=mlx_array_new(), v_t=mlx_array_new();
     if (ok) { int qs4[4]={1,n_tokens,nh,hd}, kvs4[4]={1,n_tokens,nkv,hd};
               mlx_array qh=mlx_array_new(), kh=mlx_array_new(), vh=mlx_array_new();
               ok = mlx_reshape(&qh, q, qs4,4, s)==0 && mlx_reshape(&kh, k, kvs4,4, s)==0 && mlx_reshape(&vh, v, kvs4,4, s)==0;
+              char qln[320], kln[320]; tname(m->cfg.layer_prefix, layer_idx, "self_attn.q_layernorm.norms.0.weight", qln, sizeof qln);
+              mlx_array probe = mlx_array_new();
+              bool has_qkln = multishard_get(&m->weights, qln, &probe); mlx_array_free(probe);
+              if (ok && has_qkln) {
+                  tname(m->cfg.layer_prefix, layer_idx, "self_attn.q_layernorm", qln, sizeof qln);
+                  tname(m->cfg.layer_prefix, layer_idx, "self_attn.k_layernorm", kln, sizeof kln);
+                  mlx_array qn=mlx_array_new(), kn=mlx_array_new();
+                  ok = stablelm_ln_per_head(&qn, m, layer_idx, qln, qh, nh, hd, s) &&
+                       stablelm_ln_per_head(&kn, m, layer_idx, kln, kh, nkv, hd, s);
+                  if (ok) { mlx_array_set(&qh, qn); mlx_array_set(&kh, kn); }
+                  mlx_array_free(qn); mlx_array_free(kn);
+                  CHK(ok, "qk_layernorm");
+              }
               if (ok) { const int perm[4]={0,2,1,3};
                         ok = mlx_transpose_axes(&q_t, qh, perm,4, s)==0 && mlx_transpose_axes(&k_t, kh, perm,4, s)==0 && mlx_transpose_axes(&v_t, vh, perm,4, s)==0; }
               mlx_array_free(qh); mlx_array_free(kh); mlx_array_free(vh); CHK(ok,"reshape"); }
@@ -84,16 +148,28 @@ bool stablelm_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
     tname(m->cfg.layer_prefix, layer_idx, "self_attn.o_proj", nb, sizeof nb); ok = ok && multishard_get_triple(&m->weights, nb, &ow,&os,&ob);
     mlx_array ao=mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&ao, afl, ow,os,ob, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"o_proj"); }
-    if (ok) { ok = mlx_add(out_h, x, ao, s)==0; CHK(ok,"residual (attn)"); }
+
+    mlx_array mlp_out=mlx_array_new();
+    if (ok && m->cfg.parallel_residual) {
+        /* PARALLELO: out = x + attn(ln(x)) + mlp(ln(x)) — mlp sullo STESSO normed. */
+        ok = stablelm_mlp_core(m, layer_idx, normed, &mlp_out, s); CHK(ok, "mlp (parallel)");
+        mlx_array agg = mlx_array_new();
+        if (ok) { ok = mlx_add(&agg, x, ao, s)==0 && mlx_add(out_h, agg, mlp_out, s)==0; }
+        mlx_array_free(agg); CHK(ok, "residual (parallel)");
+    } else if (ok) {
+        ok = mlx_add(out_h, x, ao, s)==0; CHK(ok, "residual (attn)");
+    }
 
     mlx_array all[] = { lnw,lnb,normed, qw,qs,qb, kw,ks,kb, vw,vs,vb, q,k,v, q_t,k_t,v_t, q_r,k_r,
-                        k_full,v_full, attn, abt,afl, ow,os,ob, ao };
+                        k_full,v_full, attn, abt,afl, ow,os,ob, ao, mlp_out };
     for (size_t i=0;i<sizeof all/sizeof all[0];i++) mlx_array_free(all[i]);
 #undef CHK
     return ok;
 }
 
 bool stablelm_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out) {
+    /* PARALLELO: il blocco intero e' gia' stato calcolato dall'attn -> ffn identita'. */
+    if (m->cfg.parallel_residual) return mlx_array_set(out, h) == 0;
     bool ok = true;
     const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
     char nb[256]; mlx_stream s = m->stream;
@@ -104,25 +180,11 @@ bool stablelm_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h
     tname(m->cfg.layer_prefix, layer_idx, "post_attention_layernorm.bias", nb, sizeof nb); ok = ok && multishard_get(&m->weights, nb, &lnb);
     mlx_array normed = mlx_array_new();
     if (ok) { ok = mlx_fast_layer_norm(&normed, h, lnw, lnb, m->cfg.rms_norm_eps, s)==0; CHK(ok,"post_attention_layernorm"); }
-
-    mlx_array gw=mlx_array_new(), gs=mlx_array_new(), gb=mlx_array_new();
-    mlx_array uw=mlx_array_new(), us=mlx_array_new(), ub=mlx_array_new();
-    mlx_array dyw=mlx_array_new(), dys=mlx_array_new(), dyb=mlx_array_new();
-    tname(m->cfg.layer_prefix, layer_idx, "mlp.gate_proj", nb, sizeof nb); ok = ok && multishard_get_triple(&m->weights, nb, &gw,&gs,&gb);
-    tname(m->cfg.layer_prefix, layer_idx, "mlp.up_proj", nb, sizeof nb); ok = ok && multishard_get_triple(&m->weights, nb, &uw,&us,&ub);
-    tname(m->cfg.layer_prefix, layer_idx, "mlp.down_proj", nb, sizeof nb); ok = ok && multishard_get_triple(&m->weights, nb, &dyw,&dys,&dyb);
-    mlx_array gate=mlx_array_new(), up=mlx_array_new();
-    if (ok) { ok = quantized_linear_cfg(&gate, normed, gw,gs,gb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"gate"); }
-    if (ok) { ok = quantized_linear_cfg(&up,   normed, uw,us,ub, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"up"); }
-    mlx_array act=mlx_array_new();
-    if (ok) { mlx_array sg=mlx_array_new(), sl=mlx_array_new();
-              ok = mlx_sigmoid(&sg,gate,s)==0 && mlx_multiply(&sl,gate,sg,s)==0 && mlx_multiply(&act,sl,up,s)==0;
-              mlx_array_free(sg); mlx_array_free(sl); CHK(ok,"swiglu"); }
-    mlx_array dn=mlx_array_new();
-    if (ok) { ok = quantized_linear_cfg(&dn, act, dyw,dys,dyb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"down"); }
+    mlx_array dn = mlx_array_new();
+    if (ok) { ok = stablelm_mlp_core(m, layer_idx, normed, &dn, s); CHK(ok,"mlp"); }
     if (ok) { ok = mlx_add(out, h, dn, s)==0; CHK(ok,"residual (ffn)"); }
 
-    mlx_array all[] = { lnw,lnb,normed, gw,gs,gb, uw,us,ub, dyw,dys,dyb, gate, up, act, dn };
+    mlx_array all[] = { lnw,lnb,normed, dn };
     for (size_t i=0;i<sizeof all/sizeof all[0];i++) mlx_array_free(all[i]);
 #undef CHK
     return ok;

@@ -424,6 +424,11 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         { cJSON* pr = cJSON_GetObjectItemCaseSensitive(src, "use_parallel_residual");
           cfg->parallel_residual = cJSON_IsBool(pr) ? (cJSON_IsTrue(pr) ? 1 : 0) : 1; }
         cfg->n_kv_heads = cfg->n_heads;   /* MHA */
+    } else if (strcmp(cfg->model_type, "stablelm") == 0) {
+        /* StableLM: LayerNorm + RoPE parziale + qkv bias + qk_layernorm opz; residuo seriale o parallelo. */
+        OPT_FLOAT(partial_rotary_factor, "partial_rotary_factor", 1.0f);
+        { cJSON* pr = cJSON_GetObjectItemCaseSensitive(src, "use_parallel_residual");
+          cfg->parallel_residual = cJSON_IsBool(pr) ? (cJSON_IsTrue(pr) ? 1 : 0) : 0; }
     } else if (strcmp(cfg->model_type, "qwen") == 0) {
         /* Qwen v1/v1.5: RMSNorm + c_attn fuso + RoPE pieno + MLP 2-proj (w1/w2/c_proj); MHA. */
         OPT_FLOAT(rms_norm_eps, "layer_norm_epsilon", 1e-6f);
