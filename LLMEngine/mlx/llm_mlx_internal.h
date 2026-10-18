@@ -121,6 +121,7 @@ typedef struct {
                                    * come LFM2-MoE (router 8-bit in modello 4-bit); 0 = usa il quant globale */
     float moe_residual_multiplier;/* scala del residuo dell'FFN (es. granitemoe 0.22); 0.0 = 1.0 (nessuna scala) */
     int parallel_residual;        /* 1 = GPT-NeoX parallel residual: out = attn(ln1(x)) + mlp(ln2(x)) + x */
+    int learned_pos_emb;          /* 1 = position embeddings APPRESE (wpe) sommate agli embed (gpt2/gpt_bigcode) */
     bool tie_word_embeddings;
     /* FASE 1b.0: da config.json["model_type"] -- seleziona la entry di ARCH_TABLE
      * (vedi LlmMlxArchOps sotto). Buffer fisso: i valori reali osservati
@@ -685,6 +686,10 @@ struct LlmMlxModel {
     /* RWKV7: carry cross-layer `v_first` (prodotto dal layer 0, letto dai successivi nello
      * stesso forward). Transiente per-forward: sovrascritto dal layer 0 ad ogni chiamata. */
     mlx_array rwkv_v_first;
+    /* GPT-2/GPT-BigCode: position embeddings APPRESE (wpe) [n_positions, hidden]. ctx==NULL
+     * per tutte le altre arch (solo RoPE). Caricata in load_output_tensors, sommata agli embed
+     * nel forward (forward_tokens_batch + forward_one_token_dev). */
+    mlx_array pos_emb_w;
     /* Qwen4-Exp (qwen4_exp): stato persistente dell'indexer QSA per-layer (ring raw +
      * chiavi compresse growable + offset) -- NON e' un mlx_array singolo come k_cache/
      * v_cache (schema diverso, vedi LlmQwen4ExpQSACache in llm_mlx_qwen4exp.h), quindi

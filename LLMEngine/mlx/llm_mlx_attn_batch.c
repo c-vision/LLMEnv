@@ -967,6 +967,23 @@ bool embed_tokens_batch(LlmMlxModel* m, mlx_array embed_w, mlx_array embed_s, ml
     return ok2;
 }
 
+/* GPT-2/GPT-BigCode: somma le position embeddings APPRESE (m->pos_emb_w [n_pos, hidden]) agli
+ * embed. offset = posizione assoluta del primo token; n = n_tokens (righe offset..offset+n-1).
+ * No-op (copia) se m->pos_emb_w assente (tutte le arch RoPE). */
+bool llm_mlx_pos_emb_add(LlmMlxModel* m, mlx_array x, int offset, int n, mlx_array* out) {
+    if (m->pos_emb_w.ctx == NULL) return mlx_array_set(out, x) == 0;
+    int st[2] = {offset, 0}, sp[2] = {offset + n, m->cfg.hidden_size}, sv[2] = {1, 1};
+    mlx_array rows = mlx_array_new();
+    bool ok = mlx_slice(&rows, m->pos_emb_w, st, 2, sp, 2, sv, 2, m->stream) == 0;
+    mlx_array re = mlx_array_new();
+    if (ok) { int sh[3] = {1, n, m->cfg.hidden_size}; ok = mlx_reshape(&re, rows, sh, 3, m->stream) == 0; }
+    mlx_array sum = mlx_array_new();
+    if (ok) ok = mlx_add(&sum, x, re, m->stream) == 0;
+    if (ok) mlx_array_set(out, sum);
+    mlx_array_free(rows); mlx_array_free(re); mlx_array_free(sum);
+    return ok;
+}
+
 /* Batched prefill: analogo di forward_one_token per n_tokens id insieme --
  * imbeve tutti gli id in un colpo solo, poi li fa passare attraverso tutti i
  * layer con UNA chiamata per layer (layer_forward con n_tokens=L) invece di
@@ -994,7 +1011,10 @@ bool forward_tokens_batch(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array emb
         mlx_array_free(x);
         return false;
     }
-    mlx_array h = x;
+    /* GPT-2/GPT-BigCode: somma le position embeddings apprese (no-op per le altre arch). */
+    mlx_array h = mlx_array_new();
+    if (!llm_mlx_pos_emb_add(m, x, cache_offset, n_tokens, &h)) { mlx_array_free(x); mlx_array_free(h); return false; }
+    mlx_array_free(x);
     bool step_ok = true;
     for (int layer = 0; step_ok && layer < m->cfg.n_layers; layer++) {
         mlx_array layer_out = mlx_array_new();

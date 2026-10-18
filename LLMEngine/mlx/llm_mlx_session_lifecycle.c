@@ -179,6 +179,10 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
         /* Qwen v1/v1.5: embed = transformer.wte; norm finale = transformer.ln_f; lm_head separato. */
         snprintf(embed_name, sizeof(embed_name), "transformer.wte");
         snprintf(norm_name, sizeof(norm_name), "transformer.ln_f.weight");
+    } else if (strcmp(m->cfg.model_type, "gpt2") == 0) {
+        /* GPT-2: embed = model.wte; wpe = model.wpe (learned PE); norm finale = model.ln_f (LayerNorm). */
+        snprintf(embed_name, sizeof(embed_name), "model.wte");
+        snprintf(norm_name, sizeof(norm_name), "model.ln_f.weight");
     } else {
         snprintf(embed_name, sizeof(embed_name), "%sembed_tokens", prefix);
         /* LFM2: la RMSNorm finale del modello e' `embedding_norm` (verificato sul checkpoint reale),
@@ -251,6 +255,13 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
     t->out_w = t->have_lm_head ? lm_w : t->embed_w;
     t->out_s = t->have_lm_head ? lm_s : t->embed_s;
     t->out_b = t->have_lm_head ? lm_b : t->embed_b;
+    /* GPT-2/GPT-BigCode: position embeddings APPRESE (wpe). Caricate una sola volta. */
+    if (m->cfg.learned_pos_emb && m->pos_emb_w.ctx == NULL) {
+        const char* pe = (strcmp(m->cfg.model_type, "gpt2") == 0) ? "model.wpe.weight" : "transformer.wpe.weight";
+        mlx_array pw = mlx_array_new();
+        if (multishard_get(&m->weights, pe, &pw)) mlx_array_set(&m->pos_emb_w, pw);
+        mlx_array_free(pw);
+    }
     return ok;
 }
 

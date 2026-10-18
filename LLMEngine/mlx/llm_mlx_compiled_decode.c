@@ -293,7 +293,11 @@ bool forward_one_token_dev(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array em
     {
         const int emb_inv = (llm_ai_mlx_opt_env("LLM_BONSAI_EMBED_INV") != NULL) ? (atoi(llm_ai_mlx_opt_env("LLM_BONSAI_EMBED_INV")) != 0 ? 1 : 0) : 1;
         (void)llm_bonsai_rotate(&x, m, -1, "embed_tokens.weight", emb_inv == 1);
-    }    mlx_array h = x;
+    }
+    /* GPT-2/GPT-BigCode: somma la position embedding appresa (no-op per le altre arch). */
+    mlx_array h = mlx_array_new();
+    if (!llm_mlx_pos_emb_add(m, x, cache_offset, 1, &h)) { mlx_array_free(x); mlx_array_free(h); return false; }
+    mlx_array_free(x);
     bool step_ok = true;
     for (int layer = 0; step_ok && layer < m->cfg.n_layers; layer++) {
         mlx_array layer_out = mlx_array_new();

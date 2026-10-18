@@ -85,6 +85,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "gpt_neox", gpt_neox_attention_block, gpt_neox_ffn_block }, /* GPT-NeoX/Pythia: parallel residual (blocco nell'attn) */
     { "qwen", qwen_attention_block, qwen_ffn_block }, /* Qwen v1/v1.5: c_attn fuso + MLP 2-proj */
     { "hunyuan_v1_dense", hunyuan_attention_block, dense_swiglu_ffn }, /* Hunyuan v1 dense: GQA+bias + qk-norm (query/key_layernorm) + SwiGLU */
+    { "gpt2", gpt2_attention_block, gpt2_ffn_block }, /* GPT-2: c_attn fuso + GELU-approx + learned PE (wpe) */
     { "glm4", glm4_attention_block, glm4_ffn_block }, /* GLM-4 denso: GQA+bias + RoPE parziale + MLP fuso (4 norm) */
     { "ernie4_5_moe", llama_attention_block, moe_v2_ffn_block }, /* ERNIE-4.5-MoE: attn llama + FFN MoE v2 (softmax+shared_experts) */
     { "mistral3",  llama_attention_block,     dense_swiglu_ffn }, /* Ministral-3-14B: Mistral denso (GQA + SwiGLU) */
@@ -168,6 +169,7 @@ void llm_mlx_model_init(LlmMlxModel* m) {
     m->ngram_fd = -1; /* 0 (da memset) sarebbe stdin -- deve restare "non caricato" finche' non aperto */
     for (int q = 0; q < 16; q++) m->ngram_file[q].fd = -1; /* idem: 0 sarebbe stdin */
     m->rwkv_v_first = mlx_array_new();   /* RWKV7: carry cross-layer (init esplicito post-memset) */
+    m->pos_emb_w = mlx_array_new();      /* GPT-2/BigCode: position embeddings (ctx==NULL se assente) */
 }
 
 void llm_mlx_model_destroy(LlmMlxModel* m) {
@@ -230,6 +232,7 @@ void llm_mlx_model_destroy(LlmMlxModel* m) {
         m->gdn_dt = NULL;
     }
     mlx_array_free(m->rwkv_v_first);   /* RWKV7: carry cross-layer v_first (no-op se vuoto) */
+    mlx_array_free(m->pos_emb_w);      /* GPT-2/BigCode: position embeddings (no-op se vuoto) */
     if (m->qsa_indexer_cache) {
         for (int l = 0; l < m->qsa_indexer_cache_n; l++) llm_mlx_qwen4exp_qsa_cache_free(&m->qsa_indexer_cache[l]);
         free(m->qsa_indexer_cache);

@@ -68,11 +68,12 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     if (strcmp(cfg->model_type, "prism_hadamard_qwen35") == 0)
         snprintf(cfg->model_type, sizeof(cfg->model_type), "qwen3_5");
 
-    if (strcmp(cfg->model_type, "lille-130m") == 0) {
+    if (strcmp(cfg->model_type, "lille-130m") == 0 || strcmp(cfg->model_type, "gpt2") == 0
+        || strcmp(cfg->model_type, "gpt_bigcode") == 0) {
         struct { const char* from; const char* to; } lm[] = {
             {"n_embd","hidden_size"}, {"n_layer","num_hidden_layers"},
             {"n_head","num_attention_heads"}, {"n_kv_heads","num_key_value_heads"},
-            {"layer_norm_eps","rms_norm_eps"},
+            {"layer_norm_eps","rms_norm_eps"}, {"layer_norm_epsilon","rms_norm_eps"},
         };
         for (size_t i = 0; i < sizeof lm/sizeof lm[0]; i++) {
             cJSON* it = cJSON_GetObjectItemCaseSensitive(j, lm[i].from);
@@ -425,6 +426,12 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(head_dim, "kv_channels");   /* head_dim = kv_channels */
         if (cfg->head_dim <= 0 && cfg->n_heads > 0) cfg->head_dim = cfg->hidden_size / cfg->n_heads;
         cfg->n_kv_heads = cfg->n_heads;
+    } else if (strcmp(cfg->model_type, "gpt2") == 0) {
+        /* GPT-2: LayerNorm + c_attn fuso + GELU-approx + position embeddings APPRESE (tied). */
+        cfg->learned_pos_emb = 1;
+        cfg->tie_word_embeddings = true;
+        cfg->n_kv_heads = cfg->n_heads;
+        cfg->rope_theta = 10000.0f;   /* non usato (no RoPE) */
     } else if (strcmp(cfg->model_type, "glm4") == 0) {
         /* GLM-4 denso: GQA con bias + RoPE PARZIALE (traditional=true) + MLP fuso (gate_up).
          * 4 RMSNorm per layer. head_dim/n_heads/n_kv_heads dal parse generico. */
@@ -835,7 +842,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     cfg->tie_word_embeddings = cJSON_IsBool(tie) ? cJSON_IsTrue(tie)
         : (strcmp(cfg->model_type, "lfm2") == 0 || strcmp(cfg->model_type, "lfm2_moe") == 0
            || strcmp(cfg->model_type, "mamba") == 0
-           || strcmp(cfg->model_type, "falcon_mamba") == 0 || strcmp(cfg->model_type, "mamba2") == 0);
+           || strcmp(cfg->model_type, "falcon_mamba") == 0 || strcmp(cfg->model_type, "mamba2") == 0
+           || strcmp(cfg->model_type, "gpt2") == 0 || strcmp(cfg->model_type, "gpt_bigcode") == 0);
 
     /* FASE 1b.2 (Llama 3.x): rope_scaling.rope_type == "llama3" -- letto dalla radice
      * (mai annidato per questa famiglia), assente/altro valore per ogni altra architettura
@@ -981,6 +989,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.h.");
     if (strcmp(cfg->model_type, "qwen") == 0)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "transformer.h.");
+    if (strcmp(cfg->model_type, "gpt2") == 0)
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.h.");
     /* DFlash2 DRAFT (config.json ha dflash_config + arch DFlash2DraftModel): prefisso "layers.". */
     if (cJSON_GetObjectItemCaseSensitive(j, "dflash_config") != NULL)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "layers.");

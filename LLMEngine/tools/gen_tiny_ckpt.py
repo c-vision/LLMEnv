@@ -145,6 +145,11 @@ TINY = {
         rope_theta=10000.0, max_position_embeddings=512, attention_bias=True,
         use_qk_norm=True, tie_word_embeddings=False,
     ),
+    "gpt2": dict(
+        cls="gpt2", model_type="gpt2",
+        n_ctx=512, n_embd=64, n_head=4, n_layer=2, n_positions=512,
+        layer_norm_epsilon=1e-5, vocab_size=128,
+    ),
 }
 
 

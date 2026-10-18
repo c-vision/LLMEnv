@@ -72,6 +72,7 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t);
 void free_output_tensors(OutputTensors* t);
 bool embed_tokens_batch(LlmMlxModel* m, mlx_array embed_w, mlx_array embed_s, mlx_array embed_b,
                         const int32_t* token_ids, int n_tokens, mlx_array* out_x);
+bool llm_mlx_pos_emb_add(LlmMlxModel* m, mlx_array x, int offset, int n, mlx_array* out);
 bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                    mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out);
 /* --- dominio layer_forward KV-quant/pagesel (llm_mlx_layer_forward.c) --- */
@@ -531,5 +532,10 @@ bool qwen_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, ml
 /* --- dominio Hunyuan v1 dense (llm_mlx_hunyuan.c) --- */
 bool hunyuan_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                              mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+
+/* --- dominio GPT-2 (llm_mlx_gpt2.c) --- */
+bool gpt2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                          mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool gpt2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 
 #endif /* LLM_MLX_PROTOS_H */
