@@ -553,4 +553,8 @@ bool openelm_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
                              mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool openelm_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 
+/* --- dominio DeepSeek-V3 / Kimi-K2 (llm_mlx_deepseek3.c) — MLA assorbita --- */
+bool deepseek_v3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens,
+                                 mlx_array x, mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+
 #endif /* LLM_MLX_PROTOS_H */
