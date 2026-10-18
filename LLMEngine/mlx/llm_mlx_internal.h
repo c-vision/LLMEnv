@@ -122,6 +122,7 @@ typedef struct {
     float moe_residual_multiplier;/* scala del residuo dell'FFN (es. granitemoe 0.22); 0.0 = 1.0 (nessuna scala) */
     int parallel_residual;        /* 1 = GPT-NeoX parallel residual: out = attn(ln1(x)) + mlp(ln2(x)) + x */
     int learned_pos_emb;          /* 1 = position embeddings APPRESE (wpe) sommate agli embed (gpt2/gpt_bigcode) */
+    float query_pre_attn_scalar;  /* gemma3: scale SDPA = query_pre_attn_scalar^-0.5 (0 = 1/sqrt(head_dim)) */
     bool tie_word_embeddings;
     /* FASE 1b.0: da config.json["model_type"] -- seleziona la entry di ARCH_TABLE
      * (vedi LlmMlxArchOps sotto). Buffer fisso: i valori reali osservati

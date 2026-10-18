@@ -543,4 +543,9 @@ bool gptbigcode_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset,
                                 mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool gptbigcode_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 
+/* --- dominio Gemma3 (llm_mlx_gemma3.c) --- */
+bool gemma3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                            mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool gemma3_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+
 #endif /* LLM_MLX_PROTOS_H */

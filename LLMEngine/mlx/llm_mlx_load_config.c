@@ -440,6 +440,22 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
             cJSON* mq = cJSON_GetObjectItemCaseSensitive(src, "multi_query");
             cfg->n_kv_heads = (cJSON_IsBool(mq) && !cJSON_IsTrue(mq)) ? cfg->n_heads : 1;
         }
+    } else if (strcmp(cfg->model_type, "gemma3_text") == 0 || strcmp(cfg->model_type, "gemma3") == 0) {
+        /* Gemma3: 4-norm (scale 1+w) + qk-norm + sliding window (pattern) + dual rope base +
+         * query_pre_attn_scalar + embed scalati per sqrt(hidden). */
+        cfg->rope_theta_full = cfg->rope_theta;                          /* global = rope_theta piatto */
+        OPT_FLOAT(rope_theta_sliding, "rope_local_base_freq", 10000.0f); /* layer sliding */
+        OPT_FLOAT(query_pre_attn_scalar, "query_pre_attn_scalar", 0.0f);
+        OPT_INT(sliding_window, "sliding_window");
+        int pattern = 6;
+        { cJSON* p = cJSON_GetObjectItemCaseSensitive(src, "sliding_window_pattern");
+          if (cJSON_IsNumber(p)) pattern = (int)p->valuedouble; }
+        if (pattern < 1) pattern = 1;
+        if (cfg->n_layers > 0) {
+            cfg->is_sliding_layer = (bool*)calloc((size_t)cfg->n_layers, sizeof(bool));
+            for (int i = 0; i < cfg->n_layers; i++) cfg->is_sliding_layer[i] = (((i + 1) % pattern) != 0);
+        }
+        cfg->embed_scale = sqrtf((float)cfg->hidden_size);
     } else if (strcmp(cfg->model_type, "glm4") == 0) {
         /* GLM-4 denso: GQA con bias + RoPE PARZIALE (traditional=true) + MLP fuso (gate_up).
          * 4 RMSNorm per layer. head_dim/n_heads/n_kv_heads dal parse generico. */

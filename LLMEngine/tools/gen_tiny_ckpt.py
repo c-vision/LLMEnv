@@ -156,6 +156,14 @@ TINY = {
         layer_norm_epsilon=1e-5, vocab_size=128, multi_query=True,
         attention_bias=True, mlp_bias=True, tie_word_embeddings=True,
     ),
+    "gemma3_text": dict(
+        cls="gemma3_text", model_type="gemma3_text",
+        hidden_size=64, num_hidden_layers=4, intermediate_size=128,
+        num_attention_heads=4, head_dim=16, rms_norm_eps=1e-6, vocab_size=128,
+        num_key_value_heads=2, rope_theta=1000000.0, rope_local_base_freq=10000.0,
+        query_pre_attn_scalar=256, sliding_window=512, sliding_window_pattern=2,
+        max_position_embeddings=512,
+    ),
 }
 
 

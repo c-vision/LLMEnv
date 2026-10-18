@@ -132,6 +132,14 @@ bool llm_mlx_final_norm(LlmMlxModel* m, mlx_array h, mlx_array norm_w, mlx_array
         mlx_array_free(nb);
         return r;
     }
+    /* Gemma3: RMSNorm finale con scala (1+w) (il weight memorizzato e' il delta). */
+    if (strcmp(m->cfg.model_type, "gemma3_text") == 0 || strcmp(m->cfg.model_type, "gemma3") == 0) {
+        mlx_array w1 = mlx_array_new(), one = mlx_array_new_float32(1.0f);
+        bool r = mlx_add(&w1, norm_w, one, m->stream) == 0
+              && rms_norm_cfg(out_normed, h, w1, m->cfg.rms_norm_eps, m->stream);
+        mlx_array_free(w1); mlx_array_free(one);
+        return r;
+    }
     if (strcmp(m->cfg.model_type, "qwen4_exp") != 0)
         return rms_norm_cfg(out_normed, h, norm_w, m->cfg.rms_norm_eps, m->stream);
 
