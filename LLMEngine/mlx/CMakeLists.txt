@@ -343,6 +343,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_qwen.c
     llm_mlx_hunyuan.c
     llm_mlx_gpt2.c
+    llm_mlx_gptbigcode.c
     oss/llm_mlx_gptoss_ffn.c
     llm_mlx_selftest_eval.c
     llm_mlx_sensitivity.c

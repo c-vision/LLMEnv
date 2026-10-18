@@ -86,6 +86,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "qwen", qwen_attention_block, qwen_ffn_block }, /* Qwen v1/v1.5: c_attn fuso + MLP 2-proj */
     { "hunyuan_v1_dense", hunyuan_attention_block, dense_swiglu_ffn }, /* Hunyuan v1 dense: GQA+bias + qk-norm (query/key_layernorm) + SwiGLU */
     { "gpt2", gpt2_attention_block, gpt2_ffn_block }, /* GPT-2: c_attn fuso + GELU-approx + learned PE (wpe) */
+    { "gpt_bigcode", gptbigcode_attention_block, gptbigcode_ffn_block }, /* GPT-BigCode/StarCoder: MQA + GELU esatto + learned PE */
     { "glm4", glm4_attention_block, glm4_ffn_block }, /* GLM-4 denso: GQA+bias + RoPE parziale + MLP fuso (4 norm) */
     { "ernie4_5_moe", llama_attention_block, moe_v2_ffn_block }, /* ERNIE-4.5-MoE: attn llama + FFN MoE v2 (softmax+shared_experts) */
     { "mistral3",  llama_attention_block,     dense_swiglu_ffn }, /* Ministral-3-14B: Mistral denso (GQA + SwiGLU) */

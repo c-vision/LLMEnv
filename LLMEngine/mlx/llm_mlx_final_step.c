@@ -124,6 +124,14 @@ bool llm_mlx_final_norm(LlmMlxModel* m, mlx_array h, mlx_array norm_w, mlx_array
         mlx_array_free(nb);
         return r;
     }
+    /* GPT-BigCode: norm finale = LayerNorm COMPLETO con bias (transformer.ln_f.bias). */
+    if (strcmp(m->cfg.model_type, "gpt_bigcode") == 0) {
+        mlx_array nb = mlx_array_new();
+        multishard_get(&m->weights, "transformer.ln_f.bias", &nb);
+        bool r = mlx_fast_layer_norm(out_normed, h, norm_w, nb, m->cfg.rms_norm_eps, m->stream) == 0;
+        mlx_array_free(nb);
+        return r;
+    }
     if (strcmp(m->cfg.model_type, "qwen4_exp") != 0)
         return rms_norm_cfg(out_normed, h, norm_w, m->cfg.rms_norm_eps, m->stream);
 

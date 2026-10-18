@@ -150,6 +150,12 @@ TINY = {
         n_ctx=512, n_embd=64, n_head=4, n_layer=2, n_positions=512,
         layer_norm_epsilon=1e-5, vocab_size=128,
     ),
+    "gpt_bigcode": dict(
+        cls="gpt_bigcode", model_type="gpt_bigcode",
+        n_embd=64, n_layer=2, n_inner=256, n_head=4, n_positions=512,
+        layer_norm_epsilon=1e-5, vocab_size=128, multi_query=True,
+        attention_bias=True, mlp_bias=True, tie_word_embeddings=True,
+    ),
 }
 
 

@@ -432,6 +432,14 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cfg->tie_word_embeddings = true;
         cfg->n_kv_heads = cfg->n_heads;
         cfg->rope_theta = 10000.0f;   /* non usato (no RoPE) */
+    } else if (strcmp(cfg->model_type, "gpt_bigcode") == 0) {
+        /* GPT-BigCode/StarCoder: LayerNorm + c_attn fuso (MQA) + GELU esatto + PE apprese (tied). */
+        cfg->learned_pos_emb = 1;
+        cfg->rope_theta = 10000.0f;   /* non usato (no RoPE) */
+        if (cfg->n_kv_heads <= 0) {
+            cJSON* mq = cJSON_GetObjectItemCaseSensitive(src, "multi_query");
+            cfg->n_kv_heads = (cJSON_IsBool(mq) && !cJSON_IsTrue(mq)) ? cfg->n_heads : 1;
+        }
     } else if (strcmp(cfg->model_type, "glm4") == 0) {
         /* GLM-4 denso: GQA con bias + RoPE PARZIALE (traditional=true) + MLP fuso (gate_up).
          * 4 RMSNorm per layer. head_dim/n_heads/n_kv_heads dal parse generico. */
@@ -991,6 +999,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "transformer.h.");
     if (strcmp(cfg->model_type, "gpt2") == 0)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.h.");
+    if (strcmp(cfg->model_type, "gpt_bigcode") == 0)
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "transformer.h.");
     /* DFlash2 DRAFT (config.json ha dflash_config + arch DFlash2DraftModel): prefisso "layers.". */
     if (cJSON_GetObjectItemCaseSensitive(j, "dflash_config") != NULL)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "layers.");

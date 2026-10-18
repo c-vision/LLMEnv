@@ -538,4 +538,9 @@ bool gpt2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
                           mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool gpt2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 
+/* --- dominio GPT-BigCode / StarCoder (llm_mlx_gptbigcode.c) --- */
+bool gptbigcode_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
+                                mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool gptbigcode_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+
 #endif /* LLM_MLX_PROTOS_H */

@@ -183,6 +183,10 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
         /* GPT-2: embed = model.wte; wpe = model.wpe (learned PE); norm finale = model.ln_f (LayerNorm). */
         snprintf(embed_name, sizeof(embed_name), "model.wte");
         snprintf(norm_name, sizeof(norm_name), "model.ln_f.weight");
+    } else if (strcmp(m->cfg.model_type, "gpt_bigcode") == 0) {
+        /* GPT-BigCode: embed = transformer.wte; wpe = transformer.wpe; norm = transformer.ln_f (LayerNorm). */
+        snprintf(embed_name, sizeof(embed_name), "transformer.wte");
+        snprintf(norm_name, sizeof(norm_name), "transformer.ln_f.weight");
     } else {
         snprintf(embed_name, sizeof(embed_name), "%sembed_tokens", prefix);
         /* LFM2: la RMSNorm finale del modello e' `embedding_norm` (verificato sul checkpoint reale),
