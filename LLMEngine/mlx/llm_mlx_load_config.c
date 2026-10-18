@@ -602,6 +602,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cJSON* prf = cJSON_GetObjectItemCaseSensitive(src, "partial_rotary_factor");
         if (cJSON_IsNumber(prf)) cfg->partial_rotary_factor = (float)prf->valuedouble;
     } else if (strcmp(cfg->model_type, "deepseek_v2") == 0 || strcmp(cfg->model_type, "deepseek_v3") == 0 ||
+               strcmp(cfg->model_type, "youtu_llm") == 0 ||
                strcmp(cfg->model_type, "kimi_k2") == 0 || strcmp(cfg->model_type, "joyai_llm_flash") == 0) {
         /* Famiglia MLA (Multi-head Latent Attention): DeepSeek V2/V3, Kimi K2, JoyAI (mlx_lm
          * remappa kimi_k2/joyai_llm_flash -> deepseek_v3: stesso codice). KV compresso in latente
