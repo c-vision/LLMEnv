@@ -240,6 +240,13 @@ TINY = {
         num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-6,
         rope_theta=10000.0, partial_rotary_factor=0.5, max_position_embeddings=512,
     ),
+    # starcoder2: LayerNorm + q/k/v/o bias + gelu esatto.
+    "starcoder2": dict(
+        cls="starcoder2", model_type="starcoder2",
+        vocab_size=128, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, norm_epsilon=1e-5, rope_theta=100000.0,
+        tie_word_embeddings=True,
+    ),
 }
 
 

@@ -195,6 +195,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     if (cfg->rms_norm_eps == 0.0f) OPT_FLOAT(rms_norm_eps, "layer_norm_eps", 0.0f);
     /* Mamba (HF): la chiave e' "layer_norm_epsilon" (con 'epsilon'), non "layer_norm_eps". */
     if (cfg->rms_norm_eps == 0.0f) OPT_FLOAT(rms_norm_eps, "layer_norm_epsilon", 0.0f);
+    /* StarCoder2 (HF): la chiave e' "norm_epsilon". */
+    if (cfg->rms_norm_eps == 0.0f) OPT_FLOAT(rms_norm_eps, "norm_epsilon", 0.0f);
     if (cfg->rms_norm_eps == 0.0f) cfg->rms_norm_eps = 1e-6f;
     /* FIX 2026-09-01: parse generico di rope_theta dalla radice (es. gpt_oss: 150000).
      * Prima era letto SOLO nei branch gemma4/qwen3_5 (rope_parameters) -> per gpt_oss
