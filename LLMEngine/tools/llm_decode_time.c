@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <mach/mach_time.h>
 
 static double now_ms(void) {
@@ -23,10 +24,20 @@ int main(int argc, char** argv) {
     void* (*create_session)(void*) = dlsym(h, "llm_ai_mlx_create_session");
     int (*append)(void*, const int32_t*, int) = dlsym(h, "llm_ai_mlx_session_append");
     int (*topk)(void*, int, int32_t*, float*) = dlsym(h, "llm_ai_mlx_session_topk");
+    int (*gen)(void*, int, int32_t, int32_t*) = dlsym(h, "llm_ai_mlx_session_generate");
     void (*destroy_session)(void*) = dlsym(h, "llm_ai_mlx_destroy_session");
     void (*free_model)(void*) = dlsym(h, "llm_ai_mlx_free_model");
+    int (*opt_set)(const char*, const char*) = dlsym(h, "llm_ai_mlx_opt_set");
     if (!load_model || !create_session || !append || !topk) { fprintf(stderr, "dlsym: mancano simboli\n"); return 4; }
 
+    for (int i = 5; i + 1 < argc; i++) {
+        if (strcmp(argv[i], "--opt") == 0 && opt_set) {
+            char buf[256]; snprintf(buf, sizeof(buf), "%s", argv[i + 1]);
+            char* eq = strchr(buf, (int)0x3d);
+            if (eq) { *eq = 0; if (opt_set(buf, eq + 1) == 0) fprintf(stderr, "[opt] %s=%s\n", buf, eq + 1); else fprintf(stderr, "[opt] IGNORATA %s\n", argv[i + 1]); }
+            i++;
+        }
+    }
     void* model = load_model(argv[2]);
     if (!model) { fprintf(stderr, "load_model fallito\n"); return 5; }
 
@@ -37,15 +48,13 @@ int main(int argc, char** argv) {
         double t0 = now_ms();
         if (append(s, prompt, np) != 0) { fprintf(stderr, "append fallito\n"); return 6; }
         double t_pre = now_ms() - t0;
-        int32_t id = 0; float lp = 0;
+        int32_t* buf = (int32_t*)calloc((size_t)ngen, sizeof(int32_t));
         double t1 = now_ms();
-        for (int i = 0; i < ngen; i++) {
-            if (topk(s, 1, &id, &lp) != 1) break;
-            if (append(s, &id, 1) != 0) break;
-        }
+        int n_ok = gen ? gen(s, ngen, -1, buf) : -1;
+        if (n_ok < 0) n_ok = 0;
         double t_dec = now_ms() - t1;
-        printf("rep %d: prefill(%d tok)=%.2f ms | decode %d tok=%.2f ms | %.2f ms/token | %.1f tok/s\n",
-               r, np, t_pre, ngen, t_dec, t_dec / ngen, 1000.0 * ngen / t_dec);
+        printf("rep %d: prefill(%d tok)=%.2f ms | decode %d/%d tok=%.2f ms | %.2f ms/token | %.1f tok/s\n",
+               r, np, t_pre, n_ok, ngen, t_dec, n_ok ? t_dec / n_ok : 0.0, n_ok ? 1000.0 * n_ok / t_dec : 0.0);
         if (destroy_session) destroy_session(s);
     }
     if (free_model) free_model(model);
