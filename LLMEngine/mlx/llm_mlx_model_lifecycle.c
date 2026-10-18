@@ -87,9 +87,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "hunyuan_v1_dense", hunyuan_attention_block, dense_swiglu_ffn }, /* Hunyuan v1 dense: GQA+bias + qk-norm (query/key_layernorm) + SwiGLU */
     { "gpt2", gpt2_attention_block, gpt2_ffn_block }, /* GPT-2: c_attn fuso + GELU-approx + learned PE (wpe) */
     { "gpt_bigcode", gptbigcode_attention_block, gptbigcode_ffn_block }, /* GPT-BigCode/StarCoder: MQA + GELU esatto + learned PE */
-    /* gemma3_text: blocco implementato + parita' tiny VERIFICATA con sliding_window_pattern=1, ma il
-     * DECODE con layer SLIDING fallisce in un path engine condiviso (shape su array vuoto) -> NON
-     * abilitato (v. Bugs/(open) - Gemma3-Sliding-Decode-Blocker). */
+    { "gemma3_text", gemma3_attention_block, gemma3_ffn_block }, /* Gemma3 text: sandwich-norm + qk-norm + sliding/global (pattern) + GeGLU; parita' tiny verificata */
     { "glm4", glm4_attention_block, glm4_ffn_block }, /* GLM-4 denso: GQA+bias + RoPE parziale + MLP fuso (4 norm) */
     { "ernie4_5_moe", llama_attention_block, moe_v2_ffn_block }, /* ERNIE-4.5-MoE: attn llama + FFN MoE v2 (softmax+shared_experts) */
     { "mistral3",  llama_attention_block,     dense_swiglu_ffn }, /* Ministral-3-14B: Mistral denso (GQA + SwiGLU) */

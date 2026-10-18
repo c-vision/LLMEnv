@@ -126,7 +126,7 @@ bool gemma3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
             CHK(ok, "kv concat");
         } else { ok = mlx_array_set(&k_full, k_rope)==0 && mlx_array_set(&v_full, v_t)==0; CHK(ok, "kv init"); }
     }
-    if (ok && has_cache) { ok = mlx_array_set(k_cache, k_full)==0 && mlx_array_set(v_cache, v_full)==0; CHK(ok, "kv store"); }
+    if (ok) { ok = mlx_array_set(k_cache, k_full)==0 && mlx_array_set(v_cache, v_full)==0; CHK(ok, "kv store"); }
 
     mlx_array attn = mlx_array_new();
     if (ok) { ok = llm_mlx_gqa_sdpa(&attn, q_rope, k_full, v_full, scale, sliding ? m->cfg.sliding_window : 0, s); CHK(ok, "sdpa"); }
