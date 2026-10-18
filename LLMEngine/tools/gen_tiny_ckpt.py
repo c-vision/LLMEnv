@@ -164,6 +164,13 @@ TINY = {
         query_pre_attn_scalar=256, sliding_window=512, sliding_window_pattern=2,
         max_position_embeddings=512,
     ),
+    "openelm": dict(
+        cls="openelm", model_type="openelm",
+        head_dim=16, num_transformer_layers=2, model_dim=64, vocab_size=128,
+        ffn_dim_divisor=8, num_query_heads=[4, 4], num_kv_heads=[2, 2],
+        ffn_multipliers=[4.0, 4.0], ffn_with_glu=True, normalize_qk_projections=True,
+        share_input_output_layers=True, rms_norm_eps=1e-6, rope_freq_constant=10000.0,
+    ),
 }
 
 

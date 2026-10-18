@@ -88,6 +88,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "gpt2", gpt2_attention_block, gpt2_ffn_block }, /* GPT-2: c_attn fuso + GELU-approx + learned PE (wpe) */
     { "gpt_bigcode", gptbigcode_attention_block, gptbigcode_ffn_block }, /* GPT-BigCode/StarCoder: MQA + GELU esatto + learned PE */
     { "gemma3_text", gemma3_attention_block, gemma3_ffn_block }, /* Gemma3 text: sandwich-norm + qk-norm + sliding/global (pattern) + GeGLU; parita' tiny verificata */
+    { "openelm", openelm_attention_block, openelm_ffn_block }, /* OpenELM: heads PER-LAYER + qkv fuso + fused gate_up MLP */
     { "glm4", glm4_attention_block, glm4_ffn_block }, /* GLM-4 denso: GQA+bias + RoPE parziale + MLP fuso (4 norm) */
     { "ernie4_5_moe", llama_attention_block, moe_v2_ffn_block }, /* ERNIE-4.5-MoE: attn llama + FFN MoE v2 (softmax+shared_experts) */
     { "mistral3",  llama_attention_block,     dense_swiglu_ffn }, /* Ministral-3-14B: Mistral denso (GQA + SwiGLU) */
@@ -259,6 +260,8 @@ void llm_mlx_model_destroy(LlmMlxModel* m) {
     mlx_device_free(m->device);
     free(m->cfg.is_sliding_layer); /* FASE 1b.4.0: NULL per architetture non-Gemma4, free(NULL) è un no-op */
     free(m->cfg.is_linear_layer);  /* FASE 1b.5: NULL per architetture senza GDN */
+    free(m->cfg.layer_n_heads);    /* openelm: NULL per architetture con heads uniformi */
+    free(m->cfg.layer_n_kv_heads);
     free(m->cfg.ple_layer_ids);    /* qwen4_exp: NULL se assente/vuoto */
     /* Prefix cache: libera i prefissi salvati (cache alias, token, history). */
     for (int i = 0; i < m->n_prefixes; i++) {

@@ -187,6 +187,10 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
         /* GPT-BigCode: embed = transformer.wte; wpe = transformer.wpe; norm = transformer.ln_f (LayerNorm). */
         snprintf(embed_name, sizeof(embed_name), "transformer.wte");
         snprintf(norm_name, sizeof(norm_name), "transformer.ln_f.weight");
+    } else if (strcmp(m->cfg.model_type, "openelm") == 0) {
+        /* OpenELM: embed = transformer.token_embeddings; norm finale = transformer.norm (RMSNorm). */
+        snprintf(embed_name, sizeof(embed_name), "transformer.token_embeddings");
+        snprintf(norm_name, sizeof(norm_name), "transformer.norm.weight");
     } else {
         snprintf(embed_name, sizeof(embed_name), "%sembed_tokens", prefix);
         /* LFM2: la RMSNorm finale del modello e' `embedding_norm` (verificato sul checkpoint reale),

@@ -69,11 +69,13 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         snprintf(cfg->model_type, sizeof(cfg->model_type), "qwen3_5");
 
     if (strcmp(cfg->model_type, "lille-130m") == 0 || strcmp(cfg->model_type, "gpt2") == 0
-        || strcmp(cfg->model_type, "gpt_bigcode") == 0) {
+        || strcmp(cfg->model_type, "gpt_bigcode") == 0
+        || strcmp(cfg->model_type, "openelm") == 0) {
         struct { const char* from; const char* to; } lm[] = {
             {"n_embd","hidden_size"}, {"n_layer","num_hidden_layers"},
             {"n_head","num_attention_heads"}, {"n_kv_heads","num_key_value_heads"},
             {"layer_norm_eps","rms_norm_eps"}, {"layer_norm_epsilon","rms_norm_eps"},
+            {"model_dim","hidden_size"}, {"num_transformer_layers","num_hidden_layers"},
         };
         for (size_t i = 0; i < sizeof lm/sizeof lm[0]; i++) {
             cJSON* it = cJSON_GetObjectItemCaseSensitive(j, lm[i].from);
@@ -456,6 +458,26 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
             for (int i = 0; i < cfg->n_layers; i++) cfg->is_sliding_layer[i] = (((i + 1) % pattern) != 0);
         }
         cfg->embed_scale = sqrtf((float)cfg->hidden_size);
+    } else if (strcmp(cfg->model_type, "openelm") == 0) {
+        /* OpenELM: n_heads/n_kv_heads PER-LAYER (liste num_query_heads/num_kv_heads) + fused qkv +
+         * fused gate_up MLP (proj_1/proj_2) + qk-norm opzionale + RoPE (rope_freq_constant). */
+        OPT_FLOAT(rope_theta, "rope_freq_constant", 10000.0f);
+        cJSON* nq = cJSON_GetObjectItemCaseSensitive(src, "num_query_heads");
+        cJSON* nk = cJSON_GetObjectItemCaseSensitive(src, "num_kv_heads");
+        if (cJSON_IsArray(nq) && cJSON_IsArray(nk) && cfg->n_layers > 0) {
+            int nl = cfg->n_layers;
+            int sn = cJSON_GetArraySize(nq), sk = cJSON_GetArraySize(nk);
+            cfg->layer_n_heads = (int*)calloc((size_t)nl, sizeof(int));
+            cfg->layer_n_kv_heads = (int*)calloc((size_t)nl, sizeof(int));
+            for (int i = 0; i < nl; i++) {
+                cJSON* a = (i < sn) ? cJSON_GetArrayItem(nq, i) : NULL;
+                cJSON* b = (i < sk) ? cJSON_GetArrayItem(nk, i) : NULL;
+                cfg->layer_n_heads[i] = cJSON_IsNumber(a) ? (int)a->valuedouble : 1;
+                cfg->layer_n_kv_heads[i] = cJSON_IsNumber(b) ? (int)b->valuedouble : 1;
+            }
+            cfg->n_heads = cfg->layer_n_heads[0];
+            cfg->n_kv_heads = cfg->layer_n_kv_heads[0];
+        }
     } else if (strcmp(cfg->model_type, "glm4") == 0) {
         /* GLM-4 denso: GQA con bias + RoPE PARZIALE (traditional=true) + MLP fuso (gate_up).
          * 4 RMSNorm per layer. head_dim/n_heads/n_kv_heads dal parse generico. */
@@ -867,7 +889,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         : (strcmp(cfg->model_type, "lfm2") == 0 || strcmp(cfg->model_type, "lfm2_moe") == 0
            || strcmp(cfg->model_type, "mamba") == 0
            || strcmp(cfg->model_type, "falcon_mamba") == 0 || strcmp(cfg->model_type, "mamba2") == 0
-           || strcmp(cfg->model_type, "gpt2") == 0 || strcmp(cfg->model_type, "gpt_bigcode") == 0);
+           || strcmp(cfg->model_type, "gpt2") == 0 || strcmp(cfg->model_type, "gpt_bigcode") == 0
+           || strcmp(cfg->model_type, "openelm") == 0);
 
     /* FASE 1b.2 (Llama 3.x): rope_scaling.rope_type == "llama3" -- letto dalla radice
      * (mai annidato per questa famiglia), assente/altro valore per ogni altra architettura
@@ -1017,6 +1040,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "model.h.");
     if (strcmp(cfg->model_type, "gpt_bigcode") == 0)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "transformer.h.");
+    if (strcmp(cfg->model_type, "openelm") == 0)
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "transformer.layers.");
     /* DFlash2 DRAFT (config.json ha dflash_config + arch DFlash2DraftModel): prefisso "layers.". */
     if (cJSON_GetObjectItemCaseSensitive(j, "dflash_config") != NULL)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "layers.");
