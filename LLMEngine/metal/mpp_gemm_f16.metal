@@ -33,6 +33,17 @@ kernel void mpp_gemm_f16(device const half* A [[buffer(0)]],
     float acc[64];
     for (int i = 0; i < 64; i++) acc[i] = 0.0f;
     const uint16_t cap = (uint16_t)cc.get_capacity();
+    const uint16_t capA = (uint16_t)ca.get_capacity();
+    const uint16_t capB = (uint16_t)cb.get_capacity();
+    short offA[64], offB[64];
+    for (uint16_t i = 0; i < capA; ++i) {
+        offA[i] = -1;
+        if (ca.is_valid_element(i)) { auto ix = ca.get_multidimensional_index(i); offA[i] = (short)((int)ix[1] * TK + (int)ix[0]); }
+    }
+    for (uint16_t i = 0; i < capB; ++i) {
+        offB[i] = -1;
+        if (cb.is_valid_element(i)) { auto ix = cb.get_multidimensional_index(i); offB[i] = (short)((int)ix[1] * TN + (int)ix[0]); }
+    }
 
     const int M = dims[0], N = dims[1], K = dims[2];
     const int row0 = (int)tgid.y * TM;
@@ -55,16 +66,10 @@ kernel void mpp_gemm_f16(device const half* A [[buffer(0)]],
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        for (uint16_t i = 0; i < ca.get_capacity(); ++i) {
-            if (!ca.is_valid_element(i)) continue;
-            auto ix = ca.get_multidimensional_index(i);      // (k, m)
-            ca[i] = shA[(int)ix[1] * TK + (int)ix[0]];
-        }
-        for (uint16_t i = 0; i < cb.get_capacity(); ++i) {
-            if (!cb.is_valid_element(i)) continue;
-            auto ix = cb.get_multidimensional_index(i);      // (n, k)
-            cb[i] = shB[(int)ix[1] * TN + (int)ix[0]];
-        }
+        for (uint16_t i = 0; i < capA; ++i)
+            if (offA[i] >= 0) ca[i] = shA[offA[i]];
+        for (uint16_t i = 0; i < capB; ++i)
+            if (offB[i] >= 0) cb[i] = shB[offB[i]];
 
         op.run(ca, cb, cc);
         for (uint16_t i = 0; i < cap; ++i)
