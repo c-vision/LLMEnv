@@ -208,6 +208,23 @@ TINY = {
         max_position_embeddings=512, rope_theta=10000.0, attention_bias=False, mlp_bias=False,
         tie_word_embeddings=True,
     ),
+    # granite denso: GQA + RoPE + multiplier (embed/residuo/attention/logits) — valori reali.
+    "granite": dict(
+        cls="granite", model_type="granite",
+        vocab_size=128, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=4, rms_norm_eps=1e-6,
+        max_position_embeddings=512, rope_theta=10000.0, attention_bias=False, mlp_bias=False,
+        attention_multiplier=0.0078125, embedding_multiplier=12.0,
+        residual_multiplier=0.22, logits_scaling=8.0, tie_word_embeddings=True,
+    ),
+    # glm4 denso: GQA + RoPE parziale + attention_bias.
+    "glm4": dict(
+        cls="glm4", model_type="glm4",
+        vocab_size=128, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=4, head_dim=16, rms_norm_eps=1e-6,
+        attention_bias=True, partial_rotary_factor=0.5, rope_theta=10000.0,
+        rope_traditional=True, max_position_embeddings=512,
+    ),
 }
 
 

@@ -27,17 +27,9 @@ static bool glm4_lin_bias(mlx_array* out, LlmMlxModel* m, int layer_idx, const c
     mlx_array w = mlx_array_new(), sc = mlx_array_new(), bb = mlx_array_new();
     if (!multishard_get_triple(&m->weights, nb, &w, &sc, &bb)) { mlx_array_free(w); mlx_array_free(sc); mlx_array_free(bb); return false; }
     bool ok = quantized_linear_cfg(out, x, w, sc, bb, gsz, bts, m->cfg.quant_mode, s);
-    /* bias lineare reale (non lo zero-point): suf + ".bias" */
-    if (ok) {
-        char nb2[264]; snprintf(nb2, sizeof(nb2), "%s.bias", nb);
-        mlx_array lb = mlx_array_new();
-        if (multishard_get(&m->weights, nb2, &lb) && mlx_array_size(lb) > 0) {
-            mlx_array y = mlx_array_new();
-            if (mlx_add(&y, *out, lb, s) == 0) mlx_array_set(out, y);
-            mlx_array_free(y);
-        }
-        mlx_array_free(lb);
-    }
+    /* Il bias lineare (`suf + ".bias"`) e' gia' nello slot `biases` del triple
+     * (multishard_get_triple fallback `.biases` -> `.bias`) e query il path plain di
+     * quantized_linear_cfg lo APPLICA (res + biases). NON ri-aggiungerlo qui (double-bias). */
     mlx_array_free(w); mlx_array_free(sc); mlx_array_free(bb);
     return ok;
 }
