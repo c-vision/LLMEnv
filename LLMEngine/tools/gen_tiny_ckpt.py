@@ -255,6 +255,13 @@ TINY = {
         use_qkv_bias=True, partial_rotary_factor=0.5, layer_norm_eps=1e-5,
         use_parallel_residual=True, qk_layernorm=True,
     ),
+    # telechat3: llama GQA + bias su q/k/v/o/mlp.
+    "telechat3": dict(
+        cls="telechat3", model_type="telechat3",
+        vocab_size=128, hidden_size=64, intermediate_size=128, max_position_embeddings=512,
+        num_attention_heads=4, num_hidden_layers=2, num_key_value_heads=2, rms_norm_eps=1e-6,
+        rope_theta=10000.0, mlp_bias=True, attention_bias=True,
+    ),
 }
 
 

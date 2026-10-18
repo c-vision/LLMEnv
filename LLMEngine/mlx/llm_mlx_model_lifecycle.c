@@ -67,6 +67,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "joyai_llm_flash", deepseek_v3_attention_block, deepseek_v2_ffn_block }, /* = deepseek_v3 */
     { "kimi_linear", kimi_linear_attention_dispatch, kimi_linear_ffn_dispatch }, /* MLA assorbita + KDA */
     { "llama",     llama_attention_block,     dense_swiglu_ffn },
+    { "telechat3",  llama_attention_block,     dense_swiglu_ffn }, /* Telechat3: llama GQA + bias q/k/v/o/mlp */
     { "ernie4_5",  llama_attention_block,   dense_swiglu_ffn }, /* ERNIE-4.5 dense: riusa i blocchi llama */
     { "lfm2",      lfm2_attention_dispatch,   lfm2_ffn_block }, /* LFM2 (Liquid): ibrido GQA(+q/k-layerNorm) / ShortConv */
     { "lfm2_moe",  lfm2_attention_dispatch,   moe_v2_ffn_block }, /* migrato a moe_v2 (ffn_norm/feed_forward, sigmoid+expert_bias+derive) */
