@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
             id<MTL4ComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc setComputePipelineState:pipe];
             [enc setArgumentTable:at];
-                [enc setThreadgroupMemoryLength:2048 atIndex:0];
+                [enc setThreadgroupMemoryLength:4096 atIndex:0];
             [enc dispatchThreadgroups:MTLSizeMake(N / 32, M / 32, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
             [enc endEncoding];
             [cb endCommandBuffer];
@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
                 [cb beginCommandBufferWithAllocator:alloc];
                 id<MTL4ComputeCommandEncoder> enc = [cb computeCommandEncoder];
                 [enc setComputePipelineState:pipe]; [enc setArgumentTable:at];
-                [enc setThreadgroupMemoryLength:2048 atIndex:0];
+                [enc setThreadgroupMemoryLength:4096 atIndex:0];
                 [enc dispatchThreadgroups:MTLSizeMake(N / 32, M / 32, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
                 [enc endEncoding]; [cb endCommandBuffer];
                 [queue commit:&cb count:1];
@@ -152,7 +152,7 @@ int main(int argc, char** argv) {
             for (int b = 0; b < BATCH; b++) {
                 id<MTL4ComputeCommandEncoder> enc = [cb computeCommandEncoder];
                 [enc setComputePipelineState:pipe]; [enc setArgumentTable:at];
-                [enc setThreadgroupMemoryLength:2048 atIndex:0];
+                [enc setThreadgroupMemoryLength:4096 atIndex:0];
                 [enc dispatchThreadgroups:MTLSizeMake(N / 32, M / 32, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
                 [enc endEncoding];
             }
