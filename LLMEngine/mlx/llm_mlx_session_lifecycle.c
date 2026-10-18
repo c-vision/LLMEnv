@@ -191,6 +191,10 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
         /* OpenELM: embed = transformer.token_embeddings; norm finale = transformer.norm (RMSNorm). */
         snprintf(embed_name, sizeof(embed_name), "transformer.token_embeddings");
         snprintf(norm_name, sizeof(norm_name), "transformer.norm.weight");
+    } else if (strcmp(m->cfg.model_type, "internlm2") == 0) {
+        /* InternLM2: embed = model.tok_embeddings; norm finale = model.norm; lm_head = output (o tied). */
+        snprintf(embed_name, sizeof(embed_name), "model.tok_embeddings");
+        snprintf(norm_name, sizeof(norm_name), "model.norm.weight");
     } else {
         snprintf(embed_name, sizeof(embed_name), "%sembed_tokens", prefix);
         /* LFM2: la RMSNorm finale del modello e' `embedding_norm` (verificato sul checkpoint reale),
@@ -233,6 +237,8 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
     char lm_name[64];
     if (strcmp(m->cfg.model_type, "gpt_neox") == 0)
         snprintf(lm_name, sizeof(lm_name), "model.embed_out");
+    else if (strcmp(m->cfg.model_type, "internlm2") == 0)
+        snprintf(lm_name, sizeof(lm_name), "output");
     else
         snprintf(lm_name, sizeof(lm_name), "%s",
              (strcmp(m->cfg.model_type, "qwen3_5") == 0 || strcmp(m->cfg.model_type, "qwen3_5_moe") == 0

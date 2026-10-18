@@ -193,6 +193,13 @@ TINY = {
         first_k_dense_replace=1, max_position_embeddings=512, rms_norm_eps=1e-6,
         rope_theta=10000.0, attention_bias=False, rope_scaling={"factor": 1.0},
     ),
+    # internlm2: wqkv fuso interleaved (GQA per-gruppo) + MLP w1/w2/w3.
+    "internlm2": dict(
+        cls="internlm2", model_type="internlm2",
+        vocab_size=128, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-6,
+        bias=True, max_position_embeddings=512, rope_theta=10000.0,
+    ),
 }
 
 

@@ -557,4 +557,9 @@ bool openelm_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h,
 bool deepseek_v3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens,
                                  mlx_array x, mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 
+/* --- dominio InternLM2 (llm_mlx_internlm2.c) — qkv fuso interleaved + w1/w2/w3 --- */
+bool internlm2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens,
+                               mlx_array x, mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool internlm2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+
 #endif /* LLM_MLX_PROTOS_H */

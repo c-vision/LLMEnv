@@ -84,6 +84,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "lille-130m", lille_attention_block, lille_ffn_block }, /* Lille-130m (Apple) */
     { "gpt_neox", gpt_neox_attention_block, gpt_neox_ffn_block }, /* GPT-NeoX/Pythia: parallel residual (blocco nell'attn) */
     { "qwen", qwen_attention_block, qwen_ffn_block }, /* Qwen v1/v1.5: c_attn fuso + MLP 2-proj */
+    { "internlm2", internlm2_attention_block, internlm2_ffn_block }, /* InternLM2: wqkv fuso interleaved + w1/w2/w3 */
     { "hunyuan_v1_dense", hunyuan_attention_block, dense_swiglu_ffn }, /* Hunyuan v1 dense: GQA+bias + qk-norm (query/key_layernorm) + SwiGLU */
     { "gpt2", gpt2_attention_block, gpt2_ffn_block }, /* GPT-2: c_attn fuso + GELU-approx + learned PE (wpe) */
     { "gpt_bigcode", gptbigcode_attention_block, gptbigcode_ffn_block }, /* GPT-BigCode/StarCoder: MQA + GELU esatto + learned PE */
