@@ -562,4 +562,9 @@ bool internlm2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, 
                                mlx_array x, mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool internlm2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 
+/* --- dominio Phi-3 (llm_mlx_phi3.c) — qkv fuso [Q|K|V] + gate_up fuso --- */
+bool phi3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens,
+                          mlx_array x, mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool phi3_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+
 #endif /* LLM_MLX_PROTOS_H */

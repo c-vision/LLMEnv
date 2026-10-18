@@ -348,6 +348,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_openelm.c
     llm_mlx_deepseek3.c
     llm_mlx_internlm2.c
+    llm_mlx_phi3.c
     oss/llm_mlx_gptoss_ffn.c
     llm_mlx_selftest_eval.c
     llm_mlx_sensitivity.c

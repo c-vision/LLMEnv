@@ -233,6 +233,13 @@ TINY = {
         qk_rope_head_dim=8, v_head_dim=16, qk_nope_head_dim=16, rms_norm_eps=1e-6,
         rope_theta=1600000.0, max_position_embeddings=512, tie_word_embeddings=True,
     ),
+    # phi3: qkv fuso [Q|K|V] + gate_up fuso + RoPE parziale.
+    "phi3": dict(
+        cls="phi3", model_type="phi3",
+        vocab_size=128, hidden_size=64, intermediate_size=128, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-6,
+        rope_theta=10000.0, partial_rotary_factor=0.5, max_position_embeddings=512,
+    ),
 }
 
 
