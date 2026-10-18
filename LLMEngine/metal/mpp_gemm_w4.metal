@@ -65,14 +65,12 @@ kernel void mpp_gemm_w4(device const half*  A  [[buffer(0)]],
                 int blk = (col0 / 32);                          /* blocco di 32 colonne */       \
                 const device uchar* p = Bn + ((size_t)((k0) + r) * nb + blk) * 16;                \
                 half s = Bs[(size_t)((k0) + r) * nb + blk];                                       \
+                uint4 q = *(const device uint4*)p;                                                \
+                uint wv[4] = { q.x, q.y, q.z, q.w };                                              \
                 for (int w = 0; w < 4; w++) {                                                     \
-                    uchar4 b = *(const device uchar4*)(p + w * 4);                                 \
-                    uchar v[4] = { b.x, b.y, b.z, b.w };                                          \
-                    for (int j = 0; j < 4; j++) {                                                 \
-                        int lo = (int)(v[j] & 0x0Fu) - 8;                                         \
-                        int hi = (int)(v[j] >> 4) - 8;                                            \
-                        bS[r * TN + w * 8 + j * 2 + 0] = (half)((float)lo * (float)s);            \
-                        bS[r * TN + w * 8 + j * 2 + 1] = (half)((float)hi * (float)s);            \
+                    for (int j = 0; j < 8; j++) {                                                 \
+                        int nib = (int)((wv[w] >> (4 * j)) & 0xFu) - 8;                           \
+                        bS[r * TN + w * 8 + j] = (half)((float)nib * (float)s);                   \
                     }                                                                             \
                 }                                                                                 \
             }                                                                                     \
