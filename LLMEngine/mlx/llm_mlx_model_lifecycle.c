@@ -90,6 +90,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "phi3", phi3_attention_block, phi3_ffn_block }, /* Phi-3: qkv fuso [Q|K|V] + gate_up fuso (RoPE parziale) */
     { "starcoder2", starcoder2_attention_block, starcoder2_ffn_block }, /* StarCoder2: LayerNorm + q/k/v/o bias + gelu esatto */
     { "stablelm", stablelm_attention_block, stablelm_ffn_block }, /* StableLM: LayerNorm + RoPE parziale + qkv bias */
+    { "minicpm", minicpm_attention_block, minicpm_ffn_block }, /* MiniCPM v1/v2: llama + muP */
     { "hunyuan_v1_dense", hunyuan_attention_block, dense_swiglu_ffn }, /* Hunyuan v1 dense: GQA+bias + qk-norm (query/key_layernorm) + SwiGLU */
     { "gpt2", gpt2_attention_block, gpt2_ffn_block }, /* GPT-2: c_attn fuso + GELU-approx + learned PE (wpe) */
     { "gpt_bigcode", gptbigcode_attention_block, gptbigcode_ffn_block }, /* GPT-BigCode/StarCoder: MQA + GELU esatto + learned PE */

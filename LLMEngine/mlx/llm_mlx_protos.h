@@ -577,4 +577,9 @@ bool stablelm_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
                               mlx_array x, mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
 bool stablelm_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
 
+/* --- dominio MiniCPM v1/v2 (llm_mlx_minicpm.c) — llama + muP (embed/residuo/logits scale) --- */
+bool minicpm_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens,
+                             mlx_array x, mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h);
+bool minicpm_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out);
+
 #endif /* LLM_MLX_PROTOS_H */

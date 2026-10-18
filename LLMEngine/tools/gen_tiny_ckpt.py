@@ -262,6 +262,14 @@ TINY = {
         num_attention_heads=4, num_hidden_layers=2, num_key_value_heads=2, rms_norm_eps=1e-6,
         rope_theta=10000.0, mlp_bias=True, attention_bias=True,
     ),
+    # minicpm v1/v2: llama + muP (scale_emb/scale_depth/dim_model_base).
+    "minicpm": dict(
+        cls="minicpm", model_type="minicpm",
+        vocab_size=128, hidden_size=64, intermediate_size=128, num_hidden_layers=4,
+        num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-5,
+        dim_model_base=256, scale_depth=1.4, scale_emb=12.0,
+        max_position_embeddings=512, rope_theta=10000.0,
+    ),
 }
 
 

@@ -429,6 +429,16 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_FLOAT(partial_rotary_factor, "partial_rotary_factor", 1.0f);
         { cJSON* pr = cJSON_GetObjectItemCaseSensitive(src, "use_parallel_residual");
           cfg->parallel_residual = cJSON_IsBool(pr) ? (cJSON_IsTrue(pr) ? 1 : 0) : 0; }
+    } else if (strcmp(cfg->model_type, "minicpm") == 0) {
+        /* MiniCPM v1/v2: llama-like + muP (embed × scale_emb; ramo residuo × scale_depth/√L;
+         * logits ÷ (hidden/dim_model_base)). */
+        OPT_FLOAT(embed_scale, "scale_emb", 1.0f);
+        { cJSON* dm = cJSON_GetObjectItemCaseSensitive(src, "dim_model_base");
+          if (cJSON_IsNumber(dm) && cfg->hidden_size > 0)
+              cfg->falcon_h1_out_scale = (float)dm->valuedouble / (float)cfg->hidden_size; }
+        { cJSON* sd = cJSON_GetObjectItemCaseSensitive(src, "scale_depth");
+          float sdf = cJSON_IsNumber(sd) ? (float)sd->valuedouble : 1.0f;
+          if (cfg->n_layers > 0) cfg->granite.residual_multiplier = sdf / sqrtf((float)cfg->n_layers); }
     } else if (strcmp(cfg->model_type, "qwen") == 0) {
         /* Qwen v1/v1.5: RMSNorm + c_attn fuso + RoPE pieno + MLP 2-proj (w1/w2/c_proj); MHA. */
         OPT_FLOAT(rms_norm_eps, "layer_norm_epsilon", 1e-6f);
