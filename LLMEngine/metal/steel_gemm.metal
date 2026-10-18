@@ -1,6 +1,6 @@
 // steel_gemm.metal — GEMM f16 "steel" (standalone, no engine deps)
-// Tile 64x64x32, 4 simdgroup (2x2 warp-tile), double-buffer (2 shared buffer set),
-// carichi vettoriali uint4 (16 byte), register blocking 4x4 frag simdgroup_matrix.
+// Tile 64x64x32, 4 simdgroup (2x2 warp-tile), register blocking 4x4 fragment
+// simdgroup_matrix, carichi uint4 16B, double-buffer As/Bs.
 #include <metal_stdlib>
 #include <metal_simdgroup_matrix>
 using namespace metal;
@@ -19,7 +19,6 @@ kernel void steel_f16_gemm(device const half* A [[buffer(0)]],
                            uint3 tgpig [[threadgroup_position_in_grid]],
                            uint  tiitg [[thread_index_in_threadgroup]],
                            uint  sgitg [[simdgroup_index_in_threadgroup]]) {
-    // double buffer: [2][BM*BK + BK*BN]
     threadgroup half* As[2] = { shmem, shmem + BM * BK + BK * BN };
     threadgroup half* Bs[2] = { shmem + BM * BK, shmem + BM * BK + BK * BN + BM * BK };
     const int row0 = tgpig.y * BM;
@@ -34,12 +33,11 @@ kernel void steel_f16_gemm(device const half* A [[buffer(0)]],
 
     const int sr = (sgitg / 2) * 32;
     const int sc = (sgitg % 2) * 32;
-
     const int iters = K / BK;
+
     for (int it = 0; it < iters; it++) {
         const int cur = it & 1;
         const int k0 = it * BK;
-        // load into buffer `cur` (the previous mma already used buffer `cur^1`)
         for (int q = 0; q < 2; q++) {
             int idx = t * 2 + q;
             int r = idx >> 2, c = (idx & 3) * 8;
