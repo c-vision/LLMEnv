@@ -326,10 +326,10 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
     }
     if (m->arch != NULL &&
         (strcmp(m->cfg.model_type, "deepseek_v3") == 0 || strcmp(m->cfg.model_type, "kimi_k2") == 0 ||
-         strcmp(m->cfg.model_type, "joyai_llm_flash") == 0 ||
-         (strcmp(m->cfg.model_type, "deepseek_v2") == 0 && (m->cfg.q_lora_rank > 0 || m->cfg.n_group > 1))))
-        fprintf(stderr, "ATTENZIONE: %s (MLA): percorso implementato ma NON validato (solo "
-                        "DeepSeek-V2-Lite lo e'); l'output puo' essere errato.\n", m->cfg.model_type);
+         strcmp(m->cfg.model_type, "joyai_llm_flash") == 0))
+        fprintf(stderr, "ATTENZIONE: %s (MLA): percorso implementato ma NON validato vs reference "
+                        "(deepseek_v2 — V2-Lite E con q_lora/group — e' ora VERIFICATO via tiny; "
+                        "deepseek_v3/kimi_k2 no). L'output puo' essere errato.\n", m->cfg.model_type);
     if (!m->arch) {
         if (strcmp(m->cfg.model_type, "deepseek_v41") == 0)
             fprintf(stderr, "llm_ai_mlx_load_model: deepseek_v41 — port MATEMATICO completo e "
