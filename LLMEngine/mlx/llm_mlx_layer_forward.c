@@ -737,12 +737,12 @@ bool layer_forward(LlmMlxModel* m, LlmMlxSession* kvq_sess, int layer_idx, int c
                     /* EVAL (2026-10-01): senza, il `contiguous` resta LAZY e la vista slice
                      * trattiene il BACKING full della KV fp16 finche' il grafo non e' consumato
                      * -> +1x KV fp16 (~60KB/token, misurato +4.5GB@71k). Valutare qui libera il full. */
-                    mlx_array_eval(*k_cache);
+                    if (valid_count > 2 * thr) mlx_array_eval(*k_cache);   /* sync solo al trim iniziale (backing grande); poi il backing e' ~thr: niente eval per layer per token */
                 }
                 if (mlx_slice(&vr, *v_cache, r0,4,r1,4,one,4,m->stream) == 0 &&
                     mlx_contiguous(&vrc, vr, false, m->stream) == 0) {
                     mlx_array_set(v_cache, vrc);
-                    mlx_array_eval(*v_cache);
+                    if (valid_count > 2 * thr) mlx_array_eval(*v_cache);
                 }
                 mlx_array_free(kr); mlx_array_free(krc); mlx_array_free(vr); mlx_array_free(vrc);
             }
