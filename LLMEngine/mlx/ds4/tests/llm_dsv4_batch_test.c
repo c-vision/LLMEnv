@@ -52,6 +52,7 @@ int main(int argc, char** argv) {
     const int nv = 129280; double ta, tb; int aa, ab;
     llm_ai_mlx_opt_set("dsv4_prefill_f16", "0"); llm_ai_mlx_opt_set("dsv4_gpu_hc", "0"); llm_ai_mlx_opt_set("dsv4_gpu_raw_attn", "1"); llm_ai_mlx_opt_set("dsv4_prefill_mm", "0");
     if (argc > 6) llm_ai_mlx_opt_set("dsv4_comp_fuse", argv[6]);   /* catena compressore fusa (test) */
+    for (int i = 7; i < argc; i++) { char* eq = strchr(argv[i], '='); if (eq) { *eq = 0; llm_ai_mlx_opt_set(argv[i], eq + 1); } }   /* opzioni extra nome=valore (da argv[7]) */
     /* batch HOST (gpu_hc=1, batch_dev=0) vs batch DEVICE (batch_dev=1): stesse kernel/matematica, cambia solo
      * DOVE vivono res/out -> DEVE essere bit-exact. Per il caso `batchdev`: A = batch host, B = batch device. */
     int is_batchdev = !strcmp(cs, "batchdev");

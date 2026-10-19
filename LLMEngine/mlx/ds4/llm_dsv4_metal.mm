@@ -1576,6 +1576,40 @@ static const char* const LLM_DSV4_METAL_MOE =
 "    const uint width = P[0], ratio = P[1], pm0 = P[2], nt = P[3]; if (g.x >= width || g.y >= nt) return;\n"
 "    XSC[(ulong)g.y * width + g.x] = PSC[(ulong)g.y * width + g.x] + APE[(ulong)((pm0 + g.y) % ratio) * width + g.x];\n"
 "}\n"
+"kernel void dsv4_gemv_f32_nt2(device const float* W [[buffer(0)]], device const float* X [[buffer(1)]], device float* O [[buffer(2)]],\n"
+"    constant uint* P [[buffer(3)]], uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {\n"
+"    /* STESSA somma per output di dsv4_gemv_f32_nt (la lane l accumula gli i == l mod 32 in ordine crescente, poi simd_sum) => BIT-EXACT.\n"
+"     * Differenza: 8 simdgroup (2 righe ciascuno = 16 righe) x 32 token per threadgroup; il tile di X (32 token x 128) e' in\n"
+"     * memoria di threadgroup condivisa, quindi X si legge una volta per 16 righe invece che per 4 e i pesi una volta per 32 token. */\n"
+"    const uint n = P[0], nt = P[1], od = P[2];\n"
+"    const uint sg = tid >> 5, lane = tid & 31u;\n"
+"    const uint row0 = tg.x * 16u + sg * 2u, t0 = tg.y * 32u;\n"
+"    threadgroup float xs[32][128];\n"
+"    float acc0[32], acc1[32];\n"
+"    for (uint k = 0; k < 32u; k++) { acc0[k] = 0.f; acc1[k] = 0.f; }\n"
+"    const bool ok0 = row0 < od, ok1 = row0 + 1u < od;\n"
+"    device const float* w0p = W + (ulong)(ok0 ? row0 : 0u) * n;\n"
+"    device const float* w1p = W + (ulong)(ok1 ? row0 + 1u : 0u) * n;\n"
+"    for (uint base = 0; base < n; base += 128u) {\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        for (uint idx = tid; idx < 32u * 128u; idx += 256u) {\n"
+"            const uint kk = idx >> 7, ii = idx & 127u;\n"
+"            xs[kk][ii] = (t0 + kk < nt && base + ii < n) ? X[(ulong)(t0 + kk) * n + base + ii] : 0.f;\n"
+"        }\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        for (uint j = 0; j < 4u; j++) {\n"
+"            const uint ii = lane + 32u * j, i = base + ii;\n"
+"            if (i < n) {\n"
+"                const float w0 = ok0 ? w0p[i] : 0.f, w1 = ok1 ? w1p[i] : 0.f;\n"
+"                for (uint k = 0; k < 32u; k++) { const float xv = xs[k][ii]; acc0[k] += w0 * xv; acc1[k] += w1 * xv; }\n"
+"            }\n"
+"        }\n"
+"    }\n"
+"    for (uint k = 0; k < 32u; k++) {\n"
+"        const float s0 = simd_sum(acc0[k]), s1 = simd_sum(acc1[k]);\n"
+"        if (lane == 0u && t0 + k < nt) { if (ok0) O[(ulong)(t0 + k) * od + row0] = s0; if (ok1) O[(ulong)(t0 + k) * od + row0 + 1u] = s1; }\n"
+"    }\n"
+"}\n"
 /* Indexer QAT: Hadamard128 + FP4 e2m1 per blocco-32, in-place per riga (head_dim=128). P={n_rows,hd}. */
 "kernel void dsv4_indexer_qat(device float* X [[buffer(0)]], constant uint* P [[buffer(1)]], uint gid [[thread_position_in_grid]]) {\n"
 "    const uint n_rows = P[0], hd = P[1]; if (gid >= n_rows || hd != 128u) return;\n"
@@ -1659,7 +1693,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
     id<MTLComputePipelineState> pso_mmp_q8, pso_mmp_iq2, pso_mmp_q2k, pso_mmp_q4k, pso_mmp_iq2a, pso_mmp_q2ka, pso_mmp_q4ka;   /* MPP (nil se non disponibile) */
-    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_rope_rows_inv, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_comp_chain, pso_rope_ev, pso_iscore_t, pso_iscore_t_mma, pso_itopk_t, pso_apart_t, pso_apart_mma, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
+    id<MTLComputePipelineState> pso_route_b, pso_gemv_nt, pso_gemv_nt2, pso_state_store, pso_hcb_scale, pso_hcb_mixes, pso_hcb_sink, pso_hcb_norm, pso_hcb_post, pso_mm_iq2a, pso_mm_q2ka, pso_mm_q4ka, pso_q4_pair, pso_q4_sum6, pso_rms_rows, pso_head_rms_rows, pso_rope_rows, pso_rope_rows_inv, pso_mm_map1, pso_mm_map8, pso_fp8_rows, pso_pool_ev, pso_comp_chain, pso_rope_ev, pso_iscore_t, pso_iscore_t_mma, pso_itopk_t, pso_apart_t, pso_apart_mma, pso_amerge_t, pso_ape_rows, pso_mm_q8, pso_mm_map0, pso_mm_iq2, pso_mm_q2k, pso_mm_q4k, pso_swiglu_w, pso_sum_slots6;  /* MoE batched mul_mm_id */
     id<MTLComputePipelineState> pso_rms_w, pso_head_rms, pso_rope; /* RMSNorm/RoPE su GPU (ds4) */
     id<MTLComputePipelineState> pso_swiglu, pso_add; /* shared expert su GPU (swiglu + accumulate) */
     id<MTLComputePipelineState> pso_rms_no_w, pso_gemv_f32, pso_rms_no_w_p, pso_rms_w_p, pso_gemv_p, pso_route_p, pso_sinkhorn, pso_hc_sum, pso_hc_post; /* mHC */
@@ -1870,7 +1904,7 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     }
     {   /* MoE batched (mul_mm_id): opzionale, se manca il path per-token resta valido */
         struct { const char* n; id<MTLComputePipelineState> __strong* dst; } mmk[] = {
-            { "kernel_mul_mm_id_map0_ne20_6", &b->pso_mm_map0 }, { "kernel_mul_mm_id_map0_ne20_1", &b->pso_mm_map1 }, { "dsv4_gemv_f32_nt", &b->pso_gemv_nt }, { "dsv4_route_batch", &b->pso_route_b }, { "dsv4_state_store", &b->pso_state_store }, { "dsv4_hcb_scale", &b->pso_hcb_scale }, { "dsv4_hcb_mixes", &b->pso_hcb_mixes },
+            { "kernel_mul_mm_id_map0_ne20_6", &b->pso_mm_map0 }, { "kernel_mul_mm_id_map0_ne20_1", &b->pso_mm_map1 }, { "dsv4_gemv_f32_nt", &b->pso_gemv_nt }, { "dsv4_gemv_f32_nt2", &b->pso_gemv_nt2 }, { "dsv4_route_batch", &b->pso_route_b }, { "dsv4_state_store", &b->pso_state_store }, { "dsv4_hcb_scale", &b->pso_hcb_scale }, { "dsv4_hcb_mixes", &b->pso_hcb_mixes },
             { "dsv4_hcb_sinkhorn", &b->pso_hcb_sink }, { "dsv4_hcb_norm", &b->pso_hcb_norm }, { "dsv4_hcb_post", &b->pso_hcb_post }, { "kernel_mul_mm_id_iq2_xxs_addr_f32", &b->pso_mm_iq2a },
             { "kernel_mul_mm_id_q2_K_addr_f32", &b->pso_mm_q2ka }, { "kernel_mul_mm_id_q4_K_addr_f32", &b->pso_mm_q4ka }, { "kernel_mul_mv_slots6_q4_K_pair_swiglu_f32", &b->pso_q4_pair },
             { "kernel_mul_mv_slots6_q4_K_sum6_f32", &b->pso_q4_sum6 }, { "dsv4_rms_w_rows", &b->pso_rms_rows },
@@ -3493,6 +3527,13 @@ int llm_dsv4_metal_comp_shift(LlmDsv4Metal* b, void* h, int n, int src) {
 
 /* Middle attenzione (compressor+indexer+attn) in UNA command buffer. Replica
  * llm_dsv4_attn_cached_mid a valle della proiezione. KV/stato su device. 0 = ok. */
+/* PROFILO (opzione dsv4_profile>=2): chiude la cb dopo ogni stadio, attende e attribuisce i ms GPU reali a un op separato
+ * (10 faseA, 11 hoist+raw, 12 compressor, 13 scores, 14 topk, 15 attenzione). Solo diagnostica: serializza le cb. */
+static void dsv4_prof_cut(LlmDsv4Metal* b, id<MTLCommandBuffer>* cb, id<MTLComputeCommandEncoder>* e, int op) {
+    [*e endEncoding]; dsv4_res_commit(b); [*cb commit]; [*cb waitUntilCompleted];
+    int sv = g_dsv4_mtl_op; g_dsv4_mtl_op = op; dsv4_gpu_acct(*cb); g_dsv4_mtl_op = sv;
+    *cb = [b->queue commandBuffer]; *e = [*cb computeCommandEncoder];
+}
 int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, int nt, void** heads_dev_out) {
     if (!b || !ps || nt <= 0 || !ps[0].heads) return -1;
     if (!b->pso_gemv_f32 || !b->pso_rms_w || !b->pso_rope || !b->pso_add || !b->pso_comp_pool || !b->pso_attn_mixed) return -1;
@@ -3543,12 +3584,18 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         /* DECODE (nt==1): gemv_f32_nt e' una tile da 16 token (4 righe x 16 acc): a nt=1 fa 16 FMA per peso di cui 15 su zeri
          * (misurato: ~35-40 GB/s, 95% del GPU del mid). gemv_f32 (1 riga per TG) ha lo STESSO ordine di accumulo
          * (lane i, i+32, ... poi simd_sum) -> risultato identico bit a bit. */
+        int gemv2_on = 1; (void)llm_ai_mlx_opt_get_bool("dsv4_gemv2", &gemv2_on);   /* A/B: 0 = gemv a 4 righe x 16 token */
         #define GEMV_NT(W_BUF, XBUF, OBUF, NIN, NOUT) do { \
             if (nt == 1 && b->pso_gemv_f32) { \
                 g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_f32]; \
                 [e setBuffer:(id<MTLBuffer>)(W_BUF) offset:0 atIndex:0]; [e setBuffer:(XBUF) offset:0 atIndex:1]; [e setBuffer:(OBUF) offset:0 atIndex:2]; \
                 { uint32_t P_[2] = { (uint32_t)(NIN), 0u }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; } \
                 [e dispatchThreadgroups:MTLSizeMake((NSUInteger)(NOUT), 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; \
+            } else if (nt >= 32 && b->pso_gemv_nt2 && gemv2_on) { \
+            g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_nt2]; \
+            [e setBuffer:(id<MTLBuffer>)(W_BUF) offset:0 atIndex:0]; [e setBuffer:(XBUF) offset:0 atIndex:1]; [e setBuffer:(OBUF) offset:0 atIndex:2]; \
+            { uint32_t P_[3] = { (uint32_t)(NIN), (uint32_t)nt, (uint32_t)(NOUT) }; [e setBytes:P_ length:sizeof(P_) atIndex:3]; } \
+            [e dispatchThreadgroups:MTLSizeMake(((NSUInteger)(NOUT) + 15) / 16, ((NSUInteger)nt + 31) / 32, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)]; \
             } else { \
             g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_nt]; \
             [e setBuffer:(id<MTLBuffer>)(W_BUF) offset:0 atIndex:0]; [e setBuffer:(XBUF) offset:0 atIndex:1]; [e setBuffer:(OBUF) offset:0 atIndex:2]; \
@@ -3572,6 +3619,8 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
     const int n_prev = p0->raw_full ? cap_raw : p0->n_raw - 1;
     id<MTLBuffer> RAWX = dsv4_scratch(b, &b->sx[74], &b->sx_cap[74], (size_t)(n_prev + nt) * hd * sizeof(float));
     if (!RAWX) return -2;
+    const int prof2 = ({ int pv = 0; (void)llm_ai_mlx_opt_get_int("dsv4_prof_stages", &pv); pv >= 1; });
+    if (prof2) dsv4_prof_cut(b, &cb, &e, 10);
     /* Prepara in blocco (indipendente dal resto della catena): fp8+f16 della riga KV di ogni token; q indexer (rope, qat, scala pesi). */
     {
         const int nnope0 = hd - p0->n_rot;
@@ -3625,6 +3674,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
         if (ndue != nev) use_tok = 0;
         if (p0->has_idx && nevi != nev) use_tok = 0;
     }
+    if (prof2) dsv4_prof_cut(b, &cb, &e, 11);
     if (use_tok) {
         const int nh_ = p0->n_head;
         const int pm0 = ratio > 0 ? p0->pos % ratio : 0;
@@ -3719,6 +3769,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
                 COPYF(XS, (NSUInteger)((size_t)(S0 + nt - keep) * w_ * 4), sts, 0, (size_t)keep * w_);
             }
         }
+        if (prof2) dsv4_prof_cut(b, &cb, &e, 12);
         if (p0->has_idx) {
             /* Indexer scores MMA (una TG per blocco di 32 chiavi): riduce la rilettura di q (~32x) e usa i
              * tensor core. Opt-in dsv4_indexer_mma=1 (default OFF: l'ordine di accumulo differisce dallo scalare). */
@@ -3732,6 +3783,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             [e setBuffer:NCB offset:0 atIndex:5];
             if (imma) [e dispatchThreadgroups:MTLSizeMake((NSUInteger)((max_ic + 31) / 32), (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
             else      [e dispatchThreadgroups:MTLSizeMake((NSUInteger)max_ic, (NSUInteger)nt, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            if (prof2) dsv4_prof_cut(b, &cb, &e, 13);
             g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_itopk_t];
             [e setBuffer:SCB offset:0 atIndex:0]; [e setBuffer:ALB offset:0 atIndex:1];
             { uint32_t P_[3] = { (uint32_t)max_ic, (uint32_t)p0->idx_top_k, 256u }; [e setBytes:P_ length:sizeof(P_) atIndex:2]; }
@@ -3739,6 +3791,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             /* radix-select: una threadgroup (256) per token, O(n_comp) invece di O(n_comp^2) */
             [e dispatchThreadgroups:MTLSizeMake((NSUInteger)nt, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         }
+        if (prof2) dsv4_prof_cut(b, &cb, &e, 14);
         {   /* attenzione a gruppi di 32 token */
             const int G_ = 32;
             id<MTLBuffer> PT = dsv4_scratch(b, &b->sx[83], &b->sx_cap[83], (size_t)G_ * nh_ * nsm * (size_t)(hd + 2) * 4);
@@ -3890,6 +3943,7 @@ int llm_dsv4_metal_attn_mid_batch(LlmDsv4Metal* b, const LlmDsv4MidParams* ps, i
             cb = [b->queue commandBuffer]; e = [cb computeCommandEncoder];
         }
     }
+    if (prof2) dsv4_prof_cut(b, &cb, &e, 15);
     {   /* stato raw = ultime min(cap, n_prev+nt) righe del buffer lineare */
         const int keep = (n_prev + nt < cap_raw) ? n_prev + nt : cap_raw;
         g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_copy];

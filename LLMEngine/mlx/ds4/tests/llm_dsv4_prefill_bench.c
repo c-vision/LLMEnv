@@ -2,6 +2,7 @@
  * Uso: prefill_bench [gguf] [n_tok] [chunk] [cache_mb] [tokfile]   (aggira il limite di lunghezza del prompt del CLI) */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include "llm_dsv4_engine.h"
 #include "llm_engine_opts.h"
@@ -9,6 +10,7 @@ int main(int argc, char** argv) {
     const char* path = argc > 1 ? argv[1] : "/Users/gaetano/ds4/ds4flash.gguf";
     int n = argc > 2 ? atoi(argv[2]) : 4096, chunk = argc > 3 ? atoi(argv[3]) : 512;
     if (argc > 4) llm_ai_mlx_opt_set("dsv4_cache_mb", argv[4]);
+    for (int i = 6; i < argc; i++) { char* eq = strchr(argv[i], '='); if (eq) { *eq = 0; llm_ai_mlx_opt_set(argv[i], eq + 1); } }   /* opzioni extra: nome=valore */
     int* tok = (int*)malloc(sizeof(int) * (size_t)n); unsigned s = 12345;
     for (int i = 0; i < n; i++) { s = s * 1103515245u + 12345u; tok[i] = 1000 + (int)((s >> 8) % 20000); }
     if (argc > 5 && argv[5][0]) { FILE* f = fopen(argv[5], "r"); int v, k = 0;   /* token id separati da spazio (es. da `ds4 --dump-tokens`) */
@@ -33,6 +35,16 @@ int main(int argc, char** argv) {
         printf("  %d/%d  %.1fs\n", i + m, n, (b.tv_sec - a.tv_sec) + (b.tv_nsec - a.tv_nsec) * 1e-9); fflush(stdout); }
     double dt = (b.tv_sec - a.tv_sec) + (b.tv_nsec - a.tv_nsec) * 1e-9;
     printf("prefill n=%d chunk=%d: %.1fs = %.1f t/s\n", n, chunk, dt, n / dt);
+    {   /* ms GPU reali per classe di cb (op); con dsv4_profile=2 il mid e' spezzato per stadio (serializza: solo diagnostica) */
+        static const char* nm[16] = { "altro", "attn proj+mid", "moe", "attn finish/out", "", "", "", "", "", "", "mid: fase A gemv", "mid: hoist+raw", "mid: compressor", "mid: idx scores", "mid: idx topk", "mid: attenzione" };
+        double tot = 0;
+        for (int o = 0; o < 16; o++) tot += llm_dsv4_metal_gpu_ms_op(o);
+        printf("GPU ms per op (somma %.0f ms):\n", tot);
+        for (int o = 0; o < 16; o++) {
+            double ms = llm_dsv4_metal_gpu_ms_op(o);
+            if (ms > 0.5) printf("  op%-2d %-18s %9.0f ms  (%4.1f%%)  cb=%ld\n", o, nm[o], ms, 100.0 * ms / tot, llm_dsv4_metal_command_buffers_op(o));
+        }
+    }
     /* decode greedy (opzionale, argv[7] = numero token; default 0 = off). */
     int ndec = (argc > 7) ? atoi(argv[7]) : 0;
     if (ndec > 0) {
