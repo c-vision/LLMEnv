@@ -42,14 +42,14 @@ typedef struct LgJ {
 
 typedef struct { const char* p; const char* end; const char* base; int err; } LgP;
 
-static void lg_ws(LgP* P) { while (P->p < P->end && (*P->p == ' ' || *P->p == '\n' || *P->p == '\t' || *P->p == '\r')) P->p++; }
-static void lg_jfree(LgJ* j) {
+static inline void lg_ws(LgP* P) { while (P->p < P->end && (*P->p == ' ' || *P->p == '\n' || *P->p == '\t' || *P->p == '\r')) P->p++; }
+static inline void lg_jfree(LgJ* j) {
     if (!j) return;
     for (int i = 0; i < j->n; i++) { lg_jfree(j->kv[i]); if (j->keys) free(j->keys[i]); }
     free(j->kv); free(j->keys); free(j->s); free(j);
 }
-static LgJ* lg_parse_val(LgP* P, int depth);
-static char* lg_parse_str(LgP* P, int* outl) {
+static inline LgJ* lg_parse_val(LgP* P, int depth);
+static inline char* lg_parse_str(LgP* P, int* outl) {
     if (P->p >= P->end || *P->p != '"') { P->err = 1; return NULL; }
     P->p++;
     size_t cap = 16, n = 0; char* o = (char*)malloc(cap); if (!o) { P->err = 1; return NULL; }
@@ -78,7 +78,7 @@ static char* lg_parse_str(LgP* P, int* outl) {
     if (P->p >= P->end) { P->err = 1; free(o); return NULL; }
     P->p++; o[n] = 0; *outl = (int)n; return o;
 }
-static LgJ* lg_parse_val(LgP* P, int depth) {
+static inline LgJ* lg_parse_val(LgP* P, int depth) {
     lg_ws(P);
     if (P->p >= P->end || depth > 64) { P->err = 1; return NULL; }
     LgJ* j = (LgJ*)calloc(1, sizeof *j); if (!j) { P->err = 1; return NULL; }
@@ -121,7 +121,7 @@ static LgJ* lg_parse_val(LgP* P, int depth) {
     if (P->err) { lg_jfree(j); return NULL; }
     return j;
 }
-static LgJ* lg_get(const LgJ* o, const char* k) {
+static inline LgJ* lg_get(const LgJ* o, const char* k) {
     if (!o || o->t != 5) return NULL;
     for (int i = 0; i < o->n; i++) if (!strcmp(o->keys[i], k)) return o->kv[i];
     return NULL;
@@ -161,26 +161,26 @@ typedef struct LlmGrammar {
     int hits, misses;
 } LlmGrammar;
 
-static int lg_node_new(LlmGrammar* g, int type) {
+static inline int lg_node_new(LlmGrammar* g, int type) {
     if (g->nn >= g->cn) { g->cn = g->cn ? g->cn * 2 : 32; g->nodes = (LgNode*)realloc(g->nodes, (size_t)g->cn * sizeof *g->nodes); if (!g->nodes) return -1; }
     memset(&g->nodes[g->nn], 0, sizeof(LgNode)); g->nodes[g->nn].type = (uint8_t)type;
     return g->nn++;
 }
-static int lg_prop_new(LlmGrammar* g) {
+static inline int lg_prop_new(LlmGrammar* g) {
     if (g->np >= g->cp) { g->cp = g->cp ? g->cp * 2 : 16; g->props = (LgProp*)realloc(g->props, (size_t)g->cp * sizeof *g->props); if (!g->props) return -1; }
     memset(&g->props[g->np], 0, sizeof(LgProp)); return g->np++;
 }
-static int lg_lit_new(LlmGrammar* g, const char* s, int l) {
+static inline int lg_lit_new(LlmGrammar* g, const char* s, int l) {
     if (g->nl >= g->cl) { g->cl = g->cl ? g->cl * 2 : 16; g->lits = (LgLit*)realloc(g->lits, (size_t)g->cl * sizeof *g->lits); if (!g->lits) return -1; }
     g->lits[g->nl].s = (char*)malloc((size_t)l + 1); if (!g->lits[g->nl].s) return -1;
     memcpy(g->lits[g->nl].s, s, (size_t)l); g->lits[g->nl].s[l] = 0; g->lits[g->nl].l = l; return g->nl++;
 }
-static int lg_br_new(LlmGrammar* g, int node) {
+static inline int lg_br_new(LlmGrammar* g, int node) {
     if (g->nb >= g->cb) { g->cb = g->cb ? g->cb * 2 : 8; g->br = (int*)realloc(g->br, (size_t)g->cb * sizeof(int)); if (!g->br) return -1; }
     g->br[g->nb] = node; return g->nb++;
 }
 /* testo JSON di una stringa (con virgolette ed escape) */
-static char* lg_json_quote(const char* s, int l, int* outl) {
+static inline char* lg_json_quote(const char* s, int l, int* outl) {
     char* o = (char*)malloc((size_t)l * 6 + 3); if (!o) return NULL; int n = 0; o[n++] = '"';
     for (int i = 0; i < l; i++) {
         unsigned char c = (unsigned char)s[i];
@@ -192,7 +192,7 @@ static char* lg_json_quote(const char* s, int l, int* outl) {
     o[n++] = '"'; o[n] = 0; *outl = n; return o;
 }
 /* serializza un valore JSON in forma compatta (per i letterali enum/const) */
-static int lg_ser(const LgJ* j, char** o, size_t* n, size_t* cap) {
+static inline int lg_ser(const LgJ* j, char** o, size_t* n, size_t* cap) {
     #define LG_PUT(str, l) do { if (*n + (size_t)(l) + 8 > *cap) { *cap = (*cap + (size_t)(l) + 8) * 2; *o = (char*)realloc(*o, *cap); if (!*o) return -1; } memcpy(*o + *n, (str), (size_t)(l)); *n += (size_t)(l); } while (0)
     if (j->t == 0) { LG_PUT("null", 4); }
     else if (j->t == 1) { if (j->b) { LG_PUT("true", 4); } else { LG_PUT("false", 5); } }
@@ -203,7 +203,7 @@ static int lg_ser(const LgJ* j, char** o, size_t* n, size_t* cap) {
     return 0;
     #undef LG_PUT
 }
-static int lg_enum_of(LlmGrammar* g, const LgJ* const* vals, int nv) {
+static inline int lg_enum_of(LlmGrammar* g, const LgJ* const* vals, int nv) {
     int nd = lg_node_new(g, LGN_ENUM); if (nd < 0) return -1;
     g->nodes[nd].po = g->nl; g->nodes[nd].np = nv;
     if (nv > LLM_GRAMMAR_MAXPROPS) return -1;
@@ -214,14 +214,14 @@ static int lg_enum_of(LlmGrammar* g, const LgJ* const* vals, int nv) {
     }
     return nd;
 }
-static int lg_enum_text(LlmGrammar* g, const char* const* txt, int nv) {
+static inline int lg_enum_text(LlmGrammar* g, const char* const* txt, int nv) {
     int nd = lg_node_new(g, LGN_ENUM); if (nd < 0) return -1;
     g->nodes[nd].po = g->nl; g->nodes[nd].np = nv;
     for (int i = 0; i < nv; i++) if (lg_lit_new(g, txt[i], (int)strlen(txt[i])) < 0) return -1;
     return nd;
 }
 
-static const LgJ* lg_resolve_ref(const LgJ* root, const char* ref) {
+static inline const LgJ* lg_resolve_ref(const LgJ* root, const char* ref) {
     if (ref[0] != '#' || ref[1] != '/') return NULL;
     const LgJ* cur = root; const char* p = ref + 2;
     while (*p && cur) {
@@ -231,8 +231,8 @@ static const LgJ* lg_resolve_ref(const LgJ* root, const char* ref) {
     return cur;
 }
 
-static int lg_compile(LlmGrammar* g, const LgJ* root, const LgJ* sc, int depth, char* err, size_t ec);
-static int lg_compile_type(LlmGrammar* g, const LgJ* root, const LgJ* sc, const char* ty, int depth, char* err, size_t ec) {
+static inline int lg_compile(LlmGrammar* g, const LgJ* root, const LgJ* sc, int depth, char* err, size_t ec);
+static inline int lg_compile_type(LlmGrammar* g, const LgJ* root, const LgJ* sc, const char* ty, int depth, char* err, size_t ec) {
     if (!strcmp(ty, "string")) {
         int nd = lg_node_new(g, LGN_STR); if (nd < 0) return -1;
         const LgJ* ml = lg_get(sc, "maxLength"); if (ml && ml->t == 2 && ml->num >= 1 && ml->num < 65000) g->nodes[nd].maxc = (int)ml->num;
@@ -276,7 +276,7 @@ static int lg_compile_type(LlmGrammar* g, const LgJ* root, const LgJ* sc, const 
     }
     snprintf(err, ec, "tipo non supportato: %s", ty); return -1;
 }
-static int lg_compile(LlmGrammar* g, const LgJ* root, const LgJ* sc, int depth, char* err, size_t ec) {
+static inline int lg_compile(LlmGrammar* g, const LgJ* root, const LgJ* sc, int depth, char* err, size_t ec) {
     if (depth > 12) return lg_node_new(g, LGN_ANY);
     if (!sc || sc->t != 5) return lg_node_new(g, LGN_ANY);   /* true / {} = qualsiasi valore */
     const LgJ* rf = lg_get(sc, "$ref");
@@ -308,7 +308,7 @@ static int lg_compile(LlmGrammar* g, const LgJ* root, const LgJ* sc, int depth, 
     return lg_node_new(g, LGN_ANY);
 }
 
-static void lg_first_set(LlmGrammar* g, int nd, uint8_t* out, int depth) {
+static inline void lg_first_set(LlmGrammar* g, int nd, uint8_t* out, int depth) {
     if (depth > 20) return;
     LgNode* n = &g->nodes[nd];
     #define LG_SET(c) out[(uint8_t)(c) >> 3] |= (uint8_t)(1u << ((uint8_t)(c) & 7))
@@ -324,7 +324,7 @@ static void lg_first_set(LlmGrammar* g, int nd, uint8_t* out, int depth) {
     #undef LG_SET
 }
 
-static void lg_free(LlmGrammar* g) {
+static inline void lg_free(LlmGrammar* g) {
     if (!g) return;
     for (int i = 0; i < g->np; i++) if (g->props[i].key) free(g->props[i].key - 1);
     for (int i = 0; i < g->nl; i++) free(g->lits[i].s);
@@ -335,7 +335,7 @@ static void lg_free(LlmGrammar* g) {
 }
 #define llm_grammar_free lg_free
 
-static LlmGrammar* lg_init_common(void) {
+static inline LlmGrammar* lg_init_common(void) {
     LlmGrammar* g = (LlmGrammar*)calloc(1, sizeof *g); if (!g) return NULL;
     /* nodi canonici per i valori "qualsiasi" */
     g->n_str_free = lg_node_new(g, LGN_STR);
@@ -347,16 +347,16 @@ static LlmGrammar* lg_init_common(void) {
     if (g->n_any_arr < 0 || g->n_boolnull < 0) { lg_free(g); return NULL; }
     return g;
 }
-static void lg_finish(LlmGrammar* g) {
+static inline void lg_finish(LlmGrammar* g) {
     for (int i = 0; i < g->nn; i++) memset(g->nodes[i].first, 0, 32);
     for (int i = 0; i < g->nn; i++) lg_first_set(g, i, g->nodes[i].first, 0);
     memset(&g->st, 0, sizeof g->st);
 }
-static LlmGrammar* llm_grammar_new_json_object(void) {
+static inline LlmGrammar* llm_grammar_new_json_object(void) {
     LlmGrammar* g = lg_init_common(); if (!g) return NULL;
     g->root = g->n_any_obj; lg_finish(g); return g;
 }
-static LlmGrammar* llm_grammar_new_schema(const char* schema, size_t n, char* err, size_t ec) {
+static inline LlmGrammar* llm_grammar_new_schema(const char* schema, size_t n, char* err, size_t ec) {
     LgP P = { schema, schema + n, schema, 0 };
     LgJ* root = lg_parse_val(&P, 0);
     if (!root) { if (ec) snprintf(err, ec, "schema JSON non valido"); return NULL; }
@@ -381,15 +381,15 @@ enum { P_START = 0,
        AO_FIRST, AO_COLON, AO_VALWAIT, AO_AFTER, AO_KEYQ,
        AA_FIRST, AA_AFTER, AA_VALWAIT };
 
-static int lg_isws(uint8_t c) { return c == ' ' || c == '\n' || c == '\t' || c == '\r'; }
-static int lg_push(LgState* s, int node, int aux) {
+static inline int lg_isws(uint8_t c) { return c == ' ' || c == '\n' || c == '\t' || c == '\r'; }
+static inline int lg_push(LgState* s, int node, int aux) {
     if (s->sp >= LLM_GRAMMAR_MAXD) return 0;
     LgFrame* f = &s->f[s->sp++]; memset(f, 0, sizeof *f); f->node = (uint16_t)node; f->aux = (uint8_t)aux; return 1;
 }
-static void lg_pop(LgState* s) { s->sp--; }
-static int lg_ws_eat(LgState* s) { if (s->ws >= LLM_GRAMMAR_WS_MAX) return LGR_REJ; s->ws++; return LGR_CONS; }
+static inline void lg_pop(LgState* s) { s->sp--; }
+static inline int lg_ws_eat(LgState* s) { if (s->ws >= LLM_GRAMMAR_WS_MAX) return LGR_REJ; s->ws++; return LGR_CONS; }
 
-static int lg_feed(const LlmGrammar* g, LgState* s, uint8_t c) {
+static inline int lg_feed(const LlmGrammar* g, LgState* s, uint8_t c) {
     LgFrame* f = &s->f[s->sp - 1];
     const LgNode* n = &g->nodes[f->node];
     switch (n->type) {
@@ -575,7 +575,7 @@ static int lg_feed(const LlmGrammar* g, LgState* s, uint8_t c) {
 }
 
 /* Un byte nella pila: gestisce re-dispatch (push/replace) e pop lazy. 0 = ok, -1 = rifiutato. */
-static int lg_step(const LlmGrammar* g, LgState* s, uint8_t c) {
+static inline int lg_step(const LlmGrammar* g, LgState* s, uint8_t c) {
     for (int guard = 0; guard < 4 * LLM_GRAMMAR_MAXD + 16; guard++) {
         if (s->sp == 0) {
             if (!s->started) {
@@ -594,9 +594,9 @@ static int lg_step(const LlmGrammar* g, LgState* s, uint8_t c) {
     }
     return -1;
 }
-static int lg_done(const LlmGrammar* g, const LgState* s) { (void)g; return s->started && s->sp == 0; }
+static inline int lg_done(const LlmGrammar* g, const LgState* s) { (void)g; return s->started && s->sp == 0; }
 /* Il documento puo' terminare qui? (anche con un numero in corso: pop lazy di frame terminali) */
-static int lg_can_end(const LlmGrammar* g, const LgState* st) {
+static inline int lg_can_end(const LlmGrammar* g, const LgState* st) {
     LgState t = *st;
     if (!t.started) return 0;
     while (t.sp > 0) {
@@ -611,7 +611,7 @@ static int lg_can_end(const LlmGrammar* g, const LgState* st) {
 }
 
 /* ───────────────────────── API: vocabolario, maschera, accept ───────────────────────── */
-static int llm_grammar_set_vocab(LlmGrammar* g, int n_vocab, const uint8_t* const* tok, const int* tlen, const int* eos, int n_eos) {
+static inline int llm_grammar_set_vocab(LlmGrammar* g, int n_vocab, const uint8_t* const* tok, const int* tlen, const int* eos, int n_eos) {
     free(g->vb); free(g->voff); free(g->vlen); free(g->plain); free(g->plain_words);
     g->n_vocab = n_vocab; g->n_words = (n_vocab + 31) / 32;
     size_t tot = 0; for (int i = 0; i < n_vocab; i++) tot += (size_t)(tlen[i] > 0 ? tlen[i] : 0);
@@ -632,10 +632,10 @@ static int llm_grammar_set_vocab(LlmGrammar* g, int n_vocab, const uint8_t* cons
     for (int i = 0; i < LLM_GRAMMAR_CACHE; i++) { free(g->cache[i].words); g->cache[i].words = NULL; g->cache[i].valid = 0; }
     return 0;
 }
-static int lg_is_eos(const LlmGrammar* g, int id) { for (int i = 0; i < g->n_eos; i++) if (g->eos[i] == id) return 1; return 0; }
+static inline int lg_is_eos(const LlmGrammar* g, int id) { for (int i = 0; i < g->n_eos; i++) if (g->eos[i] == id) return 1; return 0; }
 
 /* Riempie la maschera (n_words = (n_vocab+31)/32 uint32). Ritorna il numero di token ammessi (0 = grammatica morta). */
-static int llm_grammar_fill_mask(LlmGrammar* g, uint32_t* words) {
+static inline int llm_grammar_fill_mask(LlmGrammar* g, uint32_t* words) {
     const LgState* st = &g->st;
     /* cache per stato (le posizioni ripetute -- stesso contesto -- non rifanno la scansione) */
     size_t ssz = offsetof(LgState, f) + (size_t)st->sp * sizeof(LgFrame);
@@ -672,7 +672,7 @@ static int llm_grammar_fill_mask(LlmGrammar* g, uint32_t* words) {
     return cnt;
 }
 /* Avanza la grammatica con il token scelto. 0 = ok, -1 = illegale. L'EOS e' ammesso solo a documento completo. */
-static int llm_grammar_accept(LlmGrammar* g, int id) {
+static inline int llm_grammar_accept(LlmGrammar* g, int id) {
     if (id < 0 || id >= g->n_vocab) return -1;
     if (lg_is_eos(g, id)) return lg_can_end(g, &g->st) ? 0 : -1;
     const int l = g->vlen[id]; if (l == 0) return -1;
@@ -680,6 +680,6 @@ static int llm_grammar_accept(LlmGrammar* g, int id) {
     for (int k = 0; k < l; k++) if (lg_step(g, &t, b[k]) != 0) return -1;
     g->st = t; return 0;
 }
-static int llm_grammar_is_done(const LlmGrammar* g) { return lg_can_end(g, &g->st); }
-static void llm_grammar_reset(LlmGrammar* g) { memset(&g->st, 0, sizeof g->st); }
+static inline int llm_grammar_is_done(const LlmGrammar* g) { return lg_can_end(g, &g->st); }
+static inline void llm_grammar_reset(LlmGrammar* g) { memset(&g->st, 0, sizeof g->st); }
 #endif /* LLM_GRAMMAR_H */
