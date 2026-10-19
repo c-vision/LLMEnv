@@ -142,7 +142,7 @@ typedef struct { char* key; int kl; int node; int req; } LgProp;
 typedef struct { char* s; int l; } LgLit;
 
 typedef struct { uint16_t node; uint8_t ph; uint8_t aux; uint16_t idx; uint16_t cnt; uint64_t mask; } LgFrame;
-typedef struct { int sp, ws, started; LgFrame f[LLM_GRAMMAR_MAXD]; } LgState;
+typedef struct { int sp, ws, started; int pre_i, post_i; LgFrame f[LLM_GRAMMAR_MAXD]; } LgState;   /* pre_i/post_i: avanzamento nei letterali di contorno (prefisso/suffisso) */
 
 typedef struct { LgState st; uint32_t* words; int cnt; int valid; } LgCacheEnt;
 
@@ -157,6 +157,7 @@ typedef struct LlmGrammar {
     /* vocabolario */
     int n_vocab, n_words; uint8_t* vb; size_t* voff; int* vlen; uint8_t* plain; uint32_t* plain_words;
     int eos[8]; int n_eos;
+    char* pre; int prel; char* post; int postl;   /* letterali di contorno: byte esatti prima del documento / dopo (es. <tool_call>\n ... \n</tool_call>) */
     LgCacheEnt cache[LLM_GRAMMAR_CACHE]; int cache_next;
     int hits, misses;
 } LlmGrammar;
@@ -326,6 +327,7 @@ static inline void lg_first_set(LlmGrammar* g, int nd, uint8_t* out, int depth) 
 
 static inline void lg_free(LlmGrammar* g) {
     if (!g) return;
+    free(g->pre); free(g->post);
     for (int i = 0; i < g->np; i++) if (g->props[i].key) free(g->props[i].key - 1);
     for (int i = 0; i < g->nl; i++) free(g->lits[i].s);
     for (int i = 0; i < LLM_GRAMMAR_CACHE; i++) free(g->cache[i].words);
@@ -355,6 +357,15 @@ static inline void lg_finish(LlmGrammar* g) {
 static inline LlmGrammar* llm_grammar_new_json_object(void) {
     LlmGrammar* g = lg_init_common(); if (!g) return NULL;
     g->root = g->n_any_obj; lg_finish(g); return g;
+}
+/* Come new_schema ma il documento e' preceduto da `pre` e seguito da `post` (byte esatti, es. "<tool_call>\n" e "\n</tool_call>"). */
+static inline LlmGrammar* llm_grammar_new_schema(const char* schema, size_t n, char* err, size_t ec);
+static inline LlmGrammar* llm_grammar_new_schema_wrapped(const char* schema, size_t n, const char* pre, const char* post, char* err, size_t ec) {
+    LlmGrammar* g = llm_grammar_new_schema(schema, n, err, ec);
+    if (!g) return NULL;
+    g->pre = pre ? strdup(pre) : NULL; g->prel = g->pre ? (int)strlen(g->pre) : 0;
+    g->post = post ? strdup(post) : NULL; g->postl = g->post ? (int)strlen(g->post) : 0;
+    return g;
 }
 static inline LlmGrammar* llm_grammar_new_schema(const char* schema, size_t n, char* err, size_t ec) {
     LgP P = { schema, schema + n, schema, 0 };
@@ -579,11 +590,14 @@ static inline int lg_step(const LlmGrammar* g, LgState* s, uint8_t c) {
     for (int guard = 0; guard < 4 * LLM_GRAMMAR_MAXD + 16; guard++) {
         if (s->sp == 0) {
             if (!s->started) {
+                if (s->pre_i < g->prel) { if (c == (uint8_t)g->pre[s->pre_i]) { s->pre_i++; return 0; } return -1; }   /* prefisso esatto */
                 if (lg_isws(c)) { if (s->ws >= LLM_GRAMMAR_WS_MAX) return -1; s->ws++; return 0; }
                 s->started = 1;
                 if (!lg_push(s, g->root, 0)) return -1;
                 continue;
             }
+            if (s->post_i < g->postl) { if (c == (uint8_t)g->post[s->post_i]) { s->post_i++; return 0; } return -1; }   /* suffisso esatto */
+            if (g->postl > 0) return -1;   /* con suffisso, a documento+suffisso completi non si emette altro */
             if (lg_isws(c)) { if (s->ws >= LLM_GRAMMAR_WS_MAX) return -1; s->ws++; return 0; }   /* documento completo: solo whitespace */
             return -1;
         }
@@ -607,7 +621,7 @@ static inline int lg_can_end(const LlmGrammar* g, const LgState* st) {
         if (!ok) return 0;
         t.sp--;
     }
-    return 1;
+    return t.post_i >= g->postl;   /* col suffisso: terminabile solo a suffisso completo */
 }
 
 /* ───────────────────────── API: vocabolario, maschera, accept ───────────────────────── */
@@ -687,7 +701,12 @@ static inline int llm_grammar_accept(LlmGrammar* g, int id) {
 static inline int llm_grammar_forced(const LlmGrammar* g, uint8_t* out, int cap) {
     LgState t = g->st;
     int n = 0;
-    while (n < cap && !(t.started && t.sp == 0)) {
+    while (n < cap) {
+        if (!t.started && t.pre_i < g->prel) { uint8_t b = (uint8_t)g->pre[t.pre_i]; if (lg_step(g, &t, b) != 0) break; out[n++] = b; continue; }
+        if (t.started && t.sp == 0) {
+            if (t.post_i < g->postl) { uint8_t b = (uint8_t)g->post[t.post_i]; if (lg_step(g, &t, b) != 0) break; out[n++] = b; continue; }
+            break;
+        }
         int cnt = 0, pick = -1;
         for (int b = 0; b < 256 && cnt < 2; b++) {
             if (lg_isws((uint8_t)b)) continue;
