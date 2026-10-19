@@ -50,6 +50,23 @@ static bool named_lin(mlx_array* res, LlmMlxModel* m, int layer_idx, const char*
     return ok;
 }
 
+/* Bias degli ESPERTI su pesi PLAIN (SwitchLinear bias di mlx_lm, es. ernie4_5_moe use_bias=true):
+ * mlx_gather_mm non lo applica. bias [E,out] -> gather per indice esperto -> [T,K,out] -> reshape come `out`
+ * (mlx_lm: x + expand_dims(bias[indices], -2)). Sui pesi quantizzati `biases` e' il bias di quantizzazione: no-op. */
+static bool add_expert_bias(mlx_array* out, mlx_array scales, mlx_array bias, mlx_array inds_u, mlx_stream s) {
+    if (bias.ctx == NULL || mlx_array_size(bias) == 0) return true;
+    if (scales.ctx != NULL && mlx_array_size(scales) > 0) return true;
+    mlx_array gb = mlx_array_new(), gbr = mlx_array_new(), gbc = mlx_array_new(), o2 = mlx_array_new();
+    bool ok = mlx_take_axis(&gb, bias, inds_u, 0, s) == 0;
+    if (ok) { int nd = mlx_array_ndim(*out), sh[8]; for (int i = 0; i < nd && i < 8; i++) sh[i] = mlx_array_shape(*out)[i];
+              ok = mlx_reshape(&gbr, gb, sh, nd, s) == 0; }
+    if (ok) ok = mlx_astype(&gbc, gbr, mlx_array_dtype(*out), s) == 0;
+    if (ok) ok = mlx_add(&o2, *out, gbc, s) == 0;
+    if (ok) mlx_array_set(out, o2);
+    mlx_array_free(gb); mlx_array_free(gbr); mlx_array_free(gbc); mlx_array_free(o2);
+    return ok;
+}
+
 /* true se questo layer e' DENSE (non MoE). */
 static bool moe_v2_is_dense(const LlmMlxModel* m, int layer_idx) {
     if (m->cfg.moe_layer_interval > 0) {
@@ -268,7 +285,9 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
     mlx_optional_int gsz_o={gg,true}, bts_o={gbts,true};
     mlx_array g_out=mlx_array_new(), u_out=mlx_array_new(), act=mlx_array_new(), d_out=mlx_array_new();
     if (ok) ok = llm_mlx_moe_gather_mm(&m->cfg, &g_out, x1, gw, gs, gb, no_lhs, inds_u, true, gsz_o, bts_o, gmode, false, s)==0;
+    if (ok) ok = add_expert_bias(&g_out, gs, gb, inds_u, s);
     if (ok) ok = llm_mlx_moe_gather_mm(&m->cfg, &u_out, x1, uw, us, ub, no_lhs, inds_u, true, gsz_o, bts_o, gmode, false, s)==0;
+    if (ok) ok = add_expert_bias(&u_out, us, ub, inds_u, s);
     /* mlx_lm: swiglu = @mx.compile(shapeless) silu(gate)*up (fusa): differisce di 1 ulp bf16 dall'eager su alcuni
      * elementi. Prefill (n_tokens>1): closure compilata (stessa politica di qwen3_moe_ffn_block); decode:
      * eager (il costo fisso di mlx_closure_apply non si ammortizza a n_tokens==1). */
@@ -277,6 +296,7 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
         if (!fused) { mlx_array sg=mlx_array_new(), sl=mlx_array_new(); ok = mlx_sigmoid(&sg,g_out,s)==0 && mlx_multiply(&sl,g_out,sg,s)==0 && mlx_multiply(&act,sl,u_out,s)==0; mlx_array_free(sg); mlx_array_free(sl); }
     }
     if (ok) ok = llm_mlx_moe_gather_mm(&m->cfg, &d_out, act, dw, ds, db, no_lhs, inds_u, true, gsz_o, bts_o, gmode, false, s)==0;
+    if (ok) ok = add_expert_bias(&d_out, ds, db, inds_u, s);
     CHK(ok, "gather_qmm experts");
     mlx_array moe_out = mlx_array_new();
     if (ok) {

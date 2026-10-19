@@ -517,6 +517,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cfg->moe_shared_gate = 0;
         cfg->moe_gate_f32 = 1;   /* mlx_lm: gate in f32 prima dell'act */
         cfg->norm_topk_prob = true;   /* ernie renormalizza sempre */
+        OPT_FLOAT(routed_scaling_factor, "routed_scaling_factor", 1.0f);   /* assente nel config ernie: senza default resta 0 e moe_v2 azzera il contributo routed */
         { cJSON* ga = cJSON_GetObjectItemCaseSensitive(src, "moe_gate_act");
           cfg->moe_gate_sigmoid = (cJSON_IsString(ga) && strcmp(ga->valuestring, "sigmoid") == 0) ? 1 : 0; }
         OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
@@ -933,6 +934,10 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
      * generico qui sopra lo azzera e il MoE non rinormalizza (routed ~3x troppo grande). */
     if (strcmp(cfg->model_type, "kimi_linear") == 0 && !cJSON_IsBool(norm_topk))
         cfg->norm_topk_prob = cfg->moe_renormalize;
+    /* ernie4_5_moe: mlx_lm rinormalizza SEMPRE i top-k (scores / max(sum,1e-12)) e il config non ha la chiave:
+     * senza questo il parse generico sopra azzera il true impostato nel ramo ernie e i pesi restano i softmax grezzi. */
+    if (strcmp(cfg->model_type, "ernie4_5_moe") == 0 && !cJSON_IsBool(norm_topk))
+        cfg->norm_topk_prob = true;
     cJSON* tie = cJSON_GetObjectItemCaseSensitive(j, "tie_word_embeddings");
     /* LFM2/Mamba non dichiarano la chiave e sono SEMPRE legati (nessun lm_head): default true. */
     cfg->tie_word_embeddings = cJSON_IsBool(tie) ? cJSON_IsTrue(tie)
@@ -972,6 +977,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     cJSON* rt = cJSON_GetObjectItemCaseSensitive(j, "rope_traditional");
     cfg->rope_traditional = cJSON_IsBool(rt) ? cJSON_IsTrue(rt)
                             : (strcmp(cfg->model_type, "ernie4_5") == 0
+                               || strcmp(cfg->model_type, "ernie4_5_moe") == 0
                                || strcmp(cfg->model_type, "lille-130m") == 0);
     /* YaRN (FASE 1b.7): rope_scaling.rope_type == "yarn" (o "deepseek_yarn"/"telechat3-yarn",
      * stessi parametri -- mlx_lm initialize_rope li tratta allo stesso modo). Stessa chiave
