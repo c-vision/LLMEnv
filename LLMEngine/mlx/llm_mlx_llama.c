@@ -218,6 +218,47 @@ bool llama_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
     }
     mlx_array_free(fq); mlx_array_free(fk); mlx_array_free(fv);
 
+    /* ministral3/mistral4: attn-scale llama-4 — moltiplicatore PER-POSIZIONE su Q, prima
+     * della SDPA (ministral3.py: queries = queries * attn_scale):
+     *   scale[t] = 1 + beta*log(1 + floor((arange(L)+offset) / mpe_orig))
+     * Guardato da beta>0: no-op per llama e tutte le altre arch. */
+    if (ok && m->cfg.llama4_scaling_beta > 0.0f && n_tokens > 0) {
+        const float beta = m->cfg.llama4_scaling_beta;
+        const int mpe = m->cfg.llama4_mpe_orig > 0 ? m->cfg.llama4_mpe_orig : 4096;
+        mlx_array ar = mlx_array_new();
+        ok = mlx_arange(&ar, 0, n_tokens, 1, MLX_INT32, m->stream) == 0;
+        mlx_array coff = mlx_array_new_int(cache_offset), pos = mlx_array_new();
+        if (ok) ok = mlx_add(&pos, ar, coff, m->stream) == 0;
+        mlx_array_free(ar); mlx_array_free(coff);
+        mlx_array pf = mlx_array_new();
+        if (ok) { mlx_array mpea = mlx_array_new_int(mpe);
+                  ok = mlx_divide(&pf, pos, mpea, m->stream) == 0; mlx_array_free(mpea); }
+        mlx_array_free(pos);
+        mlx_array pfl = mlx_array_new();
+        if (ok) ok = mlx_floor(&pfl, pf, m->stream) == 0;
+        mlx_array_free(pf);
+        mlx_array p1 = mlx_array_new();
+        if (ok) ok = mlx_add(&p1, pfl, mlx_array_new_float32(1.0f), m->stream) == 0;
+        mlx_array_free(pfl);
+        mlx_array lg = mlx_array_new();
+        if (ok) ok = mlx_log(&lg, p1, m->stream) == 0;
+        mlx_array_free(p1);
+        mlx_array sc = mlx_array_new();
+        if (ok) { /* sc = 1 + beta*log(...) */
+                  mlx_array bg = mlx_array_new();
+                  ok = mlx_multiply(&bg, lg, mlx_array_new_float32(beta), m->stream) == 0;
+                  if (ok) ok = mlx_add(&sc, bg, mlx_array_new_float32(1.0f), m->stream) == 0;
+                  mlx_array_free(bg); }
+        mlx_array_free(lg);
+        if (ok) { int sh[4] = {1, 1, n_tokens, 1}; ok = mlx_reshape(&sc, sc, sh, 4, m->stream) == 0; }
+        if (ok) { mlx_array q2 = mlx_array_new();
+                  ok = mlx_multiply(&q2, q_rope, sc, m->stream) == 0;
+                  if (ok) mlx_array_set(&q_rope, q2);
+                  mlx_array_free(q2); }
+        mlx_array_free(sc);
+        CHK(ok, "llama4 attn-scale");
+    }
+
     mlx_array k_full = mlx_array_new(), v_full = mlx_array_new();
     mlx_array attn = mlx_array_new();
     bool kvsl = llm_mlx_kvslice_enabled() && n_tokens == 1 && has_cache && m->cfg.kv_max_tokens <= 0;

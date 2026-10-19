@@ -156,6 +156,10 @@ typedef struct {
     int kv_shared_layers;
     /* gemma4 per-layer inputs (gemma4_text.py: hidden_size_per_layer_input). 0 = off. */
     int gemma4_pli;
+    /* ministral3/mistral4: attn-scale llama-4 (rope_parameters.llama_4_scaling_beta) —
+     * moltiplicatore per-posizione su Q: 1 + beta*log(1+floor((pos)/mpe_orig)). 0 = off. */
+    float llama4_scaling_beta;
+    int llama4_mpe_orig;
 
     /* FASE 1b.2 (Llama 3.x): RoPE con scaling a 3 fasce di frequenza
      * (config.json["rope_scaling"]["rope_type"] == "llama3") -- ignorati (0/false)
