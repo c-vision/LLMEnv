@@ -30,6 +30,20 @@ TINY = {
         moe_layer_start_index=0, moe_layer_interval=2, moe_num_shared_experts=1,
         moe_gate_act="softmax", head_dim=16,
     ),
+    # llama: blocco base (GQA + RMSNorm + RoPE + swiglu).
+    "llama": dict(
+        cls="llama", model_type="llama",
+        vocab_size=128, hidden_size=64, num_hidden_layers=2, intermediate_size=128,
+        num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-6, rope_theta=10000.0,
+        max_position_embeddings=512, tie_word_embeddings=True,
+    ),
+    # qwen3: dense GQA + qk-norm per-testa + swiglu.
+    "qwen3": dict(
+        cls="qwen3", model_type="qwen3",
+        vocab_size=128, hidden_size=64, num_hidden_layers=2, intermediate_size=128,
+        num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-6, head_dim=16,
+        max_position_embeddings=512, rope_theta=1000000.0, tie_word_embeddings=True,
+    ),
     # dots1: GQA + qk-norm per-testa + MoE noaux_tc (mlp.experts/shared, e_score_bias, group).
     "dots1": dict(
         cls="dots1", model_type="dots1",
