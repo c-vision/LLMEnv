@@ -32,6 +32,7 @@ def main():
     floor = float(sys.argv[5]) if len(sys.argv) > 5 else 30.0   # override SOLO per misure concordate (default: cap 30%)
     batch_dev = int(sys.argv[6]) if len(sys.argv) > 6 else 0   # 1 = --opt dsv4_batch_dev=1 (mHC device-resident)
     to = int(sys.argv[7]) if len(sys.argv) > 7 else 600        # timeout per-run (s)
+    extra = sys.argv[8] if len(sys.argv) > 8 else ""            # opt extra k=v (es. offload_cache_mb=28000)
     rsscap, pre = 62.0, 60.0
     P = long_prompt(ntok)
     f0 = H.free_pct()
@@ -45,6 +46,7 @@ def main():
            "--opt", f"memgov_reserve_mb={reserve}", "--opt", "dsv4_profile=1"]
     if mmap: cmd += ["--opt", "dsv4_experts_mmap=1"]
     if batch_dev: cmd += ["--opt", "dsv4_batch_dev=1"]
+    if extra: cmd += ["--opt", extra]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     why, peak, minfree = {"v": None}, {"rss": 0.0}, {"f": 100.0}
     stop = threading.Event()
