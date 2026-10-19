@@ -776,7 +776,7 @@ int llm_ai_mlx_session_generate_constrained(llm_ai_mlx_session_handle handle,
 /* ABI v6 — MASKED: come generate_constrained ma l'insieme ammesso e' una BITMASK sul vocabolario (llm_grammar.h).
  * I logit sono gia' letti in host memory (stesso tensore di final_step): argmax sui bit accesi, greedy. */
 static bool final_step_masked_local(LlmMlxModel* m, mlx_array h, mlx_array norm_w, mlx_array out_w, mlx_array out_s,
-                                    mlx_array out_b, const uint32_t* mask, int n_words, int32_t* out_id) {
+                                    mlx_array out_b, const uint32_t* mask, int n_words, llm_mlx_sampling_t sp, int32_t* out_id) {
     mlx_array normed = mlx_array_new();
     bool ok = llm_mlx_final_norm(m, h, norm_w, &normed);
     mlx_array logits = mlx_array_new();
@@ -804,6 +804,60 @@ static bool final_step_masked_local(LlmMlxModel* m, mlx_array h, mlx_array norm_
                 }
             }
             ok = best_id >= 0;
+            /* Campionamento sull'insieme ammesso (temperatura, top_k, top_p, seed deterministico come final_step): scarta i
+             * candidati con prob. trascurabile (< e^-25 del massimo), ordina il resto, taglia top_k/top_p e pesca. */
+            if (ok && sp.active && sp.temperature > 0.0f) {
+                const float T = sp.temperature;
+                size_t cap = 0, cnt = 0;
+                int32_t* cid = NULL; float* cl = NULL;
+                for (size_t w = 0; w < (size_t)n_words && w * 32u < nv; w++) {
+                    uint32_t bits = mask[w];
+                    while (bits) {
+                        int b = __builtin_ctz(bits); bits &= bits - 1u;
+                        size_t id = w * 32u + (size_t)b;
+                        if (id >= nv) break;
+                        if ((data[id] - best_val) / T < -25.0f) continue;
+                        if (cnt == cap) {
+                            cap = cap ? cap * 2 : 256;
+                            cid = (int32_t*)realloc(cid, cap * sizeof *cid); cl = (float*)realloc(cl, cap * sizeof *cl);
+                            if (!cid || !cl) { ok = false; break; }
+                        }
+                        cid[cnt] = (int32_t)id; cl[cnt] = data[id]; cnt++;
+                    }
+                    if (!ok) break;
+                }
+                if (ok && cnt > 1) {
+                    /* ordina per logit decrescente (insertion/heap non servono: cnt tipico piccolo; qsort su indici) */
+                    for (size_t i = 1; i < cnt; i++) {   /* insertion sort se piccolo, altrimenti shell */
+                        int32_t ki = cid[i]; float kl = cl[i]; size_t j = i;
+                        while (j > 0 && cl[j - 1] < kl) { cid[j] = cid[j - 1]; cl[j] = cl[j - 1]; j--; }
+                        cid[j] = ki; cl[j] = kl;
+                        if (i > 4096) break;   /* troppi candidati: il resto e' in coda di probabilita' trascurabile */
+                    }
+                    size_t keep = cnt > 4097 ? 4097 : cnt;
+                    if (sp.top_k > 0 && (size_t)sp.top_k < keep) keep = (size_t)sp.top_k;
+                    double z = 0.0;
+                    double* pr = (double*)malloc(keep * sizeof *pr);
+                    if (pr) {
+                        for (size_t i = 0; i < keep; i++) { pr[i] = exp((double)(cl[i] - cl[0]) / (double)T); z += pr[i]; }
+                        size_t kp = keep;
+                        if (sp.top_p > 0.0f && sp.top_p < 1.0f) {
+                            double acc = 0.0; kp = 0;
+                            for (size_t i = 0; i < keep; i++) { acc += pr[i] / z; kp++; if (acc >= (double)sp.top_p) break; }
+                        }
+                        double zz = 0.0; for (size_t i = 0; i < kp; i++) zz += pr[i];
+                        uint64_t rng = (uint64_t)(sp.seed == 0 ? (int64_t)0x9E3779B97F4A7C15ULL : sp.seed);
+                        rng ^= (uint64_t)(sp.hist_n + 1) * 0x9E3779B97F4A7C15ULL;
+                        rng = (rng * 0x2545F4914F6CDD1DULL);
+                        double r = (double)((rng = (rng * 0x2545F4914F6CDD1DULL)) >> 11) / 9007199254740992.0 * zz, a = 0.0;
+                        size_t pick = kp - 1;
+                        for (size_t i = 0; i < kp; i++) { a += pr[i]; if (r < a) { pick = i; break; } }
+                        best_id = cid[pick];
+                        free(pr);
+                    }
+                }
+                free(cid); free(cl);
+            }
             if (ok) *out_id = best_id;
         }
     }
@@ -825,7 +879,7 @@ int llm_ai_mlx_session_generate_masked(llm_ai_mlx_session_handle handle, const u
     OutputTensors t;
     bool ok = load_output_tensors(m, &t);
     int32_t chosen_id = 0;
-    if (ok) ok = final_step_masked_local(m, s->pending_h, t.final_norm_w, t.out_w, t.out_s, t.out_b, mask_words, n_words, &chosen_id);
+    if (ok) ok = final_step_masked_local(m, s->pending_h, t.final_norm_w, t.out_w, t.out_s, t.out_b, mask_words, n_words, llm_mlx_session_sampling(s), &chosen_id);
     if (ok) {
         mlx_array h = mlx_array_new();
         ok = forward_one_token(m, s, t.embed_w, t.embed_s, t.embed_b, chosen_id, s->cache_offset,
