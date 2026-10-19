@@ -736,7 +736,7 @@ int llm_ai_mlx_session_generate_constrained(llm_ai_mlx_session_handle handle,
                                              int32_t* out_token_id) {
     if (handle == NULL || allowed_ids == NULL || n_allowed <= 0 || out_token_id == NULL) return -1;
     LlmMlxSession* s = (LlmMlxSession*)handle;
-    if (!s->has_pending) return -1;
+    if (!s->has_pending || s->pending_h.ctx == NULL) return -1;   /* riuso di prefisso a coda vuota: pending_h assente (il chiamante deve ingerire l ultimo token) */
     LlmMlxModel* m = s->model;
 
     /* Modello DELEGATO (DS4/DS4.1): constrained non esposto dall'ABI a 9 metodi -> non supportato. */
@@ -872,7 +872,7 @@ int llm_ai_mlx_session_generate_masked(llm_ai_mlx_session_handle handle, const u
                                        int32_t* out_token_id) {
     if (handle == NULL || mask_words == NULL || n_words <= 0 || out_token_id == NULL) return -1;
     LlmMlxSession* s = (LlmMlxSession*)handle;
-    if (!s->has_pending) return -1;
+    if (!s->has_pending || s->pending_h.ctx == NULL) return -1;   /* riuso di prefisso a coda vuota: pending_h assente (il chiamante deve ingerire l ultimo token) */
     LlmMlxModel* m = s->model;
     if (m->deleg) return -1;   /* DS4/DS4.1: non esposto dall'ABI delegato */
 
