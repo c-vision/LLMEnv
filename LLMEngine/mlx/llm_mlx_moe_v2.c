@@ -147,15 +147,15 @@ bool moe_v2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, 
     }
     if (ok) {
         mlx_array act = mlx_array_new();
-        if (m->cfg.moe_gate_sigmoid) {
-            /* glm4_moe: sigmoid sui logit in f32 (dtype del router). */
-            if (m->cfg.moe_gate_f32 && mlx_array_dtype(gates) != MLX_FLOAT32) {
-                mlx_array gf = mlx_array_new();
-                if (mlx_astype(&gf, gates, MLX_FLOAT32, s) == 0) mlx_array_set(&gates, gf);
-                mlx_array_free(gf);
-            }
-            ok = mlx_sigmoid(&act, gates, s) == 0;
-        } else ok = mlx_softmax_axis(&act, gates, -1, /*precise=*/true, s) == 0;
+        /* Gate in f32 (mlx_lm: gates.astype(mx.float32) PRIMA dell'act, sia softmax sia sigmoid).
+         * Guardato da moe_gate_f32 (glm4_moe/ernie): il default resta il dtype del router. */
+        if (m->cfg.moe_gate_f32 && mlx_array_dtype(gates) != MLX_FLOAT32) {
+            mlx_array gf = mlx_array_new();
+            if (mlx_astype(&gf, gates, MLX_FLOAT32, s) == 0) mlx_array_set(&gates, gf);
+            mlx_array_free(gf);
+        }
+        if (m->cfg.moe_gate_sigmoid) ok = mlx_sigmoid(&act, gates, s) == 0;
+        else ok = mlx_softmax_axis(&act, gates, -1, /*precise=*/true, s) == 0;
         if (ok) mlx_array_set(&gates, act);
         mlx_array_free(act);
         CHK(ok, "router act");
