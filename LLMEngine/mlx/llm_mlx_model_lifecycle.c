@@ -64,6 +64,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
     { "deepseek_v2", deepseek_v2_attention_block, deepseek_v2_ffn_block }, /* DeepSeek-V2-Lite (MLA + MoE group-limited-greedy) */
     { "deepseek_v3", deepseek_v3_attention_block, deepseek_v2_ffn_block }, /* DeepSeek-V3 (MLA, q_lora) */
     { "youtu_llm", deepseek_v2_attention_block, dense_swiglu_ffn }, /* Youtu-LLM: MLA q_lora (kv_b_proj) + ffn dense swiglu */
+    { "glm4_moe_lite", deepseek_v3_attention_block, deepseek_v2_ffn_block }, /* GLM-4.5-Air: MLA assorbita + MoE (noaux_tc) */
     { "kimi_k2", deepseek_v3_attention_block, deepseek_v2_ffn_block },     /* Kimi K2 = deepseek_v3 */
     { "joyai_llm_flash", deepseek_v3_attention_block, deepseek_v2_ffn_block }, /* = deepseek_v3 */
     { "kimi_linear", kimi_linear_attention_dispatch, kimi_linear_ffn_dispatch }, /* MLA assorbita + KDA */

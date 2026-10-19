@@ -285,6 +285,18 @@ TINY = {
         num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-6, rope_theta=1000000.0,
         tie_word_embeddings=True,
     ),
+    # glm4_moe_lite: MLA assorbita (embed_q/unembed_out) + MoE noaux_tc + shared.
+    "glm4_moe_lite": dict(
+        cls="glm4_moe_lite", model_type="glm4_moe_lite",
+        vocab_size=128, hidden_size=64, intermediate_size=128, moe_intermediate_size=32,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
+        n_shared_experts=1, n_routed_experts=4, routed_scaling_factor=1.0,
+        kv_lora_rank=32, q_lora_rank=16, qk_rope_head_dim=8, v_head_dim=16, qk_nope_head_dim=16,
+        topk_method="noaux_tc", scoring_func="sigmoid", norm_topk_prob=True,
+        n_group=2, topk_group=1, num_experts_per_tok=2, first_k_dense_replace=1,
+        max_position_embeddings=512, rms_norm_eps=1e-6, rope_theta=1000000.0,
+        rope_scaling={"factor": 1.0},
+    ),
 }
 
 
