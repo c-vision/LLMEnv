@@ -773,6 +773,80 @@ int llm_ai_mlx_session_generate_constrained(llm_ai_mlx_session_handle handle,
     return ok ? 0 : -1;
 }
 
+/* ABI v6 — MASKED: come generate_constrained ma l'insieme ammesso e' una BITMASK sul vocabolario (llm_grammar.h).
+ * I logit sono gia' letti in host memory (stesso tensore di final_step): argmax sui bit accesi, greedy. */
+static bool final_step_masked_local(LlmMlxModel* m, mlx_array h, mlx_array norm_w, mlx_array out_w, mlx_array out_s,
+                                    mlx_array out_b, const uint32_t* mask, int n_words, int32_t* out_id) {
+    mlx_array normed = mlx_array_new();
+    bool ok = llm_mlx_final_norm(m, h, norm_w, &normed);
+    mlx_array logits = mlx_array_new();
+    mlx_array logits32 = mlx_array_new();
+    if (ok) ok = llm_bonsai_rotate(&normed, m, -1, "lm_head.weight", false);
+    if (ok) ok = quantized_linear_cfg(&logits, normed, out_w, out_s, out_b, m->cfg.quant_group_size, m->cfg.quant_bits, m->cfg.quant_mode, m->stream);
+    if (ok) ok = llm_mlx_logits_f32(&logits32, logits, m->stream);
+    if (ok) ok = mlx_array_eval(logits32) == 0;
+    if (ok) {
+        const float* data = mlx_array_data_float32(logits32);
+        size_t vocab = mlx_array_size(logits32);
+        ok = (data != NULL);
+        if (ok) {
+            int32_t best_id = -1;
+            float best_val = -INFINITY;
+            size_t nv = vocab < (size_t)n_words * 32u ? vocab : (size_t)n_words * 32u;
+            for (size_t w = 0; w < (size_t)n_words && w * 32u < nv; w++) {
+                uint32_t bits = mask[w];
+                while (bits) {
+                    int b = __builtin_ctz(bits); bits &= bits - 1u;
+                    size_t id = w * 32u + (size_t)b;
+                    if (id >= nv) break;
+                    float v = data[id];
+                    if (best_id < 0 || v > best_val) { best_val = v; best_id = (int32_t)id; }
+                }
+            }
+            ok = best_id >= 0;
+            if (ok) *out_id = best_id;
+        }
+    }
+    if (!ok) fprintf(stderr, "final_step_masked: fallito\n");
+    mlx_array_free(normed);
+    mlx_array_free(logits);
+    mlx_array_free(logits32);
+    return ok;
+}
+
+int llm_ai_mlx_session_generate_masked(llm_ai_mlx_session_handle handle, const uint32_t* mask_words, int n_words,
+                                       int32_t* out_token_id) {
+    if (handle == NULL || mask_words == NULL || n_words <= 0 || out_token_id == NULL) return -1;
+    LlmMlxSession* s = (LlmMlxSession*)handle;
+    if (!s->has_pending) return -1;
+    LlmMlxModel* m = s->model;
+    if (m->deleg) return -1;   /* DS4/DS4.1: non esposto dall'ABI delegato */
+
+    OutputTensors t;
+    bool ok = load_output_tensors(m, &t);
+    int32_t chosen_id = 0;
+    if (ok) ok = final_step_masked_local(m, s->pending_h, t.final_norm_w, t.out_w, t.out_s, t.out_b, mask_words, n_words, &chosen_id);
+    if (ok) {
+        mlx_array h = mlx_array_new();
+        ok = forward_one_token(m, s, t.embed_w, t.embed_s, t.embed_b, chosen_id, s->cache_offset,
+                                s->k_cache, s->v_cache, s->has_cache, &h);
+        int32_t next_id = 0;
+        if (ok) ok = final_step(m, h, t.final_norm_w, t.out_w, t.out_s, t.out_b,
+                                llm_mlx_session_sampling(s), &next_id);
+        if (ok) {
+            mlx_array_free(s->pending_h);
+            s->pending_h = mlx_array_new();
+            mlx_array_set(&s->pending_h, h);
+            s->pending_next_id = next_id;
+        }
+        mlx_array_free(h);
+        s->cache_offset++;
+    }
+    free_output_tensors(&t);
+    if (ok) *out_token_id = chosen_id;
+    return ok ? 0 : -1;
+}
+
 
 
 /* ─────────────────────────────────────────────────────────────────────────────

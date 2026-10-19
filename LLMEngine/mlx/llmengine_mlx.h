@@ -424,6 +424,11 @@ int llm_ai_mlx_session_generate_constrained(llm_ai_mlx_session_handle handle,
                                              const int32_t* allowed_ids, int n_allowed,
                                              int32_t* out_token_id);
 
+/* ABI v6 — come generate_constrained ma l'insieme ammesso e' una BITMASK sul vocabolario (bit i%32 della parola i/32,
+ * n_words = (n_vocab+31)/32): vedi llm_grammar.h. Greedy. Ritorna 0 / -1. */
+int llm_ai_mlx_session_generate_masked(llm_ai_mlx_session_handle handle, const uint32_t* mask_words, int n_words,
+                                       int32_t* out_token_id);
+
 /* FASE 2b: swap-out su disco -- stesso contratto di llm_ai_session_swap_out in
  * llmengine_llama.h, con una differenza: il model handle di MLX e' un puntatore
  * in-processo (non un intero da registro come in llama.cpp), quindi swap_in lo riceve

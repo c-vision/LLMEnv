@@ -23,7 +23,7 @@
  * v3 = token_topk (distribuzione top-k alla posizione pending, MLX).
  * v4 = embed_ids (embedding IDS-based, MLX).
  * v5 = set_expert_swap (offload esperti MoE da disco, MLX). */
-#define LLMENGINE_ABI_VERSION 5u
+#define LLMENGINE_ABI_VERSION 6u
 
 #ifdef __cplusplus
 extern "C" {
@@ -167,6 +167,14 @@ typedef struct LlmEngineLlmEngine {
      * o "" disattiva. E' la controparte API dell'opzione di offload degli altri engine (niente
      * variabili d'ambiente). Per modelli senza esperti (dense) è un no-op. */
     void  (*set_expert_swap)(const char* dir);
+
+    /* ── ABI v6 — campo NUOVO in coda (NULL se il motore non lo implementa). ────────────────────
+     * MASKED (grammatica con BITMASK, vedi llm_grammar.h): come `generate_id_constrained` ma l'insieme ammesso e'
+     * una bitmask sul vocabolario (1 bit per token, bit i della parola i/32), 19 KB per 150k token invece di un
+     * array di id per passo. Decide UN token alla posizione pending con argmax ristretto ai bit accesi, poi avanza.
+     * Greedy (la temperatura non si applica). `n_words` = (n_vocab+31)/32. Ritorna 0 / -1 (nessun bit valido,
+     * sessione senza pending, modello delegato). */
+    int   (*generate_id_masked)(LlmEngineLlmSession s, const uint32_t* mask_words, int n_words, int32_t* out_token_id);
 } LlmEngineLlmEngine;
 
 /* Versione dell'ABI esportata dal runner (== LLMENGINE_ABI_VERSION dell'header con cui e' stato

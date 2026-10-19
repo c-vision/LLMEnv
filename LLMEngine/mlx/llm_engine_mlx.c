@@ -62,6 +62,11 @@ static int mlx_embed_ids(LlmEngineLlmModel m, const int32_t* ids, int n, float* 
 /* ABI v5 — EXPERT SWAP: offload esperti da disco (scelta del consumer, nessun env). */
 static void mlx_set_expert_swap(const char* dir) { llm_ai_mlx_set_moe_swap_dir(dir); }
 
+/* ABI v6 — MASKED: argmax ristretto a una bitmask sul vocabolario (grammatica). */
+static int mlx_generate_id_masked(LlmEngineLlmSession s, const uint32_t* mask_words, int n_words, int32_t* out_token_id) {
+    return llm_ai_mlx_session_generate_masked((llm_ai_mlx_session_handle)s, mask_words, n_words, out_token_id);
+}
+
 /* ABI v2 — KV: reset in-place + stats. */
 static int mlx_kv_clear(LlmEngineLlmSession s) {
     return llm_ai_mlx_session_reset((llm_ai_mlx_session_handle)s);
@@ -138,6 +143,8 @@ static const LlmEngineLlmEngine LLM_MLX_ENGINE = {
     .embed_ids = mlx_embed_ids,
     /* ABI v5 (in coda): offload esperti da disco. */
     .set_expert_swap = mlx_set_expert_swap,
+    /* ABI v6 (in coda): grammatica con bitmask. */
+    .generate_id_masked = mlx_generate_id_masked,
 };
 
 const LlmEngineLlmEngine* llmengine_llm_engine_mlx(void) { return &LLM_MLX_ENGINE; }
