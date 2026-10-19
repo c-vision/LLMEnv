@@ -552,6 +552,25 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cfg->norm_topk_prob = false;
         cfg->moe_layer_interval = 0;
         cfg->first_k_dense_replace = 0;
+    } else if (strcmp(cfg->model_type, "dots1") == 0) {
+        /* dots1: GQA + qk-norm per-testa (qwen3_moe_attention_block) + MoE noaux_tc (sigmoid +
+         * e_score_correction_bias + group-prune + shared) con esperti `mlp.experts`. */
+        OPT_INT(n_experts, "n_routed_experts");
+        OPT_INT(top_k, "num_experts_per_tok");
+        OPT_INT(n_shared_experts, "n_shared_experts");
+        OPT_INT(first_k_dense_replace, "first_k_dense_replace");
+        OPT_INT(n_group, "n_group");
+        OPT_INT(topk_group, "topk_group");
+        OPT_FLOAT(routed_scaling_factor, "routed_scaling_factor", 1.0f);
+        cfg->moe_gate_sigmoid = 1;
+        cfg->moe_gate_f32 = 1;
+        cfg->moe_group_prune = 1;
+        cfg->use_expert_bias = 1;
+        llm_mlx_mode_set(cfg->moe_expert_bias_name, sizeof cfg->moe_expert_bias_name, "mlp.gate.e_score_correction_bias");
+        llm_mlx_mode_set(cfg->moe_experts_base, sizeof cfg->moe_experts_base, "mlp.experts");
+        llm_mlx_mode_set(cfg->moe_shared_base, sizeof cfg->moe_shared_base, "mlp.shared_experts");
+        cfg->moe_shared_gate = 0;
+        cfg->moe_layer_interval = 0;
     } else if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0) {
         /* Mamba / Falcon-Mamba (mlx_lm rimappa falcon_mamba->mamba): SSM selettivo. */
         OPT_INT(mamba.state_size, "state_size");

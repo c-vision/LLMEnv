@@ -30,6 +30,15 @@ TINY = {
         moe_layer_start_index=0, moe_layer_interval=2, moe_num_shared_experts=1,
         moe_gate_act="softmax", head_dim=16,
     ),
+    # dots1: GQA + qk-norm per-testa + MoE noaux_tc (mlp.experts/shared, e_score_bias, group).
+    "dots1": dict(
+        cls="dots1", model_type="dots1",
+        vocab_size=128, hidden_size=64, num_hidden_layers=2, intermediate_size=128,
+        num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-6,
+        max_position_embeddings=512, first_k_dense_replace=0, moe_intermediate_size=32,
+        n_routed_experts=4, n_shared_experts=1, norm_topk_prob=True, num_experts_per_tok=2,
+        rope_theta=10000.0, routed_scaling_factor=1.0, head_dim=16, n_group=2, topk_group=1,
+    ),
     "qwen3_moe": dict(
         cls="qwen3_moe", model_type="qwen3_moe",
         hidden_size=64, num_hidden_layers=2, intermediate_size=128,
