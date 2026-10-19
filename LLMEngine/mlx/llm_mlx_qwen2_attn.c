@@ -60,13 +60,13 @@ bool qwen2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
     /* Bias reale (NON di quantizzazione): self_attn.{q,k,v}_proj.bias, un
      * tensore float separato da .biases (quantizzazione, già in qb/kb/vb). */
     mlx_array q_bias = mlx_array_new(), k_bias = mlx_array_new(), v_bias = mlx_array_new();
+    bool have_bias = true;
     tname(m->cfg.layer_prefix, layer_idx, "self_attn.q_proj.bias", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get(&m->weights, namebuf, &q_bias);
+    have_bias = have_bias && multishard_get(&m->weights, namebuf, &q_bias);
     tname(m->cfg.layer_prefix, layer_idx, "self_attn.k_proj.bias", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get(&m->weights, namebuf, &k_bias);
+    have_bias = have_bias && multishard_get(&m->weights, namebuf, &k_bias);
     tname(m->cfg.layer_prefix, layer_idx, "self_attn.v_proj.bias", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get(&m->weights, namebuf, &v_bias);
-    CHK(ok, "q/k/v_proj.bias lookup");
+    have_bias = have_bias && multishard_get(&m->weights, namebuf, &v_bias);
 
     mlx_array q0 = mlx_array_new(), k0 = mlx_array_new(), v0 = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&q0, normed, qw, qs, qb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "q_proj matmul"); }
@@ -79,10 +79,18 @@ bool qwen2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int 
 
     mlx_array q = mlx_array_new(), k = mlx_array_new(), v = mlx_array_new();
     if (ok) {
-        ok = mlx_add(&q, q0, q_bias, m->stream) == 0 &&
-             mlx_add(&k, k0, k_bias, m->stream) == 0 &&
-             mlx_add(&v, v0, v_bias, m->stream) == 0;
-        CHK(ok, "q/k/v bias add");
+        /* Il bias reale va aggiunto SOLO per pesi QUANTIZZATI: per i pesi PLAIN il triple lo porta
+         * gia' nello slot `biases` (fallback .biases->.bias) e quantized_linear_cfg lo applica ->
+         * aggiungerlo di nuovo = double-bias. */
+        bool quantized = (qs.ctx != NULL && ks.ctx != NULL && vs.ctx != NULL);
+        if (quantized && have_bias) {
+            ok = mlx_add(&q, q0, q_bias, m->stream) == 0 &&
+                 mlx_add(&k, k0, k_bias, m->stream) == 0 &&
+                 mlx_add(&v, v0, v_bias, m->stream) == 0;
+            CHK(ok, "q/k/v bias add");
+        } else {
+            ok = mlx_array_set(&q, q0) == 0 && mlx_array_set(&k, k0) == 0 && mlx_array_set(&v, v0) == 0;
+        }
     }
 
     mlx_array q_heads = mlx_array_new(), k_heads = mlx_array_new(), v_heads = mlx_array_new();

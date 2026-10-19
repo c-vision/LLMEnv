@@ -540,6 +540,17 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cfg->first_k_dense_replace = 0;
         cfg->moe_shared_base[0] = 0; cfg->moe_shared_gate = 0; cfg->moe_gate_sigmoid = 0;
         cfg->norm_topk_prob = true;
+    } else if (strcmp(cfg->model_type, "qwen2_moe") == 0) {
+        /* Qwen2-MoE: attn qwen2 (mappata) + MoE (moe_v2) con shared_expert a gate SIGMOID.
+         * router softmax, scores = softmax sui top-k (SENZA renormalizzazione => norm_topk_prob=false).
+         * esperti mlp.switch_mlp.*, router mlp.gate, shared mlp.shared_expert(+_gate). */
+        llm_mlx_mode_set(cfg->moe_experts_base, sizeof cfg->moe_experts_base, "mlp.switch_mlp");
+        llm_mlx_mode_set(cfg->moe_shared_base, sizeof cfg->moe_shared_base, "mlp.shared_expert");
+        cfg->moe_shared_gate = 1;
+        cfg->moe_gate_sigmoid = 0;
+        cfg->norm_topk_prob = false;
+        cfg->moe_layer_interval = 0;
+        cfg->first_k_dense_replace = 0;
     } else if (strcmp(cfg->model_type, "mamba") == 0 || strcmp(cfg->model_type, "falcon_mamba") == 0) {
         /* Mamba / Falcon-Mamba (mlx_lm rimappa falcon_mamba->mamba): SSM selettivo. */
         OPT_INT(mamba.state_size, "state_size");

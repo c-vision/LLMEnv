@@ -270,6 +270,21 @@ TINY = {
         dim_model_base=256, scale_depth=1.4, scale_emb=12.0,
         max_position_embeddings=512, rope_theta=10000.0,
     ),
+    # qwen2_moe: attn qwen2 + MoE (softmax router, shared_expert gate sigmoid).
+    "qwen2_moe": dict(
+        cls="qwen2_moe", model_type="qwen2_moe",
+        vocab_size=128, hidden_size=64, num_hidden_layers=2, intermediate_size=128,
+        num_attention_heads=4, num_key_value_heads=2, num_experts_per_tok=2, num_experts=4,
+        moe_intermediate_size=32, shared_expert_intermediate_size=32, rms_norm_eps=1e-6,
+        rope_theta=1000000.0,
+    ),
+    # qwen2: llama-like con q/k/v bias (o_proj no) — base condivisa di molti distill.
+    "qwen2": dict(
+        cls="qwen2", model_type="qwen2",
+        vocab_size=128, hidden_size=64, num_hidden_layers=2, intermediate_size=128,
+        num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-6, rope_theta=1000000.0,
+        tie_word_embeddings=True,
+    ),
 }
 
 

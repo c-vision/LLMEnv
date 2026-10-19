@@ -54,6 +54,7 @@ static const LlmMlxArchOps ARCH_TABLE[] = {
       llm_bonsai_rotate (proiezioni per-proiezione + uscita embed). Vedi i commenti in fondo. */
     { "qwen3_5_moe", qwen3_5_attention_block, qwen3_5_moe_ffn_block }, /* FASE 1b.6: Qwen3.6 hybrid GDN + MoE + shared_expert */
     { "qwen2",     qwen2_attention_block,     dense_swiglu_ffn },
+    { "qwen2_moe", qwen2_attention_block,     moe_v2_ffn_block }, /* Qwen2-MoE: attn qwen2 + MoE shared_expert */
     { "qwen2vl",   qwen2_attention_block,     dense_swiglu_ffn }, /* Qwen2.5-Omni: parte TESTO = qwen2 (vision via llm_host_ai) */
     { "olmoe",     qwen3_moe_attention_block, moe_v2_ffn_block }, /* OLMoE-1B-7B: GQA + QK-norm + MoE (gate plain + switch_mlp) — migrato a moe_v2 */
     { "gemma4",    gemma4_attention_block,    dense_geglu_ffn },
