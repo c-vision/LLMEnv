@@ -939,6 +939,12 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     if (strcmp(cfg->model_type, "ernie4_5_moe") == 0 && !cJSON_IsBool(norm_topk))
         cfg->norm_topk_prob = true;
     cJSON* tie = cJSON_GetObjectItemCaseSensitive(j, "tie_word_embeddings");
+    /* Wrapper con text_config annidato (gemma4/ministral3/qwen3_5...): la chiave vive nel
+     * text_config, non alla radice -> fallback quando alla radice non c'e'. */
+    if (!cJSON_IsBool(tie)) {
+        cJSON* tc = cJSON_GetObjectItemCaseSensitive(j, "text_config");
+        if (cJSON_IsObject(tc)) tie = cJSON_GetObjectItemCaseSensitive(tc, "tie_word_embeddings");
+    }
     /* LFM2/Mamba non dichiarano la chiave e sono SEMPRE legati (nessun lm_head): default true. */
     cfg->tie_word_embeddings = cJSON_IsBool(tie) ? cJSON_IsTrue(tie)
         : (strcmp(cfg->model_type, "lfm2") == 0 || strcmp(cfg->model_type, "lfm2_moe") == 0

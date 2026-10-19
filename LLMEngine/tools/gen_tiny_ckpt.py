@@ -51,6 +51,19 @@ TINY = {
         num_attention_heads=4, num_key_value_heads=2, rms_norm_eps=1e-6, head_dim=16,
         max_position_embeddings=512, sliding_window=8, rope_theta=10000.0,
     ),
+    # gemma4: wrapper di gemma4_text con text_config annidato (valida il path wrapper).
+    "gemma4": dict(
+        cls="gemma4", model_type="gemma4", vocab_size=128,
+        text_config=dict(
+            hidden_size=64, num_hidden_layers=2, intermediate_size=128,
+            num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+            rms_norm_eps=1e-6, rope_theta=1000000.0, max_position_embeddings=512,
+            hidden_size_per_layer_input=0,
+            num_kv_shared_layers=0, sliding_window=8, tie_word_embeddings=True,
+            layer_types=["sliding_attention", "sliding_attention"],
+            rope_parameters={"full_attention": {"rope_theta": 1000000.0}, "sliding_attention": {"rope_theta": 1000000.0}},
+        ),
+    ),
     # dots1: GQA + qk-norm per-testa + MoE noaux_tc (mlp.experts/shared, e_score_bias, group).
     "dots1": dict(
         cls="dots1", model_type="dots1",
