@@ -155,6 +155,7 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
                           || strcmp(m->cfg.model_type, "qwen3_5") == 0
                           || strcmp(m->cfg.model_type, "qwen3_5_moe") == 0
                           || strcmp(m->cfg.model_type, "qwen4_exp") == 0
+                          || strcmp(m->cfg.model_type, "mistral3") == 0
                           || strcmp(m->cfg.model_type, "prism_hadamard_qwen35") == 0) ? "language_model.model." : "model.";
     char embed_name[128], norm_name[128];
     if (strcmp(m->cfg.model_type, "mamba") == 0 || strcmp(m->cfg.model_type, "falcon_mamba") == 0 || strcmp(m->cfg.model_type, "mamba2") == 0) {
@@ -243,6 +244,7 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
         snprintf(lm_name, sizeof(lm_name), "%s",
              (strcmp(m->cfg.model_type, "qwen3_5") == 0 || strcmp(m->cfg.model_type, "qwen3_5_moe") == 0
               || strcmp(m->cfg.model_type, "qwen4_exp") == 0
+              || strcmp(m->cfg.model_type, "mistral3") == 0
               || strcmp(m->cfg.model_type, "prism_hadamard_qwen35") == 0)
                  ? "language_model.lm_head" : "lm_head");
     /* Fallback a catena per lm_head, specchio del caso embed (alcuni checkpoint NON hanno la

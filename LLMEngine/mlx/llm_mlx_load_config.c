@@ -529,6 +529,14 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
           cfg->moe_gate_sigmoid = (cJSON_IsString(ga) && strcmp(ga->valuestring, "sigmoid") == 0) ? 1 : 0; }
         OPT_FLOAT(rope_theta, "rope_theta", 10000.0f);
         cfg->rope_traditional = true;   /* ernie: traditional=true */
+    } else if (strcmp(cfg->model_type, "mistral3") == 0) {
+        /* Mistral3 (wrapper multimodale, inner ministral3): sotto-modello testuale sotto
+         * language_model.model.*. rope_theta opzionale in rope_parameters; attn-scale llama-4
+         * letta genericamente in fondo (rope_parameters.llama_4_scaling_beta). */
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof cfg->layer_prefix, "language_model.model.layers.");
+        { cJSON* rpa = cJSON_GetObjectItemCaseSensitive(src, "rope_parameters");
+          cJSON* rt2 = cJSON_IsObject(rpa) ? cJSON_GetObjectItemCaseSensitive(rpa, "rope_theta") : NULL;
+          if (cJSON_IsNumber(rt2)) cfg->rope_theta = (float)rt2->valuedouble; }
     } else if (strcmp(cfg->model_type, "qwen3_moe") == 0) {
         /* Qwen3-MoE migrato a moe_v2: softmax + top-k + norm_topk_prob; dense/MoE via
          * decoder_sparse_step (interval); NIENTE shared expert. n_experts/top_k/moe_intermediate_size
@@ -952,6 +960,22 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         cJSON* tc = cJSON_GetObjectItemCaseSensitive(j, "text_config");
         if (cJSON_IsObject(tc)) tie = cJSON_GetObjectItemCaseSensitive(tc, "tie_word_embeddings");
     }
+    /* ministral3/mistral4 (e wrapper): attn-scale llama-4 in rope_parameters
+     * (llama_4_scaling_beta + original_max_position_embeddings). Lettura generica: le altre
+     * arch non hanno la chiave -> beta resta 0 (off). */
+    {
+        cJSON* rp = cJSON_GetObjectItemCaseSensitive(j, "rope_parameters");
+        if (!cJSON_IsObject(rp)) {
+            cJSON* tc = cJSON_GetObjectItemCaseSensitive(j, "text_config");
+            if (cJSON_IsObject(tc)) rp = cJSON_GetObjectItemCaseSensitive(tc, "rope_parameters");
+        }
+        if (cJSON_IsObject(rp)) {
+            cJSON* b = cJSON_GetObjectItemCaseSensitive(rp, "llama_4_scaling_beta");
+            if (cJSON_IsNumber(b)) cfg->llama4_scaling_beta = (float)b->valuedouble;
+            cJSON* om = cJSON_GetObjectItemCaseSensitive(rp, "original_max_position_embeddings");
+            if (cJSON_IsNumber(om)) cfg->llama4_mpe_orig = (int)om->valuedouble;
+        }
+    }
     /* LFM2/Mamba non dichiarano la chiave e sono SEMPRE legati (nessun lm_head): default true. */
     cfg->tie_word_embeddings = cJSON_IsBool(tie) ? cJSON_IsTrue(tie)
         : (strcmp(cfg->model_type, "lfm2") == 0 || strcmp(cfg->model_type, "lfm2_moe") == 0
@@ -1098,6 +1122,8 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "backbone.layers.");
     if (strcmp(cfg->model_type, "qwen3_5") == 0 || strcmp(cfg->model_type, "qwen3_5_moe") == 0
         || strcmp(cfg->model_type, "qwen4_exp") == 0)
+        llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "language_model.model.layers.");
+    if (strcmp(cfg->model_type, "mistral3") == 0)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "language_model.model.layers.");
     if (strcmp(cfg->model_type, "lille-130m") == 0)
         llm_mlx_mode_set(cfg->layer_prefix, sizeof(cfg->layer_prefix), "transformer.layers.");

@@ -64,6 +64,17 @@ TINY = {
             rope_parameters={"full_attention": {"rope_theta": 1000000.0}, "sliding_attention": {"rope_theta": 1000000.0}},
         ),
     ),
+    # mistral3: wrapper con text_config (inner ministral3 = llama + RoPE parziale).
+    "mistral3": dict(
+        cls="mistral3", model_type="mistral3",
+        text_config=dict(
+            model_type="ministral3",
+            vocab_size=128, hidden_size=64, num_hidden_layers=2, intermediate_size=128,
+            num_attention_heads=4, num_key_value_heads=2, head_dim=16, rms_norm_eps=1e-6,
+            max_position_embeddings=512, rope_parameters={"rope_theta": 1000000.0, "llama_4_scaling_beta": 0.5, "original_max_position_embeddings": 8},
+            layer_types=["full_attention", "full_attention"],
+        ),
+    ),
     # dots1: GQA + qk-norm per-testa + MoE noaux_tc (mlp.experts/shared, e_score_bias, group).
     "dots1": dict(
         cls="dots1", model_type="dots1",
