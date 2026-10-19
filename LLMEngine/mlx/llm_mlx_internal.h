@@ -508,6 +508,8 @@ typedef struct {
     uint64_t last_used; /* LRU: timestamp (lru_clock del modello) dell'ultimo uso */
     bool has_kv;        /* true = KV cache presente (salvato in-process); false = caricato
                          * da disco (solo keys): il riuso deve rifare il prefill del prefisso */
+    int hits;           /* C5 (HiCache selettivo): quante volte il prefisso e' stato RIUSATO; l'eviction spilla su SSD solo
+                         * i prefissi con hits >= opzione `prefix_spill_min_hits` (default 1 = dal 2o uso) */
     bool on_disk;       /* §G: KV spillata su llm_kv_disk (RAM liberata); tokens/name restano,
                          * il riuso la ripristina da disco invece di ri-prefillare */
 } SavedPrefix;

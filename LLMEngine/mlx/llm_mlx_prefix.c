@@ -389,8 +389,11 @@ static bool llm_prefix_evict_lru(LlmMlxModel* m) {
     if (!m || m->prefix_max <= 0 || m->n_prefixes < m->prefix_max) return false;
     if (llm_kvdisk_enabled(m)) {
         int cand = -1; uint64_t oldest = UINT64_MAX;
+        /* C5: spill SELETTIVO — scrivere su SSD un prefisso mai riusato e' I/O sprecato (SGLang HiCache: dal 2o hit).
+         * I prefissi sotto soglia, se vittime, vengono evitti senza spill. 0 = spill incondizionato (comportamento storico). */
+        int min_hits = 1; (void)llm_ai_mlx_opt_get_int("prefix_spill_min_hits", &min_hits);
         for (int i = 0; i < m->n_prefixes; i++)
-            if (m->prefixes[i].has_kv && !m->prefixes[i].on_disk && m->prefixes[i].last_used < oldest) {
+            if (m->prefixes[i].has_kv && !m->prefixes[i].on_disk && m->prefixes[i].hits >= min_hits && m->prefixes[i].last_used < oldest) {
                 oldest = m->prefixes[i].last_used; cand = i;
             }
         if (cand >= 0) {
@@ -615,6 +618,7 @@ int llm_ai_mlx_session_append_reuse_prefix(llm_ai_mlx_session_handle sh, llm_ai_
     for (int i = 0; i < p->token_len; i++) if (token_ids[i] != p->tokens[i]) { match = 0; break; }
 
     if (!match) return llm_ai_mlx_session_append(sh, token_ids, n_ids); /* prefisso non combacia */
+    p->hits++;   /* C5: contatore dei riusi (politica di spill selettivo) */
     /* KV assente: prefisso caricato da disco (solo keys) oppure SPILLATO nel tier SSD (§G).
      * Nel secondo caso la ripristiniamo dallo scratch e proseguiamo col riuso normale;
      * altrimenti re-prefill dell'intero prompt (fail-open, corretto). */
