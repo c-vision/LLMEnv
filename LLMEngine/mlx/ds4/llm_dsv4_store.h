@@ -178,7 +178,8 @@ static inline LlmDsv4Store* llm_dsv4_store_open(const char* path, const LlmEngin
         if (s->fd < 0) { free(s->layers); free(s->ents); free(s); return NULL; }
         /* I3 (ishizuki): le read streamate degli esperti (pread) non devono inquinare il page-cache
          * unificato. Il fd e' usato SOLO per i pread dello SWAP (il RESIDENT usa il mmap del GGUF). */
-        if (fcntl(s->fd, F_NOCACHE, 1) != 0) { /* best-effort */ }
+        { int nc = 1; (void)llm_ai_mlx_opt_get_bool("dsv4_store_nocache", &nc);   /* A/B: 0 = i pread usano il page cache */
+          if (nc && fcntl(s->fd, F_NOCACHE, 1) != 0) { /* best-effort */ } }
     }
     for (int il = 0; il < c->n_layer; il++) {
         char b[160];
@@ -304,7 +305,8 @@ static inline int llm_dsv4_store_claim(LlmDsv4Store* s, int layer, int e, int* m
         void* p = NULL;
         if (posix_memalign(&p, page, padded) == 0) { en->buf = (uint8_t*)p; en->cap = padded; }
         /* I6 (ishizuki): slot residente PINNATO (mlock) -> il SO non lo comprime/pagina (best-effort). */
-        if (en->buf) (void)mlock(en->buf, en->cap);
+        { int ml = 1; (void)llm_ai_mlx_opt_get_bool("dsv4_store_mlock", &ml);   /* A/B */
+          if (en->buf && ml) (void)mlock(en->buf, en->cap); }
     }
     if (!en->buf) { en->valid = 0; return -1; }
     en->len = len;
