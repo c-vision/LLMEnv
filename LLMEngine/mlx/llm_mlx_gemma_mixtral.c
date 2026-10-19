@@ -73,6 +73,79 @@ static void llm_flash_prefill_fp64_uniform(mlx_array v_src, mlx_array kout, mlx_
     mlx_array_free(kf); mlx_array_free(nf);
 }
 
+/* ============================================================================
+ * gemma4 per-layer inputs (hidden_size_per_layer_input>0): prepara il per-layer
+ * inputs PROIETTATO del forward corrente in m->pli_all [1,T,N,pli].
+ *   raw  = embed_tokens_per_layer(ids) * pli^0.5                -> [1,T,N*pli] -> [1,T,N,pli]
+ *   proj = per_layer_model_projection(h) * hidden^-0.5          -> [1,T,N*pli] -> [1,T,N,pli]
+ *          -> per_layer_projection_norm(proj)                   (RMSNorm sull'asse pli)
+ *   pli_all = (proj + raw) * 2^-0.5
+ * Consumo: blocco ffn -> slice [:, :, layer_idx, :] e gate chain.
+ * TRAP: rms_norm_cfg ritorna TRUE=ok.
+ * ============================================================================ */
+bool llm_mlx_gemma4_pli_prepare(LlmMlxModel* m, const int32_t* token_ids, int n_tokens, mlx_array h) {
+    const int N = m->cfg.n_layers, pli = m->cfg.gemma4_pli;
+    if (pli <= 0) return true;
+    mlx_stream s = m->stream;
+    bool ok = m->pli_embed_w.ctx != NULL && m->pli_proj_w.ctx != NULL && m->pli_norm_w.ctx != NULL;
+    if (!ok) { fprintf(stderr, "gemma4_pli: pesi non caricati\n"); return false; }
+
+    /* raw: gather dei per-layer embeddings * pli^0.5 -> [1,T,N,pli]. */
+    const int idx_shape[1] = {n_tokens};
+    mlx_array indices = mlx_array_new_data(token_ids, idx_shape, 1, MLX_INT32);
+    mlx_array raw_flat = mlx_array_new();
+    ok = ok && mlx_take_axis(&raw_flat, m->pli_embed_w, indices, 0, s) == 0;
+    mlx_array_free(indices);
+    mlx_array raw = mlx_array_new();
+    if (ok) { int sh[4] = {1, n_tokens, N, pli}; ok = mlx_reshape(&raw, raw_flat, sh, 4, s) == 0; }
+    mlx_array_free(raw_flat);
+    if (ok) {
+        mlx_array scl = mlx_array_new_float32(sqrtf((float)pli));
+        mlx_array r2 = mlx_array_new();
+        ok = mlx_multiply(&r2, raw, scl, s) == 0;
+        if (ok) mlx_array_set(&raw, r2);
+        mlx_array_free(scl); mlx_array_free(r2);
+    }
+
+    /* proj: linear(h) * hidden^-0.5 -> [1,T,N,pli] -> norm. */
+    mlx_array proj = mlx_array_new();
+    if (ok) {
+        const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
+        mlx_array p0 = mlx_array_new();
+        ok = quantized_linear_cfg(&p0, h, m->pli_proj_w, mlx_array_new(), mlx_array_new(), gsz, bts, m->cfg.quant_mode, s);
+        if (ok) { int sh[4] = {1, n_tokens, N, pli}; ok = mlx_reshape(&proj, p0, sh, 4, s) == 0; }
+        mlx_array_free(p0);
+    }
+    if (ok) {
+        mlx_array scl = mlx_array_new_float32(1.0f / sqrtf((float)m->cfg.hidden_size));
+        mlx_array p2 = mlx_array_new();
+        ok = mlx_multiply(&p2, proj, scl, s) == 0;
+        if (ok) mlx_array_set(&proj, p2);
+        mlx_array_free(scl); mlx_array_free(p2);
+    }
+    if (ok) { mlx_array pn = mlx_array_new();
+              ok = rms_norm_cfg(&pn, proj, m->pli_norm_w, m->cfg.rms_norm_eps, s);
+              if (ok) mlx_array_set(&proj, pn);
+              mlx_array_free(pn); }
+
+    mlx_array out = mlx_array_new();
+    if (ok) {
+        mlx_array sum = mlx_array_new();
+        ok = mlx_add(&sum, proj, raw, s) == 0;
+        mlx_array_free(proj);
+        if (ok) {
+            mlx_array scl = mlx_array_new_float32(0.7071067811865476f); /* 2^-0.5 */
+            ok = mlx_multiply(&out, sum, scl, s) == 0;
+            mlx_array_free(scl);
+        }
+        mlx_array_free(sum);
+    }
+    mlx_array_free(raw);
+    if (ok) mlx_array_set(&m->pli_all, out);
+    mlx_array_free(out);
+    return ok;
+}
+
 bool gemma4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                     mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h) {
     bool ok = true;

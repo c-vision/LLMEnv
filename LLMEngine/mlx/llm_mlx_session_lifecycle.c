@@ -276,6 +276,27 @@ bool load_output_tensors(LlmMlxModel* m, OutputTensors* t) {
         if (multishard_get(&m->weights, pe, &pw)) mlx_array_set(&m->pos_emb_w, pw);
         mlx_array_free(pw);
     }
+    /* gemma4 per-layer inputs: pesi caricati UNA volta (schema pos_emb_w).
+     * embed_tokens_per_layer [vocab_pli, N*pli], per_layer_model_projection [N*pli, hidden],
+     * per_layer_projection_norm.weight [pli]. */
+    if (strcmp(m->cfg.model_type, "gemma4") == 0 && m->cfg.gemma4_pli > 0 && m->pli_embed_w.ctx == NULL) {
+        m->pli_embed_w = mlx_array_new(); m->pli_embed_s = mlx_array_new();
+        m->pli_proj_w = mlx_array_new();  m->pli_proj_s = mlx_array_new();
+        m->pli_norm_w = mlx_array_new();
+        char nbuf[384];
+        snprintf(nbuf, sizeof nbuf, "language_model.model.embed_tokens_per_layer.weight");
+        mlx_array w1 = mlx_array_new();
+        if (multishard_get(&m->weights, nbuf, &w1)) mlx_array_set(&m->pli_embed_w, w1);
+        mlx_array_free(w1);
+        snprintf(nbuf, sizeof nbuf, "language_model.model.per_layer_model_projection.weight");
+        mlx_array w2 = mlx_array_new();
+        if (multishard_get(&m->weights, nbuf, &w2)) mlx_array_set(&m->pli_proj_w, w2);
+        mlx_array_free(w2);
+        snprintf(nbuf, sizeof nbuf, "language_model.model.per_layer_projection_norm.weight");
+        mlx_array w3 = mlx_array_new();
+        if (multishard_get(&m->weights, nbuf, &w3)) mlx_array_set(&m->pli_norm_w, w3);
+        mlx_array_free(w3);
+    }
     return ok;
 }
 

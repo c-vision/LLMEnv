@@ -262,6 +262,9 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
          * I layer j >= n_layers - N condividono K/V col primo layer dello stesso tipo. */
         { cJSON* ks = cJSON_GetObjectItemCaseSensitive(src, "num_kv_shared_layers");
           cfg->kv_shared_layers = cJSON_IsNumber(ks) ? (int)ks->valuedouble : 0; }
+        /* gemma4 per-layer inputs: hidden_size_per_layer_input (>0 abilita il gate chain). */
+        { cJSON* pl = cJSON_GetObjectItemCaseSensitive(src, "hidden_size_per_layer_input");
+          cfg->gemma4_pli = cJSON_IsNumber(pl) ? (int)pl->valuedouble : 0; }
     } else if (strcmp(cfg->model_type, "lfm2") == 0) {
         /* LFM2 (Liquid): ibrido. Layer a ShortConv (is_linear_layer=true) alternati a layer a
          * piena attenzione (indici in full_attn_idxs). conv_L_cache = kernel del conv1d. */

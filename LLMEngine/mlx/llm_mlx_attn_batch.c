@@ -1015,6 +1015,8 @@ bool forward_tokens_batch(LlmMlxModel* m, LlmMlxSession* kvq_sess, mlx_array emb
     mlx_array h = mlx_array_new();
     if (!llm_mlx_pos_emb_add(m, x, cache_offset, n_tokens, &h)) { mlx_array_free(x); mlx_array_free(h); return false; }
     mlx_array_free(x);
+    /* gemma4 per-layer inputs: calcola e materializza m->pli_all (no-op se l'MLP non lo usa). */
+    if (!llm_mlx_gemma4_pli_prepare(m, (const int32_t*)token_ids, n_tokens, h)) { mlx_array_free(h); return false; }
     bool step_ok = true;
     for (int layer = 0; step_ok && layer < m->cfg.n_layers; layer++) {
         mlx_array layer_out = mlx_array_new();

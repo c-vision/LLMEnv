@@ -154,6 +154,8 @@ typedef struct {
     /* gemma4 kv-sharing: gli ULTIMI kv_shared_layers layer NON hanno k_proj/v_proj/k_norm e
      * riusano il K/V (post-norm+rope) del primo layer precedente dello stesso tipo. 0 = off. */
     int kv_shared_layers;
+    /* gemma4 per-layer inputs (gemma4_text.py: hidden_size_per_layer_input). 0 = off. */
+    int gemma4_pli;
 
     /* FASE 1b.2 (Llama 3.x): RoPE con scaling a 3 fasce di frequenza
      * (config.json["rope_scaling"]["rope_type"] == "llama3") -- ignorati (0/false)
@@ -697,6 +699,12 @@ struct LlmMlxModel {
      * per tutte le altre arch (solo RoPE). Caricata in load_output_tensors, sommata agli embed
      * nel forward (forward_tokens_batch + forward_one_token_dev). */
     mlx_array pos_emb_w;
+    /* gemma4 per-layer inputs (hidden_size_per_layer_input>0): pesi caricati UNA volta
+     * (schema pos_emb_w) e il per-layer inputs PROIETTATO del forward corrente
+     * [1,T,N,pli], preparato a ogni embed (forward_tokens_batch/forward_one_token_dev)
+     * e consumato dal blocco ffn (gate chain). ctx==NULL quando la feature e' off. */
+    mlx_array pli_embed_w, pli_embed_s, pli_proj_w, pli_proj_s, pli_norm_w;
+    mlx_array pli_all;
     /* Qwen4-Exp (qwen4_exp): stato persistente dell'indexer QSA per-layer (ring raw +
      * chiavi compresse growable + offset) -- NON e' un mlx_array singolo come k_cache/
      * v_cache (schema diverso, vedi LlmQwen4ExpQSACache in llm_mlx_qwen4exp.h), quindi

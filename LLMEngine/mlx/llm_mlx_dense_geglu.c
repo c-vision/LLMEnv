@@ -168,6 +168,71 @@ bool dense_geglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, m
     mlx_array residual_out = mlx_array_new();
     if (ok) { ok = mlx_add(&residual_out, h, down_normed, m->stream) == 0; CHK(ok, "final residual add"); }
 
+    /* gemma4 per-layer inputs (hidden_size_per_layer_input>0): gate chain DOPO il residuo
+     * e PRIMA del layer_scalar (gemma4_text.py DecoderLayer.__call__):
+     *   gate = per_layer_input_gate(residual) -> gelu_approx -> * per_layer_input[:, :, j, :]
+     *          -> per_layer_projection (pli->hidden) -> post_per_layer_input_norm -> residual + gate */
+    if (ok && m->cfg.gemma4_pli > 0 && m->pli_all.ctx != NULL) {
+        mlx_array pli_w = mlx_array_new(), pli_s = mlx_array_new(), pli_b = mlx_array_new();
+        mlx_array gate_lin = mlx_array_new(), g_in = mlx_array_new(), g_act = mlx_array_new();
+        mlx_array g_proj = mlx_array_new(), g_norm = mlx_array_new(), gate_out = mlx_array_new();
+        tname_gemma4(layer_idx, "per_layer_input_gate", namebuf, sizeof(namebuf));
+        ok = ok && multishard_get_triple(&m->weights, namebuf, &pli_w, &pli_s, &pli_b);
+        CHK(ok, "per_layer_input_gate lookup");
+        /* slice per-layer input [:, :, layer_idx, :] da pli_all [1,T,N,pli] -> [1,T,pli] */
+        if (ok) {
+            const int N = m->cfg.n_layers, pli = m->cfg.gemma4_pli;
+            const int p0[4] = {0, 0, layer_idx, 0}, p1[4] = {1, n_tokens, layer_idx + 1, pli};
+            const int st4[4] = {1, 1, 1, 1};
+            ok = mlx_slice(&g_in, m->pli_all, p0, 4, p1, 4, st4, 4, m->stream) == 0;
+        }
+        if (ok) { const int sh[3] = {1, n_tokens, m->cfg.gemma4_pli}; ok = mlx_reshape(&g_in, g_in, sh, 3, m->stream) == 0; }
+        if (ok) { ok = quantized_linear_cfg(&gate_lin, residual_out, pli_w, pli_s, pli_b, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "gate lin"); }
+        if (ok) {
+            /* gelu_approx = 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715x^3))) — come mlx_lm nn.gelu_approx. */
+            const float s2pi = 0.7978845608028654f;
+            mlx_array xs = mlx_array_new(), x3 = mlx_array_new(), inner = mlx_array_new();
+            mlx_array th = mlx_array_new(), inner1 = mlx_array_new(), hf = mlx_array_new();
+            mlx_array one = mlx_array_new_float32(1.0f), half = mlx_array_new_float32(0.5f);
+            { int sh3[3] = {1, n_tokens, m->cfg.gemma4_pli}; ok = mlx_reshape(&g_act, gate_lin, sh3, 3, m->stream) == 0; }
+            if (ok) ok = mlx_multiply(&xs, g_act, mlx_array_new_float32(s2pi), m->stream) == 0;
+            if (ok) ok = mlx_power(&x3, g_act, mlx_array_new_float32(3.0f), m->stream) == 0;
+            if (ok) ok = mlx_multiply(&inner, x3, mlx_array_new_float32(0.044715f), m->stream) == 0;
+            if (ok) ok = mlx_add(&inner, inner, g_act, m->stream) == 0;
+            if (ok) ok = mlx_multiply(&inner, inner, mlx_array_new_float32(s2pi), m->stream) == 0;
+            if (ok) ok = mlx_tanh(&th, inner, m->stream) == 0;
+            if (ok) ok = mlx_add(&inner1, th, one, m->stream) == 0;
+            if (ok) ok = mlx_multiply(&hf, g_act, half, m->stream) == 0;
+            if (ok) ok = mlx_multiply(&g_act, hf, inner1, m->stream) == 0;
+            mlx_array_free(one); mlx_array_free(half);
+            mlx_array_free(xs); mlx_array_free(x3); mlx_array_free(inner);
+            mlx_array_free(th); mlx_array_free(inner1); mlx_array_free(hf);
+            CHK(ok, "gelu_approx");
+        }
+        if (ok) { ok = mlx_multiply(&g_act, g_act, g_in, m->stream) == 0; CHK(ok, "gate * per_layer_input"); }
+        if (ok) {
+            mlx_array pj_w = mlx_array_new(), pj_s = mlx_array_new(), pj_b = mlx_array_new();
+            tname_gemma4(layer_idx, "per_layer_projection", namebuf, sizeof(namebuf));
+            ok = ok && multishard_get_triple(&m->weights, namebuf, &pj_w, &pj_s, &pj_b);
+            CHK(ok, "per_layer_projection lookup");
+            if (ok) { ok = quantized_linear_cfg(&g_proj, g_act, pj_w, pj_s, pj_b, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "per_layer_projection matmul"); }
+            mlx_array_free(pj_w); mlx_array_free(pj_s); mlx_array_free(pj_b);
+        }
+        if (ok) {
+            mlx_array pn_w = mlx_array_new();
+            tname_gemma4(layer_idx, "post_per_layer_input_norm.weight", namebuf, sizeof(namebuf));
+            ok = ok && multishard_get(&m->weights, namebuf, &pn_w);
+            CHK(ok, "post_per_layer_input_norm lookup");
+            if (ok) { ok = rms_norm_cfg(&g_norm, g_proj, pn_w, m->cfg.rms_norm_eps, m->stream); CHK(ok, "post_per_layer_input_norm"); }
+            mlx_array_free(pn_w);
+        }
+        if (ok) { ok = mlx_add(&gate_out, residual_out, g_norm, m->stream) == 0; CHK(ok, "residual + gate"); }
+        if (ok) mlx_array_set(&residual_out, gate_out);
+        mlx_array_free(pli_w); mlx_array_free(pli_s); mlx_array_free(pli_b);
+        mlx_array_free(gate_lin); mlx_array_free(g_in); mlx_array_free(g_act);
+        mlx_array_free(g_proj); mlx_array_free(g_norm); mlx_array_free(gate_out);
+    }
+
     /* layer_scalar: scalare appreso per layer (shape [1]), moltiplicato incondizionatamente
      * sull'intero output del layer -- verificato in gemma4_text.py, riga finale di
      * DecoderLayer.__call__, applicato SEMPRE (non condizionato da MoE/per-layer-gating,

@@ -390,6 +390,7 @@ bool llm_mlx_flash_decode_verify_enabled(void);
 bool llm_mlx_flash_prefill_enabled(void);
 GattnQuant* llm_mlx_gemma4_attn_quant(LlmMlxModel* m, int layer_idx);
 void tname_gemma4(int layer_idx, const char* suffix, char* out, size_t out_cap);
+bool llm_mlx_gemma4_pli_prepare(LlmMlxModel* m, const int32_t* token_ids, int n_tokens, mlx_array h);
 void llm_mlx_kv_compact_prefix(int n_layers, int cache_offset, mlx_stream stream,
                                mlx_array* k_cache, mlx_array* v_cache);
 /* --- dominio Gemma4+Mixtral attenzione (llm_mlx_gemma_mixtral.c) --- */
