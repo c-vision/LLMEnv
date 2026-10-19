@@ -258,6 +258,10 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
             else if (strcmp(lt->valuestring, "full_attention") == 0) cfg->is_sliding_layer[i] = false;
             else { fprintf(stderr, "load_config: layer_types[%d]=\"%s\" non riconosciuto\n", i, lt->valuestring); cJSON_Delete(j); free(cfg->is_sliding_layer); cfg->is_sliding_layer = NULL; return false; }
         }
+        /* gemma4 kv-sharing: num_kv_shared_layers (gemma4_text.py: num_kv_shared_layers).
+         * I layer j >= n_layers - N condividono K/V col primo layer dello stesso tipo. */
+        { cJSON* ks = cJSON_GetObjectItemCaseSensitive(src, "num_kv_shared_layers");
+          cfg->kv_shared_layers = cJSON_IsNumber(ks) ? (int)ks->valuedouble : 0; }
     } else if (strcmp(cfg->model_type, "lfm2") == 0) {
         /* LFM2 (Liquid): ibrido. Layer a ShortConv (is_linear_layer=true) alternati a layer a
          * piena attenzione (indici in full_attn_idxs). conv_L_cache = kernel del conv1d. */

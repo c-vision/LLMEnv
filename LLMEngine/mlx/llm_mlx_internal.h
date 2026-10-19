@@ -151,6 +151,9 @@ typedef struct {
      * non noto a compile-time), liberata in llm_mlx_model_destroy. NULL per architetture senza
      * questa distinzione (tutti i layer si comportano uguale). */
     bool* is_sliding_layer;
+    /* gemma4 kv-sharing: gli ULTIMI kv_shared_layers layer NON hanno k_proj/v_proj/k_norm e
+     * riusano il K/V (post-norm+rope) del primo layer precedente dello stesso tipo. 0 = off. */
+    int kv_shared_layers;
 
     /* FASE 1b.2 (Llama 3.x): RoPE con scaling a 3 fasce di frequenza
      * (config.json["rope_scaling"]["rope_type"] == "llama3") -- ignorati (0/false)

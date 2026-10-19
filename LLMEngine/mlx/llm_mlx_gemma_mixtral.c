@@ -130,25 +130,56 @@ bool gemma4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
     mlx_array q_normed = mlx_array_new();
     if (ok) { ok = rms_norm_cfg(&q_normed, q_heads, qn_w, m->cfg.rms_norm_eps, m->stream); CHK(ok, "q_norm"); }
 
-    /* K: proiezione + reshape. */
+    /* K: proiezione + reshape. Sui layer KV-SHARED (gemma4: j >= n_layers - kv_shared_layers)
+     * k_proj/v_proj/k_norm NON esistono: il K/V corrente (post-norm+rope) viene preso dallo
+     * STASH del primo layer precedente dello stesso tipo (aux_cache[src], schema mlx_lm
+     * previous_kvs). Il layer shared lo scrive nel PROPRIO cache (cache.update_and_fetch). */
+    const int N_layers = m->cfg.n_layers, S_shared = m->cfg.kv_shared_layers;
+    const bool kv_shared = (S_shared > 0 && layer_idx >= N_layers - S_shared);
+    int kv_src = layer_idx;
+    if (kv_shared && m->cfg.is_sliding_layer)
+        for (int i = 0; i < N_layers - S_shared; i++)
+            if (m->cfg.is_sliding_layer[i] == is_sliding) { kv_src = i; break; }
+
     mlx_array kw = mlx_array_new(), ks = mlx_array_new(), kb = mlx_array_new();
+    mlx_array k0 = mlx_array_new();
+    mlx_array k_heads = mlx_array_new(), v_heads = mlx_array_new();
+    if (ok && kv_shared) {
+        mlx_array* st_ptr = (m->aux_cache && kv_src < N_layers) ? &m->aux_cache[kv_src] : NULL;
+        ok = st_ptr && (*st_ptr).ctx != NULL;
+        if (ok) {
+            /* stash [1,nkv,T,2*hd] -> [1,T,nkv,2*hd]: prima meta' K (post-rope), seconda V. */
+            int hd2[4] = {1, n_kv_heads, n_tokens, head_dim*2};
+            mlx_array st2 = mlx_array_new(), st_t = mlx_array_new();
+            ok = mlx_reshape(&st2, *st_ptr, hd2, 4, m->stream) == 0 &&
+                 mlx_transpose_axes(&st_t, st2, (const int[4]){0,2,1,3}, 4, m->stream) == 0;
+            if (ok) { int sec[1] = {head_dim}; mlx_vector_array sp = mlx_vector_array_new();
+                      ok = mlx_split_sections(&sp, st_t, sec, 1, -1, m->stream) == 0 &&
+                           mlx_vector_array_get(&k_heads, sp, 0) == 0 && mlx_vector_array_get(&v_heads, sp, 1) == 0;
+                      mlx_vector_array_free(sp); }
+            mlx_array_free(st2); mlx_array_free(st_t);
+        }
+        CHK(ok, "kv-shared stash lookup");
+    } else if (ok) {
     if (ac4 != NULL) { ok = ok && mlx_array_set(&kw, ac4->kw) == 0 && mlx_array_set_optional(&ks, ac4->ks) && mlx_array_set_optional(&kb, ac4->kb); }
     else { tname_gemma4(layer_idx, "self_attn.k_proj", namebuf, sizeof(namebuf));
         ok = ok && multishard_get_triple(&m->weights, namebuf, &kw, &ks, &kb); CHK(ok, "k_proj lookup"); }
-    mlx_array k0 = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&k0, normed, kw, ks, kb, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "k_proj matmul"); }
-    mlx_array k_heads = mlx_array_new();
     if (ok) {
         const int kv_shape[4] = {1, n_tokens, n_kv_heads, head_dim};
         ok = mlx_reshape(&k_heads, k0, kv_shape, 4, m->stream) == 0;
         CHK(ok, "k head reshape");
     }
+    }
 
     /* V: se use_k_eq_v, è una copia di k_heads (PRIMA di k_norm) -- nessun v_proj
-     * separato caricato in quel caso. Altrimenti proiezione propria, come al solito. */
+     * separato caricato in quel caso. Altrimenti proiezione propria, come al solito.
+     * Sui layer kv-shared V arriva già dallo stash (nessun v_proj nel checkpoint). */
     mlx_array vw = mlx_array_new(), vs = mlx_array_new(), vb = mlx_array_new();
-    mlx_array v0 = mlx_array_new(), v_heads = mlx_array_new();
-    if (ok && use_k_eq_v) {
+    mlx_array v0 = mlx_array_new();
+    if (ok && kv_shared) {
+        CHK(true, "v_heads dallo stash (kv-shared)");
+    } else if (ok && use_k_eq_v) {
         ok = mlx_array_set(&v_heads, k_heads) == 0;
         CHK(ok, "v_heads = k_heads (k_eq_v)");
     } else if (ok) {
@@ -164,16 +195,27 @@ bool gemma4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
     }
 
     /* k_norm (con peso) su K; v_norm (SENZA peso, RMSNormNoScale) su V -- applicata
-     * su entrambi i tipi di layer, verificato. */
+     * su entrambi i tipi di layer, verificato. Sui layer kv-shared K/V sono GIA'
+     * normalizzati e rope-ati (dallo stash): niente norm e niente RoPE su K. */
     mlx_array kn_w = mlx_array_new();
+    mlx_array k_normed = mlx_array_new();
+    if (ok && kv_shared) {
+        ok = mlx_array_set(&k_normed, k_heads) == 0;
+        CHK(ok, "k_normed dallo stash (kv-shared)");
+    } else {
     tname_gemma4(layer_idx, "self_attn.k_norm.weight", namebuf, sizeof(namebuf));
     if (ac4 != NULL && ac4->has_qn) { ok = ok && mlx_array_set(&kn_w, ac4->kn_w) == 0; }
     else { ok = ok && multishard_get(&m->weights, namebuf, &kn_w); }
     CHK(ok, "k_norm lookup");
-    mlx_array k_normed = mlx_array_new();
     if (ok) { ok = rms_norm_cfg(&k_normed, k_heads, kn_w, m->cfg.rms_norm_eps, m->stream); CHK(ok, "k_norm"); }
+    }
     mlx_array v_normed = mlx_array_new();
+    if (ok && kv_shared) {
+        ok = mlx_array_set(&v_normed, v_heads) == 0;
+        CHK(ok, "v_normed dallo stash (kv-shared)");
+    } else {
     if (ok) { ok = mlx_fast_rms_norm_no_scale(&v_normed, v_heads, head_dim, m->cfg.rms_norm_eps, m->stream); CHK(ok, "v_norm (no-scale)"); }
+    }
 
     /* Transpose a [B, n_heads/n_kv_heads, L, head_dim] per attenzione/RoPE. */
     mlx_array q_t = mlx_array_new(), k_t = mlx_array_new(), v_t = mlx_array_new();
@@ -186,10 +228,29 @@ bool gemma4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
     }
 
     /* RoPE su Q e K (MAI su V): base semplice sui layer sliding, frequenze custom
-     * proporzionali sui layer full/global (Fase 1b.4.2). */
+     * proporzionali sui layer full/global (Fase 1b.4.2). Sui layer kv-shared la K e'
+     * GIA' rope-ata (la RoPE del layer sorgente, nel checkpoint): RoPE solo su Q. */
     mlx_array q_rope = mlx_array_new(), k_rope = mlx_array_new();
     mlx_array custom_freqs = mlx_array_new();
-    if (ok) {
+    if (ok && kv_shared) {
+        ok = mlx_array_set(&k_rope, k_t) == 0;
+        CHK(ok, "k_rope dallo stash (kv-shared)");
+        if (ok) {
+            if (is_sliding) {
+                mlx_optional_float base = {rope_theta, true};
+                mlx_array no_freqs = mlx_array_new();
+                ok = mlx_fast_rope(&q_rope, q_t, head_dim, false, base, 1.0f, cache_offset, no_freqs, m->stream) == 0;
+                CHK(ok, "rope Q (kv-shared, sliding)");
+                mlx_array_free(no_freqs);
+            } else {
+                int rotated_dims = (int)(head_dim * m->cfg.partial_rotary_factor);
+                custom_freqs = llm_mlx_proportional_rope_freqs(head_dim, rotated_dims, rope_theta, 1.0f);
+                mlx_optional_float no_base = {0.0f, false};
+                ok = mlx_fast_rope(&q_rope, q_t, head_dim, false, no_base, 1.0f, cache_offset, custom_freqs, m->stream) == 0;
+                CHK(ok, "rope Q (kv-shared, full)");
+            }
+        }
+    } else if (ok) {
         if (is_sliding) {
             mlx_optional_float base = {rope_theta, true};
             mlx_array no_freqs = mlx_array_new();
@@ -207,6 +268,18 @@ bool gemma4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
                  mlx_fast_rope(&k_rope, k_t, head_dim, false, no_base, 1.0f, cache_offset, custom_freqs, m->stream) == 0;
             CHK(ok, "rope (full, frequenze custom)");
         }
+    }
+
+    /* STASH del K/V corrente (post-norm+rope) per i layer kv-shared successivi: il primo
+     * layer di ogni tipo lo pubblica in aux_cache[layer] come [1,nkv,T,2hd] (K|V). */
+    if (ok && S_shared > 0 && !kv_shared && m->aux_cache && layer_idx < N_layers) {
+        mlx_vector_array kvv = mlx_vector_array_new();
+        mlx_vector_array_append_value(kvv, k_rope); mlx_vector_array_append_value(kvv, v_t);
+        mlx_array st = mlx_array_new();
+        if (mlx_concatenate_axis(&st, kvv, -1, m->stream) == 0)
+            mlx_array_set(&m->aux_cache[layer_idx], st);
+        mlx_array_free(st);
+        mlx_vector_array_free(kvv);
     }
 
     /* Crescita KV-cache + attenzione. Due vie mutuamente esclusive:

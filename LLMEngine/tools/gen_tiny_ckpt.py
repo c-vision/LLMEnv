@@ -59,7 +59,7 @@ TINY = {
             num_attention_heads=4, num_key_value_heads=2, head_dim=16,
             rms_norm_eps=1e-6, rope_theta=1000000.0, max_position_embeddings=512,
             hidden_size_per_layer_input=0,
-            num_kv_shared_layers=0, sliding_window=8, tie_word_embeddings=True,
+            num_kv_shared_layers=1, sliding_window=8, tie_word_embeddings=True,
             layer_types=["sliding_attention", "sliding_attention"],
             rope_parameters={"full_attention": {"rope_theta": 1000000.0}, "sliding_attention": {"rope_theta": 1000000.0}},
         ),
