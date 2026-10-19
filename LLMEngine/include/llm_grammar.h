@@ -680,6 +680,32 @@ static inline int llm_grammar_accept(LlmGrammar* g, int id) {
     for (int k = 0; k < l; k++) if (lg_step(g, &t, b[k]) != 0) return -1;
     g->st = t; return 0;
 }
+/* JUMP-FORWARD (stadio 2): testo che la grammatica impone dallo stato corrente, ignorando le scelte di sola whitespace
+ * (si assume JSON compatto: e' la scelta di design del jump-forward). Si ferma alla prima scelta reale fra due byte
+ * non-whitespace, a un frame lazy-end (numero/enum in corso) o a fine documento. NON avanza la grammatica.
+ * Ritorna i byte scritti in `out` (<= cap). */
+static inline int llm_grammar_forced(const LlmGrammar* g, uint8_t* out, int cap) {
+    LgState t = g->st;
+    int n = 0;
+    while (n < cap && !(t.started && t.sp == 0)) {
+        int cnt = 0, pick = -1;
+        for (int b = 0; b < 256 && cnt < 2; b++) {
+            if (lg_isws((uint8_t)b)) continue;
+            LgState u = t;
+            if (lg_step(g, &u, (uint8_t)b) == 0) { cnt++; pick = b; }
+        }
+        if (cnt != 1) break;
+        /* un frame che puo' terminare qui (numero/enum) ha anche l'opzione "fine valore": non e' forzato */
+        if (t.sp > 0) {
+            const LgFrame* f = &t.f[t.sp - 1]; const LgNode* nd = &g->nodes[f->node];
+            if (nd->type == LGN_NUM || nd->type == LGN_INT) break;
+            if (nd->type == LGN_ENUM && f->ph == E_BODY) { int comp = 0; for (int i = 0; i < nd->np; i++) if (((f->mask >> i) & 1u) && g->lits[nd->po + i].l == f->idx) comp = 1; if (comp) break; }
+        }
+        if (lg_step(g, &t, (uint8_t)pick) != 0) break;
+        out[n++] = (uint8_t)pick;
+    }
+    return n;
+}
 static inline int llm_grammar_is_done(const LlmGrammar* g) { return lg_can_end(g, &g->st); }
 static inline void llm_grammar_reset(LlmGrammar* g) { memset(&g->st, 0, sizeof g->st); }
 #endif /* LLM_GRAMMAR_H */
