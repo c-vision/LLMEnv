@@ -135,6 +135,7 @@ typedef struct {
     int po, np;              /* OBJ: indice/conteggio in props; UNION: indice/conteggio in branches; ENUM: lits */
     int item;                /* ARR: nodo item */
     int minc, maxc;          /* ARR: min/max items; STR: maxc = maxLength (0 = libero) */
+    int dep;                 /* OBJ: prop[1] e' una UNION i cui rami corrispondono 1:1 ai letterali enum di prop[0] (tool-calling: name -> arguments) */
     uint8_t first[32];       /* bitset dei primi byte ammessi */
 } LgNode;
 
@@ -142,7 +143,7 @@ typedef struct { char* key; int kl; int node; int req; } LgProp;
 typedef struct { char* s; int l; } LgLit;
 
 typedef struct { uint16_t node; uint8_t ph; uint8_t aux; uint16_t idx; uint16_t cnt; uint64_t mask; } LgFrame;
-typedef struct { int sp, ws, started; int pre_i, post_i; LgFrame f[LLM_GRAMMAR_MAXD]; } LgState;   /* pre_i/post_i: avanzamento nei letterali di contorno (prefisso/suffisso) */
+typedef struct { int sp, ws, started; int pre_i, post_i; int last_enum; LgFrame f[LLM_GRAMMAR_MAXD]; } LgState;   /* pre_i/post_i: avanzamento nei letterali di contorno (prefisso/suffisso) */
 
 typedef struct { LgState st; uint32_t* words; int cnt; int valid; } LgCacheEnt;
 
@@ -273,6 +274,8 @@ static inline int lg_compile_type(LlmGrammar* g, const LgJ* root, const LgJ* sc,
             int cn = lg_compile(g, root, pr->kv[i], depth + 1, err, ec); if (cn < 0) return -1;
             g->props[base + i].node = cn;
         }
+        { const LgJ* dp = lg_get(sc, "x-dependent-arguments");   /* estensione: arguments dipende da name (unione di rami 1:1 con l'enum di name) */
+          if (dp && dp->t == 1 && dp->b && pr->n == 2) g->nodes[nd].dep = 1; }
         return nd;
     }
     snprintf(err, ec, "tipo non supportato: %s", ty); return -1;
@@ -434,6 +437,7 @@ static inline int lg_feed(const LlmGrammar* g, LgState* s, uint8_t c) {
         case O_VALWAIT: {
             if (lg_isws(c)) return lg_ws_eat(s);
             int child = P[f->aux].node; f->ph = O_AFTER;
+            if (n->dep && f->aux == 1) { const LgNode* un = &g->nodes[child]; if (un->type == LGN_UNION && s->last_enum < un->np) child = g->br[un->po + s->last_enum]; }
             return lg_push(s, child, 0) ? LGR_RE : LGR_REJ;
         }
         case O_AFTER: {
@@ -518,13 +522,13 @@ static inline int lg_feed(const LlmGrammar* g, LgState* s, uint8_t c) {
         uint64_t nm = 0;
         for (int i = 0; i < n->np; i++) if (((m >> i) & 1u) && idx < L[i].l && (uint8_t)L[i].s[idx] == c) nm |= (1ull << i);
         if (!nm) {
-            if (f->ph == E_BODY && f->idx > 0) { for (int i = 0; i < n->np; i++) if (((m >> i) & 1u) && L[i].l == idx) { lg_pop(s); return LGR_POPRE; } }
+            if (f->ph == E_BODY && f->idx > 0) { for (int i = 0; i < n->np; i++) if (((m >> i) & 1u) && L[i].l == idx) { s->last_enum = i; lg_pop(s); return LGR_POPRE; } }
             return LGR_REJ;
         }
         f->mask = nm; f->idx = (uint16_t)(idx + 1);
         int longer = 0;
         for (int i = 0; i < n->np; i++) if (((nm >> i) & 1u) && L[i].l > f->idx) longer = 1;
-        if (!longer) { lg_pop(s); return LGR_CONS; }
+        if (!longer) { for (int i = 0; i < n->np; i++) if ((nm >> i) & 1u) { s->last_enum = i; break; } lg_pop(s); return LGR_CONS; }
         return LGR_CONS;
     }
     case LGN_UNION: {

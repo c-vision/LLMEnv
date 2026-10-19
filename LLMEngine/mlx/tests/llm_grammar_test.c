@@ -124,15 +124,16 @@ int main(void) {
     run_schema("annidato+$ref", "{\"$defs\":{\"p\":{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"}},\"required\":[\"x\",\"y\"]}},"
         "\"type\":\"object\",\"properties\":{\"pts\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/p\"},\"maxItems\":3}},\"required\":[\"pts\"]}", 1000, chk_obj);
     {   /* TOOL-CALLING: unione di due funzioni, avvolta in <tool_call>\n ... \n</tool_call> */
-        const char* sch = "{\"anyOf\":["
-            "{\"type\":\"object\",\"properties\":{\"name\":{\"const\":\"get_weather\"},\"arguments\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"maxLength\":12},\"days\":{\"type\":\"integer\"}},\"required\":[\"city\"]}},\"required\":[\"name\",\"arguments\"]},"
-            "{\"type\":\"object\",\"properties\":{\"name\":{\"const\":\"add\"},\"arguments\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"number\"},\"b\":{\"type\":\"number\"}},\"required\":[\"a\",\"b\"]}},\"required\":[\"name\",\"arguments\"]}]}";
+        const char* sch = "{\"type\":\"object\",\"x-dependent-arguments\":true,\"properties\":{\"name\":{\"enum\":[\"get_weather\",\"add\"]},\"arguments\":{\"anyOf\":["
+            "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"maxLength\":12},\"days\":{\"type\":\"integer\"}},\"required\":[\"city\"]},"
+            "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"number\"},\"b\":{\"type\":\"number\"}},\"required\":[\"a\",\"b\"]}]}},\"required\":[\"name\",\"arguments\"]}";
         char err[160];
         LlmGrammar* g = llm_grammar_new_schema_wrapped(sch, strlen(sch), "<tool_call>\n", "\n</tool_call>", err, sizeof err);
         CHECK(g != NULL, "tool grammar: %s", err);
         if (g) {
             uint8_t* tk[NV]; int tl[NV]; for (int i = 0; i < g_nv; i++) { tk[i] = g_tok[i]; tl[i] = g_len[i]; }
             int eos[1] = { g_eos }; llm_grammar_set_vocab(g, g_nv, (const uint8_t* const*)tk, tl, eos, 1);
+            int n_w = 0, n_a = 0;
             int ok = 0, bad = 0, unf = 0;
             for (int it = 0; it < 1200; it++) {
                 char out[4096]; int ended = 0; int n = walk(g, out, sizeof out, 400, &ended);
@@ -148,8 +149,11 @@ int main(void) {
                     if (good && strstr(nm, "\"add\"") && !(strstr(body, "\"a\"") && strstr(body, "\"b\""))) good = 0;
                 }
                 if (!good) { CHECK(0, "tool: chiamata non conforme: [%s]", out); bad++; continue; }
+                if (strstr(out, "\"get_weather\"")) n_w++; else n_a++;
                 ok++;
             }
+            printf("tool_call: get_weather=%d add=%d\n", n_w, n_a);
+            CHECK(n_w > 100 && n_a > 100, "tool: entrambe le funzioni devono comparire (union per discriminante)");
             printf("%-22s validi=%d  non_validi=%d  non_terminati=%d\n", "tool_call wrapped", ok, bad, unf);
             CHECK(ok > 0, "tool: nessun documento");
             llm_grammar_free(g);
