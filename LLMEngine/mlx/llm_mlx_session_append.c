@@ -18,6 +18,15 @@
 #include <math.h>
 #include <time.h>
 
+/* PREFILL YIELD (chunked prefill + mixed batch, C1 di Knowledge/SGLang-Analisi...): il coordinatore del lotto registra,
+ * PER THREAD, una callback che il prefill chiama fra un chunk e il successivo (non dopo l'ultimo): serve a far avanzare i
+ * decode delle altre sessioni invece di fermarli per tutta la durata di un prompt lungo. La callback gira sullo stesso
+ * thread (single-owner del motore); lo stato condiviso del modello che il prefill tiene in `m` (side-channel PLE/MLA) viene
+ * salvato/ripristinato attorno alla chiamata perche' un decode di un'altra sessione lo sovrascrive. */
+static _Thread_local llm_ai_mlx_prefill_yield_fn t_prefill_yield;
+static _Thread_local void* t_prefill_yield_ctx;
+void llm_ai_mlx_set_prefill_yield(llm_ai_mlx_prefill_yield_fn fn, void* ctx) { t_prefill_yield = fn; t_prefill_yield_ctx = ctx; }
+
 static int llm_ai_mlx_session_append_impl(llm_ai_mlx_session_handle handle, const int32_t* token_ids, int n_ids) {
     if (handle == NULL || token_ids == NULL || n_ids <= 0) return -1;
     LlmMlxSession* s = (LlmMlxSession*)handle;
@@ -183,6 +192,11 @@ static int llm_ai_mlx_session_append_impl(llm_ai_mlx_session_handle handle, cons
              * rende il chunking efficiente (memoria ~costante per chunk). */
             mlx_array_eval(h_batch);
             if (!llm_no_clear_cache()) mlx_clear_cache();
+            if (t_prefill_yield) {   /* i decode degli altri stream avanzano fra un chunk e l'altro */
+                const int32_t* sv_ids = m->q4e_ctx_ids; const int sv_len = m->q4e_ctx_len; mlx_array* sv_aux = m->aux_cache;
+                t_prefill_yield(t_prefill_yield_ctx);
+                m->q4e_ctx_ids = sv_ids; m->q4e_ctx_len = sv_len; m->aux_cache = sv_aux;
+            }
         }
     }
     m->q4e_ctx_ids = NULL; m->q4e_ctx_len = 0;

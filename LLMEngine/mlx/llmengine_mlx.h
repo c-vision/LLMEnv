@@ -424,6 +424,12 @@ int llm_ai_mlx_session_generate_constrained(llm_ai_mlx_session_handle handle,
                                              const int32_t* allowed_ids, int n_allowed,
                                              int32_t* out_token_id);
 
+/* PREFILL YIELD: callback per-thread chiamata dal prefill (append) fra un chunk e il successivo (mai dopo l'ultimo).
+ * Il coordinatore del lotto la usa per servire i decode delle altre sessioni durante un prefill lungo (chunked prefill +
+ * mixed batch). fn=NULL la disattiva. Gira sullo stesso thread del prefill. */
+typedef void (*llm_ai_mlx_prefill_yield_fn)(void* ctx);
+void llm_ai_mlx_set_prefill_yield(llm_ai_mlx_prefill_yield_fn fn, void* ctx);
+
 /* ABI v6 — come generate_constrained ma l'insieme ammesso e' una BITMASK sul vocabolario (bit i%32 della parola i/32,
  * n_words = (n_vocab+31)/32): vedi llm_grammar.h. Greedy. Ritorna 0 / -1. */
 int llm_ai_mlx_session_generate_masked(llm_ai_mlx_session_handle handle, const uint32_t* mask_words, int n_words,
