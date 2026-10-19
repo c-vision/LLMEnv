@@ -223,6 +223,28 @@ TINY = {
         first_k_dense_replace=1, max_position_embeddings=512, rms_norm_eps=1e-6,
         rope_theta=10000.0, attention_bias=False, rope_scaling={"factor": 1.0},
     ),
+    # kimi_k2 e joyai_llm_flash: mlx_lm li remappa a deepseek_v3 (stesso codice) -> cls deepseek_v3,
+    # model_type diverso per validare il PERCORSO DI MAPPING dell'engine.
+    "kimi_k2": dict(
+        cls="deepseek_v3", model_type="kimi_k2",
+        vocab_size=128, hidden_size=64, intermediate_size=128, moe_intermediate_size=32,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
+        n_shared_experts=1, n_routed_experts=4, routed_scaling_factor=1.0,
+        kv_lora_rank=32, q_lora_rank=16, qk_rope_head_dim=8, v_head_dim=16, qk_nope_head_dim=16,
+        topk_method="noaux_tc", scoring_func="sigmoid", norm_topk_prob=True, n_group=2, topk_group=1, num_experts_per_tok=2, moe_layer_freq=1,
+        first_k_dense_replace=1, max_position_embeddings=512, rms_norm_eps=1e-6,
+        rope_theta=10000.0, attention_bias=False, rope_scaling={"factor": 1.0},
+    ),
+    "joyai_llm_flash": dict(
+        cls="deepseek_v3", model_type="joyai_llm_flash",
+        vocab_size=128, hidden_size=64, intermediate_size=128, moe_intermediate_size=32,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
+        n_shared_experts=1, n_routed_experts=4, routed_scaling_factor=1.0,
+        kv_lora_rank=32, q_lora_rank=16, qk_rope_head_dim=8, v_head_dim=16, qk_nope_head_dim=16,
+        topk_method="noaux_tc", scoring_func="sigmoid", norm_topk_prob=True, n_group=2, topk_group=1, num_experts_per_tok=2, moe_layer_freq=1,
+        first_k_dense_replace=1, max_position_embeddings=512, rms_norm_eps=1e-6,
+        rope_theta=10000.0, attention_bias=False, rope_scaling={"factor": 1.0},
+    ),
     # internlm2: wqkv fuso interleaved (GQA per-gruppo) + MLP w1/w2/w3.
     "internlm2": dict(
         cls="internlm2", model_type="internlm2",
