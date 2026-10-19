@@ -169,6 +169,22 @@ int llm_mlx_moe_gather_mm(const ModelConfig* cfg, mlx_array* res, mlx_array x, m
         int r = mlx_transpose_axes(&wt, w, perm, nd, s);
         if (r == 0) r = mlx_gather_mm(res, x, wt, lhs, idxs, sorted, s);
         mlx_array_free(wt);
+        /* Bias degli ESPERTI (es. ernie4_5: switch_mlp.*.bias con use_bias=true): mlx_gather_mm NON
+         * lo applica. Il bias e' [E, out]; gather per indice esperto -> [T,K,out] -> reshape come res. */
+        if (r == 0 && biases.ctx != NULL && mlx_array_size(biases) > 0) {
+            mlx_array gb = mlx_array_new(), gbr = mlx_array_new();
+            if (mlx_take_axis(&gb, biases, idxs, 0, s) == 0) {
+                int nd2 = mlx_array_ndim(*res);
+                int sh[8];
+                for (int i = 0; i < nd2 && i < 8; i++) sh[i] = mlx_array_shape(*res)[i];
+                if (mlx_reshape(&gbr, gb, sh, nd2, s) == 0) {
+                    mlx_array o2 = mlx_array_new();
+                    if (mlx_add(&o2, *res, gbr, s) == 0) mlx_array_set(res, o2);
+                    mlx_array_free(o2);
+                }
+            }
+            mlx_array_free(gb); mlx_array_free(gbr);
+        }
         return r;
     }
     return llm_mlx_gather_qmm_guarded(res, x, w, scales, biases, lhs, idxs, transpose, gsz, bts, mode, sorted, s);
