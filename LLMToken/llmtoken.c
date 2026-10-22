@@ -1185,36 +1185,32 @@ extern const char* llmtoken_gguf_model(llmtoken_handle handle) {
     return t->metaspace ? "llama" : "gpt2";
 }
 
-extern int llmtoken_encode(llmtoken_handle handle, const char* text, int32_t* out_ids, int max_ids) {
-    if (handle == NULL || text == NULL) return -1;
-    const LlmTokenizer* t = (const LlmTokenizer*)handle;
-
-    int32_t* ids = NULL;
-    size_t ids_len = 0, ids_cap = 0;
+/* Nucleo dell'encode: appende gli id di `text[0..n)` a (*ids,*len,*cap). `flags & LLMTOKEN_ENCODE_NO_SPECIAL`: i token aggiunti
+ * (speciali e utente) NON vengono riconosciuti nel testo, che e' codificato come testo ordinario. 1 = ok, 0 = errore. */
+static int encode_core(const LlmTokenizer* t, const char* text, size_t n, int flags, int32_t** ids, size_t* ids_len, size_t* ids_cap) {
     int ok = 1;
-
-    size_t n = strlen(text);
     size_t pos = 0;
     sds normal_buf = sdsempty();
+    const int match_special = !(flags & LLMTOKEN_ENCODE_NO_SPECIAL);
 
     while (pos < n && ok) {
         int matched = 0;
-        for (size_t si = 0; si < t->special_tokens_len; si++) {
+        for (size_t si = 0; match_special && si < t->special_tokens_len; si++) {
             size_t sclen = sdslen(t->special_tokens[si].content);
             if (n - pos >= sclen && memcmp(text + pos, t->special_tokens[si].content, sclen) == 0) {
                 if (sdslen(normal_buf) > 0) {
                     sds* pieces = NULL; size_t pieces_len = 0, pieces_cap = 0;
                     if (!pretokenize(t, normal_buf, sdslen(normal_buf), &pieces, &pieces_len, &pieces_cap)) { ok = 0; }
                     for (size_t pi = 0; ok && pi < pieces_len; pi++) {
-                        if (!encode_piece(t, pieces[pi], sdslen(pieces[pi]), &ids, &ids_len, &ids_cap)) ok = 0;
+                        if (!encode_piece(t, pieces[pi], sdslen(pieces[pi]), ids, ids_len, ids_cap)) ok = 0;
                     }
                     for (size_t pi = 0; pi < pieces_len; pi++) sdsfree(pieces[pi]);
                     free(pieces);
                     sdsclear(normal_buf);
                 }
                 if (ok) {
-                    if (ids_len >= ids_cap) { ids_cap = ids_cap ? ids_cap * 2 : 64; ids = (int32_t*)realloc(ids, ids_cap * sizeof(int32_t)); }
-                    ids[ids_len++] = t->special_tokens[si].id;
+                    if (*ids_len >= *ids_cap) { *ids_cap = *ids_cap ? *ids_cap * 2 : 64; *ids = (int32_t*)realloc(*ids, *ids_cap * sizeof(int32_t)); }
+                    (*ids)[(*ids_len)++] = t->special_tokens[si].id;
                     pos += sclen;
                 }
                 matched = 1;
@@ -1230,15 +1226,26 @@ extern int llmtoken_encode(llmtoken_handle handle, const char* text, int32_t* ou
         sds* pieces = NULL; size_t pieces_len = 0, pieces_cap = 0;
         if (!pretokenize(t, normal_buf, sdslen(normal_buf), &pieces, &pieces_len, &pieces_cap)) ok = 0;
         for (size_t pi = 0; ok && pi < pieces_len; pi++) {
-            if (!encode_piece(t, pieces[pi], sdslen(pieces[pi]), &ids, &ids_len, &ids_cap)) ok = 0;
+            if (!encode_piece(t, pieces[pi], sdslen(pieces[pi]), ids, ids_len, ids_cap)) ok = 0;
         }
         for (size_t pi = 0; pi < pieces_len; pi++) sdsfree(pieces[pi]);
         free(pieces);
     }
     sdsfree(normal_buf);
+    return ok;
+}
 
+/* Un token aggiunto e' da PROTEGGERE nel testo non fidato se e' speciale (CONTROL) o ha la forma di un marcatore (<...> oppure [...]); i token aggiunti
+ * che sono semplice testo/whitespace (es. blocchi di spazi di alcuni tokenizer) restano riconosciuti come prima. */
+static int guard_worthy(const SpecialToken* s) {
+    size_t l = sdslen(s->content);
+    if (l == 0) return 0;
+    if (s->special) return 1;
+    return l >= 3 && ((s->content[0] == '<' && s->content[l - 1] == '>') || (s->content[0] == '[' && s->content[l - 1] == ']'));
+}
+
+static int encode_finish(int ok, int32_t* ids, size_t ids_len, int32_t* out_ids, int max_ids) {
     if (!ok) { free(ids); return -1; }
-
     int count = (int)ids_len;
     if (out_ids != NULL) {
         int to_copy = count < max_ids ? count : max_ids;
@@ -1246,6 +1253,74 @@ extern int llmtoken_encode(llmtoken_handle handle, const char* text, int32_t* ou
     }
     free(ids);
     return count;
+}
+
+extern int llmtoken_encode_ex(llmtoken_handle handle, const char* text, int32_t* out_ids, int max_ids, int flags) {
+    if (handle == NULL || text == NULL) return -1;
+    const LlmTokenizer* t = (const LlmTokenizer*)handle;
+    int32_t* ids = NULL; size_t ids_len = 0, ids_cap = 0;
+    int ok = encode_core(t, text, strlen(text), flags, &ids, &ids_len, &ids_cap);
+    return encode_finish(ok, ids, ids_len, out_ids, max_ids);
+}
+
+extern int llmtoken_encode(llmtoken_handle handle, const char* text, int32_t* out_ids, int max_ids) {
+    return llmtoken_encode_ex(handle, text, out_ids, max_ids, 0);
+}
+
+/* ── span NON FIDATI (anti-injection dei token di controllo) ──
+ * Il testo puo' contenere span racchiusi fra i code point guardia U+E000 (inizio) e U+E001 (fine): il loro contenuto e' codificato come
+ * testo ORDINARIO (nessun token speciale/aggiunto), il resto normalmente; le guardie non producono token. Guardie spaiate: ignorate. */
+#define LLMTOKEN_GUARD_BEGIN "\xEE\x80\x80"
+#define LLMTOKEN_GUARD_END   "\xEE\x80\x81"
+extern int llmtoken_encode_guarded(llmtoken_handle handle, const char* text, int32_t* out_ids, int max_ids) {
+    if (handle == NULL || text == NULL) return -1;
+    const LlmTokenizer* t = (const LlmTokenizer*)handle;
+    int32_t* ids = NULL; size_t ids_len = 0, ids_cap = 0;
+    int ok = 1, untrusted = 0;
+    const char* p = text; const char* seg = text;
+    const char* end = text + strlen(text);
+    while (ok && p <= end) {
+        int is_b = (end - p >= 3 && memcmp(p, LLMTOKEN_GUARD_BEGIN, 3) == 0);
+        int is_e = (end - p >= 3 && memcmp(p, LLMTOKEN_GUARD_END, 3) == 0);
+        if (p == end || is_b || is_e) {
+            if (p > seg) ok = encode_core(t, seg, (size_t)(p - seg), untrusted ? LLMTOKEN_ENCODE_NO_SPECIAL : 0, &ids, &ids_len, &ids_cap);
+            if (p == end) break;
+            untrusted = is_b ? 1 : 0;   /* inizio: span non fidato; fine (o guardia spaiata): torna fidato */
+            p += 3; seg = p;
+        } else p++;
+    }
+    return encode_finish(ok, ids, ids_len, out_ids, max_ids);
+}
+
+/* Prepara una stringa NON FIDATA (testo utente/tool) per un template: toglie le guardie eventualmente presenti nell'input (non possono essere
+ * spacciate dall'utente) e racchiude fra guardie ogni occorrenza di un token aggiunto/speciale. Ritorna una stringa malloc (da free()), NULL su errore;
+ * se non c'e' nulla da proteggere la copia e' identica all'input (a parte le guardie rimosse). */
+extern char* llmtoken_guard_text(llmtoken_handle handle, const char* in) {
+    if (handle == NULL || in == NULL) return NULL;
+    const LlmTokenizer* t = (const LlmTokenizer*)handle;
+    size_t n = strlen(in);
+    size_t cap = n * 2 + 16, len = 0;
+    char* out = (char*)malloc(cap);
+    if (!out) return NULL;
+    size_t pos = 0;
+    while (pos < n) {
+        if (n - pos >= 3 && (memcmp(in + pos, LLMTOKEN_GUARD_BEGIN, 3) == 0 || memcmp(in + pos, LLMTOKEN_GUARD_END, 3) == 0)) { pos += 3; continue; }
+        size_t hit = 0;
+        for (size_t si = 0; si < t->special_tokens_len; si++) {
+            size_t sclen = sdslen(t->special_tokens[si].content);
+            if (guard_worthy(&t->special_tokens[si]) && n - pos >= sclen && memcmp(in + pos, t->special_tokens[si].content, sclen) == 0) { hit = sclen; break; }
+        }
+        size_t need = len + (hit ? hit + 6 : 1) + 1;
+        if (need > cap) { cap = need * 2; char* nb = (char*)realloc(out, cap); if (!nb) { free(out); return NULL; } out = nb; }
+        if (hit) {
+            memcpy(out + len, LLMTOKEN_GUARD_BEGIN, 3); len += 3;
+            memcpy(out + len, in + pos, hit); len += hit;
+            memcpy(out + len, LLMTOKEN_GUARD_END, 3); len += 3;
+            pos += hit;
+        } else out[len++] = in[pos++];
+    }
+    out[len] = 0;
+    return out;
 }
 
 extern int llmtoken_decode(llmtoken_handle handle, const int32_t* ids, int n_ids, char* out_text, int max_bytes) {

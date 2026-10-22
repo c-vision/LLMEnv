@@ -94,6 +94,17 @@ const char* llmtoken_gguf_model(llmtoken_handle handle);
  * byte-level ben caricato, trattato come bug reale se succede). */
 int llmtoken_encode(llmtoken_handle handle, const char* text, int32_t* out_ids, int max_ids);
 
+/* Come llmtoken_encode ma con `flags`. LLMTOKEN_ENCODE_NO_SPECIAL: i token aggiunti/speciali NON sono riconosciuti nel testo (testo ordinario). */
+#define LLMTOKEN_ENCODE_NO_SPECIAL 1
+int llmtoken_encode_ex(llmtoken_handle handle, const char* text, int32_t* out_ids, int max_ids, int flags);
+
+/* ANTI-INJECTION. Il testo dell'utente, dei tool e dei risultati NON deve poter produrre token di controllo (es. `<|im_end|>` scritto a mano).
+ * `llmtoken_guard_text` racchiude fra guardie (U+E000 ... U+E001) ogni occorrenza di un token speciale/marcatore nella stringa non fidata e
+ * rimuove le guardie gia' presenti nell'input; `llmtoken_encode_guarded` codifica il testo del prompt gia' renderizzato: gli span fra guardie
+ * diventano testo ORDINARIO, il resto (i token di controllo del template) resta com'e'. Il risultato di guard_text va liberato con free(). */
+char* llmtoken_guard_text(llmtoken_handle handle, const char* in);
+int llmtoken_encode_guarded(llmtoken_handle handle, const char* text, int32_t* out_ids, int max_ids);
+
 /* Decodifica `n_ids` id di token in testo UTF-8: per ogni id, se è un token
  * speciale ne concatena il contenuto letterale, altrimenti decodifica la
  * stringa byte-unicode del vocabolario codepoint per codepoint e la
