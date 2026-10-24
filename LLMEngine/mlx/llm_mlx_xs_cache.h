@@ -38,12 +38,14 @@ int llm_ai_mlx_opt_get_str(const char* key, char* out, int cap);
  * righe `layer expert` (o `layer <spazi> expert <count>`), `#` commenti. */
 static uint8_t* g_hot = NULL;
 static int g_hot_layers = 0, g_hot_experts = 0;
+static int g_full_layers = 0;   /* moe_full_layers: primi N layer interamente pinned (port ds4) */
 static void llm_xsc_hot_alloc(int layers, int experts) {
     if (g_hot || layers <= 0 || experts <= 0) return;
     g_hot_layers = layers; g_hot_experts = experts;
     g_hot = (uint8_t*)calloc((size_t)layers * (size_t)((experts + 7) / 8), 1);
 }
 static inline int llm_xsc_is_hot(int layer, int e) {
+    if (layer >= 0 && layer < g_full_layers) return 1;
     if (!g_hot || layer < 0 || layer >= g_hot_layers || e < 0 || e >= g_hot_experts) return 0;
     size_t row = (size_t)((g_hot_experts + 7) / 8);
     return (g_hot[(size_t)layer * row + (size_t)(e >> 3)] >> (e & 7)) & 1;
@@ -105,6 +107,7 @@ static inline void llm_xsc_init(void) {
     g_xsc.init = 1;
     int mb = 2048;
     if (llm_ai_mlx_opt_get_int("moe_expert_cache_mb", &mb) == 0 && mb < 0) mb = 0;
+    { int fl = 0; if (llm_ai_mlx_opt_get_int("moe_full_layers", &fl) == 0 && fl > 0) g_full_layers = fl; }
     if (mb <= 0) { g_xsc.budget = 0; return; }
     g_xsc.budget = (size_t)mb << 20;
     uint32_t nsets = (uint32_t)(g_xsc.budget / (256u * 1024u * 4u)); /* ~256KB per entry */
