@@ -1014,6 +1014,12 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
 void llm_ai_mlx_free_model(llm_ai_mlx_model_handle handle) {
     if (handle == NULL) return;
     LlmMlxModel* m = (LlmMlxModel*)handle;
+    /* Profilo routing -> hotlist (opzione `moe_profile`): scritto alla chiusura del modello. */
+    { char pp[1200];
+      if (llm_ai_mlx_opt_get_str("moe_profile", pp, sizeof pp) == 0 && pp[0] != '\0') {
+          if (llm_ai_mlx_moe_prof_write(pp) == 0)
+              fprintf(stderr, "[moe-profile] scritto %s\n", pp);
+      } }
     llm_mlx_kvseg_reset_all();   /* LLM_KVSEG: libera main/segmento per-layer */
     llm_mlx_pad512_reset();      /* PAD512: i pesi padded referenziano il modello */
     llm_mlx_gateup_reset();      /* FUSE_GATEUP: idem per i pesi gate+up concatenati */

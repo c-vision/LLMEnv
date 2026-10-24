@@ -19,7 +19,12 @@
 #endif
 
 #include "llm_mlx_xs_pool.h"   /* pool riusabile + mlock dei bundle streamed */
-#include "llm_mlx_xs_cache.h"  /* cache HOT/LRU degli esperti (budget da opzione registro) */
+#include "llm_mlx_xs_cache.h"
+/* PROFILER routing (per hotlist): contatori per (layer,expert), definiti in llm_mlx_moe.c. */
+void llm_mlx_moe_prof_count(int layer, int e);
+#if defined(__APPLE__)
+#include <fcntl.h>
+#endif  /* cache HOT/LRU degli esperti (budget da opzione registro) */
 
 /* Costruisce+materializza [k, d1, d2] per (layer, proj, kind) dagli esperti `uniq[]`.
  * kind: 0=weight(U32) 1=scales(BF16) 2=biases(BF16). Ritorna 0 e *out, oppure -1. */
@@ -39,13 +44,53 @@ static inline int llm_mlx_xs_stack(const LlmEngineMoeTsIngest* s, int layer, int
     uint8_t* buf = llm_xs_pool_acquire(need, &sl);
     if (buf == NULL) { buf = (uint8_t*)malloc(need); sl = NULL; }
     if (buf == NULL) return -1;
+    /* LETTURE ORDINATE/COALESCENTI (port del fix ds4 `ee7e840`): si leggono gli esperti
+     * selezionati in ORDINE DI FILE e si fondono i range adiacenti; l'advise asincrono
+     * (F_RDADVISE su macOS, posix_fadvise su Linux) precede le copie. Il routing resta
+     * intatto: cambia solo l'ordine/coalescenza delle letture. */
+    int miss_j[256]; const uint8_t* miss_p[256]; uint64_t miss_off[256];
+    int nm = 0;
     for (int j = 0; j < k; j++) {
         const uint64_t key = llm_xsc_key(layer, proj, kind, uniq[j]);
         if (llm_xsc_get(key, (uint32_t)per, buf + (size_t)j * per)) continue;
         const uint8_t* p = llmengine_moe_ts_get(s, layer, proj, kind, uniq[j], NULL);
         if (!p) { if (sl != NULL) llm_xs_slot_dtor(sl); else free(buf); return -1; }
-        memcpy(buf + (size_t)j * per, p, per);
-        llm_xsc_put(key, p, (uint32_t)per);
+        if (nm < 256) { miss_j[nm] = j; miss_p[nm] = p; miss_off[nm] = (uint64_t)t->off + (uint64_t)uniq[j] * (uint64_t)t->stride; nm++; }
+        else { /* fallback oltre 256 miss: copia immediata */ memcpy(buf + (size_t)j * per, p, per); llm_xsc_put(key, p, (uint32_t)per); }
+    }
+    if (nm > 1) {
+        /* insertion sort per offset (k piccolo) */
+        for (int a = 1; a < nm; a++) {
+            int jj = miss_j[a]; const uint8_t* pp = miss_p[a]; uint64_t oo = miss_off[a]; int b = a - 1;
+            while (b >= 0 && miss_off[b] > oo) { miss_j[b+1] = miss_j[b]; miss_p[b+1] = miss_p[b]; miss_off[b+1] = miss_off[b]; b--; }
+            miss_j[b+1] = jj; miss_p[b+1] = pp; miss_off[b+1] = oo;
+        }
+        const int fd = s->maps[t->map].fd;
+        uint64_t run_off = miss_off[0], run_len = per;
+        for (int a = 1; a < nm; a++) {
+            if (miss_off[a] == run_off + run_len) { run_len += per; continue; }
+            if (fd >= 0) {
+#if defined(__APPLE__)
+                struct radvisory ra; ra.ra_offset = (off_t)run_off; ra.ra_count = (int)run_len;
+                (void)fcntl(fd, F_RDADVISE, &ra);
+#else
+                (void)posix_fadvise(fd, (off_t)run_off, (off_t)run_len, POSIX_FADV_WILLNEED);
+#endif
+            }
+            run_off = miss_off[a]; run_len = per;
+        }
+        if (fd >= 0) {
+#if defined(__APPLE__)
+            struct radvisory ra; ra.ra_offset = (off_t)run_off; ra.ra_count = (int)run_len;
+            (void)fcntl(fd, F_RDADVISE, &ra);
+#else
+            (void)posix_fadvise(fd, (off_t)run_off, (off_t)run_len, POSIX_FADV_WILLNEED);
+#endif
+        }
+    }
+    for (int a = 0; a < nm; a++) {
+        memcpy(buf + (size_t)miss_j[a] * per, miss_p[a], per);
+        llm_xsc_put(llm_xsc_key(layer, proj, kind, uniq[miss_j[a]]), miss_p[a], (uint32_t)per);
     }
     int shp[3] = { k, t->d1, t->d2 };
     if (sl != NULL)
@@ -386,6 +431,7 @@ static inline int llm_mlx_moe_swap_prepare(const LlmEngineMoeTsIngest* ing, int 
         out->s[p] = mlx_array_new();
         out->b[p] = mlx_array_new();
     }
+    for (int i = 0; i < k; i++) llm_mlx_moe_prof_count(layer, uniq[i]);
     llm_xs_prefetch_predicted(ing, layer, proj);   /* hint puro, nessun cambio di valori */
     /* TurboQuant NON-ternary (tq 3/4-bit): decode F16 in dominio NON ruotato + ramo PLAIN
      * gather_mm (scales/biases vuoti). Il tq TERNARY non passa di qui: usa array pieni residenti

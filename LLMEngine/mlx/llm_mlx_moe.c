@@ -184,14 +184,59 @@ static int g_moe_ts_state = -1; /* -1 non init, 0 off, 1 ok */
 /* API del consumer (nessun env): imposta la dir degli esperti da streamare. Va chiamata PRIMA
  * del load del modello. `dir` NULL/vuota disattiva. Resetta lo stato dell'ingest così una nuova
  * dir viene riaperta alla prima chiamata. */
+/* ── Profiler routing + hotlist (port ds4 `ee7e840`/hotlist) ───────────────────────────────── */
+static uint16_t* g_prof = NULL;
+static int g_prof_layers = 0, g_prof_experts = 0;
+void llm_mlx_moe_prof_reset(void) { free(g_prof); g_prof = NULL; g_prof_layers = g_prof_experts = 0; }
+void llm_mlx_moe_prof_count(int layer, int e) {
+    if (layer < 0 || layer >= LLMENGINE_MOE_TS_MAXLAYER || e < 0 || e >= 8192) return;
+    if (g_prof == NULL) {
+        g_prof_layers = LLMENGINE_MOE_TS_MAXLAYER; g_prof_experts = 8192;
+        g_prof = (uint16_t*)calloc((size_t)g_prof_layers * (size_t)g_prof_experts, sizeof(uint16_t));
+        if (g_prof == NULL) return;
+    }
+    uint16_t* v = &g_prof[(size_t)layer * (size_t)g_prof_experts + (size_t)e];
+    if (*v < 0xFFFFu) (*v)++;
+}
+int llm_ai_mlx_moe_prof_write(const char* path) {
+    if (path == NULL || path[0] == 0 || g_prof == NULL) return -1;
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+    fprintf(f, "# gemma/gmb expert hotlist v1 (layer expert count)\n");
+    for (int l = 0; l < g_prof_layers; ++l)
+        for (int e = 0; e < g_prof_experts; ++e) {
+            uint16_t c = g_prof[(size_t)l * (size_t)g_prof_experts + (size_t)e];
+            if (c) fprintf(f, "%d %d %u\n", l, e, (unsigned)c);
+        }
+    fclose(f);
+    return 0;
+}
+int llm_ai_mlx_moe_hotlist_load(const char* path) { return llm_xsc_hot_load(path, LLMENGINE_MOE_TS_MAXLAYER, 8192); }
+
 void llm_ai_mlx_set_moe_swap_dir(const char* dir) {
     llm_xsc_reset();   /* modello diverso -> cache esperti non valida */
+    llm_xsc_hot_clear();
+    llm_mlx_moe_prof_reset();
     if (dir) {
         snprintf(g_moe_swap_dir, sizeof g_moe_swap_dir, "%s", dir);
     } else {
         g_moe_swap_dir[0] = '\0';
     }
     g_moe_ts_state = -1;
+    if (dir != NULL && dir[0] != '\0') {
+        char hp[1200];
+        if (llm_ai_mlx_opt_get_str("moe_hotlist", hp, sizeof hp) != 0 || hp[0] == '\0') {
+            snprintf(hp, sizeof hp, "%s/hotlist.txt", dir);
+        }
+        if (llm_xsc_hot_load(hp, LLMENGINE_MOE_TS_MAXLAYER, 8192))
+            fprintf(stderr, "[moe-hotlist] caricata %s\n", hp);
+    } else {
+        char pp[1200];
+        if (llm_ai_mlx_opt_get_str("moe_profile", pp, sizeof pp) == 0 && pp[0] != '\0' &&
+            llm_ai_mlx_moe_prof_write(pp) == 0)
+            fprintf(stderr, "[moe-profile] scritto %s\n", pp);
+        llm_mlx_moe_prof_reset();
+    }
 }
 
 /* Statistiche della cache HOT/LRU (per metriche e test dal consumer). */

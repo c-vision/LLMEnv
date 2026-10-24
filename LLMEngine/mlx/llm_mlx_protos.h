@@ -203,6 +203,11 @@ uint64_t llm_mlx_moe_swap_expert_bytes(void);
 /* Cache HOT/LRU degli esperti streamati: hit/miss/byte occupati (metrica di working set). */
 void llm_ai_mlx_moe_cache_stats(unsigned long long* hits, unsigned long long* misses,
                                 unsigned long long* bytes);
+/* Profiler routing + hotlist esperti (path streaming MLX). */
+void llm_mlx_moe_prof_count(int layer, int e);
+void llm_mlx_moe_prof_reset(void);
+int  llm_ai_mlx_moe_prof_write(const char* path);
+int  llm_ai_mlx_moe_hotlist_load(const char* path);
 /* Offload esperti (streaming da disco): stato impostato via API `llm_ai_mlx_set_moe_swap_dir`. */
 int llm_mlx_moe_swap_on(void);
 /* TurboQuant: 1 = esperti packed (memoria), 0 = affine-2bit residenti (velocita'). */

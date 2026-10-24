@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { uint64_t key; uint64_t used; uint8_t* buf; uint32_t len; } LlmXsCacheEnt;
+typedef struct { uint64_t key; uint64_t used; uint8_t* buf; uint32_t len; uint32_t pinned; } LlmXsCacheEnt;
 
 static struct {
     int       init;
@@ -32,6 +32,42 @@ static struct {
 } g_xsc;
 
 int llm_ai_mlx_opt_get_int(const char* key, int* out);   /* registro opzioni del motore */
+int llm_ai_mlx_opt_get_str(const char* key, char* out, int cap);
+
+/* HOTLIST (port ds4): esperti "hot" per layer restano PINNED nella cache LRU. File di testo:
+ * righe `layer expert` (o `layer <spazi> expert <count>`), `#` commenti. */
+static uint8_t* g_hot = NULL;
+static int g_hot_layers = 0, g_hot_experts = 0;
+static void llm_xsc_hot_alloc(int layers, int experts) {
+    if (g_hot || layers <= 0 || experts <= 0) return;
+    g_hot_layers = layers; g_hot_experts = experts;
+    g_hot = (uint8_t*)calloc((size_t)layers * (size_t)((experts + 7) / 8), 1);
+}
+static inline int llm_xsc_is_hot(int layer, int e) {
+    if (!g_hot || layer < 0 || layer >= g_hot_layers || e < 0 || e >= g_hot_experts) return 0;
+    size_t row = (size_t)((g_hot_experts + 7) / 8);
+    return (g_hot[(size_t)layer * row + (size_t)(e >> 3)] >> (e & 7)) & 1;
+}
+static inline void llm_xsc_hot_set(int layer, int e) {
+    if (!g_hot || layer < 0 || layer >= g_hot_layers || e < 0 || e >= g_hot_experts) return;
+    size_t row = (size_t)((g_hot_experts + 7) / 8);
+    g_hot[(size_t)layer * row + (size_t)(e >> 3)] |= (uint8_t)(1u << (e & 7));
+}
+static int llm_xsc_hot_load(const char* path, int layers, int experts) {
+    if (path == NULL || path[0] == 0) return 0;
+    llm_xsc_hot_alloc(layers, experts);
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == '#') continue;
+        int l = -1, e = -1;
+        if (sscanf(line, "%d %d", &l, &e) == 2) llm_xsc_hot_set(l, e);
+    }
+    fclose(f);
+    return 1;
+}
+static inline void llm_xsc_hot_clear(void) { free(g_hot); g_hot = NULL; g_hot_layers = g_hot_experts = 0; }
 
 static inline uint64_t llm_xsc_hash(uint64_t x) {
     x += 0x9e3779b97f4a7c15ull;
@@ -53,7 +89,7 @@ static inline void llm_xsc_evict_hand(void) {
     for (uint32_t i = 0; i < n; i++) {
         LlmXsCacheEnt* e = &g_xsc.tab[g_xsc.hand];
         g_xsc.hand = (g_xsc.hand + 1u) % n;
-        if (e->buf) { llm_xsc_free_ent(e); return; }
+        if (e->buf && !e->pinned) { llm_xsc_free_ent(e); return; }
     }
 }
 static inline void llm_xsc_reset(void) {
@@ -112,14 +148,15 @@ static inline void llm_xsc_put(uint64_t key, const uint8_t* src, uint32_t len) {
             if (e->len == len) { memcpy(e->buf, src, len); e->used = ++g_xsc.tick; return; }
             llm_xsc_free_ent(e); victim = e; break;
         }
-        if (!victim || e->used < victim->used) victim = e;
+        if (!e->pinned && (!victim || e->used < victim->used)) victim = e;
     }
-    if (!victim) return;
+    if (!victim || victim->pinned) return;
     if (victim->buf) llm_xsc_free_ent(victim);
     uint8_t* b = (uint8_t*)malloc(len);
     if (!b) return;
     memcpy(b, src, len);
     victim->buf = b; victim->len = len; victim->key = key; victim->used = ++g_xsc.tick;
+    victim->pinned = llm_xsc_is_hot((int)(key >> 40), (int)(key & 0xffffffffu));
     g_xsc.bytes += len;
 }
 #endif /* LLM_MLX_XS_CACHE_H */
