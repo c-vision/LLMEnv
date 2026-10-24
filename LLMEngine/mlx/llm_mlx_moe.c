@@ -157,6 +157,13 @@ int llm_mlx_moe_gather_mm(const ModelConfig* cfg, mlx_array* res, mlx_array x, m
                                  mlx_array scales, mlx_array biases, mlx_array lhs, mlx_array idxs,
                                  bool transpose, mlx_optional_int gsz, mlx_optional_int bts,
                                  const char* mode, bool sorted, mlx_stream s) {
+    /* bits/group PER-TENSORE (esperti misti: down 3-bit, gate/up 2-bit): deriva dalle forme. */
+    if (scales.ctx != NULL) {
+        int dg = gsz.value, db = bts.value; char m2[16];
+        llm_mlx_mode_set(m2, sizeof m2, mode != NULL ? mode : "affine");
+        llm_mlx_quant_derive(w, scales, gsz.value, bts.value, mode, &dg, &db, m2, sizeof m2);
+        if (dg > 0 && db > 0) { gsz.value = dg; bts.value = db; }
+    }
     if (cfg->quant_mode[0] == 0 || strcmp(cfg->quant_mode, "none") == 0 || scales.ctx == NULL) {
         /* gather_mm calcola a @ b con b = (E, K, N): il peso (E, out, in) va trasposto (ultimi 2 assi). */
         (void)transpose; (void)gsz; (void)bts; (void)mode;

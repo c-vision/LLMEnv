@@ -1978,7 +1978,9 @@ void llm_mlx_quant_derive(mlx_array w, mlx_array scales,
         /* 2-bit affine (es. Ternary-Bonsai g128, bits 2): ratio 8 e' AMBIGUO con affine 4-bit g64
          * (128/16=8 e 64/8=8). Quando la config dichiara bits 2 si tiene fb_group (128) e bits 2,
          * NON la derivazione da ratio (che darebbe (64,4) e corromperebbe il layout 2-bit). */
-        if (ratio == 2) {
+        if (ratio == 3) { *out_group = 32; *out_bits = 3; llm_mlx_mode_set(out_mode, mode_cap, "affine"); }
+        else if (ratio == 6) { *out_group = 32; *out_bits = 6; llm_mlx_mode_set(out_mode, mode_cap, "affine"); }
+        else if (ratio == 2) {
             /* 2-bit g32 (mixed models): ratio 2 = cols*2/32 / cols/32. NON va confuso con
              * 4-bit g16 (non usato). Prima il ramo `fb_bits==2` forzava 2-bit su OGNI tensore
              * (bug 2026-10-24: attenzione 4-bit dequantizzata come 2-bit). */
