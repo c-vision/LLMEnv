@@ -1416,6 +1416,7 @@ void llm_mlx_dbg_dump(const char* name, int layer, mlx_array a) {
  * dichiara le override per modulo; al load si registra (w.ctx -> group,bits) e il chokepoint
  * `quantized_linear_cfg` le usa al posto dei valori globali di cfg. Nessun cambio ai call-site. */
 typedef struct { void* ctx; int rows, packed, g, b; } LlmMlxQpReg;
+static int g_nqpshape;
 static LlmMlxQpReg g_qpreg[16384];
 static int g_nqpreg = 0;
 void llm_mlx_qp_register(void* ctx, int rows, int packed, int group, int bits) {
@@ -1437,7 +1438,22 @@ int llm_mlx_qp_lookup(void* ctx, int rows, int packed, int* group, int* bits) {
         }
     return 0;
 }
-void llm_mlx_qp_clear(void) { g_nqpreg = 0; }
+void llm_mlx_qp_clear(void) { g_nqpreg = 0; g_nqpshape = 0; }
+
+/* Registro SECONDARIO per FORMA (rows,packed): copre le viste/traspose che perdono il ctx. */
+typedef struct { int rows, packed, g, b; } LlmMlxQpShape;
+static LlmMlxQpShape g_qpshape[4096];
+void llm_mlx_qp_register_shape(int rows, int packed, int group, int bits) {
+    if (rows <= 0 || packed <= 0 || group <= 0 || bits <= 0) return;
+    for (int i = 0; i < g_nqpshape; ++i)
+        if (g_qpshape[i].rows == rows && g_qpshape[i].packed == packed) { g_qpshape[i].g = group; g_qpshape[i].b = bits; return; }
+    if (g_nqpshape < 4096) { g_qpshape[g_nqpshape++] = (LlmMlxQpShape){rows, packed, group, bits}; }
+}
+int llm_mlx_qp_lookup_shape(int rows, int packed, int* group, int* bits) {
+    for (int i = g_nqpshape - 1; i >= 0; --i)
+        if (g_qpshape[i].rows == rows && g_qpshape[i].packed == packed) { if (group) *group = g_qpshape[i].g; if (bits) *bits = g_qpshape[i].b; return 1; }
+    return 0;
+}
 /* qparams dell'embedding del modello corrente (fallback globale per i callback che non
  * possono fare lookup per-array, es. l'adapter che slicea le righe). */
 static int g_embed_qg = 0, g_embed_qb = 0;
@@ -1463,11 +1479,35 @@ int llm_mlx_qp_name_get(const char* name, int* g, int* b) {
     return best > 0;
 }
 
+/* Chokepoint per OGNI quantized_matmul affine: se il tensore ha scales, deriva (g,b) dalle
+ * FORME (w packed vs scales) invece di fidarsi del solo cfg. Necessario per i modelli a
+ * quantizzazione PER-MODULO (attenzione 4-bit + esperti 2-bit). */
+int llm_mlx_qmatmul_auto(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc, mlx_array bi,
+                         bool transpose, int group_size, int bits, const char* mode, mlx_stream s) {
+    if (sc.ctx != NULL) {
+        int dg = group_size, db = bits; char m2[16];
+        llm_mlx_mode_set(m2, sizeof m2, mode != NULL ? mode : "affine");
+        llm_mlx_quant_derive(w, sc, group_size, bits, mode, &dg, &db, m2, sizeof m2);
+        if (dg > 0 && db > 0) { group_size = dg; bits = db; }
+    }
+    return mlx_quantized_matmul(res, x, w, sc, bi, transpose, (mlx_optional_int){group_size, true},
+                                (mlx_optional_int){bits, true}, mode, s);
+}
+
 bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases, int group_size, int bits, const char* mode, mlx_stream stream) {
     /* Override per-modulo dal config (registrato al load): vince sui valori globali di cfg. */
     { int qg = 0, qb = 0; int rr = (mlx_array_ndim(w) >= 2) ? (int)mlx_array_shape(w)[0] : 0;
       int pp = (mlx_array_ndim(w) >= 2) ? (int)mlx_array_shape(w)[mlx_array_ndim(w) - 1] : 0;
-      if (llm_mlx_qp_lookup(w.ctx, rr, pp, &qg, &qb)) { group_size = qg; bits = qb; } }
+      if (llm_mlx_qp_lookup(w.ctx, rr, pp, &qg, &qb)) { group_size = qg; bits = qb; }
+      else if (llm_mlx_qp_lookup_shape(rr, pp, &qg, &qb)) { group_size = qg; bits = qb; }
+      else if (scales.ctx != NULL) {
+          /* Fallback ROBUSTO per-modulo: deriva bits/group dalle FORME del tensore (w packed vs
+           * scales). Copre anche le viste/traspose che non passano dal registro per-ctx. */
+          char m2[16]; llm_mlx_mode_set(m2, sizeof m2, mode);
+          int dg = group_size, db = bits;
+          llm_mlx_quant_derive(w, scales, group_size, bits, mode, &dg, &db, m2, sizeof m2);
+          if (dg > 0 && db > 0) { group_size = dg; bits = db; }
+      } }
     /* TQ dense (opzione 2, LLM_TQ_DENSE=1): w UINT32 packed + biases=signs (già forniti dal fetch),
      * codebook GLOBALE. Decode: kernel TQ che legge packed (meno traffico memoria del bf16 plain).
      * Prefill (T>1): loop per riga (una volta, correttezza prima). */
@@ -1938,7 +1978,14 @@ void llm_mlx_quant_derive(mlx_array w, mlx_array scales,
         /* 2-bit affine (es. Ternary-Bonsai g128, bits 2): ratio 8 e' AMBIGUO con affine 4-bit g64
          * (128/16=8 e 64/8=8). Quando la config dichiara bits 2 si tiene fb_group (128) e bits 2,
          * NON la derivazione da ratio (che darebbe (64,4) e corromperebbe il layout 2-bit). */
-        if (fb_bits == 2) {
+        if (ratio == 2) {
+            /* 2-bit g32 (mixed models): ratio 2 = cols*2/32 / cols/32. NON va confuso con
+             * 4-bit g16 (non usato). Prima il ramo `fb_bits==2` forzava 2-bit su OGNI tensore
+             * (bug 2026-10-24: attenzione 4-bit dequantizzata come 2-bit). */
+            *out_group = 32; *out_bits = 2;
+            llm_mlx_mode_set(out_mode, mode_cap, "affine");
+        } else if (fb_bits == 2 && ratio == 8) {
+            /* Bonsai g128 b2: ratio 8 ambiguo con g64 b4 -> si tiene il fallback. */
             *out_group = fb_group > 0 ? fb_group : 128;
             *out_bits = 2;
             llm_mlx_mode_set(out_mode, mode_cap, "affine");

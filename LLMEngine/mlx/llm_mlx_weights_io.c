@@ -120,7 +120,8 @@ bool multishard_get(const MultiShardWeights* mw, const char* name, mlx_array* ou
             { int qg = 0, qb = 0; if (llm_mlx_qp_name_get(name, &qg, &qb)) {
                 int rr = (mlx_array_ndim(*out) >= 2) ? (int)mlx_array_shape(*out)[0] : 0;
                 int pp = (mlx_array_ndim(*out) >= 2) ? (int)mlx_array_shape(*out)[mlx_array_ndim(*out)-1] : 0;
-                llm_mlx_qp_register(out->ctx, rr, pp, qg, qb); } }
+                llm_mlx_qp_register(out->ctx, rr, pp, qg, qb);
+                llm_mlx_qp_register_shape(rr, pp, qg, qb); } }
             for (unsigned probe = 0; probe < 16; ++probe) {
                 unsigned j = (idx + probe) & (LLM_WCACHE_SZ - 1);
                 if (g_wcache[j].key == NULL) {

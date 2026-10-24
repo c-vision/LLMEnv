@@ -161,7 +161,8 @@ static void llm_mlx_register_module_qparams(const char* dir, MultiShardWeights* 
                         if (strncmp(key, mod, kl) == 0 && (key[kl] == '.' || key[kl] == 0)) {
                             { int rr = (mlx_array_ndim(val) >= 2) ? (int)mlx_array_shape(val)[0] : 0;
                               int pp = (mlx_array_ndim(val) >= 2) ? (int)mlx_array_shape(val)[mlx_array_ndim(val) - 1] : 0;
-                              llm_mlx_qp_register(val.ctx, rr, pp, mg, mb); }
+                              llm_mlx_qp_register(val.ctx, rr, pp, mg, mb);
+                              llm_mlx_qp_register_shape(rr, pp, mg, mb); }
                         }
                     }
                     mlx_map_string_to_array_iterator_free(it);

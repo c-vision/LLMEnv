@@ -38,6 +38,10 @@ int llm_mlx_dequantize_dbg(mlx_array* res, mlx_array w, mlx_array s, mlx_array b
                            mlx_optional_int g, mlx_optional_int bt, const char* mode,
                            mlx_array gs, mlx_optional_dtype dt, mlx_stream st, const char* tag);
 int  llm_mlx_qp_lookup(void* ctx, int rows, int packed, int* group, int* bits);
+void llm_mlx_qp_register_shape(int rows, int packed, int group, int bits);
+int  llm_mlx_qp_lookup_shape(int rows, int packed, int* group, int* bits);
+int llm_mlx_qmatmul_auto(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc, mlx_array bi,
+                         bool transpose, int group_size, int bits, const char* mode, mlx_stream s);
 void llm_mlx_qp_clear(void);
 void llm_mlx_qp_name_set(const char* key, int group, int bits);
 int  llm_mlx_qp_name_get(const char* name, int* group, int* bits);
