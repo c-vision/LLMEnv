@@ -742,6 +742,8 @@ struct LlmMlxModel {
     bool ngram_has_biases;
     bool ngram_table_loaded;
     int ngram_table_bits, ngram_table_group_size; /* da __metadata__ del file, vedi loader */
+    int embed_q_group, embed_q_bits;             /* override per-modulo dell'embedding (0 = cfg) */
+    int lmhead_q_group, lmhead_q_bits;           /* override per-modulo di lm_head (0 = cfg) */
     /* Qwen4-Exp N-gram/PLE SHARDED: sul checkpoint UFFICIALE mlx-community non esiste un
      * `ngram_table.bin` monolitico -- la stesssa tabella e' inline nei file safetensors
      * principali, divisa row-wise in 128 tensori `...ngram_embedding.shards.N.{weight,

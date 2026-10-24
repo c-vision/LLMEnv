@@ -202,6 +202,41 @@ bool qwen4_exp_ngram_table_open(const char* path, LlmMlxModel* m) {
  * qwen4_exp_ngram_read_rows -- MAI l'array intero (32GB) in RAM. Ritorna false senza side
  * effects se gli shard mancano o non sono coerenti (shape/dtype misti): il chiamante
  * tratta "non caricato" come oggi. */
+/* qparams della tabella PLE dal config PER-MODULO (es. shard a 4-bit mentre il top e' 2-bit). */
+static void ngram_qp_from_config(const char* dir, const char* prefix, int* bits, int* group) {
+    char pth[1200]; snprintf(pth, sizeof pth, "%s/config.json", dir);
+    FILE* f = fopen(pth, "rb"); if (!f) return;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > (1<<24)) { fclose(f); return; }
+    char* js = (char*)malloc((size_t)sz + 1); if (!js) { fclose(f); return; }
+    size_t rd = fread(js, 1, (size_t)sz, f); js[rd] = 0; fclose(f);
+    const char* q = strstr(js, "\"quantization\"");
+    if (!q) { free(js); return; }
+    const char* v = strchr(q, ':'); if (!v) { free(js); return; }
+    ++v; while (*v==' '||*v=='\t'||*v=='\n'||*v=='\r') ++v;
+    if (*v != '{') { free(js); return; }
+    const char* p = v + 1;
+    while (*p && *p != '}') {
+        while (*p && (*p==' '||*p==','||*p=='\t'||*p=='\n'||*p=='\r')) ++p;
+        if (*p != '"') { p++; continue; }
+        const char* ke = strchr(p+1, '"'); if (!ke) break;
+        size_t kl = (size_t)(ke - p - 1);
+        const char* c = strchr(ke, ':'); if (!c) break;
+        const char* o = c + 1; while (*o==' '||*o=='\t'||*o=='\n'||*o=='\r') ++o;
+        if (*o != '{') { const char* np=o; if(*np=='"'){const char* q2=strchr(np+1,'"');np=q2?q2+1:np+1;} p=np; continue; }
+        const char* oe = o; int dep = 0;
+        for (; *oe; ++oe) { if (*oe=='{') dep++; else if (*oe=='}') { dep--; if (!dep) break; } }
+        if (kl > strlen(prefix) && strncmp(p+1, prefix, strlen(prefix)) == 0) {
+            const char* bx = strstr(o, "\"bits\""); const char* gx = strstr(o, "\"group_size\"");
+            if (bx && bx < oe) { const char* cc = strchr(bx, ':'); if (cc) *bits = atoi(cc+1); }
+            if (gx && gx < oe) { const char* cc = strchr(gx, ':'); if (cc) *group = atoi(cc+1); }
+            free(js); return;
+        }
+        p = oe + 1;
+    }
+    free(js);
+}
+
 bool qwen4_exp_ngram_table_open_shards(const char* model_dir, LlmMlxModel* m) {
     char path[1200];
     snprintf(path, sizeof(path), "%s/model.safetensors.index.json", model_dir);
@@ -331,6 +366,8 @@ bool qwen4_exp_ngram_table_open_shards(const char* model_dir, LlmMlxModel* m) {
     m->ngram_rows_per_shard = rows_expected;
     m->ngram_table_bits = (m->cfg.quant_bits > 0) ? m->cfg.quant_bits : 4;
     m->ngram_table_group_size = (m->cfg.quant_group_size > 0) ? m->cfg.quant_group_size : 32;
+    /* override per-modulo degli shard PLE (possono avere bits/group diversi dal top-level) */
+    ngram_qp_from_config(model_dir, prefix, &m->ngram_table_bits, &m->ngram_table_group_size);
     m->ngram_table_loaded = true;
     return true;
 }

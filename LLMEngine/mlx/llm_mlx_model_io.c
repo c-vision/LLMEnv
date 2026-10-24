@@ -106,6 +106,73 @@ static void llm_engine_opt_auto(const char* name, const char* value) {
     (void)llm_ai_mlx_opt_set(name, value);
 }
 
+/* ── Registrazione qparams PER-MODULO dal config (`quantization` con chiavi modulo) ─────────
+ * I checkpoint MLX reali non sono uniformi (router 8/64, PLE 4/32, esperti 2/32). Si registra
+ * (array.ctx -> group,bits) cosi' `quantized_linear_cfg` usa i valori giusti per ogni tensore.
+ * Solo per modelli da dir MLX (chiavi HF); per GGUF la role map resta l'autorita'. */
+static void llm_mlx_register_module_qparams(const char* dir, MultiShardWeights* W, LlmMlxModel* m) {
+    if (dir == NULL || W == NULL || W->shards == NULL) return;
+    char pth[1200]; snprintf(pth, sizeof pth, "%s/config.json", dir);
+    FILE* f = fopen(pth, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > (1<<24)) { fclose(f); return; }
+    char* js = (char*)malloc((size_t)sz + 1);
+    if (!js) { fclose(f); return; }
+    size_t rd = fread(js, 1, (size_t)sz, f); js[rd] = 0; fclose(f);
+    const char* q = strstr(js, "\"quantization\"");
+    if (!q) { free(js); return; }
+    if (q) {
+        const char* v = strchr(q, ':'); if (!v) { free(js); return; }
+        ++v; while (*v==' '||*v=='\t'||*v=='\n'||*v=='\r') ++v;
+        if (*v != '{') { free(js); return; }
+        const char* p = v + 1;
+        char mod[192]; int mg = 0, mb = 0;
+        while (*p && *p != '}') {
+            while (*p && (*p==' '||*p==','||*p=='\t'||*p=='\n'||*p=='\r')) ++p;
+            if (*p != '"') { p++; continue; }
+            const char* ke = strchr(p+1, '"'); if (!ke) break;
+            size_t kl = (size_t)(ke - p - 1);
+            const char* c = strchr(ke, ':'); if (!c) break;
+            const char* o = c + 1; while (*o==' '||*o=='\t'||*o=='\n'||*o=='\r') ++o;
+            if (*o != '{') {
+                const char* np = o; if (*np=='"') { const char* q2 = strchr(np+1,'"'); np = q2 ? q2+1 : np+1; }
+                p = np; continue;
+            }
+            const char* oe = o; int dep = 0;
+            for (; *oe; ++oe) { if (*oe=='{') dep++; else if (*oe=='}') { dep--; if (!dep) break; } }
+            mg = 0; mb = 0;
+            { const char* bx = strstr(o, "\"bits\""); const char* gx = strstr(o, "\"group_size\"");
+              if (bx && bx < oe) { const char* cc = strchr(bx, ':'); if (cc) mb = atoi(cc+1); }
+              if (gx && gx < oe) { const char* cc = strchr(gx, ':'); if (cc) mg = atoi(cc+1); } }
+            if (kl > 0 && kl < sizeof mod && mg > 0 && mb > 0) {
+                memcpy(mod, p+1, kl); mod[kl] = 0;
+                if (m && strstr(mod, "embed_tokens") != NULL) { m->embed_q_group = mg; m->embed_q_bits = mb; }
+                if (m && strstr(mod, "lm_head") != NULL) { m->lmhead_q_group = mg; m->lmhead_q_bits = mb; }
+                llm_mlx_qp_name_set(mod, (int)mg, (int)mb);
+                /* registra ogni tensore `.weight` il cui nome inizia con questo modulo */
+                for (int si = 0; si < W->count; ++si) {
+                    mlx_map_string_to_array_iterator it = mlx_map_string_to_array_iterator_new(W->shards[si]);
+                    const char* key = NULL; mlx_array val;
+                    while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0) {
+                        if (key == NULL || val.ctx == NULL) continue;
+                        size_t klen = strlen(key);
+                        if (klen <= 7 || strcmp(key + klen - 7, ".weight") != 0) continue;
+                        if (strncmp(key, mod, kl) == 0 && (key[kl] == '.' || key[kl] == 0)) {
+                            { int rr = (mlx_array_ndim(val) >= 2) ? (int)mlx_array_shape(val)[0] : 0;
+                              int pp = (mlx_array_ndim(val) >= 2) ? (int)mlx_array_shape(val)[mlx_array_ndim(val) - 1] : 0;
+                              llm_mlx_qp_register(val.ctx, rr, pp, mg, mb); }
+                        }
+                    }
+                    mlx_map_string_to_array_iterator_free(it);
+                }
+            }
+            p = oe + 1;
+        }
+    }
+    free(js);
+}
+
 llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
     if (getenv("LLM_MLX_ERRTRACE")) mlx_set_error_handler(llm_mlx_err_trace_handler, NULL, NULL);
     if (model_dir == NULL) return NULL;
@@ -782,6 +849,9 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
     const bool pretouch_weights = llm_mlx_pretouch_weights_enabled();
     if (!is_mixtral && pretouch_weights)
         llm_mlx_pretouch_weights(&m->weights);
+    llm_mlx_qp_clear();
+    llm_mlx_register_module_qparams(model_dir, &m->weights, m);
+    if (m->embed_q_group > 0) llm_mlx_embed_qp_set(m->embed_q_group, m->embed_q_bits);
     llm_mlx_dp_memory("post-shard-load"); /* prima dello stacking: sono i GB dei soli pesi */
     /* Il dtype delle scale si conosce SOLO qui: e' nel checkpoint, non nel config. */
     llm_mlx_auto_pair_act_dtype(m, dtype_explicit);

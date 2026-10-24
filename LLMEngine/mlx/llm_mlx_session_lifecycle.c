@@ -32,8 +32,10 @@ static bool embed_token(LlmMlxModel* m, mlx_array embed_w, mlx_array embed_s, ml
     int e_group = m->cfg.quant_group_size, e_bits = m->cfg.quant_bits;
     char e_mode[16];
     llm_mlx_mode_set(e_mode, sizeof(e_mode), m->cfg.quant_mode);
-    if (quantized)
-        llm_mlx_quant_derive(embed_w, embed_s, e_group, e_bits, e_mode, &e_group, &e_bits, e_mode, sizeof(e_mode));
+    if (quantized) {
+        if (m->embed_q_group > 0) { e_group = m->embed_q_group; e_bits = m->embed_q_bits; }
+        else llm_mlx_quant_derive(embed_w, embed_s, e_group, e_bits, e_mode, &e_group, &e_bits, e_mode, sizeof(e_mode));
+    }
     const int idx_shape[1] = {1};
     mlx_array indices = mlx_array_new_data(&token_id, idx_shape, 1, MLX_INT32);
     mlx_array w_row = mlx_array_new(), s_row = mlx_array_new(), b_row = mlx_array_new();

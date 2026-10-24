@@ -32,6 +32,17 @@ extern int g_df2_n_rounds, g_df2_n_roll;
 bool plain_linear(mlx_array* res, mlx_array x, mlx_array w, mlx_stream stream);
 bool rms_norm_cfg(mlx_array* res, mlx_array x, mlx_array w, float eps, mlx_stream stream);
 bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases, int group_size, int bits, const char* mode, mlx_stream stream);
+/* Registro qparams per-tensore (quantizzazione per-modulo). */
+void llm_mlx_qp_register(void* ctx, int rows, int packed, int group, int bits);
+int llm_mlx_dequantize_dbg(mlx_array* res, mlx_array w, mlx_array s, mlx_array b,
+                           mlx_optional_int g, mlx_optional_int bt, const char* mode,
+                           mlx_array gs, mlx_optional_dtype dt, mlx_stream st, const char* tag);
+int  llm_mlx_qp_lookup(void* ctx, int rows, int packed, int* group, int* bits);
+void llm_mlx_qp_clear(void);
+void llm_mlx_qp_name_set(const char* key, int group, int bits);
+int  llm_mlx_qp_name_get(const char* name, int* group, int* bits);
+void llm_mlx_embed_qp_set(int group, int bits);
+int  llm_mlx_embed_qp(int* group, int* bits);
 void llm_mlx_dbg_dump(const char* name, int layer, mlx_array a);   /* LLM_DBG_DUMP_DIR */
 /* Codebook TurboQuant GLOBALE (identico in tutti i tensori tq, da config.quantization.codebook). */
 void llm_mlx_tq_set_cb(const float* cb, int n);
@@ -189,6 +200,9 @@ int llm_mlx_moe_gather_streamed(const ModelConfig* cfg, int layer, int proj,
                                 const char* mode, bool sorted, mlx_stream st);
 /* Byte totali degli esperti (dall'ingest SWAP attivo), da sottrarre all'active memory. */
 uint64_t llm_mlx_moe_swap_expert_bytes(void);
+/* Cache HOT/LRU degli esperti streamati: hit/miss/byte occupati (metrica di working set). */
+void llm_ai_mlx_moe_cache_stats(unsigned long long* hits, unsigned long long* misses,
+                                unsigned long long* bytes);
 /* Offload esperti (streaming da disco): stato impostato via API `llm_ai_mlx_set_moe_swap_dir`. */
 int llm_mlx_moe_swap_on(void);
 /* TurboQuant: 1 = esperti packed (memoria), 0 = affine-2bit residenti (velocita'). */

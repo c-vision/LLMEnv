@@ -1411,7 +1411,63 @@ void llm_mlx_dbg_dump(const char* name, int layer, mlx_array a) {
 }
 
 
+/* ── REGISTRO qparams PER-TENSORE (quantizzazione per-modulo) ────────────────────────────────
+ * I checkpoint MLX reali NON sono uniformi (router 8/64, PLE 4/32, esperti 2/32...). Il config
+ * dichiara le override per modulo; al load si registra (w.ctx -> group,bits) e il chokepoint
+ * `quantized_linear_cfg` le usa al posto dei valori globali di cfg. Nessun cambio ai call-site. */
+typedef struct { void* ctx; int rows, packed, g, b; } LlmMlxQpReg;
+static LlmMlxQpReg g_qpreg[16384];
+static int g_nqpreg = 0;
+void llm_mlx_qp_register(void* ctx, int rows, int packed, int group, int bits) {
+    if (ctx == NULL || group <= 0 || bits <= 0) return;
+    for (int i = 0; i < g_nqpreg; ++i)
+        if (g_qpreg[i].ctx == ctx && g_qpreg[i].rows == rows && g_qpreg[i].packed == packed) {
+            g_qpreg[i].g = group; g_qpreg[i].b = bits; return;
+        }
+    if (g_nqpreg < (int)(sizeof g_qpreg / sizeof g_qpreg[0])) {
+        g_qpreg[g_nqpreg].ctx = ctx; g_qpreg[g_nqpreg].rows = rows; g_qpreg[g_nqpreg].packed = packed;
+        g_qpreg[g_nqpreg].g = group; g_qpreg[g_nqpreg].b = bits; g_nqpreg++;
+    }
+}
+int llm_mlx_qp_lookup(void* ctx, int rows, int packed, int* group, int* bits) {
+    if (ctx == NULL) return 0;
+    for (int i = g_nqpreg - 1; i >= 0; --i)
+        if (g_qpreg[i].ctx == ctx && g_qpreg[i].rows == rows && g_qpreg[i].packed == packed) {
+            if (group) *group = g_qpreg[i].g; if (bits) *bits = g_qpreg[i].b; return 1;
+        }
+    return 0;
+}
+void llm_mlx_qp_clear(void) { g_nqpreg = 0; }
+/* qparams dell'embedding del modello corrente (fallback globale per i callback che non
+ * possono fare lookup per-array, es. l'adapter che slicea le righe). */
+static int g_embed_qg = 0, g_embed_qb = 0;
+void llm_mlx_embed_qp_set(int g, int b) { g_embed_qg = g; g_embed_qb = b; }
+int llm_mlx_embed_qp(int* g, int* b) { if (g) *g = g_embed_qg; if (b) *b = g_embed_qb; return g_embed_qg > 0; }
+
+/* Tabella nome-modulo -> qparams (riempita dal config): multishard_get registra l'array
+ * restituito, cosi' il call-site (che riceve QUEL ctx) trova i valori giusti. */
+typedef struct { char key[192]; int g, b; } LlmMlxQpName;
+static LlmMlxQpName g_qpn[1024]; static int g_nqpn = 0;
+void llm_mlx_qp_name_set(const char* key, int g, int b) {
+    if (key == NULL || g <= 0 || b <= 0) return;
+    for (int i = 0; i < g_nqpn; ++i) if (strcmp(g_qpn[i].key, key) == 0) { g_qpn[i].g = g; g_qpn[i].b = b; return; }
+    if (g_nqpn < 1024) { snprintf(g_qpn[g_nqpn].key, sizeof g_qpn[0].key, "%s", key); g_qpn[g_nqpn].g = g; g_qpn[g_nqpn].b = b; g_nqpn++; }
+}
+int llm_mlx_qp_name_get(const char* name, int* g, int* b) {
+    if (name == NULL) return 0;
+    size_t best = 0; *g = 0; *b = 0;
+    for (int i = 0; i < g_nqpn; ++i) {
+        size_t kl = strlen(g_qpn[i].key);
+        if (kl > best && strncmp(name, g_qpn[i].key, kl) == 0) { best = kl; *g = g_qpn[i].g; *b = g_qpn[i].b; }
+    }
+    return best > 0;
+}
+
 bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases, int group_size, int bits, const char* mode, mlx_stream stream) {
+    /* Override per-modulo dal config (registrato al load): vince sui valori globali di cfg. */
+    { int qg = 0, qb = 0; int rr = (mlx_array_ndim(w) >= 2) ? (int)mlx_array_shape(w)[0] : 0;
+      int pp = (mlx_array_ndim(w) >= 2) ? (int)mlx_array_shape(w)[mlx_array_ndim(w) - 1] : 0;
+      if (llm_mlx_qp_lookup(w.ctx, rr, pp, &qg, &qb)) { group_size = qg; bits = qb; } }
     /* TQ dense (opzione 2, LLM_TQ_DENSE=1): w UINT32 packed + biases=signs (già forniti dal fetch),
      * codebook GLOBALE. Decode: kernel TQ che legge packed (meno traffico memoria del bf16 plain).
      * Prefill (T>1): loop per riga (una volta, correttezza prima). */

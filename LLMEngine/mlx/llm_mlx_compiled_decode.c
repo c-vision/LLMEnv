@@ -144,8 +144,12 @@ bool llm_mlx_embed_row_from_idx(LlmMlxModel* m, mlx_array embed_w, mlx_array emb
     int e_group = m->cfg.quant_group_size, e_bits = m->cfg.quant_bits;
     char e_mode[16];
     llm_mlx_mode_set(e_mode, sizeof(e_mode), m->cfg.quant_mode);
-    if (quantized)
-        llm_mlx_quant_derive(embed_w, embed_s, e_group, e_bits, e_mode, &e_group, &e_bits, e_mode, sizeof(e_mode));
+    if (quantized) {
+        int qg = 0, qb = 0;
+        if (m->embed_q_group > 0) { e_group = m->embed_q_group; e_bits = m->embed_q_bits; }
+        else if (llm_mlx_qp_lookup(embed_w.ctx, (int)mlx_array_shape(embed_w)[0], (int)mlx_array_shape(embed_w)[mlx_array_ndim(embed_w)-1], &qg, &qb)) { e_group = qg; e_bits = qb; }
+        else llm_mlx_quant_derive(embed_w, embed_s, e_group, e_bits, e_mode, &e_group, &e_bits, e_mode, sizeof(e_mode));
+    }
     mlx_array w_row = mlx_array_new(), s_row = mlx_array_new(), b_row = mlx_array_new();
     bool g = mlx_take_axis(&w_row, embed_w, tid, 0, m->stream) == 0;
     if (g && quantized) {

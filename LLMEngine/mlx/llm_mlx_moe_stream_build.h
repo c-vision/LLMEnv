@@ -19,6 +19,7 @@
 #endif
 
 #include "llm_mlx_xs_pool.h"   /* pool riusabile + mlock dei bundle streamed */
+#include "llm_mlx_xs_cache.h"  /* cache HOT/LRU degli esperti (budget da opzione registro) */
 
 /* Costruisce+materializza [k, d1, d2] per (layer, proj, kind) dagli esperti `uniq[]`.
  * kind: 0=weight(U32) 1=scales(BF16) 2=biases(BF16). Ritorna 0 e *out, oppure -1. */
@@ -39,9 +40,12 @@ static inline int llm_mlx_xs_stack(const LlmEngineMoeTsIngest* s, int layer, int
     if (buf == NULL) { buf = (uint8_t*)malloc(need); sl = NULL; }
     if (buf == NULL) return -1;
     for (int j = 0; j < k; j++) {
+        const uint64_t key = llm_xsc_key(layer, proj, kind, uniq[j]);
+        if (llm_xsc_get(key, (uint32_t)per, buf + (size_t)j * per)) continue;
         const uint8_t* p = llmengine_moe_ts_get(s, layer, proj, kind, uniq[j], NULL);
         if (!p) { if (sl != NULL) llm_xs_slot_dtor(sl); else free(buf); return -1; }
         memcpy(buf + (size_t)j * per, p, per);
+        llm_xsc_put(key, p, (uint32_t)per);
     }
     int shp[3] = { k, t->d1, t->d2 };
     if (sl != NULL)

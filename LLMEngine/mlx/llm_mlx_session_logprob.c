@@ -35,7 +35,7 @@ static int position_logits_host(LlmMlxSession* s, float** out_logits, double* ou
     /* Ternary-Bonsai: lm_head e' elencato -> si ruota il suo ingresso (come final_step). */
     if (ok) ok = llm_bonsai_rotate(&normed, m, -1, "lm_head.weight", false);
     if (ok) ok = quantized_linear_cfg(&logits, normed, t.out_w, t.out_s, t.out_b,
-                                      m->cfg.quant_group_size, m->cfg.quant_bits, m->cfg.quant_mode, m->stream);
+                                      (m->lmhead_q_group>0?m->lmhead_q_group:m->cfg.quant_group_size), (m->lmhead_q_bits>0?m->lmhead_q_bits:m->cfg.quant_bits), m->cfg.quant_mode, m->stream);
     mlx_array capped = mlx_array_new();
     if (ok && m->cfg.final_logit_softcap > 0.0f) {
         ok = llm_mlx_logit_softcap(&capped, logits, m->cfg.final_logit_softcap, m->stream);

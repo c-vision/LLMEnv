@@ -104,12 +104,23 @@ bool multishard_get(const MultiShardWeights* mw, const char* name, mlx_array* ou
         unsigned j = (idx + probe) & (LLM_WCACHE_SZ - 1);
         if (g_wcache[j].key == (const void*)mw->shards && strcmp(g_wcache[j].name, name) == 0) {
             if (g_wcache[j].val.ctx == NULL) return false;          /* memoizzato ASSENTE */
-            return mlx_array_set(out, g_wcache[j].val) == 0;
+            { int ok2 = (mlx_array_set(out, g_wcache[j].val) == 0);
+              int qg = 0, qb = 0;
+              if (ok2 && llm_mlx_qp_name_get(name, &qg, &qb)) {
+                  int rr = (mlx_array_ndim(*out) >= 2) ? (int)mlx_array_shape(*out)[0] : 0;
+                  int pp = (mlx_array_ndim(*out) >= 2) ? (int)mlx_array_shape(*out)[mlx_array_ndim(*out)-1] : 0;
+                  llm_mlx_qp_register(out->ctx, rr, pp, qg, qb);
+              }
+              return ok2; }
         }
         if (g_wcache[j].key == NULL) break;
     }
     for (int i = 0; i < mw->count; i++) {
         if (mlx_map_string_to_array_get(out, mw->shards[i], name) == 0) {
+            { int qg = 0, qb = 0; if (llm_mlx_qp_name_get(name, &qg, &qb)) {
+                int rr = (mlx_array_ndim(*out) >= 2) ? (int)mlx_array_shape(*out)[0] : 0;
+                int pp = (mlx_array_ndim(*out) >= 2) ? (int)mlx_array_shape(*out)[mlx_array_ndim(*out)-1] : 0;
+                llm_mlx_qp_register(out->ctx, rr, pp, qg, qb); } }
             for (unsigned probe = 0; probe < 16; ++probe) {
                 unsigned j = (idx + probe) & (LLM_WCACHE_SZ - 1);
                 if (g_wcache[j].key == NULL) {

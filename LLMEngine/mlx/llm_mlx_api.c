@@ -683,7 +683,7 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
             ok = llm_mlx_final_norm(m, h, t.final_norm_w, &normed);
     }
     if (ok) ok = quantized_linear_cfg(&logits, normed, t.out_w, t.out_s, t.out_b,
-                                      m->cfg.quant_group_size, m->cfg.quant_bits, m->cfg.quant_mode, m->stream);
+                                      (m->lmhead_q_group>0?m->lmhead_q_group:m->cfg.quant_group_size), (m->lmhead_q_bits>0?m->lmhead_q_bits:m->cfg.quant_bits), m->cfg.quant_mode, m->stream);
     if (ok) ok = mlx_argmax_axis(&am, logits, -1, /*keepdims=*/false, m->stream) == 0;
     if (ok) ok = mlx_array_eval(am) == 0;
     if (g_df2_time_on()) { g_df2_t_arg += g_df2_now() - _t0; _t0 = g_df2_now(); }
@@ -1241,7 +1241,7 @@ static int df2_dflash_verify_multi(DFlash2Runtime* rt, LlmMlxSession** sess, int
     mlx_array normed = mlx_array_new(), logits = mlx_array_new(), am = mlx_array_new();
     if (ok) ok = llm_mlx_final_norm(m, h, t.final_norm_w, &normed);
     if (ok) ok = quantized_linear_cfg(&logits, normed, t.out_w, t.out_s, t.out_b,
-                                      m->cfg.quant_group_size, m->cfg.quant_bits, m->cfg.quant_mode, m->stream);
+                                      (m->lmhead_q_group>0?m->lmhead_q_group:m->cfg.quant_group_size), (m->lmhead_q_bits>0?m->lmhead_q_bits:m->cfg.quant_bits), m->cfg.quant_mode, m->stream);
     if (ok) ok = mlx_argmax_axis(&am, logits, -1, /*keepdims=*/false, m->stream) == 0;
     if (ok) ok = mlx_array_eval(am) == 0;
     const uint32_t* gdata = ok ? mlx_array_data_uint32(am) : NULL;

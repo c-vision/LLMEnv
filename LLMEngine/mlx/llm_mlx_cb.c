@@ -103,6 +103,7 @@ static bool llm_cb_rms_llm(mlx_array* o, void* c) { llm_cb_rms_ctx* p = (llm_cb_
 static bool llm_cb_ql_raw(mlx_array* o, void* c) {
     llm_cb_ql_ctx* p = (llm_cb_ql_ctx*)c;
     mlx_optional_int g = {p->gs, true}, b = {p->bits, true};
+    { int qg = 0, qb = 0; if (llm_mlx_qp_lookup(p->wq.ctx, (int)mlx_array_shape(p->wq)[0], (int)mlx_array_shape(p->wq)[mlx_array_ndim(p->wq)-1], &qg, &qb)) { g.value = qg; b.value = qb; } }
     return mlx_quantized_matmul(o, p->x, p->wq, p->sc, p->bi, true, g, b, "affine", p->s) == 0;
 }
 static bool llm_cb_ql_llm(mlx_array* o, void* c) {
@@ -246,6 +247,10 @@ static bool llm_cb_emb_raw(mlx_array* o, void* c) {
     llm_cb_emb_ctx* p = (llm_cb_emb_ctx*)c;
     mlx_array wr = mlx_array_new(), sr = mlx_array_new(), br = mlx_array_new(), flat = mlx_array_new();
     mlx_optional_int g = {p->gs, true}, b = {p->bits, true};
+    /* qparams per-modulo dell'embedding (es. 4-bit mentre il top-level e' 2-bit) */
+    { int qg = 0, qb = 0;
+      if (llm_mlx_qp_lookup(p->emb_w.ctx, (int)mlx_array_shape(p->emb_w)[0], (int)mlx_array_shape(p->emb_w)[mlx_array_ndim(p->emb_w)-1], &qg, &qb)
+          || llm_mlx_embed_qp(&qg, &qb)) { g.value = qg; b.value = qb; } }
     mlx_optional_dtype dt = {MLX_FLOAT32, true};
     bool ok = mlx_take_axis(&wr, p->emb_w, p->tid, 0, p->s) == 0 &&
               mlx_take_axis(&sr, p->emb_s, p->tid, 0, p->s) == 0 &&
@@ -499,6 +504,7 @@ static bool llm_cb_lo_raw(mlx_array* o, void* c) {
 typedef bool (*llm_cb_qmm_fn)(mlx_array*, mlx_array, mlx_array, mlx_array, mlx_array, int, mlx_stream);
 static bool llm_cb_raw_qmm(mlx_array* o, mlx_array x, mlx_array w, mlx_array sc, mlx_array bi, int gs, mlx_stream s) {
     mlx_optional_int g = {gs, true}, b = {8, true};
+    { int qg = 0, qb = 0; if (llm_mlx_qp_lookup(w.ctx, (int)mlx_array_shape(w)[0], (int)mlx_array_shape(w)[mlx_array_ndim(w)-1], &qg, &qb)) { g.value = qg; b.value = qb; } }
     return mlx_quantized_matmul(o, x, w, sc, bi, true, g, b, "affine", s) == 0;
 }
 static bool llm_cb_llm_qmm(mlx_array* o, mlx_array x, mlx_array w, mlx_array sc, mlx_array bi, int gs, mlx_stream s) {

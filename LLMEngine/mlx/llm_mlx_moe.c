@@ -185,12 +185,21 @@ static int g_moe_ts_state = -1; /* -1 non init, 0 off, 1 ok */
  * del load del modello. `dir` NULL/vuota disattiva. Resetta lo stato dell'ingest così una nuova
  * dir viene riaperta alla prima chiamata. */
 void llm_ai_mlx_set_moe_swap_dir(const char* dir) {
+    llm_xsc_reset();   /* modello diverso -> cache esperti non valida */
     if (dir) {
         snprintf(g_moe_swap_dir, sizeof g_moe_swap_dir, "%s", dir);
     } else {
         g_moe_swap_dir[0] = '\0';
     }
     g_moe_ts_state = -1;
+}
+
+/* Statistiche della cache HOT/LRU (per metriche e test dal consumer). */
+void llm_ai_mlx_moe_cache_stats(unsigned long long* hits, unsigned long long* misses,
+                                unsigned long long* bytes) {
+    if (hits) *hits = g_xsc.hits;
+    if (misses) *misses = g_xsc.misses;
+    if (bytes) *bytes = (unsigned long long)g_xsc.bytes;
 }
 
 static const LlmEngineMoeTsIngest* llm_moe_swap_ingest(void) {
