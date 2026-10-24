@@ -160,7 +160,7 @@ static char* run_media_pipeline(struct llm_ai_ocr_ctx* ctx, const char* media_pa
     mtmd_input_chunks* chunks = NULL;
 
     /* 1. Carica il media (immagine via stb_image, audio via miniaudio -- auto-detect). */
-    struct mtmd_helper_bitmap_wrapper bitmap_wrap = mtmd_helper_bitmap_init_from_file(ctx->mtmd_ctx, media_path, false);
+    struct mtmd_helper_bitmap_wrapper bitmap_wrap = mtmd_helper_bitmap_init_from_file(ctx->mtmd_ctx, media_path, false, mtmd_helper_init_opt_default());
     if (!bitmap_wrap.bitmap) {
         fprintf(stderr, "[llm_ai_ocr] unable to load media: %s\n", media_path);
         return NULL;

@@ -68,7 +68,7 @@ endif()
 FetchContent_Declare(
     llama_cpp
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
-    GIT_TAG b10448  # PIN ESPLICITO -- verificato reale (release GitHub più recente al
+    GIT_TAG v0.7.0  # PIN ESPLICITO (qwen4exp nelle arch) -- verificato reale (release GitHub più recente al
                      # 2026-08-16, https://github.com/ggml-org/llama.cpp/releases/latest).
                      # Aggiornare a mano dopo aver verificato compatibilità, mai seguire master.
     GIT_SHALLOW TRUE
