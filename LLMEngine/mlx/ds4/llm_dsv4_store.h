@@ -362,6 +362,12 @@ static inline const uint8_t* llm_dsv4_store_expert(LlmDsv4Store* s, int layer, i
 /* PREFETCH parallelo di un insieme di esperti di un layer (es. i 6 esperti di ogni token di un chunk): gli slot sono
  * assegnati in serie (logica LRU), le letture dei record mancanti (3 pread per esperto) girano in parallelo su GCD
  * (l'NVMe/page cache scalano con piu' richieste). Dopo, llm_dsv4_store_expert() e' tutto hit. `n` fino a 4096. */
+typedef struct { uint64_t off; size_t len; } LlmDsv4Span;
+static int llm_dsv4_span_cmp(const void* a, const void* b) {
+    const LlmDsv4Span* x = (const LlmDsv4Span*)a; const LlmDsv4Span* y = (const LlmDsv4Span*)b;
+    if (x->off < y->off) return -1; if (x->off > y->off) return 1; return 0;
+}
+
 static inline void llm_dsv4_store_prefetch(LlmDsv4Store* s, int layer, const int* experts, int n) {
     if (!s || s->mode != LLM_DSV4_STORE_SWAP || (s->mmap_only && s->mmap_now) || n <= 0) return;
     if (llm_dsv4_store_q4_stacks(s, layer, NULL, NULL, NULL)) { llm_dsv4_store_q4_ensure(s, layer, experts, n); return; }
@@ -374,6 +380,39 @@ static inline void llm_dsv4_store_prefetch(LlmDsv4Store* s, int layer, const int
         if (idx >= 0 && miss) { jobs[nj].e = experts[i]; jobs[nj].idx = idx; nj++; }
     }
     if (nj == 0) { free(jobs); return; }
+    /* LETTURE ORDINATE (port ds4 ee7e840): con page-cache attivo si chiede l'advise asincrono
+     * sui range FUSI degli esperti selezionati, in ordine di file; i pread restano paralleli.
+     * Con F_NOCACHE (dsv4_store_nocache=1) l'advise non ha effetto: si salta. */
+    { int nc = 1; (void)llm_ai_mlx_opt_get_bool("dsv4_store_nocache", &nc);
+      if (!nc && s->fd >= 0) {
+          LlmDsv4Span* sp = (LlmDsv4Span*)malloc(sizeof(LlmDsv4Span) * (size_t)nj * 3u);
+          if (sp) {
+              size_t ns = 0; LlmDsv4StoreLayer* LL = &s->layers[layer];
+              for (int j = 0; j < nj; ++j) {
+                  const int e = jobs[j].e;
+                  sp[ns++] = (LlmDsv4Span){ LL->off_g + (uint64_t)e * LL->stride_g, LL->nb_g };
+                  sp[ns++] = (LlmDsv4Span){ LL->off_u + (uint64_t)e * LL->stride_u, LL->nb_u };
+                  sp[ns++] = (LlmDsv4Span){ LL->off_d + (uint64_t)e * LL->stride_d, LL->nb_d };
+              }
+              qsort(sp, ns, sizeof(sp[0]), llm_dsv4_span_cmp);
+              uint64_t ro = sp[0].off, rl = sp[0].len;
+              for (size_t i = 1; i < ns; ++i) {
+                  if (sp[i].off <= ro + rl) { uint64_t end = sp[i].off + sp[i].len; if (end > ro + rl) rl = end - ro; continue; }
+#if defined(__APPLE__)
+                  { struct radvisory ra; ra.ra_offset = (off_t)ro; ra.ra_count = (int)rl; (void)fcntl(s->fd, F_RDADVISE, &ra); }
+#else
+                  (void)posix_fadvise(s->fd, (off_t)ro, (off_t)rl, POSIX_FADV_WILLNEED);
+#endif
+                  ro = sp[i].off; rl = sp[i].len;
+              }
+#if defined(__APPLE__)
+              { struct radvisory ra; ra.ra_offset = (off_t)ro; ra.ra_count = (int)rl; (void)fcntl(s->fd, F_RDADVISE, &ra); }
+#else
+              (void)posix_fadvise(s->fd, (off_t)ro, (off_t)rl, POSIX_FADV_WILLNEED);
+#endif
+              free(sp);
+          }
+      } }
     __block int bad = 0;
     dispatch_apply((size_t)nj * 3, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t k) {
         if (llm_dsv4_store_read_ent(s, layer, jobs[k / 3].e, jobs[k / 3].idx, (int)(k % 3))) bad = 1;
