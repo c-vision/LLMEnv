@@ -566,6 +566,14 @@ if(LLM_BUILD_DSV4_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}
         $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
     set_target_properties(llm_qwen4_native_ple_test PROPERTIES LINKER_LANGUAGE CXX)
+
+    # P4 (qwen4exp nativo): router top-k + shared gate, parita' model-free.
+    add_executable(llm_qwen4_native_router_test tests/llm_qwen4_native_router_test.c)
+    target_link_libraries(llm_qwen4_native_router_test PRIVATE llm_ai_mlx)
+    target_include_directories(llm_qwen4_native_router_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
+    set_target_properties(llm_qwen4_native_router_test PROPERTIES LINKER_LANGUAGE CXX)
     set_target_properties(llm_mlx_kvformat_test PROPERTIES LINKER_LANGUAGE CXX)
 
     # §9.A M10a: test model-free del modello di costo KV (KEEP/PERSIST/RECOMPUTE).
