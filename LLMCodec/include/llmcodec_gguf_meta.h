@@ -4,6 +4,7 @@
 #ifndef LLMCODEC_GGUF_META_H
 #define LLMCODEC_GGUF_META_H
 #include "llmcodec_gguf_read.h"
+#include "llmcodec_rolemap.h"
 
 /* Tokenizer pre-digerito dal PROGETTO tokenizer (unica sorgente di tokenizer.json).
  * Il codec NON ri-parsa il file: riceve i dati e li emette. Le stringhe sono
@@ -25,5 +26,10 @@ int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmC
                         const char* tokenizer_pre,
                         LlmCodecGgufMetaKV** out_kv, int* out_n);
 void llmcodec_gguf_meta_free_built(LlmCodecGgufMetaKV* kv, int n);
+/* Come llmcodec_gguf_meta_build, ma applica anche la sezione `gguf_meta` del descrittore
+ * (chiave GGUF <- "config:<campo>"), tenendo il .gmbarch come fonte di verita'. */
+int llmcodec_gguf_meta_build_rm(const char* model_dir, const char* arch, const LlmCodecTokenizerMeta* tm,
+                                const char* tokenizer_pre, LlmCodecGgufMetaKV** out_kv, int* out_n,
+                                const LlmCodecRoleMap* rm);
 
 #endif

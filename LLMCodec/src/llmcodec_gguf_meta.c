@@ -8,6 +8,7 @@
  * NON legge tokenizer.json: i token/merges arrivano gia' digeriti (LlmCodecTokenizerMeta) dal
  * progetto tokenizer (llmtoken) — unica sorgente. Vedi llmcodec_gguf_meta.h. */
 #include "llmcodec_gguf_meta.h"
+#include "llmcodec_rolemap.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,7 +92,7 @@ static void add_boola(ML* m, const char* arch, const char* suf, int v){ char b[9
 static void add_arra(ML* m, const char* arch, const char* suf, char** a, int n){ char b[96]; snprintf(b,sizeof b,"%s.%s",arch,suf); add_arr_str(m,b,a,n); }
 
 
-int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmCodecTokenizerMeta* tm, const char* tokenizer_pre, LlmCodecGgufMetaKV** out_kv, int* out_n) {
+static int meta_build_impl(const char* model_dir, const char* arch, const LlmCodecTokenizerMeta* tm, const char* tokenizer_pre, LlmCodecGgufMetaKV** out_kv, int* out_n, const LlmCodecRoleMap* rm) {
     if (!model_dir || !arch || !out_kv || !out_n) return -1;
     *out_kv=NULL; *out_n=0;
     char p[1300]; snprintf(p,sizeof p,"%s/config.json",model_dir); char* cj=mslurp(p);
@@ -196,6 +197,24 @@ int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmC
       char* tcj2 = mslurp(tcp2); if (tcj2) { add_str(&m, "tokenizer.gmb.config", tcj2); free(tcj2); } }
     { char cfp[1300]; snprintf(cfp, sizeof cfp, "%s/config.json", model_dir);
       char* cf = mslurp(cfp); if (cf) { add_str(&m, "model.gmb.config", cf); free(cf); } }
+    /* gguf_meta dal descrittore: chiave GGUF <- config:<campo> (solo se non gia' emessa). */
+    if (rm) {
+        for (int i = 0; i < rm->n_m; i++) {
+            const char* src = rm->mm[i].src;
+            if (strncmp(src, "config:", 7) != 0) continue;
+            const char* p = jfind(cj, src + 7);
+            if (!p) continue;
+            int exists = 0;
+            for (int k = 0; k < m.n; k++) if (strcmp(m.kv[k].key, rm->mm[i].key) == 0) { exists = 1; break; }
+            if (exists) continue;
+            char* e = NULL; double d = strtod(p, &e);
+            if (e == p) continue;
+            int is_float = 0;
+            for (const char* q = p; q < e; q++) if (*q == '.' || *q == 'e' || *q == 'E') is_float = 1;
+            if (is_float) add_f32(&m, rm->mm[i].key, (float)d);
+            else add_u32(&m, rm->mm[i].key, (uint32_t)d);
+        }
+    }
     free(cj);
     /* trasferisci ownership: la free libera il Reg (chiavi, str, array) + kv */
     *out_kv=m.kv; *out_n=m.n;
@@ -203,6 +222,12 @@ int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmC
      * ricostruisce i puntatori. Per non complicare, teniamo il Reg in una tabella statica. */
     { extern void llmcodec_gguf_meta_track(LlmCodecGgufMetaKV*, Reg*); llmcodec_gguf_meta_track(m.kv,&m.reg); }
     return 0;
+}
+int llmcodec_gguf_meta_build(const char* model_dir, const char* arch, const LlmCodecTokenizerMeta* tm, const char* tokenizer_pre, LlmCodecGgufMetaKV** out_kv, int* out_n) {
+    return meta_build_impl(model_dir, arch, tm, tokenizer_pre, out_kv, out_n, NULL);
+}
+int llmcodec_gguf_meta_build_rm(const char* model_dir, const char* arch, const LlmCodecTokenizerMeta* tm, const char* tokenizer_pre, LlmCodecGgufMetaKV** out_kv, int* out_n, const LlmCodecRoleMap* rm) {
+    return meta_build_impl(model_dir, arch, tm, tokenizer_pre, out_kv, out_n, rm);
 }
 void llmcodec_gguf_meta_free_built(LlmCodecGgufMetaKV* kv, int n){ (void)n; extern void llmcodec_gguf_meta_release(LlmCodecGgufMetaKV*); llmcodec_gguf_meta_release(kv); free(kv); }
 

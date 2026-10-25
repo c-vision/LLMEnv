@@ -21,6 +21,8 @@ typedef struct { char key[32]; char type[32]; } LlmCodecRoleStruct;
 typedef struct { char name[24]; char dtype[16]; char codec[24]; char role[32]; char scale_suffix[16]; char bias_suffix[16]; int expert_axis; int fmt, p0, p1; char mode[16]; char global_suffix[16]; } LlmCodecWeightSource;
 typedef struct { char fmt[24]; char plugin[32]; } LlmCodecDecl;
 typedef struct { char role[32]; char codec[24]; int fmt, p0, p1; } LlmCodecConvertRole;
+/* Sezione `gguf_meta`: chiave GGUF -> sorgente dichiarativa (es. "config:num_experts"). */
+typedef struct { char key[96]; char src[192]; } LlmCodecMetaKVMap;
 
 typedef struct {
     char        arch[64];
@@ -37,6 +39,7 @@ typedef struct {
     LlmCodecDecl    codec[16]; int n_codec;/* sezione `codecs`: fmt -> plugin/codec */
     char ct_codec[24]; int ct_fmt, ct_p0, ct_p1;   /* sezione `convert_target`.default */
     LlmCodecConvertRole  ctr[16]; int n_ctr;            /* sezione `convert_target`.roles */
+    LlmCodecMetaKVMap mm[64]; int n_m;     /* sezione `gguf_meta`: metadati extra dal config */
 } LlmCodecRoleMap;
 
 /* Carica `roles`/`scale_suffix`/`arch` da una `.llmarch` (JSON). 0 ok / -1. */

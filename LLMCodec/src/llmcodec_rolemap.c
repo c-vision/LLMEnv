@@ -328,6 +328,33 @@ int llmcodec_rolemap_load(const char* llmarch_path, LlmCodecRoleMap* out) {
             p = end + 1;
         }
     }
+    /* gguf_meta: {"<chiave GGUF>": "config:<campo>", ...} — metadati extra dal config.json */
+    { const char* gm = jval(j, "gguf_meta");
+      if (gm != NULL && *gm == '{' && out->n_m < 64) {
+          const char* p = gm + 1;
+          while (*p && *p != '}' && out->n_m < 64) {
+              while (*p && *p != '"' && *p != '}') ++p;
+              if (*p != '"') break;
+              char k[96]; size_t n = 0; ++p;
+              while (*p && *p != '"' && n + 1 < sizeof k) k[n++] = *p++;
+              k[n] = 0;
+              if (*p != '"') break;
+              ++p; while (*p && *p != ':') ++p; if (*p == ':') ++p;
+              while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p;
+              if (*p != '"') break;
+              char v[192]; n = 0; ++p;
+              while (*p && *p != '"' && n + 1 < sizeof v) v[n++] = *p++;
+              v[n] = 0;
+              if (*p != '"') break;
+              ++p;
+              snprintf(out->mm[out->n_m].key, sizeof out->mm[out->n_m].key, "%s", k);
+              snprintf(out->mm[out->n_m].src, sizeof out->mm[out->n_m].src, "%s", v);
+              out->n_m++;
+              while (*p && *p != ',' && *p != '}') ++p;
+              if (*p == ',') ++p;
+          }
+      }
+    }
     free(j);
     return out->n > 0 ? 0 : -1;
 }
