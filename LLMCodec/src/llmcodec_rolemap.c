@@ -328,6 +328,39 @@ int llmcodec_rolemap_load(const char* llmarch_path, LlmCodecRoleMap* out) {
             p = end + 1;
         }
     }
+    /* tiled: {"k":16,"v_per_k":3,"head_dim":128} */
+    { const char* tv = jval(j, "tiled");
+      if (tv && *tv == '{') {
+          const char* p = tv;
+          p = (p = strstr(p, "\"k\"")) ? p + 3 : NULL;
+          if (p) { while (*p && (*p < '0' || *p > '9')) ++p; out->tiled_k = atoi(p); }
+          p = tv; p = (p = strstr(p, "\"v_per_k\"")) ? p + 9 : NULL;
+          if (p) { while (*p && (*p < '0' || *p > '9')) ++p; out->tiled_v = atoi(p); }
+          p = tv; p = (p = strstr(p, "\"head_dim\"")) ? p + 10 : NULL;
+          if (p) { while (*p && (*p < '0' || *p > '9')) ++p; out->tiled_d = atoi(p); }
+      }
+    }
+    /* transforms: [ {"match":"...", "op":"..."}, ... ] */
+    { const char* tr = jval(j, "transforms");
+      if (tr && *tr == '[') {
+          const char* p = tr + 1;
+          while (*p && *p != ']' && out->n_tr < 32) {
+              p = strchr(p, '{');
+              if (!p) break;
+              const char* end = strchr(p, '}');
+              if (!end) break;
+              size_t len = (size_t)(end - p) + 1;
+              char obj[512];
+              if (len < sizeof obj) {
+                  memcpy(obj, p, len); obj[len] = 0;
+                  if (jstr(jval(obj, "match"), out->tr[out->n_tr].match, sizeof out->tr[out->n_tr].match) &&
+                      jstr(jval(obj, "op"), out->tr[out->n_tr].op, sizeof out->tr[out->n_tr].op))
+                      out->n_tr++;
+              }
+              p = end + 1;
+          }
+      }
+    }
     /* gguf_meta: {"<chiave GGUF>": "config:<campo>", ...} — metadati extra dal config.json */
     { const char* gm = jval(j, "gguf_meta");
       if (gm != NULL && *gm == '{' && out->n_m < 64) {
