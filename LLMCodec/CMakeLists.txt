@@ -80,6 +80,12 @@ if(LLMCODEC_TESTS)
     target_link_libraries(llmcodec_fp8_fp4_selfcheck PRIVATE llmcodec)
     add_test(NAME llmcodec_fp8_fp4_selfcheck COMMAND llmcodec_fp8_fp4_selfcheck)
 
+    add_executable(llmcodec_qwen4_rolemap_selfcheck tests/test_qwen4_rolemap.c)
+    target_link_libraries(llmcodec_qwen4_rolemap_selfcheck PRIVATE llmcodec)
+    target_compile_definitions(llmcodec_qwen4_rolemap_selfcheck PRIVATE
+        LLMCODEC_Q4_ABI="${CMAKE_CURRENT_SOURCE_DIR}/../../GMBasic/ABI/qwen4_exp.gmbarch")
+    add_test(NAME llmcodec_qwen4_rolemap_selfcheck COMMAND llmcodec_qwen4_rolemap_selfcheck)
+
     add_executable(llmcodec_abi_all_selfcheck tests/test_abi_all.c)
     target_link_libraries(llmcodec_abi_all_selfcheck PRIVATE llmcodec)
     target_compile_definitions(llmcodec_abi_all_selfcheck PRIVATE LLMCODEC_ABI_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ABI")
