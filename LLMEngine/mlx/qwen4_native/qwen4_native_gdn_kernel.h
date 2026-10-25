@@ -27,7 +27,7 @@ static const char llm_q4n_gdn_prep_src[] =
     "float qs = metal::rsqrt(sq + 1e-6f) * metal::rsqrt((float)D);\n"
     "float ks = metal::rsqrt(sk + 1e-6f);\n"
     "for (uint d = 0; d < D; d++) { qkv_o[q0+d] = qkv[q0+d]*qs; qkv_o[k0+d] = qkv[k0+d]*ks; }\n"
-    "if (h < Hv) { ulong v0 = (ulong)tok*conv_dim + (ulong)(2u*Hk + h)*D;\n"
+    "for (uint vh = h; vh < Hv; vh += Hk) { ulong v0 = (ulong)tok*conv_dim + (ulong)(2u*Hk + vh)*D;\n"
     "  for (uint d = 0; d < D; d++) qkv_o[v0+d] = qkv[v0+d]; }\n"
     "if (h == 0u) {\n"
     "  for (uint j = 0; j < Hv; j++) {\n"

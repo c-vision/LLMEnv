@@ -598,6 +598,15 @@ if(LLM_BUILD_DSV4_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}
         $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
     set_target_properties(llm_qwen4_native_hc_test PROPERTIES LINKER_LANGUAGE CXX)
+
+    # P7a (qwen4exp nativo): wiring layer linear/GDN vs qwen4_ref_linear.
+    add_executable(llm_qwen4_native_layer_test tests/llm_qwen4_native_layer_test.c)
+    target_link_libraries(llm_qwen4_native_layer_test PRIVATE llm_ai_mlx)
+    target_include_directories(llm_qwen4_native_layer_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
+        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
+    set_target_properties(llm_qwen4_native_layer_test PROPERTIES LINKER_LANGUAGE CXX)
     set_target_properties(llm_mlx_kvformat_test PROPERTIES LINKER_LANGUAGE CXX)
 
     # §9.A M10a: test model-free del modello di costo KV (KEEP/PERSIST/RECOMPUTE).
