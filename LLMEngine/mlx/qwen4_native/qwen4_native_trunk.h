@@ -44,15 +44,24 @@ static int qwen4_native_hc_mix(mlx_array* mixed, mlx_array* inj, mlx_array R,
     float* lo = malloc((size_t)w->rank * sizeof(float));
     float* iv = malloc((size_t)hc * sizeof(float));
     if (!lo || !iv) { free(lo); free(iv); mlx_array_free(xn); return -1; }
-    int ok = mv(mvctx, w->down, xh, lo, hc * E, w->rank) == 0 &&
-             mv(mvctx, w->inject, xh, iv, hc * E, hc) == 0;
+    int ok = mv(mvctx, w->down, xh, lo, hc * E, w->rank) == 0;
+    if (ok) {
+        if (w->inject) ok = mv(mvctx, w->inject, xh, iv, hc * E, hc) == 0;
+        else memset(iv, 0, (size_t)hc * sizeof(float));
+    }
     if (!ok) { free(lo); free(iv); mlx_array_free(xn); return -1; }
     int lsh[2] = {1, w->rank}, ish[2] = {1, hc};
     mlx_array aLo = mlx_array_new_data(lo, lsh, 2, MLX_FLOAT32);
     mlx_array aInj = mlx_array_new_data(iv, ish, 2, MLX_FLOAT32);
     mlx_array aUp = mlx_array_new_data(w->up, (int[]){hc * E, w->rank}, 2, MLX_FLOAT32);
     int rc = llm_q4n_hc_gate_mix(mixed, xn, aLo, aUp, hc, E, s);
-    if (rc == 0) *inj = aInj; else mlx_array_free(aInj);
+    if (rc == 0) {
+        /* eval PRIMA di liberare gli input del kernel (graph lazy) */
+        mlx_vector_array evm = mlx_vector_array_new();
+        mlx_vector_array_append_value(evm, *mixed);
+        mlx_eval(evm); mlx_vector_array_free(evm);
+        *inj = aInj;
+    } else mlx_array_free(aInj);
     mlx_array_free(aLo); mlx_array_free(aUp); mlx_array_free(xn);
     free(lo); free(iv);
     return rc;

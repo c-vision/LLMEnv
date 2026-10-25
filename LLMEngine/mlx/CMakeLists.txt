@@ -644,6 +644,16 @@ if(LLM_BUILD_DSV4_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
         $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
     set_target_properties(llm_qwen4_native_gguf_test PROPERTIES LINKER_LANGUAGE CXX)
+
+    # P7f: smoke del forward completo su uno slice GGUF reale (use_moe=0).
+    add_executable(llm_qwen4_native_model_smoke tests/llm_qwen4_native_model_smoke.c)
+    target_link_libraries(llm_qwen4_native_model_smoke PRIVATE llm_ai_mlx llmcodec_ggml llmcodec)
+    target_include_directories(llm_qwen4_native_model_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
+        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
+    set_target_properties(llm_qwen4_native_model_smoke PROPERTIES LINKER_LANGUAGE CXX)
     set_target_properties(llm_mlx_kvformat_test PROPERTIES LINKER_LANGUAGE CXX)
 
     # §9.A M10a: test model-free del modello di costo KV (KEEP/PERSIST/RECOMPUTE).

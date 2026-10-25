@@ -94,6 +94,11 @@ static float* q4n_f32(const LlmEngineMoeGguf* g, int il, const char* suf, bool r
     if (!x && required) { fprintf(stderr, "qwen4: manca %s\n", b); *ok = false; }
     return x;
 }
+static float* q4n_f32_global(const LlmEngineMoeGguf* g, const char* name, bool required, bool* ok) {
+    float* x = llm_gguf_load_f32(g, name, NULL);
+    if (!x && required) { fprintf(stderr, "qwen4: manca %s\n", name); *ok = false; }
+    return x;
+}
 static const uint8_t* q4n_packed(const LlmEngineMoeGguf* g, int il, const char* suf, int* type, bool* ok) {
     char b[200];
     snprintf(b, sizeof b, "blk.%d.%s", il, suf);
@@ -101,6 +106,21 @@ static const uint8_t* q4n_packed(const LlmEngineMoeGguf* g, int il, const char* 
     if (i < 0) { fprintf(stderr, "qwen4: manca %s\n", b); *ok = false; return NULL; }
     if (type) *type = g->ti[i].type;
     return llm_gguf_tensor_data(g, i, NULL);
+}
+
+static void q4n_layer_free(Q4nLayerRefs* r) {
+    if (!r) return;
+#define F(x) free(r->x)
+    F(hc_attn_norm); F(hc_attn_down); F(hc_attn_up); F(hc_attn_inject);
+    F(hc_ffn_norm); F(hc_ffn_down); F(hc_ffn_up); F(hc_ffn_inject);
+    F(attn_qkv); F(attn_gate); F(ssm_conv1d); F(ssm_dt); F(ssm_a); F(ssm_beta);
+    F(ssm_alpha); F(ssm_norm); F(ssm_out);
+    F(attn_q); F(attn_k); F(attn_v); F(attn_out); F(attn_q_norm); F(attn_k_norm);
+    F(idx_q_proj); F(idx_k_proj); F(idx_q_norm); F(idx_k_norm);
+    F(ple_key); F(ple_value); F(ple_norm_key); F(ple_norm_query); F(ple_norm_conv); F(ple_conv);
+    F(gate_inp); F(gate_inp_sh); F(gate_sh); F(up_sh); F(down_sh);
+#undef F
+    memset(r, 0, sizeof *r);
 }
 
 static int q4n_layer_load(const LlmEngineMoeGguf* g, int il, bool is_linear, bool is_ple,
