@@ -21,24 +21,61 @@ static const char* plugin_rid(void)
 #endif
 }
 
-static const char* find_plugin(const char* kind, const char* name)
+/* Cerca un singolo nome file (canonico o legacy) nelle dir dei plugin. */
+static int find_named(const char* fname, char* out, size_t outlen)
 {
-    static char buf[4096];
-    char fname[256];
-    snprintf(fname, sizeof fname, "libllmengine_plugin_%s_%s.dylib", kind, name);
     const char* env = getenv("LLMENGINE_PLUGIN_DIR");
-    if (env && *env) { snprintf(buf, sizeof buf, "%s/%s", env, fname); if (access(buf, R_OK) == 0) return buf; }
+    if (env && *env) {
+        snprintf(out, outlen, "%s/%s", env, fname);
+        if (access(out, R_OK) == 0) return 1;
+    }
     char cwd[2048];
     if (getcwd(cwd, sizeof cwd) != NULL) {
         char dir[2048]; snprintf(dir, sizeof dir, "%s", cwd);
         for (int up = 0; up < 12; ++up) {
-            snprintf(buf, sizeof buf, "%s/Resources/plugins/%s/%s", dir, plugin_rid(), fname);
-            if (access(buf, R_OK) == 0) return buf;
+            snprintf(out, outlen, "%s/Resources/plugins/%s/%s", dir, plugin_rid(), fname);
+            if (access(out, R_OK) == 0) return 1;
+            /* Monorepo: i plugin vivono in <workspace>/GMBasic/Resources/plugins.
+             * Solo se <workspace> contiene GMBasicSharp: evita di pescare il GMBasic
+             * originale da un antenato comune (/Projects). */
+            char sharp[2048];
+            snprintf(sharp, sizeof sharp, "%s/GMBasicSharp", dir);
+            if (access(sharp, R_OK) == 0) {
+                snprintf(out, outlen, "%s/GMBasic/Resources/plugins/%s/%s", dir, plugin_rid(), fname);
+                if (access(out, R_OK) == 0) return 1;
+            }
             char* s = strrchr(dir, '/');
             if (s == NULL || s == dir) break;
             *s = 0;
         }
     }
+    snprintf(out, outlen, "%s", fname);
+    return 0;
+}
+
+/* I plugin GMBasic storici usano il prefisso/simboli `gmb_*`; LLMEnv (e i plugin
+ * nativi nuovi) usano il namespace `llmengine_plugin_*`. Accettiamo entrambi:
+ * il file e' lo stesso contratto ABI (llmengine_plugin.h), cambia solo il nome. */
+static const char* legacy_prefix(const char* kind)
+{
+    if (strcmp(kind, "primmlx") == 0) return "gmb_primmlx_";
+    if (strcmp(kind, "prim") == 0) return "gmb_prim_";
+    if (strcmp(kind, "codec") == 0) return "gmb_codec_";
+    return NULL;
+}
+
+static const char* find_plugin(const char* kind, const char* name)
+{
+    static char buf[4096];
+    char fname[256];
+    snprintf(fname, sizeof fname, "libllmengine_plugin_%s_%s.dylib", kind, name);
+    if (find_named(fname, buf, sizeof buf) && access(buf, R_OK) == 0) return buf;
+    const char* lp = legacy_prefix(kind);
+    if (lp != NULL) {
+        snprintf(fname, sizeof fname, "lib%s%s.dylib", lp, name);
+        if (find_named(fname, buf, sizeof buf) && access(buf, R_OK) == 0) return buf;
+    }
+    /* fallback: nome corto, per la ricerca dlopen di sistema */
     snprintf(buf, sizeof buf, "%s", fname);
     return buf;
 }
@@ -85,6 +122,7 @@ const LlmCodec* llmengine_plugin_codec_get(const char* name)
     void* h = open_plugin("codec", name);
     if (h == NULL) return NULL;
     void* sym = dlsym(h, "llmcodec_describe");
+    if (sym == NULL) sym = dlsym(h, "gmb_codec_describe");
     if (sym == NULL) { dlclose(h); return NULL; }
     const LlmCodec* c = ((const LlmCodec* (*)(void))sym)();
     if (c == NULL || c->name == NULL) { dlclose(h); return NULL; }
@@ -100,6 +138,7 @@ const LlmEnginePluginPrim* llmengine_plugin_prim_get(const char* name)
     void* h = open_plugin("prim", name);
     if (h == NULL) return NULL;
     void* sym = dlsym(h, "llmengine_plugin_prim_describe");
+    if (sym == NULL) sym = dlsym(h, "gmb_prim_describe");
     if (sym == NULL) { dlclose(h); return NULL; }
     const LlmEnginePluginPrim* p = ((const LlmEnginePluginPrim* (*)(void))sym)();
     if (p == NULL || p->name == NULL || p->abi_version != LLMENGINE_PLUGIN_ABI_VERSION) { dlclose(h); return NULL; }
@@ -115,6 +154,7 @@ const LlmEnginePluginPrimMLX* llmengine_plugin_prim_mlx_get(const char* name)
     void* h = open_plugin("primmlx", name);
     if (h == NULL) return NULL;
     void* sym = dlsym(h, "llmengine_plugin_prim_mlx_describe");
+    if (sym == NULL) sym = dlsym(h, "gmb_prim_mlx_describe");
     if (sym == NULL) { dlclose(h); return NULL; }
     const LlmEnginePluginPrimMLX* p = ((const LlmEnginePluginPrimMLX* (*)(void))sym)();
     if (p == NULL || p->name == NULL || p->abi_version != LLMENGINE_PLUGIN_ABI_VERSION) { dlclose(h); return NULL; }
