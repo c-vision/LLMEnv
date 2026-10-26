@@ -9,6 +9,8 @@
 #define LLM_QWEN4_NATIVE_MODEL_H
 
 #include "mlx/c/mlx.h"
+#include <time.h>
+#include <stdio.h>
 #include "qwen4_native_gguf.h"
 #include "qwen4_native_attn_layer.h"
 #include "qwen4_native_trunk.h"
@@ -146,6 +148,14 @@ static void q4n_model_free(Q4nModel* m) {
 typedef struct { const float* W; int n_in, n_out; } Q4nMvJob;
 
 /* forward di un token; logits [V] nel buffer del chiamante. 0 = ok. */
+double g_q4n_prof[12];
+#define Q4N_PROF_TOTAL_SLOT 10
+#define Q4N_PROF_LM_SLOT 9
+static double q4n_now(void) {
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
+}
 static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s) {
     if (!m || !logits || token < 0) return -1;
     const Q4nHp* h = &m->hp;
@@ -158,7 +168,9 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
     for (int st = 1; st < hc; st++) memcpy(R + (size_t)st * E, R, (size_t)E * sizeof(float));
     int rsh[2] = {1, hd};
     mlx_array aR = mlx_array_new_data(R, rsh, 2, MLX_FLOAT32);
+    double t0 = q4n_now();
     for (int il = 0; il < h->L; il++) {
+        double tl0 = q4n_now();
         char pkn[64]; snprintf(pkn, sizeof pkn, "blk.%d.ple_key.weight", il);
         int is_ple = llm_gguf_find_tensor(&m->gguf, pkn) >= 0;
         int is_linear = (il == 0);
@@ -193,6 +205,7 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
         mlx_array m1 = mlx_array_new(), i1 = mlx_array_new();
         if (qwen4_native_hc_mix(&m1, &i1, aR, &wa, E, hc, h->eps, q4n_mat_mv_gpu,
                                 m->gpu_ok ? &m->gpu : NULL, s) != 0) return -1;
+        double tl1 = q4n_now(); g_q4n_prof[0] += tl1 - tl0;   /* load */
         mlx_array blk = mlx_array_new();
         if (!is_linear) {
             size_t stride = (size_t)h->Hkv * h->D;
@@ -280,6 +293,8 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
         }
 gdn_done: ;
         }
+        g_q4n_prof[1] += q4n_now() - tl1;   /* hc1+attn/gdn */
+        double tm0 = q4n_now();
         mlx_array R1 = mlx_array_new();
         if (llm_q4n_hc_combine(&R1, aR, blk, i1, s) != 0) return -1;
         Q4nHcW wf; wf.norm = refs.hc_ffn_norm; wf.rank = h->rank;
@@ -295,6 +310,8 @@ gdn_done: ;
         mlx_array m2 = mlx_array_new(), i2 = mlx_array_new();
         if (qwen4_native_hc_mix(&m2, &i2, R1, &wf, E, hc, h->eps, q4n_mat_mv_gpu,
                                 m->gpu_ok ? &m->gpu : NULL, s) != 0) return -1;
+        g_q4n_prof[2] += q4n_now() - tm0;   /* combine1 + hc2 */
+        double tm1 = q4n_now();
         mlx_array b2 = mlx_array_new();
         if (m->use_moe) {
             if (qwen4_native_moe_quant_gpu(&b2, m2, &m->gguf, il, &refs, E, h->NE, h->K, h->F,
@@ -305,18 +322,19 @@ gdn_done: ;
             b2 = mlx_array_new_data(z, zsh, 2, MLX_FLOAT32);
             free(z);
         }
+        g_q4n_prof[3] += q4n_now() - tm1;   /* moe */
         mlx_array R2 = mlx_array_new();
         if (llm_q4n_hc_combine(&R2, R1, b2, i2, s) != 0) return -1;
         aR = R2;
         mlx_array_free(R1); mlx_array_free(m1); mlx_array_free(i1);
         mlx_array_free(m2); mlx_array_free(i2); mlx_array_free(blk); mlx_array_free(b2);
         if (!m->gpu_ok) q4n_layer_free(&refs);
-        if (m->gpu_ok) q4n_gpu_reset(&m->gpu);   /* le viste sono per-layer */
 #if defined(__APPLE__)
         { extern void malloc_zone_pressure_relief(void*, unsigned long); malloc_zone_pressure_relief((void*)0, 0); }
 #endif
     }
     /* output_hc_mix (no inject) -> mixed [E] */
+    double to0 = q4n_now();
     Q4nHcW wo; wo.norm = m->out_norm; wo.rank = h->rank; wo.inject = (Q4nMat){NULL,-1,0};
     if (m->gpu_ok) {
         wo.down = q4n_mat_gguf(&m->gguf, "output_hc_down.weight");
@@ -334,6 +352,8 @@ gdn_done: ;
     /* lm_head: quante righe? dedotto dal metadata vocab_size */
     const uint64_t vs = llm_gguf_u(&m->gguf, "qwen4exp.vocab_size", 0, "qwen4_exp.vocab_size");
     if (vs == 0) return -1;
+    g_q4n_prof[5] += q4n_now() - to0;   /* out mix */
+    double tl2 = q4n_now();
     {   /* lm_head su GPU se il tensore e' Q8 (kernel ds4); altrimenti blocchi CPU */
         int oi0 = llm_gguf_find_tensor(&m->gguf, "output.weight");
         if (oi0 >= 0 && m->gguf.ti[oi0].type == 8 && m->gpu_ok) {
@@ -364,6 +384,8 @@ gdn_done: ;
         }
     }
 lm_done:
+    g_q4n_prof[9] += q4n_now() - tl2;   /* lm_head */
+    g_q4n_prof[10] += q4n_now() - t0;
     mlx_array_free(mixed); mlx_array_free(dummy); mlx_array_free(aR);
     free(R);
     m->st.pos = pos + 1;

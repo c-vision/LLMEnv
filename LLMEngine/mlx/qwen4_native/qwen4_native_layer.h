@@ -28,11 +28,7 @@ typedef struct {
 static int q4n_default_mv(void* ctx, const float* W, const float* x, float* y, int n_in, int n_out) {
     (void)ctx;
     if (!W || !x || !y || n_in <= 0 || n_out <= 0) return -1;
-    for (int o = 0; o < n_out; o++) {
-        double acc = 0.0;
-        for (int i = 0; i < n_in; i++) acc += (double)W[(size_t)o * n_in + i] * x[i];
-        y[o] = (float)acc;
-    }
+    cblas_sgemv(CblasRowMajor, CblasNoTrans, n_out, n_in, 1.0f, W, n_in, x, 1, 0.0f, y, 1);
     return 0;
 }
 
