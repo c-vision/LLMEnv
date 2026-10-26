@@ -17,7 +17,9 @@ int main(int argc, char** argv) {
     Q4nHp hp; char err[256] = {0};
     if (q4n_hparams(&g, &hp, err, sizeof err) != 0) { printf("FAIL hp\n"); return 1; }
     Q4nLayerRefs r; memset(&r, 0, sizeof r);
-    if (q4n_layer_load(&g, il, false, false, &r, err, sizeof err) != 0) { printf("FAIL layer: %s\n", err); return 1; }
+    char lk[64]; snprintf(lk, sizeof lk, "blk.%d.attn_qkv.weight", il);
+    int is_linear = llm_gguf_find_tensor(&g, lk) >= 0;
+    if (q4n_layer_load(&g, il, is_linear, false, &r, err, sizeof err) != 0) { printf("FAIL layer: %s\n", err); return 1; }
     float* x = malloc((size_t)hp.E * sizeof(float));
     for (int d = 0; d < hp.E; d++) x[d] = sinf(0.01f * d);
     int xsh[2] = {1, hp.E};

@@ -16,6 +16,8 @@ int main(int argc, char** argv) {
     if (orc != 0) { printf("FAIL open\n"); return 1; }
     printf("model: E=%d L=%d hc=%d rank=%d lin(Hk=%d Hv=%d D=%d) full_interval=%d\n",
            m.hp.E, m.hp.L, m.hp.hc, m.hp.rank, m.hp.lin_Hk, m.hp.lin_Hv, m.hp.lin_D, m.hp.full_interval);
+    { int nl = 0, nf = 0; for (int i = 0; i < m.hp.L; i++) if (m.layer_linear && m.layer_linear[i]) nl++; else nf++;
+      printf("layer_types: linear=%d full=%d\n", nl, nf); }
     const uint64_t V = llm_gguf_u(&m.gguf, "qwen4exp.vocab_size", 0, "qwen4_exp.vocab_size");
     float* logits = malloc((size_t)V * sizeof(float));
     int tokens[2] = {248044, 9707};

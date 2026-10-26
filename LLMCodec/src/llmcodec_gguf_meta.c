@@ -34,6 +34,63 @@ static long long jnum(const char* s, const char* key, long long def) {
     const char* p = jfind(s, key); if (!p) return def;
     char* e = NULL; long long v = strtoll(p, &e, 10); return (e==p) ? def : v;
 }
+/* Valore JSON di un path puntato ("text_config.num_hidden_layers"): risolve oggetti annidati
+ * con brace-matching. Ritorna il puntatore al valore (o NULL). */
+/* Cerca `key` come MEMBRO di primo livello dell'oggetto `obj` (brace/string-aware).
+ * jfind() non basta: nel config ci sono piu' "num_hidden_layers" annidati (mtp vs text_config). */
+static const char* jfind_top(const char* obj, const char* key) {
+    if (!obj || *obj != '{') return NULL;
+    size_t kl = strlen(key);
+    int depth = 0, instr = 0, esc = 0;
+    for (const char* p = obj; *p; ++p) {
+        char c = *p;
+        if (instr) { if (esc) esc = 0; else if (c == '\\') esc = 1; else if (c == '"') instr = 0; continue; }
+        if (c == '"') {
+            if (depth == 1) {
+                const char* k = p + 1;
+                if (strncmp(k, key, kl) == 0 && k[kl] == '"') {
+                    const char* q = k + kl + 1;
+                    while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') ++q;
+                    if (*q == ':') { ++q; while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') ++q; return q; }
+                }
+            }
+            instr = 1; continue;
+        }
+        if (c == '{') { depth++; continue; }
+        if (c == '}') { depth--; if (depth == 0) break; continue; }
+    }
+    return NULL;
+}
+static const char* jpath(const char* s, const char* path) {
+    if (!s || !path) return NULL;
+    if (!strchr(path, '.')) return jfind(s, path);   /* campo semplice: ricerca globale (storica) */
+    static char keep[4 << 20];
+    const char* p = s;
+    char buf[256]; snprintf(buf, sizeof buf, "%s", path);
+    char* seg = buf;
+    for (;;) {
+        char* dot = strchr(seg, '.');
+        if (dot) *dot = 0;
+        const char* v = (*p == '{') ? jfind_top(p, seg) : jfind(p, seg);
+        if (!v) return NULL;
+        if (!dot) return v;
+        while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') ++v;
+        if (*v != '{') return NULL;
+        int depth = 0, instr = 0, esc = 0; const char* q = v;
+        for (; *q; ++q) {
+            char c = *q;
+            if (instr) { if (esc) esc = 0; else if (c == '\\') esc = 1; else if (c == '"') instr = 0; continue; }
+            if (c == '"') { instr = 1; continue; }
+            if (c == '{') depth++;
+            else if (c == '}') { depth--; if (!depth) { ++q; break; } }
+        }
+        size_t n = (size_t)(q - v);
+        if (n + 1 > sizeof keep) return NULL;
+        memcpy(keep, v, n); keep[n] = 0;
+        p = keep;
+        seg = dot + 1;
+    }
+}
 static double jflt(const char* s, const char* key, double def) {
     const char* p = jfind(s, key); if (!p) return def;
     char* e = NULL; double v = strtod(p, &e); return (e==p) ? def : v;
@@ -201,17 +258,21 @@ static int meta_build_impl(const char* model_dir, const char* arch, const LlmCod
     if (rm) {
         for (int i = 0; i < rm->n_m; i++) {
             const char* src = rm->mm[i].src;
-            if (strncmp(src, "config:", 7) != 0) continue;
-            const char* p = jfind(cj, src + 7);
+            int force = (strncmp(src, "config!:", 8) == 0);
+            if (!force && strncmp(src, "config:", 7) != 0) continue;
+            const char* p = jpath(cj, src + (force ? 8 : 7));
             if (!p) continue;
-            int exists = 0;
-            for (int k = 0; k < m.n; k++) if (strcmp(m.kv[k].key, rm->mm[i].key) == 0) { exists = 1; break; }
-            if (exists) continue;
+            int exist = -1;
+            for (int k = 0; k < m.n; k++) if (strcmp(m.kv[k].key, rm->mm[i].key) == 0) { exist = k; break; }
+            if (exist >= 0 && !force) continue;
             char* e = NULL; double d = strtod(p, &e);
             if (e == p) continue;
             int is_float = 0;
             for (const char* q = p; q < e; q++) if (*q == '.' || *q == 'e' || *q == 'E') is_float = 1;
-            if (is_float) add_f32(&m, rm->mm[i].key, (float)d);
+            if (exist >= 0) {   /* override in place */
+                if (is_float) { m.kv[exist].type = LLMCODEC_GGUF_MT_F32; m.kv[exist].f32 = (float)d; }
+                else { m.kv[exist].type = LLMCODEC_GGUF_MT_U32; m.kv[exist].u32 = (uint32_t)d; }
+            } else if (is_float) add_f32(&m, rm->mm[i].key, (float)d);
             else add_u32(&m, rm->mm[i].key, (uint32_t)d);
         }
     }
