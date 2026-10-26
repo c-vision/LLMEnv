@@ -9,6 +9,7 @@
 #include "qwen4_native_gguf.h"
 #include "qwen4_native_router_kernel.h"
 #include "qwen4_native_layer.h"
+#include "qwen4_native_gpu.h"
 
 static int q4n_slab_f32(const LlmEngineMoeGguf* g, const char* name, int e, float* out) {
     int i = llm_gguf_find_tensor(g, name);
@@ -25,8 +26,8 @@ static int q4n_slab_f32(const LlmEngineMoeGguf* g, const char* name, int e, floa
     return 0;
 }
 
-static int qwen4_native_moe_quant(mlx_array* out, mlx_array x, const LlmEngineMoeGguf* g, int il,
-                                  const Q4nLayerRefs* r, int E, int NE, int K, int F, mlx_stream s) {
+static int qwen4_native_moe_quant_cpu(mlx_array* out, mlx_array x, const LlmEngineMoeGguf* g, int il,
+                                      const Q4nLayerRefs* r, int E, int NE, int K, int F, mlx_stream s) {
     if (!out || !r || !g || mlx_array_ndim(x) != 2 || mlx_array_shape(x)[0] != 1) return -1;
     const float* xh = mlx_array_data_float32(x);
     float* logits = malloc((size_t)NE * sizeof(float));
@@ -96,3 +97,104 @@ static int qwen4_native_moe_quant(mlx_array* out, mlx_array x, const LlmEngineMo
 }
 
 #endif
+
+/* Variante GPU (kernel ds4, Q8/Q2K/IQ2): gate+up in un batch, swiglu CPU, down in un batch. */
+static int qwen4_native_moe_quant_gpu(mlx_array* out, mlx_array x, const LlmEngineMoeGguf* g, int il,
+                                      const Q4nLayerRefs* r, int E, int NE, int K, int F,
+                                      Q4nGpu* gpu, mlx_stream s) {
+    if (!gpu || !gpu->b) return qwen4_native_moe_quant_cpu(out, x, g, il, r, E, NE, K, F, s);
+    if (!out || !r || mlx_array_ndim(x) != 2) return -1;
+    const float* xh = mlx_array_data_float32(x);
+    float logits[512]; float wts[16]; int sel[16]; float sg;
+    if (NE > 512 || K > 16) return -1;
+    if (q4n_default_mv(NULL, r->gate_inp, xh, logits, E, NE) != 0) return -1;
+    { /* router come in CPU (kernel top-k) */
+        int lsh[2] = {1, NE}, xsh[2] = {1, E}, wsh[1] = {E};
+        mlx_array aL = mlx_array_new_data(logits, lsh, 2, MLX_FLOAT32);
+        mlx_array aX = mlx_array_new_data(xh, xsh, 2, MLX_FLOAT32);
+        mlx_array aW = mlx_array_new_data(r->gate_inp_sh, wsh, 1, MLX_FLOAT32);
+        mlx_array aS = mlx_array_new(), aWt = mlx_array_new(), aG = mlx_array_new();
+        if (llm_q4n_router_topk(&aS, &aWt, &aG, aL, aX, aW, K, s) != 0) return -1;
+        mlx_vector_array ev = mlx_vector_array_new();
+        mlx_vector_array_append_value(ev, aS); mlx_vector_array_append_value(ev, aWt); mlx_vector_array_append_value(ev, aG);
+        mlx_eval(ev); mlx_vector_array_free(ev);
+        const int* sp = mlx_array_data_int32(aS); const float* wp = mlx_array_data_float32(aWt);
+        for (int k = 0; k < K; k++) { sel[k] = sp[k]; wts[k] = wp[k]; }
+        sg = mlx_array_data_float32(aG)[0];
+        mlx_array_free(aS); mlx_array_free(aWt); mlx_array_free(aG); mlx_array_free(aL); mlx_array_free(aX); mlx_array_free(aW);
+    }
+    int ig = llm_gguf_find_tensor(g, "blk.%d.ffn_gate_exps.weight") >= 0 ? 0 : 0; (void)ig;
+    char nm[96];
+    int gi, ui, di;
+    snprintf(nm, sizeof nm, "blk.%d.ffn_gate_exps.weight", il); gi = llm_gguf_find_tensor(g, nm);
+    snprintf(nm, sizeof nm, "blk.%d.ffn_up_exps.weight", il);   ui = llm_gguf_find_tensor(g, nm);
+    snprintf(nm, sizeof nm, "blk.%d.ffn_down_exps.weight", il); di = llm_gguf_find_tensor(g, nm);
+    if (gi < 0 || ui < 0 || di < 0) return -1;
+    const int gt = g->ti[gi].type, ut = g->ti[ui].type, dt = g->ti[di].type;
+    if (gt != 8 || ut != 8 || dt != 8) return qwen4_native_moe_quant_cpu(out, x, g, il, r, E, NE, K, F, s);
+    const uint8_t* gbase = llm_gguf_tensor_data(g, gi, NULL);
+    const uint8_t* ubase = llm_gguf_tensor_data(g, ui, NULL);
+    const uint8_t* dbase = llm_gguf_tensor_data(g, di, NULL);
+    const size_t g_rb = (size_t)llm_ggml_nbytes(8, (int64_t)g->ti[gi].dims[0]);
+    const size_t d_rb = (size_t)llm_ggml_nbytes(8, (int64_t)g->ti[di].dims[0]);
+    const size_t g_slab = g_rb * (size_t)g->ti[gi].dims[1];
+    const size_t d_slab = d_rb * (size_t)g->ti[di].dims[1];
+    float* gw = malloc((size_t)K * F * sizeof(float));
+    float* uw = malloc((size_t)K * F * sizeof(float));
+    float* dw = malloc((size_t)K * E * sizeof(float));
+    float* mid = malloc((size_t)K * F * sizeof(float));
+    if (!gw || !uw || !dw || !mid) return -1;
+    LlmDsv4GpuJob jobs[32];
+    int nj = 0;
+    for (int k = 0; k < K; k++) {
+        int e = sel[k]; if (e < 0 || e >= NE) continue;
+        jobs[nj++] = (LlmDsv4GpuJob){ .w = gbase + (size_t)e * g_slab, .byte_off = 0, .ggml_type = 8,
+                                      .row_bytes = g_rb, .n = (uint32_t)E, .out_dim = (uint32_t)F,
+                                      .x = xh, .out = gw + (size_t)k * F };
+        jobs[nj++] = (LlmDsv4GpuJob){ .w = ubase + (size_t)e * g_slab, .byte_off = 0, .ggml_type = 8,
+                                      .row_bytes = g_rb, .n = (uint32_t)E, .out_dim = (uint32_t)F,
+                                      .x = xh, .out = uw + (size_t)k * F };
+    }
+    if (q4n_gpu_gemv_batch(gpu, jobs, nj) != 0) return -1;
+    for (int k = 0; k < K; k++) {
+        for (int f = 0; f < F; f++) {
+            float gv = gw[(size_t)k*F+f], uv = uw[(size_t)k*F+f];
+            float sv = gv >= 0 ? 1.0f/(1.0f+expf(-gv)) : expf(gv)/(1.0f+expf(gv));
+            mid[(size_t)k*F+f] = gv * sv * uv;
+        }
+    }
+    nj = 0;
+    for (int k = 0; k < K; k++) {
+        int e = sel[k]; if (e < 0 || e >= NE) continue;
+        jobs[nj++] = (LlmDsv4GpuJob){ .w = dbase + (size_t)e * d_slab, .byte_off = 0, .ggml_type = 8,
+                                      .row_bytes = d_rb, .n = (uint32_t)F, .out_dim = (uint32_t)E,
+                                      .x = mid + (size_t)k * F, .out = dw + (size_t)k * E };
+    }
+    if (q4n_gpu_gemv_batch(gpu, jobs, nj) != 0) return -1;
+    float outv[4096];
+    if (E > 4096) return -1;
+    for (int d = 0; d < E; d++) outv[d] = 0.0f;
+    for (int k = 0; k < K; k++) for (int d = 0; d < E; d++) outv[d] += wts[k] * dw[(size_t)k*E+d];
+    /* shared expert (CPU, f32 piccoli) */
+    {
+        float gsh[1024], ush[1024], y[4096];
+        if (F > 1024 || E > 4096) return -1;
+        for (int f = 0; f < F; f++) {
+            double ga = 0, ua = 0;
+            for (int d = 0; d < E; d++) { ga += (double)r->gate_sh[f*E+d]*xh[d]; ua += (double)r->up_sh[f*E+d]*xh[d]; }
+            float gv = (float)ga, sv = gv>=0?1.f/(1.f+expf(-gv)):expf(gv)/(1.f+expf(gv));
+            gsh[f] = gv*sv*(float)ua;
+        }
+        for (int d = 0; d < E; d++) { double acc=0; for (int f=0; f<F; f++) acc += (double)r->down_sh[d*F+f]*gsh[f]; y[d]=(float)acc; }
+        float sv = sg>=0?1.f/(1.f+expf(-sg)):expf(sg)/(1.f+expf(sg));
+        for (int d = 0; d < E; d++) outv[d] += sv*y[d];
+    }
+    { int osh[2] = {1, E}; *out = mlx_array_new_data(outv, osh, 2, MLX_FLOAT32); }
+    free(gw); free(uw); free(dw); free(mid);
+    return 0;
+}
+
+static int qwen4_native_moe_quant(mlx_array* out, mlx_array x, const LlmEngineMoeGguf* g, int il,
+                                  const Q4nLayerRefs* r, int E, int NE, int K, int F, mlx_stream s) {
+    return qwen4_native_moe_quant_cpu(out, x, g, il, r, E, NE, K, F, s);
+}

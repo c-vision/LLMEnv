@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 int main(int argc, char** argv) {
     if (argc < 3) { printf("uso: %s <slice.gguf> <il>\n", argv[0]); return 2; }
     const int il = atoi(argv[2]);
@@ -25,7 +26,25 @@ int main(int argc, char** argv) {
     int xsh[2] = {1, hp.E};
     mlx_array ax = mlx_array_new_data(x, xsh, 2, MLX_FLOAT32);
     mlx_array ao = mlx_array_new();
-    if (qwen4_native_moe_quant(&ao, ax, &g, il, &r, hp.E, hp.NE, hp.K, hp.F, s) != 0) { printf("FAIL moe\n"); return 1; }
+    struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
+    if (qwen4_native_moe_quant(&ao, ax, &g, il, &r, hp.E, hp.NE, hp.K, hp.F, s) != 0) { printf("FAIL moe cpu\n"); return 1; }
+    clock_gettime(CLOCK_MONOTONIC,&t1);
+    double dcpu = (t1.tv_sec-t0.tv_sec)+1e-9*(t1.tv_nsec-t0.tv_nsec);
+    mlx_array ag = mlx_array_new(); Q4nGpu gpu; memset(&gpu,0,sizeof gpu);
+    double dgpu = -1;
+    if (llm_dsv4_metal_available() && q4n_gpu_init(&gpu) == 0) {
+        clock_gettime(CLOCK_MONOTONIC,&t0);
+        if (qwen4_native_moe_quant_gpu(&ag, ax, &g, il, &r, hp.E, hp.NE, hp.K, hp.F, &gpu, s) == 0) {
+            mlx_vector_array ev2 = mlx_vector_array_new(); mlx_vector_array_append_value(ev2, ag); mlx_eval(ev2); mlx_vector_array_free(ev2);
+            clock_gettime(CLOCK_MONOTONIC,&t1);
+            dgpu = (t1.tv_sec-t0.tv_sec)+1e-9*(t1.tv_nsec-t0.tv_nsec);
+            const float* pc = mlx_array_data_float32(ao); const float* pg = mlx_array_data_float32(ag);
+            double mx = 0; for (int d = 0; d < hp.E; d++) { double x2 = fabs((double)pc[d]-(double)pg[d]); if (x2 > mx) mx = x2; }
+            printf("cpu=%.4fs gpu=%.4fs  max|diff|=%.3e\n", dcpu, dgpu, mx);
+        } else printf("gpu FAIL\n");
+        q4n_gpu_free(&gpu);
+    } else printf("metal non disponibile\n");
+    if (dgpu < 0) printf("cpu=%.4fs (gpu assente)\n", dcpu);
     mlx_vector_array ev = mlx_vector_array_new();
     mlx_vector_array_append_value(ev, ao);
     mlx_eval(ev); mlx_vector_array_free(ev);

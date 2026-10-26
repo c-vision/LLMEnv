@@ -41,6 +41,7 @@ typedef struct {
     Q4nPleState ple_st;
     Q4nLayerRefs* lrefs;      /* [L] caricati una volta */
     uint8_t* lrefs_ok;
+    Q4nGpu gpu; int gpu_ok;
 } Q4nModel;
 
 static void q4n_state_free(Q4nState* st, int L) {
@@ -91,6 +92,7 @@ static int q4n_model_open(Q4nModel* m, const char* path, int cap, int use_moe) {
           p = n;
       }
     }
+    m->gpu_ok = (q4n_gpu_init(&m->gpu) == 0);
     m->lrefs = calloc((size_t)h->L, sizeof(Q4nLayerRefs));
     m->lrefs_ok = calloc((size_t)h->L, 1);
     m->rope_freq = malloc((size_t)(h->n_rot / 2) * sizeof(float));
@@ -124,6 +126,7 @@ static void q4n_model_free(Q4nModel* m) {
     q4n_state_free(&m->st, m->hp.L);
     if (m->lrefs) for (int i = 0; i < m->hp.L; i++) if (m->lrefs_ok && m->lrefs_ok[i]) q4n_layer_free(&m->lrefs[i]);
     free(m->lrefs); free(m->lrefs_ok);
+    if (m->gpu_ok) q4n_gpu_free(&m->gpu);
     free(m->out_norm); free(m->out_down); free(m->out_up); free(m->layer_linear); free(m->rope_freq);
     llm_gguf_close_file(&m->gguf, m->map, m->maplen);
 }
@@ -188,7 +191,8 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
         if (qwen4_native_hc_mix(&m2, &i2, R1, &wf, E, hc, h->eps, q4n_default_mv, NULL, s) != 0) return -1;
         mlx_array b2 = mlx_array_new();
         if (m->use_moe) {
-            if (qwen4_native_moe_quant(&b2, m2, &m->gguf, il, &refs, E, h->NE, h->K, h->F, s) != 0) return -1;
+            if (qwen4_native_moe_quant_gpu(&b2, m2, &m->gguf, il, &refs, E, h->NE, h->K, h->F,
+                                           m->gpu_ok ? &m->gpu : NULL, s) != 0) return -1;
         } else {
             float* z = calloc((size_t)E, sizeof(float));
             int zsh[2] = {1, E};
@@ -218,7 +222,15 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
     /* lm_head: quante righe? dedotto dal metadata vocab_size */
     const uint64_t vs = llm_gguf_u(&m->gguf, "qwen4exp.vocab_size", 0, "qwen4_exp.vocab_size");
     if (vs == 0) return -1;
-    {   /* lm_head a blocchi: dequant di poche righe per volta (nessun array VxE in RAM) */
+    {   /* lm_head su GPU se il tensore e' Q8 (kernel ds4); altrimenti blocchi CPU */
+        int oi0 = llm_gguf_find_tensor(&m->gguf, "output.weight");
+        if (oi0 >= 0 && m->gguf.ti[oi0].type == 8 && m->gpu_ok) {
+            int rb0 = (int)llm_ggml_nbytes(8, (int64_t)E);
+            if (q4n_gpu_gemv(&m->gpu, llm_gguf_tensor_data(&m->gguf, oi0, NULL), 8, (size_t)rb0,
+                             (uint32_t)E, (uint32_t)vs, mh, logits) == 0) goto lm_done;
+        }
+    }
+    {   /* fallback CPU */
         int oi = llm_gguf_find_tensor(&m->gguf, "output.weight");
         if (oi < 0) return -1;
         int ot = m->gguf.ti[oi].type;
@@ -239,6 +251,7 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
             }
         }
     }
+lm_done:
     mlx_array_free(mixed); mlx_array_free(dummy); mlx_array_free(aR);
     free(R);
     m->st.pos = pos + 1;
