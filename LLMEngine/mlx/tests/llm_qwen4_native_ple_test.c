@@ -14,7 +14,7 @@ int main(void) {
     Q4nHp hp; memset(&hp, 0, sizeof hp); hp.ple_ng = 3; hp.ple_heads = 8;
     Q4nPleMeta pm; memset(&pm, 0, sizeof pm);
     if (q4n_ple_meta(&g, &hp, &pm) != 0) { printf("FAIL meta\n"); return 1; }
-    printf("n_heads=%d off0=%g voc0=%g mult0=%g\n", pm.n_heads, pm.offsets[0], pm.vocab[0], pm.mult[0]);
+    printf("n_heads=%d off0=%g voc0=%g mult0=%llu\n", pm.n_heads, pm.offsets[0], pm.vocab[0], (unsigned long long)pm.mult[0]);
     int prev[4] = {0,0,0,0};
     uint32_t rows[64];
     q4n_ple_rows(5, prev, &pm, 3, 0, rows);

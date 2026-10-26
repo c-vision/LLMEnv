@@ -12,7 +12,7 @@
 
 typedef struct { int prev[4]; mlx_array hist; } Q4nPleState;
 
-typedef struct { float offsets[64], vocab[64], mult[8]; int n_heads; } Q4nPleMeta;
+typedef struct { float offsets[64], vocab[64]; uint64_t mult[8]; int n_heads; } Q4nPleMeta;
 
 static int q4n_ple_meta(const LlmEngineMoeGguf* g, Q4nHp* hp, Q4nPleMeta* m) {
     int64_t n = 0;
@@ -22,9 +22,20 @@ static int q4n_ple_meta(const LlmEngineMoeGguf* g, Q4nHp* hp, Q4nPleMeta* m) {
     float* voc = llm_gguf_load_f32(g, "ple.head_vocab_sizes", &n);
     if (!voc || n > 64) { free(voc); return -1; }
     memcpy(m->vocab, voc, (size_t)n * sizeof(float)); free(voc);
-    float* mul = llm_gguf_load_f32(g, "blk.1.ple_layer_multipliers", &n);
-    if (!mul) mul = llm_gguf_load_f32(g, "blk.0.ple_layer_multipliers", &n);
-    if (mul && n <= 8) memcpy(m->mult, mul, (size_t)n * sizeof(float));
+    int64_t nm = 0;
+    float* mul = llm_gguf_load_f32(g, "blk.1.ple_layer_multipliers", &nm);
+    if (!mul) mul = llm_gguf_load_f32(g, "blk.0.ple_layer_multipliers", &nm);
+    if (mul) {
+        if (nm == 12) {   /* 4 u16 per valore (esatto, > 2^24) */
+            for (int i = 0; i < 4 && i*4+3 < nm; i++) {
+                uint64_t u = ((uint64_t)mul[i*4+0] << 48) | ((uint64_t)mul[i*4+1] << 32) |
+                             ((uint64_t)mul[i*4+2] << 16) | (uint64_t)mul[i*4+3];
+                m->mult[i] = u;
+            }
+        } else if (nm <= 8) {
+            for (int64_t i = 0; i < nm; i++) m->mult[i] = (uint64_t)mul[i];
+        }
+    }
     free(mul);
     m->n_heads = (hp->ple_ng - 1) * hp->ple_heads;
     return (m->n_heads > 0) ? 0 : -1;
@@ -35,8 +46,8 @@ static void q4n_ple_rows(int token, int* prev, const Q4nPleMeta* m, int ng, int 
     int ctx[4]; int cut = 0; ctx[0] = token;
     for (int s = 1; s < ng; s++) { int t = cut ? eos : prev[s - 1]; cut = cut || t == eos; ctx[s] = cut ? eos : t; }
     for (int n = 2; n <= ng; n++) {
-        uint64_t mix = (uint64_t)ctx[0] * (uint64_t)m->mult[0];
-        for (int j = 1; j < n; j++) mix ^= (uint64_t)ctx[j] * (uint64_t)m->mult[j];
+        uint64_t mix = (uint64_t)ctx[0] * m->mult[0];
+        for (int j = 1; j < n; j++) mix ^= (uint64_t)ctx[j] * m->mult[j];
         for (int gg = 0; gg < (m->n_heads / (ng - 1)); gg++) {
             int h = (n - 2) * (m->n_heads / (ng - 1)) + gg;
             uint64_t voc = (uint64_t)m->vocab[h];
