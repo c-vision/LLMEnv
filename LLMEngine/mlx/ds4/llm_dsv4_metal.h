@@ -58,6 +58,18 @@ int llm_dsv4_metal_pair_swiglu_batch(LlmDsv4Metal* b, const void* const* gates, 
                                      const float* x, float* const* mids, const float* rws, int n,
                                      float clamp, uint32_t ne00, uint32_t nb01, uint32_t ne0);
 
+typedef struct { const void* w; uint32_t row_bytes, n, out_dim; const float* x; float* out; } LlmDsv4WideJob;
+int llm_dsv4_metal_gemv_q8_wide_batch(LlmDsv4Metal* b, const LlmDsv4WideJob* jobs, int n);
+int llm_dsv4_metal_pair_swiglu_q8_wide_batch(LlmDsv4Metal* b, const void* const* gates, const void* const* ups,
+                                             const float* x, float* const* mids, int n, float clamp,
+                                             uint32_t ne00, uint32_t rb_g, uint32_t rb_u, uint32_t ne0);
+
+/* Pair swiglu Q8_0: gate+up+swiglu fusi per esperto, `n` esperti in UNA cb. 0=ok.
+ * mid[i] = silu(gate*x)*up*x  (senza peso di routing). */
+int llm_dsv4_metal_pair_swiglu_q8_batch(LlmDsv4Metal* b, const void* const* gates, const void* const* ups,
+                                        const float* x, float* const* mids, int n, float clamp,
+                                        uint32_t ne00, uint32_t rb_g, uint32_t rb_u, uint32_t ne0);
+
 /* MoE ds4 fuso: `n`=6 esperti (gate/up IQ2_XXS, down Q2_K) in UNA command buffer.
  * pair_swiglu (gate+up+swiglu*peso -> mid f32 su device) + sum6 (down dei 6 + somma -> out).
  * Nessun round-trip CPU. `out[embd]` scritto per intero. 0 = ok. */

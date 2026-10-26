@@ -31,6 +31,19 @@ static int q4n_gpu_gemv(Q4nGpu* g, const void* w, int type, size_t row_bytes,
     return llm_dsv4_metal_gemv_batch(g->b, &job, 1);
 }
 
+/* gate+up+swiglu fusi (Q8_0) per n esperti in una cb. */
+static int q4n_gpu_pair_swiglu_q8(Q4nGpu* g, const void* const* gates, const void* const* ups,
+                                  const float* x, float* const* mids, int n,
+                                  uint32_t ne0, uint32_t ne00, uint32_t rb_g, uint32_t rb_u) {
+    if (!g || !g->b) return -1;
+    return llm_dsv4_metal_pair_swiglu_q8_wide_batch(g->b, gates, ups, x, mids, n, 0.0f, ne00, rb_g, rb_u, ne0);
+}
+
+static int q4n_gpu_gemv_q8_wide_batch(Q4nGpu* g, const LlmDsv4WideJob* jobs, int n) {
+    if (!g || !g->b) return -1;
+    return llm_dsv4_metal_gemv_q8_wide_batch(g->b, jobs, n);
+}
+
 /* batch di job (una command buffer, un wait). */
 static int q4n_gpu_gemv_batch(Q4nGpu* g, const LlmDsv4GpuJob* jobs, int n) {
     if (!g || !g->b) return -1;

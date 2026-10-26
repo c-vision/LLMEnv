@@ -159,6 +159,64 @@ static const char* const LLM_DSV4_METAL_KERNELS =
 "    float g = simd_sum(accg), u = simd_sum(accu);\n"
 "    if (tid == 0u) { const float c = CF[0]; if (c > 1.0e-6f) { g = min(g, c); u = clamp(u, -c, c); } MID[tg] = (g / (1.f + exp(-g))) * u; }\n"
 "}\n"
+/* Q8_0 "wide": 128 thread (4 simdgroup) per riga, riduzione in threadgroup.
+ * P = {voff, row_bytes, nblk, out_dim}. */
+"kernel void dsv4_gemv_q8_wide(device const uchar* W [[buffer(0)]], device const float* X [[buffer(1)]], device float* O [[buffer(2)]], constant uint* P [[buffer(3)]],\n"
+"    uint tg [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint lsimd [[thread_index_in_simdgroup]]) {\n"
+"    uint voff = P[0], row_bytes = P[1], nblk = P[2], out_dim = P[3];\n"
+"    if (tg >= out_dim) return;\n"
+"    threadgroup float red[4];\n"
+"    device const uchar* row = W + voff + (ulong)tg * (ulong)row_bytes;\n"
+"    float acc = 0.0f;\n"
+"    for (uint b = tid; b < nblk; b += 128u) {\n"
+"        device const uchar* blk = row + (ulong)b * 34ul;\n"
+"        ushort dh = (ushort)blk[0] | ((ushort)blk[1] << 8);\n"
+"        float d = (float)as_type<half>(dh);\n"
+"        const uint base = b * 32u; float s = 0.0f;\n"
+"        for (uint i = 0; i < 32u; i += 4) {\n"
+"            s += (float)(char)blk[2u+i]     * X[base+i]\n"
+"               + (float)(char)blk[2u+i+1u]  * X[base+i+1u]\n"
+"               + (float)(char)blk[2u+i+2u]  * X[base+i+2u]\n"
+"               + (float)(char)blk[2u+i+3u]  * X[base+i+3u];\n"
+"        }\n"
+"        acc += d * s;\n"
+"    }\n"
+"    float r = simd_sum(acc);\n"
+"    if (lsimd == 0u) red[tid >> 5] = r;\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    if (tid == 0u) O[tg] = red[0]+red[1]+red[2]+red[3];\n"
+"}\n"
+/* Pair swiglu Q8_0 wide: 128 thread per riga (gate+up fusi). P={vg,rbg,vu,rbu,nblk,out_dim}. */
+"kernel void dsv4_pair_swiglu_q8_wide(device const uchar* WG [[buffer(0)]], device const uchar* WU [[buffer(1)]],\n"
+"    device const float* X [[buffer(2)]], device float* MID [[buffer(3)]], constant uint* P [[buffer(4)]],\n"
+"    constant float* CF [[buffer(5)]], uint tg [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]],\n"
+"    uint lsimd [[thread_index_in_simdgroup]]) {\n"
+"    uint vg = P[0], rbg = P[1], vu = P[2], rbu = P[3], nblk = P[4], out_dim = P[5];\n"
+"    if (tg >= out_dim) return;\n"
+"    threadgroup float red[8];\n"
+"    device const uchar* rg = WG + vg + (ulong)tg * (ulong)rbg;\n"
+"    device const uchar* ru = WU + vu + (ulong)tg * (ulong)rbu;\n"
+"    float accg = 0.0f, accu = 0.0f;\n"
+"    for (uint b = tid; b < nblk; b += 128u) {\n"
+"        device const uchar* bg = rg + (ulong)b * 34ul; device const uchar* bu = ru + (ulong)b * 34ul;\n"
+"        ushort dgh = (ushort)bg[0] | ((ushort)bg[1] << 8);\n"
+"        ushort duh = (ushort)bu[0] | ((ushort)bu[1] << 8);\n"
+"        float dg = (float)as_type<half>(dgh); float du = (float)as_type<half>(duh);\n"
+"        const uint base = b * 32u; float sg = 0.0f, su = 0.0f;\n"
+"        for (uint i = 0; i < 32u; i += 4) {\n"
+"            float x0=X[base+i], x1=X[base+i+1u], x2=X[base+i+2u], x3=X[base+i+3u];\n"
+"            sg += (float)(char)bg[2u+i]*x0 + (float)(char)bg[2u+i+1u]*x1 + (float)(char)bg[2u+i+2u]*x2 + (float)(char)bg[2u+i+3u]*x3;\n"
+"            su += (float)(char)bu[2u+i]*x0 + (float)(char)bu[2u+i+1u]*x1 + (float)(char)bu[2u+i+2u]*x2 + (float)(char)bu[2u+i+3u]*x3;\n"
+"        }\n"
+"        accg += dg * sg; accu += du * su;\n"
+"    }\n"
+"    float g = simd_sum(accg), u = simd_sum(accu);\n"
+"    if (lsimd == 0u) { red[tid >> 5] = g; red[4u + (tid >> 5)] = u; }\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    if (tid == 0u) { float gg = red[0]+red[1]+red[2]+red[3]; float uu = red[4]+red[5]+red[6]+red[7];\n"
+"        const float c = CF[0]; if (c > 1.0e-6f) { gg = min(gg, c); uu = clamp(uu, -c, c); }\n"
+"        MID[tg] = (gg / (1.f + exp(-gg))) * uu; }\n"
+"}\n"
 /* FUSO: down (Q8_0) + OUT += (era 2 dispatch). P={voff,row_bytes,nblk,out_dim,out_off}. */
 "kernel void dsv4_gemv_q8_0_add(device const uchar* W [[buffer(0)]], device const float* X [[buffer(1)]], device float* OUT [[buffer(2)]], constant uint* P [[buffer(3)]],\n"
 "    uint tg [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {\n"
@@ -1689,6 +1747,8 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_q8_0;  /* GEMV Q8_0 veloce (scale 1x/blocco) */
     id<MTLComputePipelineState> pso_pair_swiglu_q8_0;   /* FUSO: gate+up+swiglu Q8_0 (3->1 dispatch) */
     id<MTLComputePipelineState> pso_gemv_q8_0_add;       /* FUSO: down Q8_0 + OUT += (2->1 dispatch) */
+    id<MTLComputePipelineState> pso_gemv_q8_wide;
+    id<MTLComputePipelineState> pso_pair_q8_wide;
     id<MTLComputePipelineState> pso_pair;   /* MoE fuso gate+up+swiglu (ds4 pair) */
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
     id<MTLComputePipelineState> pso_slots6;  /* pair_swiglu 6 esperti in 1 dispatch (ds4 slots6) */
@@ -1880,6 +1940,12 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     { id<MTLFunction> fda = [lib newFunctionWithName:@"dsv4_gemv_q8_0_add"];
       b->pso_gemv_q8_0_add = fda ? [dev newComputePipelineStateWithFunction:fda error:&err] : nil;
       if (!fda) fprintf(stderr, "dsv4_metal: kernel dsv4_gemv_q8_0_add NON compilato\n"); }
+    { id<MTLFunction> fw = [lib newFunctionWithName:@"dsv4_gemv_q8_wide"];
+      b->pso_gemv_q8_wide = fw ? [dev newComputePipelineStateWithFunction:fw error:&err] : nil;
+      if (!fw) fprintf(stderr, "dsv4_metal: kernel dsv4_gemv_q8_wide NON compilato\n"); }
+    { id<MTLFunction> fpw = [lib newFunctionWithName:@"dsv4_pair_swiglu_q8_wide"];
+      b->pso_pair_q8_wide = fpw ? [dev newComputePipelineStateWithFunction:fpw error:&err] : nil;
+      if (!fpw) fprintf(stderr, "dsv4_metal: kernel dsv4_pair_swiglu_q8_wide NON compilato\n"); }
     b->pso_pair    = f5 ? [dev newComputePipelineStateWithFunction:f5 error:&err] : nil;
     b->pso_sum6_q2k = f6 ? [dev newComputePipelineStateWithFunction:f6 error:&err] : nil;
     if (@available(macOS 26.0, *)) {   /* kernel MPP (tensor ops Metal 4): libreria separata, opzionale */
@@ -2000,6 +2066,8 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     for (int i = 0; i < 64; i++) if (b->spt[i]) [b->spt[i] release];
     if (b->pso_q8_0)     [b->pso_q8_0 release];
     if (b->pso_pair)     [b->pso_pair release];
+    if (b->pso_gemv_q8_wide) [b->pso_gemv_q8_wide release];
+    if (b->pso_pair_q8_wide) [b->pso_pair_q8_wide release];
     if (b->pso_sum6_q2k) [b->pso_sum6_q2k release];
     if (b->pso_attn_part) [b->pso_attn_part release];
     if (b->pso_mmp_q8) [b->pso_mmp_q8 release]; if (b->pso_mmp_iq2) [b->pso_mmp_iq2 release]; if (b->pso_mmp_q2k) [b->pso_mmp_q2k release]; if (b->pso_mmp_q4k) [b->pso_mmp_q4k release];
@@ -2547,6 +2615,142 @@ int llm_dsv4_metal_moe_iq2_q2k_batch(LlmDsv4Metal* b, int nt, const void* const*
 }
 
 /* MoE ds4 FUSO per un token (wrapper del batch). */
+/* Pair swiglu Q8_0 WIDE batch (128 thread/riga). */
+int llm_dsv4_metal_pair_swiglu_q8_wide_batch(LlmDsv4Metal* b, const void* const* gates, const void* const* ups,
+                                             const float* x, float* const* mids, int n, float clamp,
+                                             uint32_t ne00, uint32_t rb_g, uint32_t rb_u, uint32_t ne0) {
+    if (!b || !b->pso_pair_q8_wide || n <= 0 || n > 16 || !gates || !ups || !mids || !x) return -1;
+    if ((ne00 % 32u) != 0u) return -1;
+    const size_t page = (size_t)getpagesize();
+    id<MTLBuffer> BG[16], BU[16], MID[16], PB[16];
+    for (int i = 0; i < 16; i++) { BG[i]=BU[i]=MID[i]=PB[i]=nil; }
+    id<MTLBuffer> Y = [b->dev newBufferWithBytes:x length:(NSUInteger)ne00*sizeof(float) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> CF = [b->dev newBufferWithBytes:&clamp length:sizeof(float) options:MTLResourceStorageModeShared];
+    int rc = 0;
+    for (int i = 0; i < n && rc == 0; i++) {
+        size_t gbytes = (size_t)ne0 * (size_t)rb_g, ubytes = (size_t)ne0 * (size_t)rb_u;
+        uintptr_t apg = (uintptr_t)gates[i] & ~(uintptr_t)(page-1);
+        size_t leadg = (size_t)((uintptr_t)gates[i] - apg);
+        uintptr_t apu = (uintptr_t)ups[i] & ~(uintptr_t)(page-1);
+        size_t leadu = (size_t)((uintptr_t)ups[i] - apu);
+        size_t vlg = ((leadg+gbytes+page-1)/page)*page;
+        size_t vlu = ((leadu+ubytes+page-1)/page)*page;
+        BG[i] = [b->dev newBufferWithBytesNoCopy:(void*)apg length:vlg options:MTLResourceStorageModeShared deallocator:nil];
+        BU[i] = [b->dev newBufferWithBytesNoCopy:(void*)apu length:vlu options:MTLResourceStorageModeShared deallocator:nil];
+        MID[i] = [b->dev newBufferWithLength:(NSUInteger)ne0*sizeof(float) options:MTLResourceStorageModeShared];
+        uint32_t P[6] = { (uint32_t)leadg, rb_g, (uint32_t)leadu, rb_u, ne00/32u, ne0 };
+        PB[i] = [b->dev newBufferWithBytes:P length:sizeof P options:MTLResourceStorageModeShared];
+        if (!BG[i]||!BU[i]||!MID[i]||!PB[i]||!Y||!CF) rc = -2;
+    }
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        for (int i = 0; i < n; i++) {
+            g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_pair_q8_wide];
+            [e setBuffer:BG[i] offset:0 atIndex:0]; [e setBuffer:BU[i] offset:0 atIndex:1];
+            [e setBuffer:Y offset:0 atIndex:2];     [e setBuffer:MID[i] offset:0 atIndex:3];
+            [e setBuffer:PB[i] offset:0 atIndex:4]; [e setBuffer:CF offset:0 atIndex:5];
+            [e dispatchThreadgroups:MTLSizeMake(ne0, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        [e endEncoding];
+        dsv4_res_commit(b); [cb commit];
+        { g_dsv4_waits++; [cb waitUntilCompleted]; } dsv4_gpu_acct(cb);
+        if (cb.error) rc = -3;
+    }
+    if (rc == 0) for (int i = 0; i < n; i++) memcpy(mids[i], [MID[i] contents], (size_t)ne0*sizeof(float));
+    for (int i = 0; i < 16; i++) { if (BG[i]) [BG[i] release]; if (BU[i]) [BU[i] release]; if (MID[i]) [MID[i] release]; if (PB[i]) [PB[i] release]; }
+    if (Y) [Y release]; if (CF) [CF release];
+    return rc;
+}
+
+/* GEMV Q8_0 WIDE batch: n job in una cb, 128 thread/riga. */
+int llm_dsv4_metal_gemv_q8_wide_batch(LlmDsv4Metal* b, const LlmDsv4WideJob* jobs, int n) {
+    if (!b || !b->pso_gemv_q8_wide || !jobs || n <= 0 || n > 32) return -1;
+    const size_t page = (size_t)getpagesize();
+    id<MTLBuffer> W[32], X[32], O[32], PB[32];
+    for (int i = 0; i < 32; i++) { W[i]=X[i]=O[i]=PB[i]=nil; }
+    int rc = 0;
+    for (int i = 0; i < n && rc == 0; i++) {
+        const LlmDsv4WideJob* j = &jobs[i];
+        if ((j->n % 32u) != 0u || j->out_dim == 0 || j->n == 0) { rc = -1; break; }
+        size_t bytes = (size_t)j->out_dim * (size_t)j->row_bytes;
+        uintptr_t ap = (uintptr_t)j->w & ~(uintptr_t)(page-1);
+        size_t lead = (size_t)((uintptr_t)j->w - ap);
+        size_t vl = ((lead+bytes+page-1)/page)*page;
+        W[i] = [b->dev newBufferWithBytesNoCopy:(void*)ap length:vl options:MTLResourceStorageModeShared deallocator:nil];
+        X[i] = [b->dev newBufferWithBytes:j->x length:(NSUInteger)j->n*sizeof(float) options:MTLResourceStorageModeShared];
+        O[i] = [b->dev newBufferWithLength:(NSUInteger)j->out_dim*sizeof(float) options:MTLResourceStorageModeShared];
+        uint32_t P[4] = { (uint32_t)lead, j->row_bytes, j->n/32u, j->out_dim };
+        PB[i] = [b->dev newBufferWithBytes:P length:sizeof P options:MTLResourceStorageModeShared];
+        if (!W[i]||!X[i]||!O[i]||!PB[i]) rc = -2;
+    }
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        for (int i = 0; i < n; i++) {
+            g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_q8_wide];
+            [e setBuffer:W[i] offset:0 atIndex:0]; [e setBuffer:X[i] offset:0 atIndex:1];
+            [e setBuffer:O[i] offset:0 atIndex:2]; [e setBuffer:PB[i] offset:0 atIndex:3];
+            [e dispatchThreadgroups:MTLSizeMake(jobs[i].out_dim, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        [e endEncoding];
+        dsv4_res_commit(b); [cb commit];
+        { g_dsv4_waits++; [cb waitUntilCompleted]; } dsv4_gpu_acct(cb);
+        if (cb.error) rc = -3;
+    }
+    if (rc == 0) for (int i = 0; i < n; i++) memcpy(jobs[i].out, [O[i] contents], (size_t)jobs[i].out_dim*sizeof(float));
+    for (int i = 0; i < 32; i++) { if (W[i]) [W[i] release]; if (X[i]) [X[i] release]; if (O[i]) [O[i] release]; if (PB[i]) [PB[i] release]; }
+    return rc;
+}
+
+/* Pair swiglu Q8_0 batch: gate+up+swiglu in un kernel per esperto, `n` in una cb. */
+int llm_dsv4_metal_pair_swiglu_q8_batch(LlmDsv4Metal* b, const void* const* gates, const void* const* ups,
+                                        const float* x, float* const* mids, int n, float clamp,
+                                        uint32_t ne00, uint32_t rb_g, uint32_t rb_u, uint32_t ne0) {
+    if (!b || !b->pso_pair_swiglu_q8_0 || n <= 0 || n > 16 || !gates || !ups || !mids || !x) return -1;
+    if ((ne00 % 32u) != 0u) return -1;
+    const size_t page = (size_t)getpagesize();
+    id<MTLBuffer> BG[16], BU[16], MID[16], PB[16];
+    for (int i = 0; i < 16; i++) { BG[i]=BU[i]=MID[i]=PB[i]=nil; }
+    id<MTLBuffer> Y = [b->dev newBufferWithBytes:x length:(NSUInteger)ne00*sizeof(float) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> CF = [b->dev newBufferWithBytes:&clamp length:sizeof(float) options:MTLResourceStorageModeShared];
+    int rc = 0;
+    for (int i = 0; i < n && rc == 0; i++) {
+        size_t gbytes = (size_t)ne0 * (size_t)rb_g, ubytes = (size_t)ne0 * (size_t)rb_u;
+        uintptr_t apg = (uintptr_t)gates[i] & ~(uintptr_t)(page-1);
+        size_t leadg = (size_t)((uintptr_t)gates[i] - apg);
+        uintptr_t apu = (uintptr_t)ups[i] & ~(uintptr_t)(page-1);
+        size_t leadu = (size_t)((uintptr_t)ups[i] - apu);
+        size_t vlg = ((leadg+gbytes+page-1)/page)*page;
+        size_t vlu = ((leadu+ubytes+page-1)/page)*page;
+        BG[i] = [b->dev newBufferWithBytesNoCopy:(void*)apg length:vlg options:MTLResourceStorageModeShared deallocator:nil];
+        BU[i] = [b->dev newBufferWithBytesNoCopy:(void*)apu length:vlu options:MTLResourceStorageModeShared deallocator:nil];
+        MID[i] = [b->dev newBufferWithLength:(NSUInteger)ne0*sizeof(float) options:MTLResourceStorageModeShared];
+        uint32_t P[6] = { (uint32_t)leadg, rb_g, (uint32_t)leadu, rb_u, ne00/32u, ne0 };
+        PB[i] = [b->dev newBufferWithBytes:P length:sizeof P options:MTLResourceStorageModeShared];
+        if (!BG[i]||!BU[i]||!MID[i]||!PB[i]||!Y||!CF) rc = -2;
+    }
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        for (int i = 0; i < n; i++) {
+            g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_pair_swiglu_q8_0];
+            [e setBuffer:BG[i] offset:0 atIndex:0]; [e setBuffer:BU[i] offset:0 atIndex:1];
+            [e setBuffer:Y offset:0 atIndex:2];     [e setBuffer:MID[i] offset:0 atIndex:3];
+            [e setBuffer:PB[i] offset:0 atIndex:4]; [e setBuffer:CF offset:0 atIndex:5];
+            [e dispatchThreadgroups:MTLSizeMake(ne0, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        }
+        [e endEncoding];
+        dsv4_res_commit(b); [cb commit];
+        { g_dsv4_waits++; [cb waitUntilCompleted]; } dsv4_gpu_acct(cb);
+        if (cb.error) rc = -3;
+    }
+    if (rc == 0) for (int i = 0; i < n; i++) memcpy(mids[i], [MID[i] contents], (size_t)ne0*sizeof(float));
+    for (int i = 0; i < 16; i++) { if (BG[i]) [BG[i] release]; if (BU[i]) [BU[i] release]; if (MID[i]) [MID[i] release]; if (PB[i]) [PB[i] release]; }
+    if (Y) [Y release]; if (CF) [CF release];
+    return rc;
+}
+
 int llm_dsv4_metal_moe_iq2_q2k(LlmDsv4Metal* b, const void* const* gates, const void* const* ups,
                                const void* const* downs, const float* x, const float* rws, int n,
                                float clamp, uint32_t embd, uint32_t gu_nb01, uint32_t ff,
