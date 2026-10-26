@@ -562,6 +562,15 @@ if(LLM_BUILD_DSV4_TESTS)
     target_include_directories(llm_mlx_kvformat_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
     # P3 (qwen4exp nativo): parita' model-free dei kernel PLE vs riferimento ds4.
+    add_executable(llm_qwen4_native_q8mv_test tests/llm_qwen4_native_q8mv_test.c)
+    target_link_libraries(llm_qwen4_native_q8mv_test PRIVATE llm_ai_mlx llmcodec_ggml llmcodec)
+    target_include_directories(llm_qwen4_native_q8mv_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
+        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
+    set_target_properties(llm_qwen4_native_q8mv_test PROPERTIES LINKER_LANGUAGE CXX)
+
     add_executable(llm_qwen4_native_ple_test tests/llm_qwen4_native_ple_test.c)
     target_link_libraries(llm_qwen4_native_ple_test PRIVATE llm_ai_mlx)
     target_include_directories(llm_qwen4_native_ple_test PRIVATE

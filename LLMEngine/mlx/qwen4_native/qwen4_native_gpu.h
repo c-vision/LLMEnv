@@ -66,6 +66,11 @@ static int q4n_mat_mv_gpu(void* ctx, const Q4nMat* W, const float* x, float* y, 
     if (!W || !W->w) return -1;
     if (W->type < 0) return q4n_mat_mv_cpu(NULL, W, x, y, n_in, n_out);
     if (!g || !g->b) return -1;
+    if (W->type == 8) {
+        LlmDsv4WideJob job = { .w = W->w, .row_bytes = (uint32_t)W->row_bytes,
+                               .n = (uint32_t)n_in, .out_dim = (uint32_t)n_out, .x = x, .out = y };
+        if (llm_dsv4_metal_gemv_q8_wide_batch(g->b, &job, 1) == 0) return 0;
+    }
     return q4n_gpu_gemv(g, W->w, W->type, W->row_bytes, (uint32_t)n_in, (uint32_t)n_out, x, y);
 }
 
