@@ -11,7 +11,7 @@ int main(int argc, char** argv) {
     mlx_stream s = mlx_stream_new_device(dev);
     Q4nModel m;
     fprintf(stderr, "[smoke] prima di open\n");
-    int orc = q4n_model_open(&m, argv[1], 8, 0);
+    int orc = q4n_model_open(&m, argv[1], 8, argc > 2 ? atoi(argv[2]) : 0);
     fprintf(stderr, "[smoke] open rc=%d L=%d\n", orc, m.hp.L);
     if (orc != 0) { printf("FAIL open\n"); return 1; }
     printf("model: E=%d L=%d hc=%d rank=%d lin(Hk=%d Hv=%d D=%d) full_interval=%d\n",

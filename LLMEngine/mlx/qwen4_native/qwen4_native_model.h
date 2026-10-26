@@ -13,6 +13,7 @@
 #include "qwen4_native_attn_layer.h"
 #include "qwen4_native_trunk.h"
 #include "qwen4_native_moe_layer.h"
+#include "qwen4_native_moe_quant.h"
 
 typedef struct {
     int cap, pos;
@@ -152,10 +153,7 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
         if (qwen4_native_hc_mix(&m2, &i2, R1, &wf, E, hc, h->eps, q4n_default_mv, NULL, s) != 0) return -1;
         mlx_array b2 = mlx_array_new();
         if (m->use_moe) {
-            Q4nMoeW mw = {refs.gate_inp, (const float*)refs.gate_exps, (const float*)refs.up_exps,
-                          (const float*)refs.down_exps, refs.gate_sh, refs.up_sh, refs.down_sh,
-                          refs.gate_inp_sh, E, h->NE, h->K, h->F};
-            if (qwen4_native_moe_layer(&b2, m2, &mw, q4n_default_mv, NULL, s) != 0) return -1;
+            if (qwen4_native_moe_quant(&b2, m2, &m->gguf, il, &refs, E, h->NE, h->K, h->F, s) != 0) return -1;
         } else {
             float* z = calloc((size_t)E, sizeof(float));
             int zsh[2] = {1, E};
