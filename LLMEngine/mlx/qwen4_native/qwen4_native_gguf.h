@@ -123,8 +123,8 @@ static void q4n_layer_free(Q4nLayerRefs* r) {
     memset(r, 0, sizeof *r);
 }
 
-static int q4n_layer_load(const LlmEngineMoeGguf* g, int il, bool is_linear, bool is_ple,
-                          Q4nLayerRefs* r, char* err, size_t errn) {
+static int q4n_layer_load_ex(const LlmEngineMoeGguf* g, int il, bool is_linear, bool is_ple,
+                             int skip_big, Q4nLayerRefs* r, char* err, size_t errn) {
     if (!g || !r) return -1;
     bool ok = true;
     memset(r, 0, sizeof *r);
@@ -138,28 +138,28 @@ static int q4n_layer_load(const LlmEngineMoeGguf* g, int il, bool is_linear, boo
     r->hc_ffn_up = q4n_f32(g, il, "hc_ffn_up.weight", true, &ok);
     r->hc_ffn_inject = q4n_f32(g, il, "hc_ffn_inject.weight", true, &ok);
     if (is_linear) {
-        r->attn_qkv = q4n_f32(g, il, "attn_qkv.weight", true, &ok);
-        r->attn_gate = q4n_f32(g, il, "attn_gate.weight", true, &ok);
+        r->attn_qkv = skip_big ? NULL : q4n_f32(g, il, "attn_qkv.weight", true, &ok);
+        r->attn_gate = skip_big ? NULL : q4n_f32(g, il, "attn_gate.weight", true, &ok);
         r->ssm_conv1d = q4n_f32(g, il, "ssm_conv1d.weight", true, &ok);
         r->ssm_dt = q4n_f32(g, il, "ssm_dt.bias", true, &ok);
         r->ssm_a = q4n_f32(g, il, "ssm_a", true, &ok);
-        r->ssm_beta = q4n_f32(g, il, "ssm_beta.weight", true, &ok);
-        r->ssm_alpha = q4n_f32(g, il, "ssm_alpha.weight", true, &ok);
+        r->ssm_beta = skip_big ? NULL : q4n_f32(g, il, "ssm_beta.weight", true, &ok);
+        r->ssm_alpha = skip_big ? NULL : q4n_f32(g, il, "ssm_alpha.weight", true, &ok);
         r->ssm_norm = q4n_f32(g, il, "ssm_norm.weight", true, &ok);
-        r->ssm_out = q4n_f32(g, il, "ssm_out.weight", true, &ok);
+        r->ssm_out = skip_big ? NULL : q4n_f32(g, il, "ssm_out.weight", true, &ok);
     } else {
-        r->attn_q = q4n_f32(g, il, "attn_q.weight", true, &ok);
-        r->attn_k = q4n_f32(g, il, "attn_k.weight", true, &ok);
-        r->attn_v = q4n_f32(g, il, "attn_v.weight", true, &ok);
-        r->attn_out = q4n_f32(g, il, "attn_output.weight", true, &ok);
+        r->attn_q = skip_big ? NULL : q4n_f32(g, il, "attn_q.weight", true, &ok);
+        r->attn_k = skip_big ? NULL : q4n_f32(g, il, "attn_k.weight", true, &ok);
+        r->attn_v = skip_big ? NULL : q4n_f32(g, il, "attn_v.weight", true, &ok);
+        r->attn_out = skip_big ? NULL : q4n_f32(g, il, "attn_output.weight", true, &ok);
         r->attn_q_norm = q4n_f32(g, il, "attn_q_norm.weight", true, &ok);
         r->attn_k_norm = q4n_f32(g, il, "attn_k_norm.weight", true, &ok);
-        r->idx_q_proj = q4n_f32(g, il, "indexer.q_proj.weight", false, &ok);
-        r->idx_k_proj = q4n_f32(g, il, "indexer.k_proj.weight", false, &ok);
-        r->idx_qk = q4n_f32(g, il, "indexer.qk_proj.weight", false, &ok);
+        r->idx_q_proj = (!skip_big) ? q4n_f32(g, il, "indexer.q_proj.weight", false, &ok) : NULL;
+        r->idx_k_proj = (!skip_big) ? q4n_f32(g, il, "indexer.k_proj.weight", false, &ok) : NULL;
+        r->idx_qk = (!skip_big) ? q4n_f32(g, il, "indexer.qk_proj.weight", false, &ok) : NULL;
         r->idx_q_norm = q4n_f32(g, il, "indexer.q_norm.weight", true, &ok);
         r->idx_k_norm = q4n_f32(g, il, "indexer.k_norm.weight", true, &ok);
-        if (!r->idx_qk && (!r->idx_q_proj || !r->idx_k_proj)) { fprintf(stderr, "qwen4: indexer q/k mancanti (layer %d)\n", il); ok = false; }
+        if (!skip_big && !r->idx_qk && (!r->idx_q_proj || !r->idx_k_proj)) { fprintf(stderr, "qwen4: indexer q/k mancanti (layer %d)\n", il); ok = false; }
     }
     if (is_ple) {
         r->ple_key = q4n_f32(g, il, "ple_key.weight", true, &ok);
@@ -179,6 +179,10 @@ static int q4n_layer_load(const LlmEngineMoeGguf* g, int il, bool is_linear, boo
     r->down_exps = q4n_packed(g, il, "ffn_down_exps.weight", &r->type_down_exps, &ok);
     if (!ok) { snprintf(err, errn, "layer %d: tensori mancanti", il); return -1; }
     return 0;
+}
+static int q4n_layer_load(const LlmEngineMoeGguf* g, int il, bool is_linear, bool is_ple,
+                          Q4nLayerRefs* r, char* err, size_t errn) {
+    return q4n_layer_load_ex(g, il, is_linear, is_ple, 0, r, err, errn);
 }
 
 #endif /* LLM_QWEN4_NATIVE_GGUF_H */

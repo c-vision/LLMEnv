@@ -17,6 +17,11 @@ static int q4n_gpu_init(Q4nGpu* g) {
     g->b = llm_dsv4_metal_create();
     return g->b ? 0 : -1;
 }
+static void q4n_gpu_reset(Q4nGpu* g) {
+    if (!g || !g->b) return;
+    for (int i = 0; i < g->n_views; i++) llm_dsv4_metal_release(g->b, g->views[i]);
+    g->n_views = 0;
+}
 static void q4n_gpu_free(Q4nGpu* g) {
     if (!g) return;
     for (int i = 0; i < g->n_views; i++) llm_dsv4_metal_release(g->b, g->views[i]);
@@ -32,7 +37,7 @@ static int q4n_gpu_gemv(Q4nGpu* g, const void* w, int type, size_t row_bytes,
     int slot = -1;
     for (int i = 0; i < g->n_views; i++) if (g->keys[i] == w) { slot = i; break; }
     if (slot < 0) {
-        if (g->n_views >= 256) return -1;
+        if (g->n_views >= 200) { q4n_gpu_reset(g); }
         size_t off = 0;
         void* h = llm_dsv4_metal_nocopy_ptr(g->b, w, bytes, &off);
         if (!h) return -1;
@@ -49,6 +54,29 @@ static int q4n_gpu_gemv(Q4nGpu* g, const void* w, int type, size_t row_bytes,
 static int q4n_gpu_gemv_batch(Q4nGpu* g, const LlmDsv4GpuJob* jobs, int n) {
     if (!g || !g->b) return -1;
     return llm_dsv4_metal_gemv_batch(g->b, jobs, n);
+}
+
+/* Matrice peso quantizzata (ptr nel mmap) o f32 (type=-1). */
+typedef struct { const void* w; int type; size_t row_bytes; } Q4nMat;
+typedef int (*Q4nMatMvFn)(void* ctx, const Q4nMat* W, const float* x, float* y, int n_in, int n_out);
+
+static int q4n_mat_mv_cpu(void* ctx, const Q4nMat* W, const float* x, float* y, int n_in, int n_out) {
+    (void)ctx;
+    if (!W || !W->w || !x || !y || n_in <= 0 || n_out <= 0) return -1;
+    const float* w = (const float*)W->w;
+    for (int o = 0; o < n_out; o++) {
+        double acc = 0.0;
+        for (int i = 0; i < n_in; i++) acc += (double)w[(size_t)o * n_in + i] * x[i];
+        y[o] = (float)acc;
+    }
+    return 0;
+}
+static int q4n_mat_mv_gpu(void* ctx, const Q4nMat* W, const float* x, float* y, int n_in, int n_out) {
+    Q4nGpu* g = (Q4nGpu*)ctx;
+    if (!W || !W->w) return -1;
+    if (W->type < 0) return q4n_mat_mv_cpu(NULL, W, x, y, n_in, n_out);
+    if (!g || !g->b) return -1;
+    return q4n_gpu_gemv(g, W->w, W->type, W->row_bytes, (uint32_t)n_in, (uint32_t)n_out, x, y);
 }
 
 #endif

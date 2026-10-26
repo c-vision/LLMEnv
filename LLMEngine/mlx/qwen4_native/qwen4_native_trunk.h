@@ -13,12 +13,13 @@
 #include <stdlib.h>
 #include "qwen4_native_hc_kernel.h"
 #include "qwen4_native_layer.h"
+#include "qwen4_native_gpu.h"
 
 typedef struct {
     const float* norm;    /* [hc*E] */
-    const float* down;    /* [rank][hc*E] */
-    const float* up;      /* [hc*E][rank] */
-    const float* inject;  /* [hc][hc*E] */
+    Q4nMat down;          /* [rank][hc*E] */
+    Q4nMat up;            /* [hc*E][rank] */
+    Q4nMat inject;        /* [hc][hc*E] */
     int rank;
 } Q4nHcW;
 
@@ -27,7 +28,7 @@ typedef int (*Q4nBlockFn)(void* ctx, mlx_array x, mlx_array* out, mlx_stream s);
 /* R:[1][hc*E] -> *mixed [1][E], *inj [1][hc] (grezza; hc_combine applica 2*sigmoid(x/hc)). */
 static int qwen4_native_hc_mix(mlx_array* mixed, mlx_array* inj, mlx_array R,
                                const Q4nHcW* w, int E, int hc, float eps,
-                               Q4nMvFn mv, void* mvctx, mlx_stream s) {
+                               Q4nMatMvFn mv, void* mvctx, mlx_stream s) {
     if (!mixed || !inj || !w || !mv || mlx_array_ndim(R) != 2) return -1;
     if (mlx_array_shape(R)[1] != hc * E || hc <= 0 || E <= 0 || w->rank <= 0) return -1;
     int nsh[1] = {hc * E};
@@ -44,25 +45,41 @@ static int qwen4_native_hc_mix(mlx_array* mixed, mlx_array* inj, mlx_array R,
     float* lo = malloc((size_t)w->rank * sizeof(float));
     float* iv = malloc((size_t)hc * sizeof(float));
     if (!lo || !iv) { free(lo); free(iv); mlx_array_free(xn); return -1; }
-    int ok = mv(mvctx, w->down, xh, lo, hc * E, w->rank) == 0;
+    int ok = mv(mvctx, &w->down, xh, lo, hc * E, w->rank) == 0;
     if (ok) {
-        if (w->inject) ok = mv(mvctx, w->inject, xh, iv, hc * E, hc) == 0;
+        if (w->inject.w) ok = mv(mvctx, &w->inject, xh, iv, hc * E, hc) == 0;
         else memset(iv, 0, (size_t)hc * sizeof(float));
     }
     if (!ok) { free(lo); free(iv); mlx_array_free(xn); return -1; }
-    int lsh[2] = {1, w->rank}, ish[2] = {1, hc};
-    mlx_array aLo = mlx_array_new_data(lo, lsh, 2, MLX_FLOAT32);
-    mlx_array aInj = mlx_array_new_data(iv, ish, 2, MLX_FLOAT32);
-    mlx_array aUp = mlx_array_new_data(w->up, (int[]){hc * E, w->rank}, 2, MLX_FLOAT32);
-    int rc = llm_q4n_hc_gate_mix(mixed, xn, aLo, aUp, hc, E, s);
-    if (rc == 0) {
-        /* eval PRIMA di liberare gli input del kernel (graph lazy) */
-        mlx_vector_array evm = mlx_vector_array_new();
-        mlx_vector_array_append_value(evm, *mixed);
-        mlx_eval(evm); mlx_vector_array_free(evm);
-        *inj = aInj;
-    } else mlx_array_free(aInj);
-    mlx_array_free(aLo); mlx_array_free(aUp); mlx_array_free(xn);
+    /* lo -> silu(lo/hc) -> gate = up @ sl (GPU se quantizzato); mixed in CPU (hcE piccolo) */
+    float* sl = malloc((size_t)w->rank * sizeof(float));
+    float* gate = malloc((size_t)hc * E * sizeof(float));
+    int rc = -1;
+    if (sl && gate) {
+        for (int r = 0; r < w->rank; r++) { float x = lo[r] / (float)hc; sl[r] = x / (1.0f + expf(-x)); }
+        rc = mv(mvctx, &w->up, sl, gate, w->rank, hc * E);
+        if (rc == 0) {
+            float* mo = malloc((size_t)E * sizeof(float));
+            if (mo) {
+                for (int d = 0; d < E; d++) {
+                    double acc = 0.0;
+                    for (int gg = 0; gg < hc; gg++) {
+                        float gv = gate[(size_t)gg * E + d];
+                        float sg = gv >= 0 ? 1.0f/(1.0f+expf(-gv)) : expf(gv)/(1.0f+expf(gv));
+                        acc += (double)sg * xh[(size_t)gg * E + d];
+                    }
+                    mo[d] = (float)(acc / hc);
+                }
+                int msh[2] = {1, E};
+                *mixed = mlx_array_new_data(mo, msh, 2, MLX_FLOAT32);
+                int ish[2] = {1, hc};
+                *inj = mlx_array_new_data(iv, ish, 2, MLX_FLOAT32);
+                free(mo);
+            } else rc = -1;
+        }
+    }
+    free(sl); free(gate);
+    mlx_array_free(xn);
     free(lo); free(iv);
     return rc;
 }
@@ -72,7 +89,7 @@ static int qwen4_native_trunk_layer(mlx_array* R_out, mlx_array R,
                                     Q4nBlockFn blk_attn, void* cattn,
                                     Q4nBlockFn blk_ffn, void* cffn,
                                     int E, int hc, float eps,
-                                    Q4nMvFn mv, void* mvctx, mlx_stream s) {
+                                    Q4nMatMvFn mv, void* mvctx, mlx_stream s) {
     if (!R_out || !attn_hc || !ffn_hc || !blk_attn || !blk_ffn) return -1;
     mlx_array m1 = mlx_array_new(), i1 = mlx_array_new();
     if (qwen4_native_hc_mix(&m1, &i1, R, attn_hc, E, hc, eps, mv, mvctx, s) != 0) goto fail;

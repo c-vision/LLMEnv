@@ -18,16 +18,12 @@
 #include "qwen4_native_layer.h"
 #include "qwen4_native_attn_kernel.h"
 #include "qwen4_native_indexer_kernel.h"
+#include "qwen4_native_gpu.h"
 
 typedef struct {
-    const float* attn_q;      /* [2*H*D][E] */
-    const float* attn_k;      /* [Hkv*D][E] */
-    const float* attn_v;      /* [Hkv*D][E] */
+    Q4nMat attn_q, attn_k, attn_v, attn_out, idx_q, idx_k;
     const float* attn_q_norm; /* [D] */
     const float* attn_k_norm; /* [D] */
-    const float* attn_out;    /* [E][H*D] */
-    const float* idx_q;       /* [Hi*Di][E] */
-    const float* idx_k;       /* [Di][E] */
     const float* idx_q_norm;  /* [Di] */
     const float* idx_k_norm;  /* [Di] */
     int H, Hkv, D, Hi, Di;
@@ -37,7 +33,7 @@ static int qwen4_native_attn_layer(mlx_array* out, mlx_array x,
                                    float* k_cache, float* v_cache, float* idx_cache,
                                    int cap, int pos,
                                    const Q4nAttnW* w, const float* rope_freq, int n_rot,
-                                   float eps, Q4nMvFn mv, void* mvctx, mlx_stream s) {
+                                   float eps, Q4nMatMvFn mv, void* mvctx, mlx_stream s) {
     if (!out || !w || !mv || !k_cache || !v_cache || !idx_cache || !rope_freq) return -1;
     if (mlx_array_ndim(x) != 2) return -1;
     const int E = mlx_array_shape(x)[1];
@@ -53,11 +49,11 @@ static int qwen4_native_attn_layer(mlx_array* out, mlx_array x,
     float* ik = malloc((size_t)Di * sizeof(float));
     float* op = malloc((size_t)E * sizeof(float));
     if (!qg || !kr || !vr || !qi || !ik || !op) { free(qg); free(kr); free(vr); free(qi); free(ik); free(op); return -1; }
-    int ok = mv(mvctx, w->attn_q, xh, qg, E, 2 * qd) == 0 &&
-             mv(mvctx, w->attn_k, xh, kr, E, kvd) == 0 &&
-             mv(mvctx, w->attn_v, xh, vr, E, kvd) == 0 &&
-             mv(mvctx, w->idx_q, xh, qi, E, Hi * Di) == 0 &&
-             mv(mvctx, w->idx_k, xh, ik, E, Di) == 0;
+    int ok = mv(mvctx, &w->attn_q, xh, qg, E, 2 * qd) == 0 &&
+             mv(mvctx, &w->attn_k, xh, kr, E, kvd) == 0 &&
+             mv(mvctx, &w->attn_v, xh, vr, E, kvd) == 0 &&
+             mv(mvctx, &w->idx_q, xh, qi, E, Hi * Di) == 0 &&
+             mv(mvctx, &w->idx_k, xh, ik, E, Di) == 0;
     if (!ok) { free(qg); free(kr); free(vr); free(qi); free(ik); free(op); return -1; }
 
     int shqg[2] = {1, 2 * qd}, shk[2] = {1, kvd}, shdi[2] = {1, Hi * Di}, shik[2] = {1, Di};
@@ -127,7 +123,7 @@ static int qwen4_native_attn_layer(mlx_array* out, mlx_array x,
     mlx_eval(ev); mlx_vector_array_free(ev);
     {
         const float* oh = mlx_array_data_float32(o);
-        ok = mv(mvctx, w->attn_out, oh, op, qd, E) == 0;
+        ok = mv(mvctx, &w->attn_out, oh, op, qd, E) == 0;
     }
     if (!ok) { mlx_array_free(o); goto fail3; }
     {

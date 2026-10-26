@@ -15,7 +15,18 @@
 #include "qwen4_native_moe_layer.h"
 #include "qwen4_native_moe_quant.h"
 #include "qwen4_native_ple.h"
+#include "qwen4_native_gpu.h"
 #include "llm_ggml.h"
+
+static Q4nMat q4n_mat_gguf(const LlmEngineMoeGguf* g, const char* nm) {
+    Q4nMat m = {NULL, -1, 0};
+    int i = llm_gguf_find_tensor(g, nm);
+    if (i < 0) return m;
+    m.w = llm_gguf_tensor_data(g, i, NULL);
+    m.type = g->ti[i].type;
+    m.row_bytes = (size_t)llm_ggml_nbytes(m.type, (int64_t)g->ti[i].dims[0]);
+    return m;
+}
 
 typedef struct {
     int cap, pos;
@@ -152,43 +163,138 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
         int is_ple = llm_gguf_find_tensor(&m->gguf, pkn) >= 0;
         int is_linear = (il == 0);
         if (m->layer_linear) is_linear = m->layer_linear[il];
-        Q4nLayerRefs refs; char err[256] = {0};
-        if (q4n_layer_load(&m->gguf, il, is_linear, is_ple, &refs, err, sizeof err) != 0) continue;
+        Q4nLayerRefs refs;
+        if (m->gpu_ok) {
+            if (!m->lrefs_ok[il]) {
+                char err[256] = {0};
+                if (q4n_layer_load_ex(&m->gguf, il, is_linear, is_ple, 1, &m->lrefs[il], err, sizeof err) != 0) continue;
+                m->lrefs_ok[il] = 1;
+            }
+            refs = m->lrefs[il];
+        } else {
+            char err[256] = {0};
+            if (q4n_layer_load_ex(&m->gguf, il, is_linear, is_ple, 0, &refs, err, sizeof err) != 0) continue;
+        }
         if (is_ple && m->ple_meta.n_heads > 0) {
             if (qwen4_native_ple_layer(&aR, &m->gguf, il, &refs, &m->ple_meta, &m->ple_st, token,
                                        E, hc, h->ple_ng, h->ple_eos, h->ple_conv, h->eps,
                                        q4n_default_mv, s) != 0) return -1;
         }
-        Q4nHcW wa = {refs.hc_attn_norm, refs.hc_attn_down, refs.hc_attn_up, refs.hc_attn_inject, h->rank};
+        Q4nHcW wa; wa.norm = refs.hc_attn_norm; wa.rank = h->rank;
+        { char b3[96];
+          if (m->gpu_ok) {
+              snprintf(b3,sizeof b3,"blk.%d.hc_attn_down.weight", il);   wa.down = q4n_mat_gguf(&m->gguf, b3);
+              snprintf(b3,sizeof b3,"blk.%d.hc_attn_up.weight", il);     wa.up = q4n_mat_gguf(&m->gguf, b3);
+              wa.inject = (Q4nMat){refs.hc_attn_inject,-1,0};   /* piccolo: CPU */
+          } else {
+              wa.down = (Q4nMat){refs.hc_attn_down,-1,0}; wa.up = (Q4nMat){refs.hc_attn_up,-1,0};
+              wa.inject = (Q4nMat){refs.hc_attn_inject,-1,0};
+          } }
         mlx_array m1 = mlx_array_new(), i1 = mlx_array_new();
-        if (qwen4_native_hc_mix(&m1, &i1, aR, &wa, E, hc, h->eps, q4n_default_mv, NULL, s) != 0) return -1;
+        if (qwen4_native_hc_mix(&m1, &i1, aR, &wa, E, hc, h->eps, q4n_mat_mv_gpu,
+                                m->gpu_ok ? &m->gpu : NULL, s) != 0) return -1;
         mlx_array blk = mlx_array_new();
         if (!is_linear) {
-            const float* iq = refs.idx_q_proj;
-            const float* ik = refs.idx_k_proj;
-            if (!iq && refs.idx_qk) { iq = refs.idx_qk; ik = refs.idx_qk + (size_t)h->Hi * h->Di * h->E; }
-            Q4nAttnW aw = {refs.attn_q, refs.attn_k, refs.attn_v, refs.attn_q_norm, refs.attn_k_norm,
-                           refs.attn_out, iq, ik, refs.idx_q_norm, refs.idx_k_norm,
-                           h->H, h->Hkv, h->D, h->Hi, h->Di};
             size_t stride = (size_t)h->Hkv * h->D;
             float* kc = m->st.k_cache + (size_t)il * m->st.cap * stride;
             float* vc = m->st.v_cache + (size_t)il * m->st.cap * stride;
             float* ic = m->st.idx_cache + (size_t)il * m->st.cap * h->Di;
-            if (qwen4_native_attn_layer(&blk, m1, kc, vc, ic, m->st.cap, pos, &aw,
-                                        m->rope_freq, h->n_rot, h->eps, q4n_default_mv, NULL, s) != 0) return -1;
+            Q4nAttnW aw; memset(&aw, 0, sizeof aw);
+            aw.attn_q_norm = refs.attn_q_norm; aw.attn_k_norm = refs.attn_k_norm;
+            aw.idx_q_norm = refs.idx_q_norm; aw.idx_k_norm = refs.idx_k_norm;
+            aw.H = h->H; aw.Hkv = h->Hkv; aw.D = h->D; aw.Hi = h->Hi; aw.Di = h->Di;
+            int attn_gpu = 0;
+            if (m->gpu_ok) {
+                char b2[96];
+                snprintf(b2,sizeof b2,"blk.%d.attn_q.weight", il); aw.attn_q = q4n_mat_gguf(&m->gguf, b2);
+                snprintf(b2,sizeof b2,"blk.%d.attn_k.weight", il); aw.attn_k = q4n_mat_gguf(&m->gguf, b2);
+                snprintf(b2,sizeof b2,"blk.%d.attn_v.weight", il); aw.attn_v = q4n_mat_gguf(&m->gguf, b2);
+                snprintf(b2,sizeof b2,"blk.%d.attn_output.weight", il); aw.attn_out = q4n_mat_gguf(&m->gguf, b2);
+                snprintf(b2,sizeof b2,"blk.%d.indexer.qk_proj.weight", il); Q4nMat qk = q4n_mat_gguf(&m->gguf, b2);
+                if (qk.w) { aw.idx_q = qk; aw.idx_k = qk; aw.idx_k.w = (const uint8_t*)qk.w + (size_t)h->Hi * h->Di * qk.row_bytes; }
+                else {
+                    snprintf(b2,sizeof b2,"blk.%d.indexer.q_proj.weight", il); aw.idx_q = q4n_mat_gguf(&m->gguf, b2);
+                    snprintf(b2,sizeof b2,"blk.%d.indexer.k_proj.weight", il); aw.idx_k = q4n_mat_gguf(&m->gguf, b2);
+                }
+                const Q4nMat* am[6] = {&aw.attn_q,&aw.attn_k,&aw.attn_v,&aw.attn_out,&aw.idx_q,&aw.idx_k};
+                attn_gpu = 1;
+                for (int mi = 0; mi < 6; mi++) { int t = am[mi]->type; if (!(t==8||t==10||t==16)) attn_gpu = 0; }
+            }
+            if (attn_gpu) {
+                if (qwen4_native_attn_layer(&blk, m1, kc, vc, ic, m->st.cap, pos, &aw,
+                                            m->rope_freq, h->n_rot, h->eps, q4n_mat_mv_gpu, &m->gpu, s) != 0) return -1;
+            } else {
+                { Q4nLayerRefs rr; char e2[256];
+                  if (q4n_layer_load_ex(&m->gguf, il, is_linear, is_ple, 0, &rr, e2, sizeof e2) == 0) refs = rr; }
+                const float* iq = refs.idx_q_proj;
+                const float* ik = refs.idx_k_proj;
+                if (!iq && refs.idx_qk) { iq = refs.idx_qk; ik = refs.idx_qk + (size_t)h->Hi * h->Di * h->E; }
+                memset(&aw, 0, sizeof aw);
+                aw.attn_q = (Q4nMat){refs.attn_q,-1,0}; aw.attn_k = (Q4nMat){refs.attn_k,-1,0};
+                aw.attn_v = (Q4nMat){refs.attn_v,-1,0}; aw.attn_out = (Q4nMat){refs.attn_out,-1,0};
+                aw.idx_q = (Q4nMat){iq,-1,0}; aw.idx_k = (Q4nMat){ik,-1,0};
+                aw.attn_q_norm = refs.attn_q_norm; aw.attn_k_norm = refs.attn_k_norm;
+                aw.idx_q_norm = refs.idx_q_norm; aw.idx_k_norm = refs.idx_k_norm;
+                aw.H = h->H; aw.Hkv = h->Hkv; aw.D = h->D; aw.Hi = h->Hi; aw.Di = h->Di;
+                if (qwen4_native_attn_layer(&blk, m1, kc, vc, ic, m->st.cap, pos, &aw,
+                                            m->rope_freq, h->n_rot, h->eps, q4n_mat_mv_gpu, NULL, s) != 0) return -1;
+            }
         } else {
-        Q4nGdnW gw = {refs.attn_qkv, refs.attn_gate, refs.ssm_beta, refs.ssm_alpha, refs.ssm_conv1d,
-                      refs.ssm_a, refs.ssm_dt, refs.ssm_norm, refs.ssm_out,
-                      2 * h->lin_Hk * h->lin_D + h->lin_Hv * h->lin_D, h->lin_Hv * h->lin_D,
-                      h->lin_Hk, h->lin_Hv, h->lin_D};
-        if (qwen4_native_gdn_layer(&blk, m1, &m->st.conv_hist[il], &m->st.lin_state[il], &gw,
-                                   q4n_default_mv, NULL, s) != 0) return -1;
+        Q4nGdnW gw;
+        if (m->gpu_ok) {
+            char b1[96];
+            snprintf(b1,sizeof b1,"blk.%d.attn_qkv.weight", il);   gw.lin_qkv = q4n_mat_gguf(&m->gguf, b1);
+            snprintf(b1,sizeof b1,"blk.%d.attn_gate.weight", il);  gw.lin_gate = q4n_mat_gguf(&m->gguf, b1);
+            snprintf(b1,sizeof b1,"blk.%d.ssm_beta.weight", il);   gw.lin_beta = q4n_mat_gguf(&m->gguf, b1);
+            snprintf(b1,sizeof b1,"blk.%d.ssm_alpha.weight", il);  gw.lin_alpha = q4n_mat_gguf(&m->gguf, b1);
+            snprintf(b1,sizeof b1,"blk.%d.ssm_out.weight", il);    gw.lin_out = q4n_mat_gguf(&m->gguf, b1);
+            gw.lin_conv = refs.ssm_conv1d; gw.lin_a = refs.ssm_a; gw.lin_dt = refs.ssm_dt; gw.lin_norm = refs.ssm_norm;
+            gw.conv_dim = 2 * h->lin_Hk * h->lin_D + h->lin_Hv * h->lin_D;
+            gw.v_dim = h->lin_Hv * h->lin_D;
+            gw.Hk = h->lin_Hk; gw.Hv = h->lin_Hv; gw.D = h->lin_D;
+            const Q4nMat* ms[5] = {&gw.lin_qkv,&gw.lin_gate,&gw.lin_beta,&gw.lin_alpha,&gw.lin_out};
+            int gpu_ok_mats = 1;
+            for (int mi = 0; mi < 5; mi++) { int t = ms[mi]->type; if (!(t==8||t==10||t==16)) gpu_ok_mats = 0; }
+            if (!gpu_ok_mats) {   /* tipi non gestiti dal backend: ricarica f32 e usa la CPU */
+                { char e2[256]; Q4nLayerRefs rr; if (q4n_layer_load_ex(&m->gguf, il, is_linear, is_ple, 0, &rr, e2, sizeof e2) == 0) refs = rr; }
+                gw = (Q4nGdnW){{refs.attn_qkv,-1,0},{refs.attn_gate,-1,0},{refs.ssm_beta,-1,0},
+                               {refs.ssm_alpha,-1,0},{refs.ssm_out,-1,0},
+                               refs.ssm_conv1d, refs.ssm_a, refs.ssm_dt, refs.ssm_norm,
+                               2 * h->lin_Hk * h->lin_D + h->lin_Hv * h->lin_D, h->lin_Hv * h->lin_D,
+                               h->lin_Hk, h->lin_Hv, h->lin_D};
+                if (qwen4_native_gdn_layer(&blk, m1, &m->st.conv_hist[il], &m->st.lin_state[il], &gw,
+                                           q4n_mat_mv_gpu, NULL, s) != 0) return -1;
+                goto gdn_done;
+            }
+            if (qwen4_native_gdn_layer(&blk, m1, &m->st.conv_hist[il], &m->st.lin_state[il], &gw,
+                                       q4n_mat_mv_gpu, &m->gpu, s) != 0) return -1;
+            goto gdn_done;
+        } else {
+            gw = (Q4nGdnW){{refs.attn_qkv,-1,0},{refs.attn_gate,-1,0},{refs.ssm_beta,-1,0},
+                           {refs.ssm_alpha,-1,0},{refs.ssm_out,-1,0},
+                           refs.ssm_conv1d, refs.ssm_a, refs.ssm_dt, refs.ssm_norm,
+                           2 * h->lin_Hk * h->lin_D + h->lin_Hv * h->lin_D, h->lin_Hv * h->lin_D,
+                           h->lin_Hk, h->lin_Hv, h->lin_D};
+            if (qwen4_native_gdn_layer(&blk, m1, &m->st.conv_hist[il], &m->st.lin_state[il], &gw,
+                                       q4n_mat_mv_gpu, NULL, s) != 0) return -1;
+        }
+gdn_done: ;
         }
         mlx_array R1 = mlx_array_new();
         if (llm_q4n_hc_combine(&R1, aR, blk, i1, s) != 0) return -1;
-        Q4nHcW wf = {refs.hc_ffn_norm, refs.hc_ffn_down, refs.hc_ffn_up, refs.hc_ffn_inject, h->rank};
+        Q4nHcW wf; wf.norm = refs.hc_ffn_norm; wf.rank = h->rank;
+        { char b3[96];
+          if (m->gpu_ok) {
+              snprintf(b3,sizeof b3,"blk.%d.hc_ffn_down.weight", il);   wf.down = q4n_mat_gguf(&m->gguf, b3);
+              snprintf(b3,sizeof b3,"blk.%d.hc_ffn_up.weight", il);     wf.up = q4n_mat_gguf(&m->gguf, b3);
+              wf.inject = (Q4nMat){refs.hc_ffn_inject,-1,0};
+          } else {
+              wf.down = (Q4nMat){refs.hc_ffn_down,-1,0}; wf.up = (Q4nMat){refs.hc_ffn_up,-1,0};
+              wf.inject = (Q4nMat){refs.hc_ffn_inject,-1,0};
+          } }
         mlx_array m2 = mlx_array_new(), i2 = mlx_array_new();
-        if (qwen4_native_hc_mix(&m2, &i2, R1, &wf, E, hc, h->eps, q4n_default_mv, NULL, s) != 0) return -1;
+        if (qwen4_native_hc_mix(&m2, &i2, R1, &wf, E, hc, h->eps, q4n_mat_mv_gpu,
+                                m->gpu_ok ? &m->gpu : NULL, s) != 0) return -1;
         mlx_array b2 = mlx_array_new();
         if (m->use_moe) {
             if (qwen4_native_moe_quant_gpu(&b2, m2, &m->gguf, il, &refs, E, h->NE, h->K, h->F,
@@ -204,15 +310,21 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
         aR = R2;
         mlx_array_free(R1); mlx_array_free(m1); mlx_array_free(i1);
         mlx_array_free(m2); mlx_array_free(i2); mlx_array_free(blk); mlx_array_free(b2);
-        q4n_layer_free(&refs);
+        if (!m->gpu_ok) q4n_layer_free(&refs);
+        if (m->gpu_ok) q4n_gpu_reset(&m->gpu);   /* le viste sono per-layer */
 #if defined(__APPLE__)
         { extern void malloc_zone_pressure_relief(void*, unsigned long); malloc_zone_pressure_relief((void*)0, 0); }
 #endif
     }
     /* output_hc_mix (no inject) -> mixed [E] */
-    Q4nHcW wo = {m->out_norm, m->out_down, m->out_up, NULL, h->rank};
+    Q4nHcW wo; wo.norm = m->out_norm; wo.rank = h->rank; wo.inject = (Q4nMat){NULL,-1,0};
+    if (m->gpu_ok) {
+        wo.down = q4n_mat_gguf(&m->gguf, "output_hc_down.weight");
+        wo.up   = q4n_mat_gguf(&m->gguf, "output_hc_up.weight");
+    } else { wo.down = (Q4nMat){m->out_down,-1,0}; wo.up = (Q4nMat){m->out_up,-1,0}; }
     mlx_array mixed = mlx_array_new(), dummy = mlx_array_new();
-    if (qwen4_native_hc_mix(&mixed, &dummy, aR, &wo, E, hc, h->eps, q4n_default_mv, NULL, s) != 0) return -1;
+    if (qwen4_native_hc_mix(&mixed, &dummy, aR, &wo, E, hc, h->eps, q4n_mat_mv_gpu,
+                            m->gpu_ok ? &m->gpu : NULL, s) != 0) return -1;
     mlx_vector_array ev = mlx_vector_array_new();
     mlx_vector_array_append_value(ev, mixed);
     mlx_eval(ev); mlx_vector_array_free(ev);

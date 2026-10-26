@@ -11,20 +11,17 @@
 
 #include "mlx/c/mlx.h"
 #include "qwen4_native_gdn_kernel.h"
+#include "qwen4_native_gpu.h"
 
 /* W e' [n_out][n_in] f32 row-major; y = W*x. 0 = ok. */
 typedef int (*Q4nMvFn)(void* ctx, const float* W, const float* x, float* y, int n_in, int n_out);
 
 typedef struct {
-    const float* lin_qkv;   /* [conv_dim][E] */
-    const float* lin_gate;  /* [v_dim][E] */
-    const float* lin_beta;  /* [Hv][E] */
-    const float* lin_alpha; /* [Hv][E] */
-    const float* lin_conv;  /* [conv_dim][K] */
-    const float* lin_a;     /* [Hv] (ssm_a) */
-    const float* lin_dt;    /* [Hv] */
-    const float* lin_norm;  /* [D] */
-    const float* lin_out;   /* [E][v_dim] */
+    Q4nMat lin_qkv, lin_gate, lin_beta, lin_alpha, lin_out;
+    const float* lin_conv;
+    const float* lin_a;
+    const float* lin_dt;
+    const float* lin_norm;
     int conv_dim, v_dim, Hk, Hv, D;
 } Q4nGdnW;
 
@@ -42,7 +39,7 @@ static int q4n_default_mv(void* ctx, const float* W, const float* x, float* y, i
 /* x:[T][E] -> *out [T][E]. conv_hist:[K-1][conv_dim], lin_state:[Hv][D][D] (in/out). */
 static int qwen4_native_gdn_layer(mlx_array* out, mlx_array x,
                                   mlx_array* conv_hist, mlx_array* lin_state,
-                                  const Q4nGdnW* w, Q4nMvFn mv, void* mvctx, mlx_stream s) {
+                                  const Q4nGdnW* w, Q4nMatMvFn mv, void* mvctx, mlx_stream s) {
     if (!out || !w || !mv || !conv_hist || !lin_state) return -1;
     if (mlx_array_ndim(x) != 2) return -1;
     const int T = mlx_array_shape(x)[0], E = mlx_array_shape(x)[1];
@@ -62,10 +59,10 @@ static int qwen4_native_gdn_layer(mlx_array* out, mlx_array x,
     if (!qkv || !z || !a || !b || !op) { free(qkv); free(z); free(a); free(b); free(op); return -1; }
     for (int t = 0; t < T; t++) {
         const float* xr = xh + (size_t)t * E;
-        if (mv(mvctx, w->lin_qkv, xr, qkv + (size_t)t * cd, E, cd) != 0 ||
-            mv(mvctx, w->lin_gate, xr, z + (size_t)t * vd, E, vd) != 0 ||
-            mv(mvctx, w->lin_beta, xr, b + (size_t)t * Hv, E, Hv) != 0 ||
-            mv(mvctx, w->lin_alpha, xr, a + (size_t)t * Hv, E, Hv) != 0) {
+        if (mv(mvctx, &w->lin_qkv, xr, qkv + (size_t)t * cd, E, cd) != 0 ||
+            mv(mvctx, &w->lin_gate, xr, z + (size_t)t * vd, E, vd) != 0 ||
+            mv(mvctx, &w->lin_beta, xr, b + (size_t)t * Hv, E, Hv) != 0 ||
+            mv(mvctx, &w->lin_alpha, xr, a + (size_t)t * Hv, E, Hv) != 0) {
             free(qkv); free(z); free(a); free(b); free(op); return -1;
         }
     }
@@ -97,7 +94,7 @@ static int qwen4_native_gdn_layer(mlx_array* out, mlx_array x,
     {
         const float* oh = mlx_array_data_float32(o2);
         for (int t = 0; t < T; t++)
-            if (mv(mvctx, w->lin_out, oh + (size_t)t * vd, op + (size_t)t * E, vd, E) != 0) {
+            if (mv(mvctx, &w->lin_out, oh + (size_t)t * vd, op + (size_t)t * E, vd, E) != 0) {
                 goto fail4;
             }
     }
