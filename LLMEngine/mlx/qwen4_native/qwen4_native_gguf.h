@@ -79,7 +79,7 @@ typedef struct {
     float *hc_ffn_norm, *hc_ffn_down, *hc_ffn_up, *hc_ffn_inject;
     float *attn_qkv, *attn_gate, *ssm_conv1d, *ssm_dt, *ssm_a, *ssm_beta, *ssm_alpha, *ssm_norm, *ssm_out;
     float *attn_q, *attn_k, *attn_v, *attn_out, *attn_q_norm, *attn_k_norm;
-    float *idx_q_proj, *idx_k_proj, *idx_q_norm, *idx_k_norm;
+    float *idx_q_proj, *idx_k_proj, *idx_q_norm, *idx_k_norm, *idx_qk;
     float *ple_key, *ple_value, *ple_norm_key, *ple_norm_query, *ple_norm_conv, *ple_conv;
     float *gate_inp, *gate_inp_sh, *gate_sh, *up_sh, *down_sh;
     const uint8_t *gate_exps, *up_exps, *down_exps;
@@ -116,7 +116,7 @@ static void q4n_layer_free(Q4nLayerRefs* r) {
     F(attn_qkv); F(attn_gate); F(ssm_conv1d); F(ssm_dt); F(ssm_a); F(ssm_beta);
     F(ssm_alpha); F(ssm_norm); F(ssm_out);
     F(attn_q); F(attn_k); F(attn_v); F(attn_out); F(attn_q_norm); F(attn_k_norm);
-    F(idx_q_proj); F(idx_k_proj); F(idx_q_norm); F(idx_k_norm);
+    F(idx_q_proj); F(idx_k_proj); F(idx_q_norm); F(idx_k_norm); F(idx_qk);
     F(ple_key); F(ple_value); F(ple_norm_key); F(ple_norm_query); F(ple_norm_conv); F(ple_conv);
     F(gate_inp); F(gate_inp_sh); F(gate_sh); F(up_sh); F(down_sh);
 #undef F
@@ -154,10 +154,12 @@ static int q4n_layer_load(const LlmEngineMoeGguf* g, int il, bool is_linear, boo
         r->attn_out = q4n_f32(g, il, "attn_output.weight", true, &ok);
         r->attn_q_norm = q4n_f32(g, il, "attn_q_norm.weight", true, &ok);
         r->attn_k_norm = q4n_f32(g, il, "attn_k_norm.weight", true, &ok);
-        r->idx_q_proj = q4n_f32(g, il, "indexer.q_proj.weight", true, &ok);
-        r->idx_k_proj = q4n_f32(g, il, "indexer.k_proj.weight", true, &ok);
+        r->idx_q_proj = q4n_f32(g, il, "indexer.q_proj.weight", false, &ok);
+        r->idx_k_proj = q4n_f32(g, il, "indexer.k_proj.weight", false, &ok);
+        r->idx_qk = q4n_f32(g, il, "indexer.qk_proj.weight", false, &ok);
         r->idx_q_norm = q4n_f32(g, il, "indexer.q_norm.weight", true, &ok);
         r->idx_k_norm = q4n_f32(g, il, "indexer.k_norm.weight", true, &ok);
+        if (!r->idx_qk && (!r->idx_q_proj || !r->idx_k_proj)) { fprintf(stderr, "qwen4: indexer q/k mancanti (layer %d)\n", il); ok = false; }
     }
     if (is_ple) {
         r->ple_key = q4n_f32(g, il, "ple_key.weight", true, &ok);

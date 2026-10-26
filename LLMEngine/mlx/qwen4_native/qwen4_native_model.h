@@ -33,6 +33,7 @@ typedef struct {
     Q4nState st;
     int use_moe;         /* 0 = salta il blocco MoE (smoke/f32) */
     int* layer_linear;   /* [L] da model.gmb.config layer_types */
+    float* rope_freq;    /* [n_rot/2] */
 } Q4nModel;
 
 static void q4n_state_free(Q4nState* st, int L) {
@@ -72,6 +73,8 @@ static int q4n_model_open(Q4nModel* m, const char* path, int cap, int use_moe) {
           p = n;
       }
     }
+    m->rope_freq = malloc((size_t)(h->n_rot / 2) * sizeof(float));
+    for (int i = 0; i < h->n_rot / 2; i++) m->rope_freq[i] = (float)pow((double)h->rope_base, -2.0 * i / (double)h->n_rot);
     m->st.cap = cap;
     m->st.k_cache = calloc((size_t)h->L * cap * h->Hkv * h->D, sizeof(float));
     m->st.v_cache = calloc((size_t)h->L * cap * h->Hkv * h->D, sizeof(float));
@@ -92,7 +95,7 @@ static void q4n_model_free(Q4nModel* m) {
     if (!m) return;
     q4n_state_free(&m->st, m->hp.L);
     free(m->token_embd); free(m->output);
-    free(m->out_norm); free(m->out_down); free(m->out_up); free(m->layer_linear);
+    free(m->out_norm); free(m->out_down); free(m->out_up); free(m->layer_linear); free(m->rope_freq);
     llm_gguf_close_file(&m->gguf, m->map, m->maplen);
 }
 
@@ -122,7 +125,18 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
         if (qwen4_native_hc_mix(&m1, &i1, aR, &wa, E, hc, h->eps, q4n_default_mv, NULL, s) != 0) return -1;
         mlx_array blk = mlx_array_new();
         if (!is_linear) {
-            /* TODO P7g: attention path (blk resta vuoto) */
+            const float* iq = refs.idx_q_proj;
+            const float* ik = refs.idx_k_proj;
+            if (!iq && refs.idx_qk) { iq = refs.idx_qk; ik = refs.idx_qk + (size_t)h->Hi * h->Di * h->E; }
+            Q4nAttnW aw = {refs.attn_q, refs.attn_k, refs.attn_v, refs.attn_q_norm, refs.attn_k_norm,
+                           refs.attn_out, iq, ik, refs.idx_q_norm, refs.idx_k_norm,
+                           h->H, h->Hkv, h->D, h->Hi, h->Di};
+            size_t stride = (size_t)h->Hkv * h->D;
+            float* kc = m->st.k_cache + (size_t)il * m->st.cap * stride;
+            float* vc = m->st.v_cache + (size_t)il * m->st.cap * stride;
+            float* ic = m->st.idx_cache + (size_t)il * m->st.cap * h->Di;
+            if (qwen4_native_attn_layer(&blk, m1, kc, vc, ic, m->st.cap, pos, &aw,
+                                        m->rope_freq, h->n_rot, h->eps, q4n_default_mv, NULL, s) != 0) return -1;
         } else {
         Q4nGdnW gw = {refs.attn_qkv, refs.attn_gate, refs.ssm_beta, refs.ssm_alpha, refs.ssm_conv1d,
                       refs.ssm_a, refs.ssm_dt, refs.ssm_norm, refs.ssm_out,
