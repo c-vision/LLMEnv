@@ -683,6 +683,17 @@ if(LLM_BUILD_DSV4_TESTS)
         $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
     set_target_properties(llm_qwen4_native_gen PROPERTIES LINKER_LANGUAGE CXX)
 
+    add_executable(llm_qwen4_native_ppl tests/llm_qwen4_native_ppl.c)
+    target_link_libraries(llm_qwen4_native_ppl PRIVATE llm_ai_mlx llmcodec_ggml llmcodec
+        /Users/gaetano/Documents/Projects/GMBasic/native/gmb_runtime_c/build/llmtoken_build/libllmtoken.dylib)
+    target_include_directories(llm_qwen4_native_ppl PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMToken
+        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
+    set_target_properties(llm_qwen4_native_ppl PROPERTIES LINKER_LANGUAGE CXX)
+
     add_executable(llm_qwen4_native_ple_rows_test tests/llm_qwen4_native_ple_test.c tests/q4n_ple_synth.c)
     target_link_libraries(llm_qwen4_native_ple_rows_test PRIVATE llm_ai_mlx llmcodec_ggml llmcodec)
     target_include_directories(llm_qwen4_native_ple_rows_test PRIVATE

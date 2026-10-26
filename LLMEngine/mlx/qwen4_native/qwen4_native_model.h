@@ -15,6 +15,7 @@
 #include "qwen4_native_moe_layer.h"
 #include "qwen4_native_moe_quant.h"
 #include "qwen4_native_ple.h"
+#include "llm_ggml.h"
 
 typedef struct {
     int cap, pos;
@@ -38,12 +39,26 @@ typedef struct {
     float* rope_freq;    /* [n_rot/2] */
     Q4nPleMeta ple_meta;
     Q4nPleState ple_st;
+    Q4nLayerRefs* lrefs;      /* [L] caricati una volta */
+    uint8_t* lrefs_ok;
 } Q4nModel;
 
 static void q4n_state_free(Q4nState* st, int L) {
     for (int i = 0; i < L; i++) { mlx_array_free(st->conv_hist[i]); mlx_array_free(st->lin_state[i]); }
     free(st->k_cache); free(st->v_cache); free(st->idx_cache);
     memset(st, 0, sizeof *st);
+}
+
+/* riga `row` di un tensore GGUF [cols,in ...]: dequant in out (cols valori). */
+static int q4n_tensor_row(const LlmEngineMoeGguf* g, const char* name, uint64_t row, float* out) {
+    int i = llm_gguf_find_tensor(g, name);
+    if (i < 0) return -1;
+    int type = g->ti[i].type;
+    uint64_t cols = (uint64_t)g->ti[i].dims[0];
+    int rb = (int)llm_ggml_nbytes(type, (int64_t)cols);
+    const uint8_t* base = llm_gguf_tensor_data(g, i, NULL);
+    if (!base || rb <= 0) return -1;
+    return llmcodec_ggml_dequant_row(type, base + row * (uint64_t)rb, out, (int64_t)cols);
 }
 
 static int q4n_model_open(Q4nModel* m, const char* path, int cap, int use_moe) {
@@ -54,13 +69,12 @@ static int q4n_model_open(Q4nModel* m, const char* path, int cap, int use_moe) {
     char err[256] = {0};
     if (q4n_hparams(&m->gguf, &m->hp, err, sizeof err) != 0) return -1;
     const Q4nHp* h = &m->hp;
-    m->token_embd = llm_gguf_load_f32(&m->gguf, "token_embd.weight", NULL);
-    m->output = llm_gguf_load_f32(&m->gguf, "output.weight", NULL);
+    m->token_embd = NULL; m->output = NULL;   /* letti a riga (RAM costante) */
     bool ok = true;
     m->out_norm = q4n_f32_global(&m->gguf, "output_hc_norm.weight", true, &ok);
     m->out_down = q4n_f32_global(&m->gguf, "output_hc_down.weight", true, &ok);
     m->out_up = q4n_f32_global(&m->gguf, "output_hc_up.weight", true, &ok);
-    if (!m->token_embd || !m->output || !m->out_norm || !m->out_down || !m->out_up) return -1;
+    if (!m->out_norm || !m->out_down || !m->out_up) return -1;
     m->use_moe = use_moe;
     m->layer_linear = calloc((size_t)h->L, sizeof(int));
     { const LlmGgufVal* cv = llm_gguf_find_val(&m->gguf, "model.gmb.config");
@@ -77,6 +91,8 @@ static int q4n_model_open(Q4nModel* m, const char* path, int cap, int use_moe) {
           p = n;
       }
     }
+    m->lrefs = calloc((size_t)h->L, sizeof(Q4nLayerRefs));
+    m->lrefs_ok = calloc((size_t)h->L, 1);
     m->rope_freq = malloc((size_t)(h->n_rot / 2) * sizeof(float));
     for (int i = 0; i < h->n_rot / 2; i++) m->rope_freq[i] = (float)pow((double)h->rope_base, -2.0 * i / (double)h->n_rot);
     if (q4n_ple_meta(&m->gguf, &m->hp, &m->ple_meta) != 0) { m->ple_meta.n_heads = 0; }
@@ -106,7 +122,8 @@ static int q4n_model_open(Q4nModel* m, const char* path, int cap, int use_moe) {
 static void q4n_model_free(Q4nModel* m) {
     if (!m) return;
     q4n_state_free(&m->st, m->hp.L);
-    free(m->token_embd); free(m->output);
+    if (m->lrefs) for (int i = 0; i < m->hp.L; i++) if (m->lrefs_ok && m->lrefs_ok[i]) q4n_layer_free(&m->lrefs[i]);
+    free(m->lrefs); free(m->lrefs_ok);
     free(m->out_norm); free(m->out_down); free(m->out_up); free(m->layer_linear); free(m->rope_freq);
     llm_gguf_close_file(&m->gguf, m->map, m->maplen);
 }
@@ -123,16 +140,16 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
     const int pos = m->st.pos;
     float* R = malloc((size_t)hd * sizeof(float));
     if (!R) return -1;
-    for (int d = 0; d < E; d++) R[d] = m->token_embd[(size_t)token * E + d];
+    if (q4n_tensor_row(&m->gguf, "token_embd.weight", (uint64_t)token, R) != 0) { free(R); return -1; }
     for (int st = 1; st < hc; st++) memcpy(R + (size_t)st * E, R, (size_t)E * sizeof(float));
     int rsh[2] = {1, hd};
     mlx_array aR = mlx_array_new_data(R, rsh, 2, MLX_FLOAT32);
     for (int il = 0; il < h->L; il++) {
-        Q4nLayerRefs refs; char err[256] = {0};
         char pkn[64]; snprintf(pkn, sizeof pkn, "blk.%d.ple_key.weight", il);
         int is_ple = llm_gguf_find_tensor(&m->gguf, pkn) >= 0;
-        int is_linear = (il == 0);   /* smoke: layer 0 lineare; il resto verra' da layer_linear */
+        int is_linear = (il == 0);
         if (m->layer_linear) is_linear = m->layer_linear[il];
+        Q4nLayerRefs refs; char err[256] = {0};
         if (q4n_layer_load(&m->gguf, il, is_linear, is_ple, &refs, err, sizeof err) != 0) continue;
         if (is_ple && m->ple_meta.n_heads > 0) {
             if (qwen4_native_ple_layer(&aR, &m->gguf, il, &refs, &m->ple_meta, &m->ple_st, token,
@@ -184,6 +201,9 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
         mlx_array_free(R1); mlx_array_free(m1); mlx_array_free(i1);
         mlx_array_free(m2); mlx_array_free(i2); mlx_array_free(blk); mlx_array_free(b2);
         q4n_layer_free(&refs);
+#if defined(__APPLE__)
+        { extern void malloc_zone_pressure_relief(void*, unsigned long); malloc_zone_pressure_relief((void*)0, 0); }
+#endif
     }
     /* output_hc_mix (no inject) -> mixed [E] */
     Q4nHcW wo = {m->out_norm, m->out_down, m->out_up, NULL, h->rank};
@@ -198,11 +218,26 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
     /* lm_head: quante righe? dedotto dal metadata vocab_size */
     const uint64_t vs = llm_gguf_u(&m->gguf, "qwen4exp.vocab_size", 0, "qwen4_exp.vocab_size");
     if (vs == 0) return -1;
-    for (uint64_t v = 0; v < vs; v++) {
-        const float* row = m->output + v * E;
-        double acc = 0.0;
-        for (int d = 0; d < E; d++) acc += (double)row[d] * mh[d];
-        logits[v] = (float)acc;
+    {   /* lm_head a blocchi: dequant di poche righe per volta (nessun array VxE in RAM) */
+        int oi = llm_gguf_find_tensor(&m->gguf, "output.weight");
+        if (oi < 0) return -1;
+        int ot = m->gguf.ti[oi].type;
+        int rb = (int)llm_ggml_nbytes(ot, (int64_t)E);
+        const uint8_t* obase = llm_gguf_tensor_data(&m->gguf, oi, NULL);
+        if (!obase || rb <= 0) return -1;
+        enum { CH = 64 };
+        float buf[64 * 4096];
+        if (E > 4096) return -1;
+        for (uint64_t v0 = 0; v0 < vs; v0 += CH) {
+            uint64_t nc = vs - v0; if (nc > CH) nc = CH;
+            for (uint64_t r = 0; r < nc; r++)
+                if (llmcodec_ggml_dequant_row(ot, obase + (v0 + r) * (uint64_t)rb, buf + r * E, (int64_t)E) != 0) return -1;
+            for (uint64_t r = 0; r < nc; r++) {
+                const float* row = buf + r * E; double acc = 0.0;
+                for (int d = 0; d < E; d++) acc += (double)row[d] * mh[d];
+                logits[v0 + r] = (float)acc;
+            }
+        }
     }
     mlx_array_free(mixed); mlx_array_free(dummy); mlx_array_free(aR);
     free(R);
