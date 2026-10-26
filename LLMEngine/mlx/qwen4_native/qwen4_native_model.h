@@ -14,6 +14,7 @@
 #include "qwen4_native_trunk.h"
 #include "qwen4_native_moe_layer.h"
 #include "qwen4_native_moe_quant.h"
+#include "qwen4_native_ple.h"
 
 typedef struct {
     int cap, pos;
@@ -35,6 +36,8 @@ typedef struct {
     int use_moe;         /* 0 = salta il blocco MoE (smoke/f32) */
     int* layer_linear;   /* [L] da model.gmb.config layer_types */
     float* rope_freq;    /* [n_rot/2] */
+    Q4nPleMeta ple_meta;
+    Q4nPleState ple_st;
 } Q4nModel;
 
 static void q4n_state_free(Q4nState* st, int L) {
@@ -76,6 +79,14 @@ static int q4n_model_open(Q4nModel* m, const char* path, int cap, int use_moe) {
     }
     m->rope_freq = malloc((size_t)(h->n_rot / 2) * sizeof(float));
     for (int i = 0; i < h->n_rot / 2; i++) m->rope_freq[i] = (float)pow((double)h->rope_base, -2.0 * i / (double)h->n_rot);
+    if (q4n_ple_meta(&m->gguf, &m->hp, &m->ple_meta) != 0) { m->ple_meta.n_heads = 0; }
+    if (m->ple_meta.n_heads > 0) {
+        int ph[2] = {(h->ple_conv - 1) * h->ple_ng, h->hc * h->E};
+        float* z = calloc((size_t)ph[0] * ph[1], sizeof(float));
+        m->ple_st.hist = mlx_array_new_data(z, ph, 2, MLX_FLOAT32);
+        free(z);
+        for (int i = 0; i < 4; i++) m->ple_st.prev[i] = h->ple_eos;
+    }
     m->st.cap = cap;
     m->st.k_cache = calloc((size_t)h->L * cap * h->Hkv * h->D, sizeof(float));
     m->st.v_cache = calloc((size_t)h->L * cap * h->Hkv * h->D, sizeof(float));
@@ -118,9 +129,16 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
     mlx_array aR = mlx_array_new_data(R, rsh, 2, MLX_FLOAT32);
     for (int il = 0; il < h->L; il++) {
         Q4nLayerRefs refs; char err[256] = {0};
+        char pkn[64]; snprintf(pkn, sizeof pkn, "blk.%d.ple_key.weight", il);
+        int is_ple = llm_gguf_find_tensor(&m->gguf, pkn) >= 0;
         int is_linear = (il == 0);   /* smoke: layer 0 lineare; il resto verra' da layer_linear */
         if (m->layer_linear) is_linear = m->layer_linear[il];
-        if (q4n_layer_load(&m->gguf, il, is_linear, false, &refs, err, sizeof err) != 0) continue;
+        if (q4n_layer_load(&m->gguf, il, is_linear, is_ple, &refs, err, sizeof err) != 0) continue;
+        if (is_ple && m->ple_meta.n_heads > 0) {
+            if (qwen4_native_ple_layer(&aR, &m->gguf, il, &refs, &m->ple_meta, &m->ple_st, token,
+                                       E, hc, h->ple_ng, h->ple_eos, h->ple_conv, h->eps,
+                                       q4n_default_mv, s) != 0) return -1;
+        }
         Q4nHcW wa = {refs.hc_attn_norm, refs.hc_attn_down, refs.hc_attn_up, refs.hc_attn_inject, h->rank};
         mlx_array m1 = mlx_array_new(), i1 = mlx_array_new();
         if (qwen4_native_hc_mix(&m1, &i1, aR, &wa, E, hc, h->eps, q4n_default_mv, NULL, s) != 0) return -1;
