@@ -258,9 +258,10 @@ static int meta_build_impl(const char* model_dir, const char* arch, const LlmCod
     if (rm) {
         for (int i = 0; i < rm->n_m; i++) {
             const char* src = rm->mm[i].src;
-            int force = (strncmp(src, "config!:", 8) == 0);
-            if (!force && strncmp(src, "config:", 7) != 0) continue;
-            const char* p = jpath(cj, src + (force ? 8 : 7));
+            int lit = (strncmp(src, "lit:", 4) == 0);          /* valore letterale (es. lit:6144) */
+            int force = lit || (strncmp(src, "config!:", 8) == 0);
+            if (!lit && !force && strncmp(src, "config:", 7) != 0) continue;
+            const char* p = lit ? (src + 4) : jpath(cj, src + (force ? 8 : 7));
             if (!p) continue;
             int exist = -1;
             for (int k = 0; k < m.n; k++) if (strcmp(m.kv[k].key, rm->mm[i].key) == 0) { exist = k; break; }
