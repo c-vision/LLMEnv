@@ -9,6 +9,16 @@
 #include "qwen4_native_gguf.h"
 #include "qwen4_native_router_kernel.h"
 #include <time.h>
+static Q4nMat q4n_mat_gguf(const LlmEngineMoeGguf* g, const char* nm) {
+    Q4nMat m = {NULL, -1, 0};
+    int i = llm_gguf_find_tensor(g, nm);
+    if (i < 0) return m;
+    m.w = llm_gguf_tensor_data(g, i, NULL);
+    m.type = g->ti[i].type;
+    m.row_bytes = (size_t)llm_ggml_nbytes(m.type, (int64_t)g->ti[i].dims[0]);
+    return m;
+}
+
 extern double g_q4n_prof[12];
 static double q4nm_now(void){struct timespec t;timespec_get(&t,TIME_UTC);return (double)t.tv_sec+1e-9*(double)t.tv_nsec;}
 #include "qwen4_native_layer.h"
@@ -221,19 +231,47 @@ static int qwen4_native_moe_quant_gpu(mlx_array* out, mlx_array x, const LlmEngi
     if (E > 4096) return -1;
     for (int d = 0; d < E; d++) outv[d] = 0.0f;
     for (int k = 0; k < K; k++) for (int d = 0; d < E; d++) outv[d] += wts[k] * dw[(size_t)k*E+d];
-    /* shared expert (CPU, f32 piccoli) */
+    /* shared expert: quantizzato su GPU se disponibile, altrimenti f32 CPU */
     {
-        float gsh[1024], ush[1024], y[4096];
-        if (F > 1024 || E > 4096) return -1;
-        for (int f = 0; f < F; f++) {
-            double ga = 0, ua = 0;
-            for (int d = 0; d < E; d++) { ga += (double)r->gate_sh[f*E+d]*xh[d]; ua += (double)r->up_sh[f*E+d]*xh[d]; }
-            float gv = (float)ga, sv = gv>=0?1.f/(1.f+expf(-gv)):expf(gv)/(1.f+expf(gv));
-            gsh[f] = gv*sv*(float)ua;
+        float* gsh = malloc((size_t)F * sizeof(float));
+        float* y = malloc((size_t)E * sizeof(float));
+        if (!gsh || !y) { free(gsh); free(y); return -1; }
+        int sh_gpu = 0;
+        Q4nMat mg = {0}, mu = {0}, md = {0};
+        if (gpu && gpu->b) {
+            char n1[96];
+            snprintf(n1,sizeof n1,"blk.%d.ffn_gate_shexp.weight", il); mg = q4n_mat_gguf(g, n1);
+            snprintf(n1,sizeof n1,"blk.%d.ffn_up_shexp.weight", il);   mu = q4n_mat_gguf(g, n1);
+            snprintf(n1,sizeof n1,"blk.%d.ffn_down_shexp.weight", il); md = q4n_mat_gguf(g, n1);
+            int t1 = mg.type, t2 = mu.type, t3 = md.type;
+            sh_gpu = mg.w && mu.w && md.w &&
+                     (t1==8||t1==2||t1==10||t1==12||t1==16) &&
+                     (t2==8||t2==2||t2==10||t2==12||t2==16) &&
+                     (t3==8||t3==2||t3==10||t3==12||t3==16);
         }
-        for (int d = 0; d < E; d++) { double acc=0; for (int f=0; f<F; f++) acc += (double)r->down_sh[d*F+f]*gsh[f]; y[d]=(float)acc; }
+        if (sh_gpu) {
+            if (q4n_mat_mv_gpu(gpu, &mg, xh, gsh, E, F) != 0 ||
+                q4n_mat_mv_gpu(gpu, &mu, xh, y, E, F) != 0) { free(gsh); free(y); return -1; }
+            for (int f = 0; f < F; f++) { float gv = gsh[f];
+                float sv = gv >= 0 ? 1.0f/(1.0f+expf(-gv)) : expf(gv)/(1.0f+expf(gv));
+                gsh[f] = gv * sv * y[f]; }
+            if (q4n_mat_mv_gpu(gpu, &md, gsh, y, F, E) != 0) { free(gsh); free(y); return -1; }
+        } else {
+            if (!r->gate_sh || !r->up_sh || !r->down_sh) { free(gsh); free(y); return -1; }
+            float* ush = malloc((size_t)F * sizeof(float));
+            if (!ush) { free(gsh); free(y); return -1; }
+            for (int f = 0; f < F; f++) {
+                double ga = 0, ua = 0;
+                for (int d = 0; d < E; d++) { ga += (double)r->gate_sh[f*E+d]*xh[d]; ua += (double)r->up_sh[f*E+d]*xh[d]; }
+                float gv = (float)ga, sv = gv>=0?1.f/(1.f+expf(-gv)):expf(gv)/(1.f+expf(gv));
+                gsh[f] = gv*sv*(float)ua; (void)ush;
+            }
+            for (int d = 0; d < E; d++) { double acc=0; for (int f=0; f<F; f++) acc += (double)r->down_sh[d*F+f]*gsh[f]; y[d]=(float)acc; }
+            free(ush);
+        }
         float sv = sg>=0?1.f/(1.f+expf(-sg)):expf(sg)/(1.f+expf(sg));
         for (int d = 0; d < E; d++) outv[d] += sv*y[d];
+        free(gsh); free(y);
     }
     g_q4n_prof[8] += q4nm_now() - m4;
     { int osh[2] = {1, E}; *out = mlx_array_new_data(outv, osh, 2, MLX_FLOAT32); }

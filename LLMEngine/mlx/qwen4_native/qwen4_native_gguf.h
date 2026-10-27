@@ -130,12 +130,12 @@ static int q4n_layer_load_ex(const LlmEngineMoeGguf* g, int il, bool is_linear, 
     memset(r, 0, sizeof *r);
     r->is_linear = is_linear; r->is_ple = is_ple;
     r->hc_attn_norm = q4n_f32(g, il, "hc_attn_norm.weight", true, &ok);
-    r->hc_attn_down = q4n_f32(g, il, "hc_attn_down.weight", true, &ok);
-    r->hc_attn_up = q4n_f32(g, il, "hc_attn_up.weight", true, &ok);
+    r->hc_attn_down = skip_big ? NULL : q4n_f32(g, il, "hc_attn_down.weight", true, &ok);
+    r->hc_attn_up = skip_big ? NULL : q4n_f32(g, il, "hc_attn_up.weight", true, &ok);
     r->hc_attn_inject = q4n_f32(g, il, "hc_attn_inject.weight", true, &ok);
     r->hc_ffn_norm = q4n_f32(g, il, "hc_ffn_norm.weight", true, &ok);
-    r->hc_ffn_down = q4n_f32(g, il, "hc_ffn_down.weight", true, &ok);
-    r->hc_ffn_up = q4n_f32(g, il, "hc_ffn_up.weight", true, &ok);
+    r->hc_ffn_down = skip_big ? NULL : q4n_f32(g, il, "hc_ffn_down.weight", true, &ok);
+    r->hc_ffn_up = skip_big ? NULL : q4n_f32(g, il, "hc_ffn_up.weight", true, &ok);
     r->hc_ffn_inject = q4n_f32(g, il, "hc_ffn_inject.weight", true, &ok);
     if (is_linear) {
         r->attn_qkv = skip_big ? NULL : q4n_f32(g, il, "attn_qkv.weight", true, &ok);

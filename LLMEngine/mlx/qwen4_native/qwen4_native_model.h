@@ -22,15 +22,6 @@
 #include "qwen4_native_gpu.h"
 #include "llm_ggml.h"
 
-static Q4nMat q4n_mat_gguf(const LlmEngineMoeGguf* g, const char* nm) {
-    Q4nMat m = {NULL, -1, 0};
-    int i = llm_gguf_find_tensor(g, nm);
-    if (i < 0) return m;
-    m.w = llm_gguf_tensor_data(g, i, NULL);
-    m.type = g->ti[i].type;
-    m.row_bytes = (size_t)llm_ggml_nbytes(m.type, (int64_t)g->ti[i].dims[0]);
-    return m;
-}
 
 typedef struct {
     int cap, pos;
