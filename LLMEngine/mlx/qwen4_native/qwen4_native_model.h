@@ -149,6 +149,10 @@ static double q4n_now(void) {
     timespec_get(&ts, TIME_UTC);
     return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
 }
+#include <mach/mach.h>
+static double q4n_rss_now(void) { mach_task_basic_info_data_t i; mach_msg_type_number_t c = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&i, &c) != KERN_SUCCESS) return -1;
+    return (double)i.resident_size / 1048576.0; }
 static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s) {
     if (!m || !logits || token < 0) return -1;
     const Q4nHp* h = &m->hp;
@@ -224,7 +228,7 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
                 }
                 const Q4nMat* am[6] = {&aw.attn_q,&aw.attn_k,&aw.attn_v,&aw.attn_out,&aw.idx_q,&aw.idx_k};
                 attn_gpu = 1;
-                for (int mi = 0; mi < 6; mi++) { int t = am[mi]->type; if (!(t==8||t==10||t==16)) attn_gpu = 0; }
+                for (int mi = 0; mi < 6; mi++) { int t = am[mi]->type; if (!(t==8||t==10||t==12||t==16||t==2)) attn_gpu = 0; }
             }
             if (attn_gpu) {
                 if (qwen4_native_attn_layer(&blk, m1, kc, vc, ic, m->st.cap, pos, &aw,
@@ -260,7 +264,7 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
             gw.Hk = h->lin_Hk; gw.Hv = h->lin_Hv; gw.D = h->lin_D;
             const Q4nMat* ms[5] = {&gw.lin_qkv,&gw.lin_gate,&gw.lin_beta,&gw.lin_alpha,&gw.lin_out};
             int gpu_ok_mats = 1;
-            for (int mi = 0; mi < 5; mi++) { int t = ms[mi]->type; if (!(t==8||t==10||t==16)) gpu_ok_mats = 0; }
+            for (int mi = 0; mi < 5; mi++) { int t = ms[mi]->type; if (!(t==8||t==10||t==12||t==16||t==2)) gpu_ok_mats = 0; }
             if (!gpu_ok_mats) {   /* tipi non gestiti dal backend: ricarica f32 e usa la CPU */
                 { char e2[256]; Q4nLayerRefs rr; if (q4n_layer_load_ex(&m->gguf, il, is_linear, is_ple, 0, &rr, e2, sizeof e2) == 0) refs = rr; }
                 gw = (Q4nGdnW){{refs.attn_qkv,-1,0},{refs.attn_gate,-1,0},{refs.ssm_beta,-1,0},
@@ -319,24 +323,19 @@ gdn_done: ;
         mlx_array R2 = mlx_array_new();
         if (llm_q4n_hc_combine(&R2, R1, b2, i2, s) != 0) return -1;
         aR = R2;
-        {   /* chiude il grafo MLX del layer: senza, i 48 layer si concatenano e trattengono tutto */
-            mlx_vector_array ev = mlx_vector_array_new();
-            mlx_vector_array_append_value(ev, aR);
-            mlx_eval(ev); mlx_vector_array_free(ev);
-            mlx_clear_cache();
-        }
+
         mlx_array_free(R1); mlx_array_free(m1); mlx_array_free(i1);
         mlx_array_free(m2); mlx_array_free(i2); mlx_array_free(blk); mlx_array_free(b2);
         if (!m->gpu_ok) q4n_layer_free(&refs);
-        else q4n_gpu_reset(&m->gpu);
+        else if ((il & 7) == 7) q4n_gpu_reset(&m->gpu);   /* flush periodico: view ricreate troppo spesso costano */
         /* le pagine dei pesi sono file-backed: dopo il layer non servono piu' (il token
          * successivo rilegge solo gli esperti selezionati). Senza, RSS = cache dell'intero file. */
-        if (m->gguf.buf && m->gguf.size) madvise((void*)m->gguf.buf, m->gguf.size, MADV_DONTNEED);
 
 #if defined(__APPLE__)
         { extern void malloc_zone_pressure_relief(void*, unsigned long); malloc_zone_pressure_relief((void*)0, 0); }
 #endif
     }
+    if (m->gguf.buf && m->gguf.size) madvise((void*)m->gguf.buf, m->gguf.size, MADV_DONTNEED);
     /* output_hc_mix (no inject) -> mixed [E] */
     double to0 = q4n_now();
     Q4nHcW wo; wo.norm = m->out_norm; wo.rank = h->rank; wo.inject = (Q4nMat){NULL,-1,0};
