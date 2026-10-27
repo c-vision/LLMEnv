@@ -11,6 +11,7 @@
 #include "mlx/c/mlx.h"
 #include <time.h>
 #include <stdio.h>
+#include <sys/mman.h>
 #include "qwen4_native_gguf.h"
 #include "qwen4_native_attn_layer.h"
 #include "qwen4_native_trunk.h"
@@ -326,10 +327,18 @@ gdn_done: ;
         mlx_array R2 = mlx_array_new();
         if (llm_q4n_hc_combine(&R2, R1, b2, i2, s) != 0) return -1;
         aR = R2;
+        {   /* chiude il grafo MLX del layer: senza, i 48 layer si concatenano e trattengono tutto */
+            mlx_vector_array ev = mlx_vector_array_new();
+            mlx_vector_array_append_value(ev, aR);
+            mlx_eval(ev); mlx_vector_array_free(ev);
+        }
         mlx_array_free(R1); mlx_array_free(m1); mlx_array_free(i1);
         mlx_array_free(m2); mlx_array_free(i2); mlx_array_free(blk); mlx_array_free(b2);
         if (!m->gpu_ok) q4n_layer_free(&refs);
         else q4n_gpu_reset(&m->gpu);
+        /* le pagine dei pesi sono file-backed: dopo il layer non servono piu' (il token
+         * successivo rilegge solo gli esperti selezionati). Senza, RSS = cache dell'intero file. */
+        if (m->gguf.buf && m->gguf.size) madvise((void*)m->gguf.buf, m->gguf.size, MADV_DONTNEED);
 
 #if defined(__APPLE__)
         { extern void malloc_zone_pressure_relief(void*, unsigned long); malloc_zone_pressure_relief((void*)0, 0); }
