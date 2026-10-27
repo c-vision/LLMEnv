@@ -9,6 +9,7 @@
 #define LLM_QWEN4_NATIVE_MODEL_H
 
 #include "mlx/c/mlx.h"
+#include "mlx/c/memory.h"
 #include <time.h>
 #include <stdio.h>
 #include <sys/mman.h>
@@ -331,6 +332,7 @@ gdn_done: ;
             mlx_vector_array ev = mlx_vector_array_new();
             mlx_vector_array_append_value(ev, aR);
             mlx_eval(ev); mlx_vector_array_free(ev);
+            mlx_clear_cache();
         }
         mlx_array_free(R1); mlx_array_free(m1); mlx_array_free(i1);
         mlx_array_free(m2); mlx_array_free(i2); mlx_array_free(blk); mlx_array_free(b2);
