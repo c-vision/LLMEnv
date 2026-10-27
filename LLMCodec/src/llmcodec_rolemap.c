@@ -202,6 +202,62 @@ int llmcodec_rolemap_load(const char* llmarch_path, LlmCodecRoleMap* out) {
                   q=pe+1; } }
       }
     }
+    { const char* tgs = jval(j, "targets");
+      if (tgs != NULL && *tgs == '{') {
+          int d0=0; const char* tend=tgs;
+          for (; *tend; ++tend) { if(*tend=='{')d0++; else if(*tend=='}'){d0--; if(d0==0)break;} }
+          const char* p = tgs + 1;
+          while (p < tend && out->n_t < 8) {
+              p = strchr(p, '"'); if (p == NULL || p >= tend) break;
+              char name[24]; size_t kn=0; ++p;
+              while (*p && *p != '"' && kn+1 < sizeof name) name[kn++]=*p++;
+              name[kn]=0; p = strchr(p, ':'); if (!p || p >= tend) break; ++p;
+              while (*p==' '||*p=='\t'||*p=='\n'||*p=='\r') ++p;
+              if (*p != '{') { if (*p=='"'){const char* e=strchr(p+1,'"'); p=e?e+1:p+1;} else ++p; continue; }
+              int d2=0; const char* pe=p;
+              for (; *pe; ++pe) { if(*pe=='{')d2++; else if(*pe=='}'){d2--; if(d2==0)break;} }
+              char obj[1024]; size_t L=(size_t)(pe-p)+1;
+              if (L < sizeof obj) {
+                  memcpy(obj,p,L); obj[L]=0;
+                  LlmCodecTarget* T = &out->tg[out->n_t];
+                  snprintf(T->name, sizeof T->name, "%s", name);
+                  jstr(jval(obj,"arch"), T->arch, sizeof T->arch);
+                  const char* mo = jval(obj,"meta");
+                  if (mo && *mo=='{') {
+                      int d3=0; const char* me=mo; for(;*me;++me){ if(*me=='{')d3++; else if(*me=='}'){d3--; if(d3==0)break;} }
+                      const char* q=mo+1;
+                      while (q<me && T->n_m<32) {
+                          q=strchr(q,'"'); if(!q||q>=me) break; char k2[96]; size_t kl=0; ++q;
+                          while(*q&&*q!='"'&&kl+1<sizeof k2) k2[kl++]=*q++; k2[kl]=0;
+                          q=strchr(q,':'); if(!q) break; ++q; while(*q==' '||*q=='\t') ++q;
+                          char v2[192]={0};
+                          if (jstr(q, v2, sizeof v2)) { snprintf(T->mm[T->n_m].key,sizeof T->mm[T->n_m].key,"%s",k2);
+                              snprintf(T->mm[T->n_m].src,sizeof T->mm[T->n_m].src,"%s",v2); T->n_m++;
+                              const char* e=q+1; while(*e&&*e!='"') ++e; q=(*e=='"')?e+1:e; }
+                          else ++q;
+                      }
+                  }
+                  const char* qo = jval(obj,"quant");
+                  if (qo && *qo=='{') {
+                      int d3=0; const char* qe=qo; for(;*qe;++qe){ if(*qe=='{')d3++; else if(*qe=='}'){d3--; if(d3==0)break;} }
+                      const char* q=qo+1;
+                      while (q<qe && T->n_q<32) {
+                          q=strchr(q,'"'); if(!q||q>=qe) break; char r2[32]; size_t rl=0; ++q;
+                          while(*q&&*q!='"'&&rl+1<sizeof r2) r2[rl++]=*q++; r2[rl]=0;
+                          q=strchr(q,':'); if(!q) break; ++q; while(*q==' '||*q=='\t') ++q;
+                          char f2[24]={0};
+                          if (jstr(q, f2, sizeof f2)) { snprintf(T->q[T->n_q].role,sizeof T->q[T->n_q].role,"%s",r2);
+                              snprintf(T->q[T->n_q].fmt,sizeof T->q[T->n_q].fmt,"%s",f2); T->n_q++;
+                              const char* e=q+1; while(*e&&*e!='"') ++e; q=(*e=='"')?e+1:e; }
+                          else ++q;
+                      }
+                  }
+                  out->n_t++;
+              }
+              p = pe + 1;
+          }
+      }
+    }
     { const char* qp = jval(j, "quant_params");
       if (qp != NULL && *qp == '{') {
           int d0=0; const char* pend=qp;
@@ -409,6 +465,24 @@ int llmcodec_rolemap_stack(const LlmCodecRoleMap* m, const char* name) {
     if (m == NULL || name == NULL) return 0;
     for (int i = 0; i < m->n; ++i) if (strstr(name, m->r[i].match) != NULL) return m->r[i].stack;
     return 0;
+}
+
+int llmcodec_rolemap_apply_target(LlmCodecRoleMap* m, const char* name) {
+    if (m == NULL || name == NULL) return -1;
+    for (int i = 0; i < m->n_t; ++i) {
+        if (strcmp(m->tg[i].name, name) != 0) continue;
+        const LlmCodecTarget* T = &m->tg[i];
+        if (T->arch[0]) snprintf(m->arch, sizeof m->arch, "%s", T->arch);
+        for (int k = 0; k < T->n_m && m->n_m < 64; ++k) m->mm[m->n_m++] = T->mm[k];
+        int add = T->n_q; if (m->n_q + add > 128) add = 128 - m->n_q;
+        if (add > 0) {
+            memmove(&m->q[add], &m->q[0], (size_t)m->n_q * sizeof m->q[0]);
+            for (int k = 0; k < add; ++k) m->q[k] = T->q[k];
+            m->n_q += add;
+        }
+        return 0;
+    }
+    return -1;
 }
 
 const char* llmcodec_rolemap_fmt(const LlmCodecRoleMap* m, const char* role) {

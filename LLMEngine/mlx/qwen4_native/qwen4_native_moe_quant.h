@@ -191,7 +191,22 @@ static int qwen4_native_moe_quant_gpu(mlx_array* out, mlx_array x, const LlmEngi
             gj[ng++] = (LlmDsv4GpuJob){ .w = ubase + (size_t)e * u_slab, .ggml_type = ut, .row_bytes = u_rb,
                                         .n = (uint32_t)E, .out_dim = (uint32_t)F, .x = xh, .out = uw + (size_t)k*F };
         }
-        int rc = q4n_gpu_gemv_batch(gpu, gj, ng);
+        int rc;
+        if (gt == 2 || gt == 8 || ut == 2 || ut == 8) {
+            LlmDsv4WideJob wg[16], wu[16];
+            int nwg = 0, nwu = 0;
+            for (int k = 0; k < K; k++) {
+                int e = sel[k]; if (e < 0 || e >= NE) continue;
+                wg[nwg++] = (LlmDsv4WideJob){ .w = gbase + (size_t)e * g_slab, .row_bytes = (uint32_t)g_rb,
+                                              .n = (uint32_t)E, .out_dim = (uint32_t)F, .x = xh, .out = gw + (size_t)k*F };
+                wu[nwu++] = (LlmDsv4WideJob){ .w = ubase + (size_t)e * u_slab, .row_bytes = (uint32_t)u_rb,
+                                              .n = (uint32_t)E, .out_dim = (uint32_t)F, .x = xh, .out = uw + (size_t)k*F };
+            }
+            rc = (gt == 2) ? q4n_gpu_gemv_q4_0_wide_batch(gpu, wg, nwg) : q4n_gpu_gemv_q8_wide_batch(gpu, wg, nwg);
+            if (rc == 0) rc = (ut == 2) ? q4n_gpu_gemv_q4_0_wide_batch(gpu, wu, nwu) : q4n_gpu_gemv_q8_wide_batch(gpu, wu, nwu);
+        } else {
+            rc = q4n_gpu_gemv_batch(gpu, gj, ng);
+        }
         if (rc == 0) {
             for (int k = 0; k < K; k++) for (int f = 0; f < F; f++) {
                 float gv = gw[(size_t)k*F+f], uv = uw[(size_t)k*F+f];

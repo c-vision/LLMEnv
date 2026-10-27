@@ -33,7 +33,7 @@ int main(int argc, char** argv) {
     { int fw = n_new > 1 ? n_new - 1 : 1;
       double tot = g_q4n_prof[10], moe = g_q4n_prof[4]+g_q4n_prof[5]+g_q4n_prof[6]+g_q4n_prof[7]+g_q4n_prof[8];
       fprintf(stderr,"[prof/tok] tot=%.3f load=%.3f hc=%.3f comb+hc2=%.3f moe=%.3f lm=%.3f | router=%.3f gateup=%.3f swi=%.3f down=%.3f shared=%.3f gemv_r=%.3f\n",
-              tot/fw,g_q4n_prof[0]/fw,g_q4n_prof[1]/fw,g_q4n_prof[2]/fw,moe/fw,g_q4n_prof[9]/fw,
+              tot/fw,g_q4n_prof[0]/fw,g_q4n_prof[1]/fw,g_q4n_prof[2]/fw,g_q4n_prof[3]/fw,g_q4n_prof[9]/fw,
               g_q4n_prof[4]/fw,g_q4n_prof[5]/fw,g_q4n_prof[6]/fw,g_q4n_prof[7]/fw,g_q4n_prof[8]/fw,g_q4n_prof[11]/fw); }
     return 0;
 }

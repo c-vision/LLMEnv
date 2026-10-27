@@ -26,6 +26,11 @@ typedef struct { char key[96]; char src[192]; } LlmCodecMetaKVMap;
 /* Sezione `transforms`: match sorgente -> op (es. neg_exp, permute_head_rows). */
 typedef struct { char match[96]; char op[32]; } LlmCodecTransformRule;
 
+/* Sezione `targets.<nome>`: overlay per un motore/consumer (es. ds4). `arch` sostituisce
+ * general.architecture; `meta` aggiunge/override gguf_meta; `quant` aggiunge formati per ruolo
+ * con PRIORITA' (preposti: vincono sui default). */
+typedef struct { char name[24]; char arch[64]; LlmCodecMetaKVMap mm[32]; int n_m; LlmCodecRoleFmt q[32]; int n_q; } LlmCodecTarget;
+
 typedef struct {
     char        arch[64];
     LlmCodecRoleRule r[128];
@@ -44,6 +49,7 @@ typedef struct {
     LlmCodecMetaKVMap mm[64]; int n_m;     /* sezione `gguf_meta`: metadati extra dal config */
     LlmCodecTransformRule tr[32]; int n_tr;/* sezione `transforms`: op sui tensori (f32, pre-encode) */
     int tiled_k, tiled_v, tiled_d;         /* sezione `tiled`: k-head, v per k-head, head_dim */
+    LlmCodecTarget tg[8]; int n_t;         /* sezione `targets`: overlay per motore (ds4, ...) */
 } LlmCodecRoleMap;
 
 /* Carica `roles`/`scale_suffix`/`arch` da una `.llmarch` (JSON). 0 ok / -1. */
@@ -65,6 +71,9 @@ int llmcodec_rolemap_stack(const LlmCodecRoleMap* m, const char* name);
 
 /* Vero se il ruolo e' un esperto (ROUTED_EXPERT/SHARED_EXPERT/...). */
 int llmcodec_rolemap_is_expert(const char* role);
+
+/* Applica l'overlay `targets.<name>` (arch, meta, quant con priorita'). 0 ok / -1 assente. */
+int llmcodec_rolemap_apply_target(LlmCodecRoleMap* m, const char* name);
 
 /* Formato dichiarato per ruolo (sezione `quant`), o NULL. */
 const char* llmcodec_rolemap_fmt(const LlmCodecRoleMap* m, const char* role);
