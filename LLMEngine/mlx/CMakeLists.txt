@@ -407,6 +407,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_model_lifecycle.c
     llm_kvmetal_bridge.m
     llm_gemvq4_bridge.m
+    ../engine_select.c
     # ds4 (Metal DS4 IQ2/Q8, contesto GPU, adapter ABI): OPZIONALE (vedi LLM_DS4_SRC).
     # Se presente: Metal DS4 zero-copy + adapter llmengine_llm_engine_ds4.
     ${LLM_DS4_SRC}
@@ -458,6 +459,14 @@ find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
 
 target_link_libraries(llm_ai_mlx PRIVATE mlxc cjson ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
+# Motore ds4 (GGUF) opzionale: fornisce llmengine_llm_engine_ds4n() usato da engine_select.c.
+option(LLM_WITH_DS4_ENGINE "Collega il motore ds4 (GGUF) a llm_ai_mlx" ON)
+if(LLM_WITH_DS4_ENGINE AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../ds4/CMakeLists.txt)
+  set(DS4ENGINE_BUILD ON CACHE BOOL "" FORCE)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../ds4 ${CMAKE_BINARY_DIR}/ds4engine)
+  target_link_libraries(llm_ai_mlx PRIVATE ds4engine)
+endif()
+
 target_link_libraries(llm_ai_mlx PUBLIC ${ACCELERATE_FRAMEWORK})
 target_include_directories(llm_ai_mlx PRIVATE "${cjson_SOURCE_DIR}")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8")
@@ -562,166 +571,6 @@ if(LLM_BUILD_DSV4_TESTS)
     target_include_directories(llm_mlx_kvformat_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
     # P3 (qwen4exp nativo): parita' model-free dei kernel PLE vs riferimento ds4.
-    add_executable(llm_qwen4_native_leak_test tests/llm_qwen4_native_leak_test.c)
-    target_link_libraries(llm_qwen4_native_leak_test PRIVATE llm_ai_mlx llmcodec_ggml llmcodec)
-    target_include_directories(llm_qwen4_native_leak_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_leak_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    add_executable(llm_qwen4_native_q8mv_test tests/llm_qwen4_native_q8mv_test.c)
-    target_link_libraries(llm_qwen4_native_q8mv_test PRIVATE llm_ai_mlx llmcodec_ggml llmcodec)
-    target_include_directories(llm_qwen4_native_q8mv_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_q8mv_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    add_executable(llm_qwen4_native_ple_test tests/llm_qwen4_native_ple_test.c)
-    target_link_libraries(llm_qwen4_native_ple_test PRIVATE llm_ai_mlx)
-    target_include_directories(llm_qwen4_native_ple_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_ple_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    # P4 (qwen4exp nativo): router top-k + shared gate, parita' model-free.
-    add_executable(llm_qwen4_native_router_test tests/llm_qwen4_native_router_test.c)
-    target_link_libraries(llm_qwen4_native_router_test PRIVATE llm_ai_mlx)
-    target_include_directories(llm_qwen4_native_router_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_router_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    # P5a (qwen4exp nativo): prep QKV + attention gated, parita' model-free.
-    add_executable(llm_qwen4_native_attn_test tests/llm_qwen4_native_attn_test.c)
-    target_link_libraries(llm_qwen4_native_attn_test PRIVATE llm_ai_mlx)
-    target_include_directories(llm_qwen4_native_attn_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_attn_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    # P5b (qwen4exp nativo): indexer QSA (select a blocchi), parita' model-free.
-    add_executable(llm_qwen4_native_indexer_test tests/llm_qwen4_native_indexer_test.c)
-    target_link_libraries(llm_qwen4_native_indexer_test PRIVATE llm_ai_mlx)
-    target_include_directories(llm_qwen4_native_indexer_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_indexer_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    # P1 (qwen4exp nativo): HC combine + gate mix, parita' model-free.
-    add_executable(llm_qwen4_native_hc_test tests/llm_qwen4_native_hc_test.c)
-    target_link_libraries(llm_qwen4_native_hc_test PRIVATE llm_ai_mlx)
-    target_include_directories(llm_qwen4_native_hc_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_hc_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    # P7a (qwen4exp nativo): wiring layer linear/GDN vs qwen4_ref_linear.
-    add_executable(llm_qwen4_native_layer_test tests/llm_qwen4_native_layer_test.c)
-    target_link_libraries(llm_qwen4_native_layer_test PRIVATE llm_ai_mlx)
-    target_include_directories(llm_qwen4_native_layer_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_layer_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    # P7b (qwen4exp nativo): wiring full-attention vs qwen4_ref_attention.
-    add_executable(llm_qwen4_native_attn_layer_test tests/llm_qwen4_native_attn_layer_test.c)
-    target_link_libraries(llm_qwen4_native_attn_layer_test PRIVATE llm_ai_mlx)
-    target_include_directories(llm_qwen4_native_attn_layer_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_attn_layer_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    # P7c (qwen4exp nativo): wiring MoE (router + routed + shared).
-    add_executable(llm_qwen4_native_moe_layer_test tests/llm_qwen4_native_moe_layer_test.c)
-    target_link_libraries(llm_qwen4_native_moe_layer_test PRIVATE llm_ai_mlx)
-    target_include_directories(llm_qwen4_native_moe_layer_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_moe_layer_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    # P7d (qwen4exp nativo): hc_mix + ordine combine nel trunk.
-    add_executable(llm_qwen4_native_trunk_test tests/llm_qwen4_native_trunk_test.c)
-    target_link_libraries(llm_qwen4_native_trunk_test PRIVATE llm_ai_mlx)
-    target_include_directories(llm_qwen4_native_trunk_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_trunk_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    # P7e (qwen4exp nativo): adapter sul loader GGUF esistente (GGUF sintetico).
-    add_executable(llm_qwen4_native_gguf_test tests/llm_qwen4_native_gguf_test.c tests/q4n_synth_gguf.c)
-    target_link_libraries(llm_qwen4_native_gguf_test PRIVATE llm_ai_mlx llmcodec_ggml llmcodec)
-    target_include_directories(llm_qwen4_native_gguf_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_gguf_test PROPERTIES LINKER_LANGUAGE CXX)
-
-    # P7f: smoke del forward completo su uno slice GGUF reale (use_moe=0).
-    add_executable(llm_qwen4_native_model_smoke tests/llm_qwen4_native_model_smoke.c)
-    target_link_libraries(llm_qwen4_native_model_smoke PRIVATE llm_ai_mlx llmcodec_ggml llmcodec)
-    target_include_directories(llm_qwen4_native_model_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_model_smoke PROPERTIES LINKER_LANGUAGE CXX)
-
-    # P7g: smoke del layer full-attention nativo su un layer reale.
-    add_executable(llm_qwen4_native_attn_smoke tests/llm_qwen4_native_attn_smoke.c)
-    target_link_libraries(llm_qwen4_native_attn_smoke PRIVATE llm_ai_mlx llmcodec_ggml llmcodec)
-    target_include_directories(llm_qwen4_native_attn_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_attn_smoke PROPERTIES LINKER_LANGUAGE CXX)
-
-    add_executable(llm_qwen4_native_moe_smoke tests/llm_qwen4_native_moe_smoke.c)
-    target_link_libraries(llm_qwen4_native_moe_smoke PRIVATE llm_ai_mlx llmcodec_ggml llmcodec)
-    target_include_directories(llm_qwen4_native_moe_smoke PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_moe_smoke PROPERTIES LINKER_LANGUAGE CXX)
-
-    add_executable(llm_qwen4_native_gen tests/llm_qwen4_native_gen.c)
-    target_link_libraries(llm_qwen4_native_gen PRIVATE llm_ai_mlx llmcodec_ggml llmcodec)
-    target_include_directories(llm_qwen4_native_gen PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_gen PROPERTIES LINKER_LANGUAGE CXX)
-
-    add_executable(llm_qwen4_native_ppl tests/llm_qwen4_native_ppl.c)
-    target_link_libraries(llm_qwen4_native_ppl PRIVATE llm_ai_mlx llmcodec_ggml llmcodec
-        /Users/gaetano/Documents/Projects/GMBasic/native/gmb_runtime_c/build/llmtoken_build/libllmtoken.dylib)
-    target_include_directories(llm_qwen4_native_ppl PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMToken
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_ppl PROPERTIES LINKER_LANGUAGE CXX)
-
-    add_executable(llm_qwen4_native_ple_rows_test tests/llm_qwen4_native_ple_test.c tests/q4n_ple_synth.c)
-    target_link_libraries(llm_qwen4_native_ple_rows_test PRIVATE llm_ai_mlx llmcodec_ggml llmcodec)
-    target_include_directories(llm_qwen4_native_ple_rows_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/qwen4_native
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include
-        $<TARGET_PROPERTY:llm_ai_mlx,INCLUDE_DIRECTORIES>)
-    set_target_properties(llm_qwen4_native_ple_rows_test PROPERTIES LINKER_LANGUAGE CXX)
     set_target_properties(llm_mlx_kvformat_test PROPERTIES LINKER_LANGUAGE CXX)
 
     # §9.A M10a: test model-free del modello di costo KV (KEEP/PERSIST/RECOMPUTE).

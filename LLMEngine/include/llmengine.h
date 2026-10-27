@@ -183,7 +183,9 @@ unsigned llmengine_abi_version(void);
 
 /* Accessor per-runner: una vtable per motore (implementata nel progetto del motore). */
 const LlmEngineLlmEngine* llmengine_llm_engine_mlx(void);      /* llmengine_mlx */
-const LlmEngineLlmEngine* llmengine_llm_engine_ds4(void);      /* ds4 (motore DS4 nativo, LLMEngine/mlx/ds4) */
+const LlmEngineLlmEngine* llmengine_llm_engine_ds4(void);
+/* Selezione automatica: directory/MLX -> motore MLX; file GGUF -> motore ds4 (se linkato). */
+const LlmEngineLlmEngine* llmengine_engine_for_model(const char* model_path);      /* ds4 (motore DS4 nativo, LLMEngine/mlx/ds4) */
 const LlmEngineLlmEngine* llmengine_llm_engine_ds41(void);     /* ds41-native (nostra impl. DS4.1 nativa) */
 const LlmEngineLlmEngine* llmengine_llm_engine_llamacpp(void); /* llm_host_ai */
 const LlmEngineLlmEngine* llmengine_llm_engine_moe(void);      /* llmengine_moe */

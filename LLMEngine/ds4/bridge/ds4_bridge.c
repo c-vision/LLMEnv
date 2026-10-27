@@ -14,6 +14,7 @@ ds4_bridge* ds4_bridge_open(const char* model, int ctx, int stream, int prefill_
 }
 
 ds4_bridge* ds4_bridge_open_ex(const char* model, int ctx, int stream, int prefill_chunk, int inspect_only) {
+    if (ctx <= 0) ctx = 32768;            /* default motore (context_size=0 non crea la sessione) */
     ds4_engine_options opt; memset(&opt, 0, sizeof opt);
     opt.inspect_only = inspect_only ? true : false;
     opt.model_path = model;
