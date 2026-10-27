@@ -58,19 +58,55 @@ static void q4n_ple_rows(int token, int* prev, const Q4nPleMeta* m, int ng, int 
     prev[0] = token;
 }
 
-/* riga globale -> (shard, riga locale) assumendo shard di ugual numero di righe. */
+/* riga globale -> (shard, riga locale). Supporta PLE packed affine (qs I8 + scales/biases F16)
+ * e il vecchio layout .weight (F16/Q8). */
 static int q4n_ple_row_read(const LlmEngineMoeGguf* g, uint32_t row, float* out) {
     char nm[64];
-    int per_shard = 0, shard = -1;
+    int per_shard = 0, shard = -1, packed = 0;
     for (int s = 0; s < 128; s++) {
-        snprintf(nm, sizeof nm, "ple.shard.%d.weight", s);
+        snprintf(nm, sizeof nm, "ple.shard.%d.qs", s);
         int i = llm_gguf_find_tensor(g, nm);
+        if (i >= 0) packed = 1;
+        else { snprintf(nm, sizeof nm, "ple.shard.%d.weight", s); i = llm_gguf_find_tensor(g, nm); }
         if (i < 0) break;
         int rows = (int)g->ti[i].dims[1];
         if (!per_shard) per_shard = rows;
         if ((int)row < (s + 1) * rows) { shard = s; break; }
     }
     if (shard < 0 || per_shard <= 0) return -1;
+    const uint32_t lr = row - (uint32_t)shard * (uint32_t)per_shard;
+    if (packed) {
+        char nq[64], ns[64], nb[64];
+        snprintf(nq, sizeof nq, "ple.shard.%d.qs", shard);
+        snprintf(ns, sizeof ns, "ple.shard.%d.scales", shard);
+        snprintf(nb, sizeof nb, "ple.shard.%d.biases", shard);
+        int iq = llm_gguf_find_tensor(g, nq), is = llm_gguf_find_tensor(g, ns), ib = llm_gguf_find_tensor(g, nb);
+        if (iq < 0 || is < 0 || ib < 0) return -1;
+        const uint64_t cols = g->ti[iq].dims[0] * 2u;
+        const uint64_t ng = cols / 32u;
+        const uint8_t* qb = llm_gguf_tensor_data(g, iq, NULL);
+        const uint8_t* sb = llm_gguf_tensor_data(g, is, NULL);
+        const uint8_t* bb = llm_gguf_tensor_data(g, ib, NULL);
+        if (!qb || !sb || !bb) return -1;
+        const size_t qrb = (size_t)ng * 16u;          /* cols/2 byte */
+        const size_t srb = (size_t)ng * 2u;           /* F16 per gruppo */
+        const uint8_t* qrow = qb + (uint64_t)lr * qrb;
+        const uint8_t* srow = sb + (uint64_t)lr * srb;
+        const uint8_t* brow = bb + (uint64_t)lr * srb;
+        float* sc = malloc((size_t)ng * sizeof(float));
+        float* bi = malloc((size_t)ng * sizeof(float));
+        if (!sc || !bi) { free(sc); free(bi); return -1; }
+        if (llmcodec_ggml_dequant_row(1, srow, sc, (int64_t)ng) != 0 ||
+            llmcodec_ggml_dequant_row(1, brow, bi, (int64_t)ng) != 0) { free(sc); free(bi); return -1; }
+        for (uint64_t i = 0; i < cols; i++) {
+            uint8_t byte = qrow[i >> 1];
+            int q = (i & 1u) ? (byte >> 4) : (byte & 0x0Fu);
+            const uint64_t gg = i >> 5;
+            out[i] = (float)q * sc[gg] + bi[gg];
+        }
+        free(sc); free(bi);
+        return 0;
+    }
     snprintf(nm, sizeof nm, "ple.shard.%d.weight", shard);
     int i = llm_gguf_find_tensor(g, nm);
     const int type = g->ti[i].type;
@@ -78,7 +114,7 @@ static int q4n_ple_row_read(const LlmEngineMoeGguf* g, uint32_t row, float* out)
     const int rb = (int)llm_ggml_nbytes(type, (int64_t)in);
     const uint8_t* base = llm_gguf_tensor_data(g, i, NULL);
     if (!base || rb <= 0) return -1;
-    base += (uint64_t)(row - (uint32_t)shard * (uint32_t)per_shard) * (uint64_t)rb;
+    base += (uint64_t)lr * (uint64_t)rb;
     return llmcodec_ggml_dequant_row(type, base, out, (int64_t)in);
 }
 
