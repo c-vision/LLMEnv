@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
+#include <limits.h>
 
 struct ds4_bridge { ds4_engine* e; ds4_session* s; int ctx; };
 
@@ -22,9 +24,17 @@ ds4_bridge* ds4_bridge_open_ex(const char* model, int ctx, int stream, int prefi
     opt.ssd_streaming = stream ? true : false;
     if (prefill_chunk > 0) opt.prefill_chunk = (uint32_t)prefill_chunk;
     ds4_engine* e = NULL;
-    if (ds4_engine_open(&e, &opt) != 0) { fprintf(stderr, "bridge: open fallita\n"); return NULL; }
+    /* ds4 carica metal/*.metal dalla CWD: ci si sposta nella resource dir per l'apertura
+     * (nessuna env), poi si ripristina la CWD. */
+    char oldcwd[PATH_MAX]; int have_cwd = (getcwd(oldcwd, sizeof oldcwd) != NULL);
+#ifdef DS4_RESOURCE_DIR
+    if (chdir(DS4_RESOURCE_DIR) != 0) { /* resta la CWD corrente */ }
+#endif
+    int orc = ds4_engine_open(&e, &opt);
+    if (have_cwd) { if (chdir(oldcwd) != 0) { /* ignore */ } }
+    if (orc != 0) { fprintf(stderr, "bridge: open fallita\n"); return NULL; }
     ds4_session* s = NULL;
-    if (ds4_session_create(&s, e, ctx) != 0) { fprintf(stderr, "bridge: session create fallita\n"); ds4_engine_close(e); return NULL; }
+    if (!inspect_only && ds4_session_create(&s, e, ctx) != 0) { fprintf(stderr, "bridge: session create fallita\n"); ds4_engine_close(e); return NULL; }
     ds4_bridge* b = (ds4_bridge*)calloc(1, sizeof *b);
     b->e = e; b->s = s; b->ctx = ctx;
     return b;
