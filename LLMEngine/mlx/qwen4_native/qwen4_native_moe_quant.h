@@ -140,41 +140,82 @@ static int qwen4_native_moe_quant_gpu(mlx_array* out, mlx_array x, const LlmEngi
     snprintf(nm, sizeof nm, "blk.%d.ffn_down_exps.weight", il); di = llm_gguf_find_tensor(g, nm);
     if (gi < 0 || ui < 0 || di < 0) return -1;
     const int gt = g->ti[gi].type, ut = g->ti[ui].type, dt = g->ti[di].type;
-    if (gt != 8 || ut != 8 || dt != 8) return qwen4_native_moe_quant_cpu(out, x, g, il, r, E, NE, K, F, s);
+    { int ok = (gt==8||gt==10||gt==12||gt==16) && (ut==8||ut==10||ut==12||ut==16) &&
+               (dt==8||dt==10||dt==12||dt==16);
+      if (!ok) return qwen4_native_moe_quant_cpu(out, x, g, il, r, E, NE, K, F, s); }
     const uint8_t* gbase = llm_gguf_tensor_data(g, gi, NULL);
     const uint8_t* ubase = llm_gguf_tensor_data(g, ui, NULL);
     const uint8_t* dbase = llm_gguf_tensor_data(g, di, NULL);
-    const size_t g_rb = (size_t)llm_ggml_nbytes(8, (int64_t)g->ti[gi].dims[0]);
-    const size_t d_rb = (size_t)llm_ggml_nbytes(8, (int64_t)g->ti[di].dims[0]);
-    const size_t u_rb = (size_t)llm_ggml_nbytes(8, (int64_t)g->ti[ui].dims[0]);
+    const size_t g_rb = (size_t)llm_ggml_nbytes(gt, (int64_t)g->ti[gi].dims[0]);
+    const size_t u_rb = (size_t)llm_ggml_nbytes(ut, (int64_t)g->ti[ui].dims[0]);
+    const size_t d_rb = (size_t)llm_ggml_nbytes(dt, (int64_t)g->ti[di].dims[0]);
     const size_t g_slab = g_rb * (size_t)g->ti[gi].dims[1];
+    const size_t u_slab = u_rb * (size_t)g->ti[ui].dims[1];
     const size_t d_slab = d_rb * (size_t)g->ti[di].dims[1];
     float* dw = malloc((size_t)K * E * sizeof(float));
     float* mid = malloc((size_t)K * F * sizeof(float));
     if (!dw || !mid) return -1;
-    const void* gates[16]; const void* ups[16]; float* mids[16];
+    int fast8 = (gt == 8 && ut == 8 && dt == 8);
     int ne = 0;
+    const void* gates[16]; const void* ups[16]; float* mids[16];
     for (int k = 0; k < K; k++) {
         int e = sel[k]; if (e < 0 || e >= NE) continue;
         gates[ne] = gbase + (size_t)e * g_slab;
-        ups[ne]   = ubase + (size_t)e * g_slab;
+        ups[ne]   = ubase + (size_t)e * u_slab;
         mids[ne]  = mid + (size_t)k * F;
         ne++;
     }
     (void)gi; (void)ui;
-    int nj = 0;
-    if (q4n_gpu_pair_swiglu_q8(gpu, gates, ups, xh, mids, ne, F, E, g_rb, u_rb) != 0) return -1;
-    m2 = q4nm_now(); g_q4n_prof[5] += m2 - m1; g_q4n_prof[6] += 0.0;
-    m3 = m2;
-    LlmDsv4WideJob wjobs[32];
-    nj = 0;
-    for (int k = 0; k < K; k++) {
-        int e = sel[k]; if (e < 0 || e >= NE) continue;
-        wjobs[nj++] = (LlmDsv4WideJob){ .w = dbase + (size_t)e * d_slab,
-                                        .row_bytes = (uint32_t)d_rb, .n = (uint32_t)F, .out_dim = (uint32_t)E,
-                                        .x = mid + (size_t)k * F, .out = dw + (size_t)k * E };
+    if (fast8) {
+        if (q4n_gpu_pair_swiglu_q8(gpu, gates, ups, xh, mids, ne, F, E, g_rb, u_rb) != 0) return -1;
+    } else {
+        float* gw = malloc((size_t)K * F * sizeof(float));
+        float* uw = malloc((size_t)K * F * sizeof(float));
+        if (!gw || !uw) return -1;
+        LlmDsv4GpuJob gj[32];
+        int ng = 0;
+        for (int k = 0; k < K; k++) {
+            int e = sel[k]; if (e < 0 || e >= NE) continue;
+            gj[ng++] = (LlmDsv4GpuJob){ .w = gbase + (size_t)e * g_slab, .ggml_type = gt, .row_bytes = g_rb,
+                                        .n = (uint32_t)E, .out_dim = (uint32_t)F, .x = xh, .out = gw + (size_t)k*F };
+            gj[ng++] = (LlmDsv4GpuJob){ .w = ubase + (size_t)e * u_slab, .ggml_type = ut, .row_bytes = u_rb,
+                                        .n = (uint32_t)E, .out_dim = (uint32_t)F, .x = xh, .out = uw + (size_t)k*F };
+        }
+        int rc = q4n_gpu_gemv_batch(gpu, gj, ng);
+        if (rc == 0) {
+            for (int k = 0; k < K; k++) for (int f = 0; f < F; f++) {
+                float gv = gw[(size_t)k*F+f], uv = uw[(size_t)k*F+f];
+                float sv = gv >= 0 ? 1.0f/(1.0f+expf(-gv)) : expf(gv)/(1.0f+expf(gv));
+                mid[(size_t)k*F+f] = gv * sv * uv;
+            }
+        }
+        free(gw); free(uw);
+        if (rc != 0) return -1;
     }
-    if (q4n_gpu_gemv_q8_wide_batch(gpu, wjobs, nj) != 0) return -1;
+    m2 = q4nm_now(); g_q4n_prof[5] += m2 - m1;
+    m3 = q4nm_now(); g_q4n_prof[6] += m3 - m2;
+    int nj = 0;
+    if (dt == 8 || dt == 2) {
+        LlmDsv4WideJob wjobs[32];
+        for (int k = 0; k < K; k++) {
+            int e = sel[k]; if (e < 0 || e >= NE) continue;
+            wjobs[nj++] = (LlmDsv4WideJob){ .w = dbase + (size_t)e * d_slab,
+                                            .row_bytes = (uint32_t)d_rb, .n = (uint32_t)F, .out_dim = (uint32_t)E,
+                                            .x = mid + (size_t)k * F, .out = dw + (size_t)k * E };
+        }
+        int drc = (dt == 8) ? q4n_gpu_gemv_q8_wide_batch(gpu, wjobs, nj)
+                            : q4n_gpu_gemv_q4_0_wide_batch(gpu, wjobs, nj);
+        if (drc != 0) return -1;
+    } else {
+        LlmDsv4GpuJob dj[32];
+        for (int k = 0; k < K; k++) {
+            int e = sel[k]; if (e < 0 || e >= NE) continue;
+            dj[nj++] = (LlmDsv4GpuJob){ .w = dbase + (size_t)e * d_slab, .ggml_type = dt, .row_bytes = d_rb,
+                                        .n = (uint32_t)F, .out_dim = (uint32_t)E,
+                                        .x = mid + (size_t)k * F, .out = dw + (size_t)k * E };
+        }
+        if (q4n_gpu_gemv_batch(gpu, dj, nj) != 0) return -1;
+    }
     m4 = q4nm_now(); g_q4n_prof[7] += m4 - m3;
     float outv[4096];
     if (E > 4096) return -1;

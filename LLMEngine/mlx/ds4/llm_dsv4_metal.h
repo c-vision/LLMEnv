@@ -60,6 +60,7 @@ int llm_dsv4_metal_pair_swiglu_batch(LlmDsv4Metal* b, const void* const* gates, 
 
 typedef struct { const void* w; uint32_t row_bytes, n, out_dim; const float* x; float* out; } LlmDsv4WideJob;
 int llm_dsv4_metal_gemv_q8_wide_batch(LlmDsv4Metal* b, const LlmDsv4WideJob* jobs, int n);
+int llm_dsv4_metal_gemv_q4_0_wide_batch(LlmDsv4Metal* b, const LlmDsv4WideJob* jobs, int n);
 int llm_dsv4_metal_pair_swiglu_q8_wide_batch(LlmDsv4Metal* b, const void* const* gates, const void* const* ups,
                                              const float* x, float* const* mids, int n, float clamp,
                                              uint32_t ne00, uint32_t rb_g, uint32_t rb_u, uint32_t ne0);

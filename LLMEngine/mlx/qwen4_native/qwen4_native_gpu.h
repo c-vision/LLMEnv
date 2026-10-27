@@ -43,6 +43,10 @@ static int q4n_gpu_gemv_q8_wide_batch(Q4nGpu* g, const LlmDsv4WideJob* jobs, int
     if (!g || !g->b) return -1;
     return llm_dsv4_metal_gemv_q8_wide_batch(g->b, jobs, n);
 }
+static int q4n_gpu_gemv_q4_0_wide_batch(Q4nGpu* g, const LlmDsv4WideJob* jobs, int n) {
+    if (!g || !g->b) return -1;
+    return llm_dsv4_metal_gemv_q4_0_wide_batch(g->b, jobs, n);
+}
 
 /* batch di job (una command buffer, un wait). */
 static int q4n_gpu_gemv_batch(Q4nGpu* g, const LlmDsv4GpuJob* jobs, int n) {
@@ -66,10 +70,12 @@ static int q4n_mat_mv_gpu(void* ctx, const Q4nMat* W, const float* x, float* y, 
     if (!W || !W->w) return -1;
     if (W->type < 0) return q4n_mat_mv_cpu(NULL, W, x, y, n_in, n_out);
     if (!g || !g->b) return -1;
-    if (W->type == 8) {
+    if (W->type == 8 || W->type == 2) {
         LlmDsv4WideJob job = { .w = W->w, .row_bytes = (uint32_t)W->row_bytes,
                                .n = (uint32_t)n_in, .out_dim = (uint32_t)n_out, .x = x, .out = y };
-        if (llm_dsv4_metal_gemv_q8_wide_batch(g->b, &job, 1) == 0) return 0;
+        int rc = (W->type == 8) ? llm_dsv4_metal_gemv_q8_wide_batch(g->b, &job, 1)
+                                : llm_dsv4_metal_gemv_q4_0_wide_batch(g->b, &job, 1);
+        if (rc == 0) return 0;
     }
     return q4n_gpu_gemv(g, W->w, W->type, W->row_bytes, (uint32_t)n_in, (uint32_t)n_out, x, y);
 }

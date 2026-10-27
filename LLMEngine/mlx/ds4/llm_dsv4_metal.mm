@@ -159,6 +159,33 @@ static const char* const LLM_DSV4_METAL_KERNELS =
 "    float g = simd_sum(accg), u = simd_sum(accu);\n"
 "    if (tid == 0u) { const float c = CF[0]; if (c > 1.0e-6f) { g = min(g, c); u = clamp(u, -c, c); } MID[tg] = (g / (1.f + exp(-g))) * u; }\n"
 "}\n"
+/* Q4_0 "wide": 128 thread (4 simdgroup) per riga, dequant nibble. P={voff,row_bytes,nblk,out_dim}. */
+"kernel void dsv4_gemv_q4_0_wide(device const uchar* W [[buffer(0)]], device const float* X [[buffer(1)]], device float* O [[buffer(2)]], constant uint* P [[buffer(3)]],\n"
+"    uint tg [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint lsimd [[thread_index_in_simdgroup]]) {\n"
+"    uint voff = P[0], row_bytes = P[1], nblk = P[2], out_dim = P[3];\n"
+"    if (tg >= out_dim) return;\n"
+"    threadgroup float red[4];\n"
+"    device const uchar* row = W + voff + (ulong)tg * (ulong)row_bytes;\n"
+"    float acc = 0.0f;\n"
+"    for (uint b = tid; b < nblk; b += 128u) {\n"
+"        device const uchar* blk = row + (ulong)b * 18ul;\n"
+"        ushort dh = (ushort)blk[0] | ((ushort)blk[1] << 8);\n"
+"        float d = (float)as_type<half>(dh);\n"
+"        const uint base = b * 32u; float s = 0.0f;\n"
+"        for (uint i = 0; i < 16u; i += 2) {\n"
+"            uchar q0 = blk[2u+i], q1 = blk[2u+i+1u];\n"
+"            s += (float)((int)(q0 & 0x0F) - 8) * X[base+i]\n"
+"               + (float)((int)(q0 >> 4)   - 8) * X[base+i+16u]\n"
+"               + (float)((int)(q1 & 0x0F) - 8) * X[base+i+1u]\n"
+"               + (float)((int)(q1 >> 4)   - 8) * X[base+i+17u];\n"
+"        }\n"
+"        acc += d * s;\n"
+"    }\n"
+"    float r = simd_sum(acc);\n"
+"    if (lsimd == 0u) red[tid >> 5] = r;\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    if (tid == 0u) O[tg] = red[0]+red[1]+red[2]+red[3];\n"
+"}\n"
 /* Q8_0 "wide": 128 thread (4 simdgroup) per riga, riduzione in threadgroup.
  * P = {voff, row_bytes, nblk, out_dim}. */
 "kernel void dsv4_gemv_q8_wide(device const uchar* W [[buffer(0)]], device const float* X [[buffer(1)]], device float* O [[buffer(2)]], constant uint* P [[buffer(3)]],\n"
@@ -1748,6 +1775,7 @@ struct LlmDsv4Metal {
     id<MTLComputePipelineState> pso_pair_swiglu_q8_0;   /* FUSO: gate+up+swiglu Q8_0 (3->1 dispatch) */
     id<MTLComputePipelineState> pso_gemv_q8_0_add;       /* FUSO: down Q8_0 + OUT += (2->1 dispatch) */
     id<MTLComputePipelineState> pso_gemv_q8_wide;
+    id<MTLComputePipelineState> pso_gemv_q4_0_wide;
     id<MTLComputePipelineState> pso_pair_q8_wide;
     id<MTLComputePipelineState> pso_pair;   /* MoE fuso gate+up+swiglu (ds4 pair) */
     id<MTLComputePipelineState> pso_sum6_q2k; /* down 6 esperti Q2_K + somma (ds4 sum6) */
@@ -1943,6 +1971,9 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
     { id<MTLFunction> fw = [lib newFunctionWithName:@"dsv4_gemv_q8_wide"];
       b->pso_gemv_q8_wide = fw ? [dev newComputePipelineStateWithFunction:fw error:&err] : nil;
       if (!fw) fprintf(stderr, "dsv4_metal: kernel dsv4_gemv_q8_wide NON compilato\n"); }
+    { id<MTLFunction> f4 = [lib newFunctionWithName:@"dsv4_gemv_q4_0_wide"];
+      b->pso_gemv_q4_0_wide = f4 ? [dev newComputePipelineStateWithFunction:f4 error:&err] : nil;
+      if (!f4) fprintf(stderr, "dsv4_metal: kernel dsv4_gemv_q4_0_wide NON compilato\n"); }
     { id<MTLFunction> fpw = [lib newFunctionWithName:@"dsv4_pair_swiglu_q8_wide"];
       b->pso_pair_q8_wide = fpw ? [dev newComputePipelineStateWithFunction:fpw error:&err] : nil;
       if (!fpw) fprintf(stderr, "dsv4_metal: kernel dsv4_pair_swiglu_q8_wide NON compilato\n"); }
@@ -2067,6 +2098,7 @@ void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (b->pso_q8_0)     [b->pso_q8_0 release];
     if (b->pso_pair)     [b->pso_pair release];
     if (b->pso_gemv_q8_wide) [b->pso_gemv_q8_wide release];
+    if (b->pso_gemv_q4_0_wide) [b->pso_gemv_q4_0_wide release];
     if (b->pso_pair_q8_wide) [b->pso_pair_q8_wide release];
     if (b->pso_sum6_q2k) [b->pso_sum6_q2k release];
     if (b->pso_attn_part) [b->pso_attn_part release];
@@ -2689,6 +2721,45 @@ int llm_dsv4_metal_gemv_q8_wide_batch(LlmDsv4Metal* b, const LlmDsv4WideJob* job
         id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
         for (int i = 0; i < n; i++) {
             g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_q8_wide];
+            [e setBuffer:W[i] offset:0 atIndex:0]; [e setBuffer:X[i] offset:0 atIndex:1];
+            [e setBuffer:O[i] offset:0 atIndex:2]; [e setBuffer:PB[i] offset:0 atIndex:3];
+            [e dispatchThreadgroups:MTLSizeMake(jobs[i].out_dim, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
+        [e endEncoding];
+        dsv4_res_commit(b); [cb commit];
+        { g_dsv4_waits++; [cb waitUntilCompleted]; } dsv4_gpu_acct(cb);
+        if (cb.error) rc = -3;
+    }
+    if (rc == 0) for (int i = 0; i < n; i++) memcpy(jobs[i].out, [O[i] contents], (size_t)jobs[i].out_dim*sizeof(float));
+    for (int i = 0; i < 32; i++) { if (W[i]) [W[i] release]; if (X[i]) [X[i] release]; if (O[i]) [O[i] release]; if (PB[i]) [PB[i] release]; }
+    return rc;
+}
+
+int llm_dsv4_metal_gemv_q4_0_wide_batch(LlmDsv4Metal* b, const LlmDsv4WideJob* jobs, int n) {
+    if (!b || !b->pso_gemv_q4_0_wide || !jobs || n <= 0 || n > 32) return -1;
+    const size_t page = (size_t)getpagesize();
+    id<MTLBuffer> W[32], X[32], O[32], PB[32];
+    for (int i = 0; i < 32; i++) { W[i]=X[i]=O[i]=PB[i]=nil; }
+    int rc = 0;
+    for (int i = 0; i < n && rc == 0; i++) {
+        const LlmDsv4WideJob* j = &jobs[i];
+        if ((j->n % 32u) != 0u || j->out_dim == 0 || j->n == 0) { rc = -1; break; }
+        size_t bytes = (size_t)j->out_dim * (size_t)j->row_bytes;
+        uintptr_t ap = (uintptr_t)j->w & ~(uintptr_t)(page-1);
+        size_t lead = (size_t)((uintptr_t)j->w - ap);
+        size_t vl = ((lead+bytes+page-1)/page)*page;
+        W[i] = [b->dev newBufferWithBytesNoCopy:(void*)ap length:vl options:MTLResourceStorageModeShared deallocator:nil];
+        X[i] = [b->dev newBufferWithBytes:j->x length:(NSUInteger)j->n*sizeof(float) options:MTLResourceStorageModeShared];
+        O[i] = [b->dev newBufferWithLength:(NSUInteger)j->out_dim*sizeof(float) options:MTLResourceStorageModeShared];
+        uint32_t P[4] = { (uint32_t)lead, j->row_bytes, j->n/32u, j->out_dim };
+        PB[i] = [b->dev newBufferWithBytes:P length:sizeof P options:MTLResourceStorageModeShared];
+        if (!W[i]||!X[i]||!O[i]||!PB[i]) rc = -2;
+    }
+    if (rc == 0) {
+        id<MTLCommandBuffer> cb = [b->queue commandBuffer];
+        id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+        for (int i = 0; i < n; i++) {
+            g_dsv4_dispatchs++; [e setComputePipelineState:b->pso_gemv_q4_0_wide];
             [e setBuffer:W[i] offset:0 atIndex:0]; [e setBuffer:X[i] offset:0 atIndex:1];
             [e setBuffer:O[i] offset:0 atIndex:2]; [e setBuffer:PB[i] offset:0 atIndex:3];
             [e dispatchThreadgroups:MTLSizeMake(jobs[i].out_dim, 1, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];

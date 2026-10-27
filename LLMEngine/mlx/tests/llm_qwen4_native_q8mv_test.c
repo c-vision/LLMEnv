@@ -47,7 +47,28 @@ int main(void) {
     if (q4n_mat_mv_gpu(&g, &mat, x, y, n_in, n_out) != 0) { printf("gemv FAIL\n"); return 1; }
     double maxe = 0.0, maxr = 0.0;
     for (int o = 0; o < n_out; o++) { double e = fabs((double)y[o] - (double)ref[o]); if (e > maxe) maxe = e; if (fabs((double)ref[o]) > maxr) maxr = fabs((double)ref[o]); }
-    printf("max_abs_err=%.6g  max_ref=%.6g  rel=%.3g\n", maxe, maxr, maxe / (maxr > 0 ? maxr : 1.0));
+    printf("q8: max_abs_err=%.6g  max_ref=%.6g  rel=%.3g\n", maxe, maxr, maxe / (maxr > 0 ? maxr : 1.0));
+    /* Q4_0: blocco 18 B (d f16 + 16 byte nibble) */
+    { const size_t rb4 = (size_t)(n_in / 32) * 18; uint8_t* W4 = malloc(rb4 * (size_t)n_out);
+      float* y4 = malloc((size_t)n_out * sizeof(float)); float* ref4 = malloc((size_t)n_out * sizeof(float));
+      if (!W4 || !y4 || !ref4) return 1;
+      for (int o = 0; o < n_out; o++) { uint8_t* row = W4 + (size_t)o * rb4;
+        for (int b = 0; b < n_in/32; b++) { uint8_t* blk = row + (size_t)b*18;
+          _Float16 d = (_Float16)(0.002f + 0.0002f * (float)(b % 5)); __builtin_memcpy(blk, &d, 2);
+          for (int i = 0; i < 16; i++) blk[2+i] = (uint8_t)((rand()%16) | ((rand()%16) << 4)); } }
+      for (int o = 0; o < n_out; o++) { const uint8_t* row = W4 + (size_t)o*rb4; double acc = 0;
+        for (int b = 0; b < n_in/32; b++) { const uint8_t* blk = row + (size_t)b*18; _Float16 dh; __builtin_memcpy(&dh, blk, 2);
+          double d = (double)dh;
+          for (int i = 0; i < 16; i++) { uint8_t q0 = blk[2+i];
+            acc += d * (((int)(q0 & 0xF) - 8) * (double)x[b*32+i] + ((int)(q0 >> 4) - 8) * (double)x[b*32+16+i]); } }
+        ref4[o] = (float)acc; }
+      Q4nMat m4 = { W4, 2, rb4 };
+      if (q4n_mat_mv_gpu(&g, &m4, x, y4, n_in, n_out) != 0) { printf("q4_0 FAIL\n"); return 1; }
+      double e4 = 0, r4 = 0;
+      for (int o = 0; o < n_out; o++) { double e = fabs((double)y4[o]-(double)ref4[o]); if (e > e4) e4 = e; if (fabs((double)ref4[o]) > r4) r4 = fabs((double)ref4[o]); }
+      printf("q4_0: max_abs_err=%.6g rel=%.3g\n", e4, e4/(r4>0?r4:1.0));
+      if (e4/(r4>0?r4:1.0) >= 1e-4) return 1;
+      free(W4); free(y4); free(ref4); }
     q4n_gpu_free(&g);
     free(W); free(x); free(y); free(ref);
     return (maxe / (maxr > 0 ? maxr : 1.0) < 1e-4) ? 0 : 1;
