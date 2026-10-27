@@ -31,6 +31,7 @@ void* llm_dsv4_metal_nocopy(LlmDsv4Metal* b, const void* mmap_base, size_t file_
 /* Come nocopy ma da un puntatore arbitrario nella regione mappata (allinea a pagina da solo). */
 void* llm_dsv4_metal_nocopy_ptr(LlmDsv4Metal* b, const void* ptr, size_t bytes, size_t* out_view_off);
 void llm_dsv4_metal_release(LlmDsv4Metal* b, void* handle);
+void llm_dsv4_metal_view_cache_flush(LlmDsv4Metal* b);
 
 /* out[j] = dot(W_row_j, x), j in [0,out_dim). `ggml_type`: 16=IQ2_XXS, 10=Q2_K, 8=Q8_0. */
 int llm_dsv4_metal_gemv(LlmDsv4Metal* b, void* handle, size_t view_off, int ggml_type,

@@ -2087,6 +2087,13 @@ LlmDsv4Metal* llm_dsv4_metal_create(void) {
 }
 
 static void dsv4_view_cache_clear(void);
+/* Svuota la cache delle view no-copy (e il residency set): da chiamare quando il chiamante
+ * ha finito un blocco di layer, per non tenere residenti decine di GB di mmap. Idempotente. */
+void llm_dsv4_metal_view_cache_flush(LlmDsv4Metal* b) {
+    if (!b) return;
+    dsv4_view_cache_clear();
+}
+
 void llm_dsv4_metal_destroy(LlmDsv4Metal* b) {
     if (!b) return;
     if (b->pso)          [b->pso release];

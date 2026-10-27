@@ -15,7 +15,7 @@ static int q4n_gpu_init(Q4nGpu* g) {
     g->b = llm_dsv4_metal_create();
     return g->b ? 0 : -1;
 }
-static void q4n_gpu_reset(Q4nGpu* g) { (void)g; }   /* le view sono cache interne ds4 */
+static void q4n_gpu_reset(Q4nGpu* g) { if (g && g->b) llm_dsv4_metal_view_cache_flush(g->b); }
 static void q4n_gpu_free(Q4nGpu* g) {
     if (!g) return;
     llm_dsv4_metal_destroy(g->b);
