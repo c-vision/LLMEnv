@@ -216,7 +216,7 @@ int llmcodec_rolemap_load(const char* llmarch_path, LlmCodecRoleMap* out) {
               if (*p != '{') { if (*p=='"'){const char* e=strchr(p+1,'"'); p=e?e+1:p+1;} else ++p; continue; }
               int d2=0; const char* pe=p;
               for (; *pe; ++pe) { if(*pe=='{')d2++; else if(*pe=='}'){d2--; if(d2==0)break;} }
-              char obj[1024]; size_t L=(size_t)(pe-p)+1;
+              char obj[4096]; size_t L=(size_t)(pe-p)+1;
               if (L < sizeof obj) {
                   memcpy(obj,p,L); obj[L]=0;
                   LlmCodecTarget* T = &out->tg[out->n_t];

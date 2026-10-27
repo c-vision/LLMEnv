@@ -259,6 +259,35 @@ static int meta_build_impl(const char* model_dir, const char* arch, const LlmCod
     if (rm) {
         for (int i = 0; i < rm->n_m; i++) {
             const char* src = rm->mm[i].src;
+            if (strncmp(src, "list64:", 7) == 0) {
+                const char* lp = src + 7;
+                uint64_t vals[64]; int n = 0;
+                while (*lp && n < 64) { vals[n++] = strtoull(lp, (char**)&lp, 10); while (*lp == ',' || *lp == ' ') ++lp; }
+                if (n == 0) continue;
+                uint64_t* a = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
+                if (!a) continue;
+                memcpy(a, vals, (size_t)n * sizeof(uint64_t));
+                int ex = -1; for (int k = 0; k < m.n; k++) if (strcmp(m.kv[k].key, rm->mm[i].key) == 0) { ex = k; break; }
+                if (ex >= 0) { m.kv[ex].type = LLMCODEC_GGUF_MT_ARRAY; m.kv[ex].arr_type = LLMCODEC_GGUF_MT_U64;
+                               m.kv[ex].arr_raw = a; m.kv[ex].arr_count = (uint64_t)n; m.kv[ex].arr_raw_bytes = (uint64_t)n*8; }
+                else { LlmCodecGgufMetaKV* k2=ml_add(&m, rm->mm[i].key); k2->type=LLMCODEC_GGUF_MT_ARRAY; k2->arr_type=LLMCODEC_GGUF_MT_U64; k2->arr_raw=a; k2->arr_count=(uint64_t)n; k2->arr_raw_bytes=(uint64_t)n*8; }
+                continue;
+            }
+            if (strncmp(src, "list:", 5) == 0) {
+                /* array u32 da lista CSV: "list:1,14" */
+                const char* lp = src + 5;
+                uint32_t vals[128]; int n = 0;
+                while (*lp && n < 128) { vals[n++] = (uint32_t)strtoul(lp, (char**)&lp, 10); while (*lp == ',' || *lp == ' ') ++lp; }
+                if (n == 0) continue;
+                uint32_t* a = (uint32_t*)malloc((size_t)n * sizeof(uint32_t));
+                if (!a) continue;
+                memcpy(a, vals, (size_t)n * sizeof(uint32_t));
+                int ex = -1; for (int k = 0; k < m.n; k++) if (strcmp(m.kv[k].key, rm->mm[i].key) == 0) { ex = k; break; }
+                if (ex >= 0) { m.kv[ex].type = LLMCODEC_GGUF_MT_ARRAY; m.kv[ex].arr_type = LLMCODEC_GGUF_MT_U32;
+                               m.kv[ex].arr_raw = a; m.kv[ex].arr_count = (uint64_t)n; m.kv[ex].arr_raw_bytes = (uint64_t)n*4; }
+                else add_arr_u32(&m, rm->mm[i].key, a, n);
+                continue;
+            }
             if (strncmp(src, "ratio:", 6) == 0) {
                 /* array per-layer: value su (il+1)%interval==0, 0 altrove. es.
                  * "ratio:4:4:config!:text_config.num_hidden_layers" */
@@ -266,7 +295,8 @@ static int meta_build_impl(const char* model_dir, const char* arch, const LlmCod
                 int interval = atoi(r); r = strchr(r, ':'); if (!r) continue;
                 int value = atoi(r + 1); r = strchr(r + 1, ':'); if (!r) continue;
                 const char* nsrc = r + 1;
-                const char* np = (strncmp(nsrc, "config:", 7) == 0) ? jpath(cj, nsrc + 7) : nsrc;
+                const char* np = (strncmp(nsrc, "config!:", 8) == 0) ? jpath(cj, nsrc + 8)
+                               : (strncmp(nsrc, "config:", 7) == 0) ? jpath(cj, nsrc + 7) : nsrc;
                 if (!np) continue;
                 int n = atoi(np); if (n <= 0 || interval <= 0 || n > 1024) continue;
                 uint32_t* a = (uint32_t*)malloc((size_t)n * sizeof(uint32_t));
