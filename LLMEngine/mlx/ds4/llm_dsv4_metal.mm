@@ -2091,6 +2091,12 @@ static void dsv4_view_cache_clear(void);
  * ha finito un blocco di layer, per non tenere residenti decine di GB di mmap. Idempotente. */
 void llm_dsv4_metal_view_cache_flush(LlmDsv4Metal* b) {
     if (!b) return;
+    if (b->nc) {
+        for (uint32_t i = 0; i < b->nc_n; i++) if (b->nc[i].buf) [b->nc[i].buf release];
+        memset(b->nc, 0, (size_t)b->nc_cap * sizeof *b->nc);
+        b->nc_n = 0;
+    }
+    if (b->residency) { [b->residency removeAllAllocations]; [b->residency commit]; b->res_dirty = 0; }
     dsv4_view_cache_clear();
 }
 

@@ -329,7 +329,8 @@ gdn_done: ;
         mlx_array_free(R1); mlx_array_free(m1); mlx_array_free(i1);
         mlx_array_free(m2); mlx_array_free(i2); mlx_array_free(blk); mlx_array_free(b2);
         if (!m->gpu_ok) q4n_layer_free(&refs);
-        else q4n_gpu_reset(&m->gpu);   /* evita di tenere residenti i mmap delle view */
+        else q4n_gpu_reset(&m->gpu);
+
 #if defined(__APPLE__)
         { extern void malloc_zone_pressure_relief(void*, unsigned long); malloc_zone_pressure_relief((void*)0, 0); }
 #endif
