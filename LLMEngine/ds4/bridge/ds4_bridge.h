@@ -10,6 +10,8 @@ typedef struct ds4_bridge ds4_bridge;
 
 /* Apre il motore e crea una sessione. prefill_chunk=0 -> default del motore. */
 ds4_bridge* ds4_bridge_open(const char* model, int ctx, int stream, int prefill_chunk);
+/* inspect_only=1: valida solo configurazione/metadati (nessun peso caricato). */
+ds4_bridge* ds4_bridge_open_ex(const char* model, int ctx, int stream, int prefill_chunk, int inspect_only);
 void        ds4_bridge_close(ds4_bridge* b);
 
 /* Sincronizza la sessione al prefisso `toks[0..n)`: prefill se nuovo, altrimenti solo il suffisso. */

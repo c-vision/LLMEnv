@@ -7,8 +7,15 @@
 
 struct ds4_bridge { ds4_engine* e; ds4_session* s; int ctx; };
 
+ds4_bridge* ds4_bridge_open_ex(const char* model, int ctx, int stream, int prefill_chunk, int inspect_only);
+
 ds4_bridge* ds4_bridge_open(const char* model, int ctx, int stream, int prefill_chunk) {
+    return ds4_bridge_open_ex(model, ctx, stream, prefill_chunk, 0);
+}
+
+ds4_bridge* ds4_bridge_open_ex(const char* model, int ctx, int stream, int prefill_chunk, int inspect_only) {
     ds4_engine_options opt; memset(&opt, 0, sizeof opt);
+    opt.inspect_only = inspect_only ? true : false;
     opt.model_path = model;
     opt.context_size = ctx;
     opt.ssd_streaming = stream ? true : false;

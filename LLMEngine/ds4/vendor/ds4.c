@@ -839,6 +839,45 @@ static const ds4_shape DS4_SHAPE_QWEN4_EXP = {
 };
 
 /* Synthetic test model: same structure at toy widths, real tokenizer. */
+/* Variante 48-layer (senza layer MTP): stesso modello base, n_nextn_predict=0. */
+static const ds4_shape DS4_SHAPE_QWEN4_EXP48 = {
+    .name = "Qwen3.8 Flash Next",
+    .family = DS4_MODEL_FAMILY_QWEN4_EXP,
+    .variant = DS4_VARIANT_QWEN4_EXP,
+    .n_layer = 48,
+    .n_embd = 2560,
+    .n_vocab = 248320,
+    .n_head = 24,
+    .n_head_kv = 2,
+    .n_head_dim = 256,
+    .n_value_dim = 256,
+    .n_rot = 64,
+    .n_expert = 512,
+    .n_expert_used = 10,
+    .n_expert_shared = 1,
+    .n_ff_exp = 640,
+    .n_indexer_head = 4,
+    .n_indexer_head_dim = 128,
+    .n_indexer_top_k = 2048,
+    .n_hc = 4,
+    .n_hc_lowrank = 320,
+    .n_nextn_predict = 0,
+    .n_lin_k_head = 16,
+    .n_lin_v_head = 48,
+    .n_lin_head_dim = 128,
+    .n_lin_conv = 4,
+    .n_full_attn_interval = 4,
+    .n_ple_layer = 1,
+    .n_ple_ngram = 3,
+    .n_ple_heads_per_ngram = 8,
+    .n_ple_conv = 4,
+    .n_ple_head_dim = 160,
+    .ple_eos_id = 248044,
+    .rms_eps = 1.0e-6f,
+    .rope_freq_base = 10000000.0f,
+    .rope_orig_ctx = 262144,
+};
+
 static const ds4_shape DS4_SHAPE_QWEN4_MINI = {
     .name = "Qwen3.8 Flash Next mini",
     .family = DS4_MODEL_FAMILY_QWEN4_EXP,
@@ -7027,7 +7066,9 @@ static void qwen4_rope_configure(uint32_t native_ctx) {
 static void config_validate_qwen4_model(const ds4_model *m) {
     const uint32_t n_embd = required_u32(m, "qwen4exp.embedding_length");
     if (n_embd == DS4_SHAPE_QWEN4_EXP.n_embd) {
-        g_ds4_shape = DS4_SHAPE_QWEN4_EXP;
+        uint32_t nb48 = 0;
+        (void)model_get_u32(m, "qwen4exp.block_count", &nb48);
+        g_ds4_shape = (nb48 == 48u) ? DS4_SHAPE_QWEN4_EXP48 : DS4_SHAPE_QWEN4_EXP;
     } else if (n_embd == DS4_SHAPE_QWEN4_MINI.n_embd) {
         g_ds4_shape = DS4_SHAPE_QWEN4_MINI;
     } else {

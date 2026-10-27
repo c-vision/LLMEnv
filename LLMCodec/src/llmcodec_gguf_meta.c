@@ -146,6 +146,7 @@ static void add_arr_i32(ML* m, const char* key, const int32_t* a, int n){ LlmCod
 static void add_u32a(ML* m, const char* arch, const char* suf, uint32_t v){ char b[96]; snprintf(b,sizeof b,"%s.%s",arch,suf); add_u32(m,b,v); }
 static void add_f32a(ML* m, const char* arch, const char* suf, float v){ char b[96]; snprintf(b,sizeof b,"%s.%s",arch,suf); add_f32(m,b,v); }
 static void add_boola(ML* m, const char* arch, const char* suf, int v){ char b[96]; snprintf(b,sizeof b,"%s.%s",arch,suf); add_bool(m,b,v); }
+static void add_arr_u32(ML* m, const char* key, const uint32_t* a, int n){ LlmCodecGgufMetaKV* k=ml_add(m,key); k->type=LLMCODEC_GGUF_MT_ARRAY; k->arr_type=LLMCODEC_GGUF_MT_U32; k->arr_raw=a; k->arr_count=(uint64_t)n; k->arr_raw_bytes=(uint64_t)n*4; }
 static void add_arra(ML* m, const char* arch, const char* suf, char** a, int n){ char b[96]; snprintf(b,sizeof b,"%s.%s",arch,suf); add_arr_str(m,b,a,n); }
 
 
@@ -258,6 +259,25 @@ static int meta_build_impl(const char* model_dir, const char* arch, const LlmCod
     if (rm) {
         for (int i = 0; i < rm->n_m; i++) {
             const char* src = rm->mm[i].src;
+            if (strncmp(src, "ratio:", 6) == 0) {
+                /* array per-layer: value su (il+1)%interval==0, 0 altrove. es.
+                 * "ratio:4:4:config!:text_config.num_hidden_layers" */
+                const char* r = src + 6;
+                int interval = atoi(r); r = strchr(r, ':'); if (!r) continue;
+                int value = atoi(r + 1); r = strchr(r + 1, ':'); if (!r) continue;
+                const char* nsrc = r + 1;
+                const char* np = (strncmp(nsrc, "config:", 7) == 0) ? jpath(cj, nsrc + 7) : nsrc;
+                if (!np) continue;
+                int n = atoi(np); if (n <= 0 || interval <= 0 || n > 1024) continue;
+                uint32_t* a = (uint32_t*)malloc((size_t)n * sizeof(uint32_t));
+                if (!a) continue;
+                for (int k = 0; k < n; ++k) a[k] = (((k + 1) % interval) == 0) ? (uint32_t)value : 0u;
+                int ex = -1; for (int k = 0; k < m.n; k++) if (strcmp(m.kv[k].key, rm->mm[i].key) == 0) { ex = k; break; }
+                if (ex >= 0) { m.kv[ex].type = LLMCODEC_GGUF_MT_ARRAY; m.kv[ex].arr_type = LLMCODEC_GGUF_MT_U32;
+                               m.kv[ex].arr_raw = a; m.kv[ex].arr_count = (uint64_t)n; m.kv[ex].arr_raw_bytes = (uint64_t)n*4; }
+                else add_arr_u32(&m, rm->mm[i].key, a, n);
+                continue;
+            }
             int lit = (strncmp(src, "lit:", 4) == 0);          /* valore letterale (es. lit:6144) */
             int force = lit || (strncmp(src, "config!:", 8) == 0);
             if (!lit && !force && strncmp(src, "config:", 7) != 0) continue;
