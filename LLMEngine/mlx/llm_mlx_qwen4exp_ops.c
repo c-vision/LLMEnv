@@ -452,6 +452,71 @@ static bool qwen4_exp_ngram_read_rows(LlmMlxModel* m, const uint32_t* row_ids, s
     return ok;
 }
 
+/* ── Id N-gram sull'HOST ───────────────────────────────────────────────────────────────────────────────
+ * Gli id dipendono solo dalla storia dei token (gia' sull'host in q4e_ctx_ids) e da costanti del checkpoint
+ * (layer_multipliers, ngram_heads_vocab_sizes/offsets). Prima venivano calcolati con ~40 op MLX e riletti con DUE eval
+ * (multipliers + ids) a ogni layer PLE di ogni token: sincronizzazioni nel mezzo del grafo. Qui: stessa semantica
+ * (shift "ignora EOS", xor pesato in int64 con wraparound, resto stile Python, + offset), zero GPU, costanti lette una volta. */
+typedef struct { const LlmMlxModel* m; int layer; int n_mult, n_heads; int64_t* mult; int64_t* vsz; int64_t* voff; } PleConst;
+static PleConst* g_ple_const; static int g_ple_n, g_ple_cap;
+static pthread_mutex_t g_ple_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static bool ple_read_i64(mlx_array src, mlx_stream s, int64_t** out, int* n) {
+    mlx_array a = mlx_array_new();
+    bool ok = mlx_astype(&a, src, MLX_INT64, s) == 0 && mlx_array_eval(a) == 0;
+    const int64_t* d = ok ? mlx_array_data_int64(a) : NULL;
+    if (d) { *n = (int)mlx_array_size(a); *out = (int64_t*)malloc((size_t)*n * sizeof(int64_t)); if (*out) memcpy(*out, d, (size_t)*n * sizeof(int64_t)); else ok = false; }
+    else ok = false;
+    mlx_array_free(a);
+    return ok;
+}
+
+/* Costanti del layer (lette dal checkpoint UNA volta; unica sincronizzazione, al primo uso). */
+static const PleConst* ple_layer_const(LlmMlxModel* m, int layer_idx, mlx_array mult_arr, mlx_array vsz_arr, mlx_array voff_arr) {
+    pthread_mutex_lock(&g_ple_mu);
+    for (int i = 0; i < g_ple_n; i++) if (g_ple_const[i].m == m && g_ple_const[i].layer == layer_idx) { const PleConst* r = &g_ple_const[i]; pthread_mutex_unlock(&g_ple_mu); return r; }
+    PleConst c; memset(&c, 0, sizeof c); c.m = m; c.layer = layer_idx;
+    int nv = 0, no = 0;
+    bool ok = ple_read_i64(mult_arr, m->stream, &c.mult, &c.n_mult) && ple_read_i64(vsz_arr, m->stream, &c.vsz, &nv) && ple_read_i64(voff_arr, m->stream, &c.voff, &no) && nv == no;
+    c.n_heads = nv;
+    if (ok && g_ple_n >= g_ple_cap) { int nc = g_ple_cap ? g_ple_cap * 2 : 64; PleConst* nt = (PleConst*)realloc(g_ple_const, (size_t)nc * sizeof *nt); if (nt) { g_ple_const = nt; g_ple_cap = nc; } else ok = false; }
+    if (!ok) { free(c.mult); free(c.vsz); free(c.voff); pthread_mutex_unlock(&g_ple_mu); return NULL; }
+    g_ple_const[g_ple_n++] = c;
+    const PleConst* r = &g_ple_const[g_ple_n - 1];
+    pthread_mutex_unlock(&g_ple_mu);
+    return r;
+}
+
+/* out: [n_tokens][n_heads] uint32 (ultimi n_tokens della storia di L token). */
+static void ple_ngram_ids_host(uint32_t* out, const int32_t* tok, int L, int n_tokens, int ngram_size, int heads_per_ngram,
+                               const PleConst* c, int64_t eos) {
+    const int n_grams = ngram_size - 1, n_heads = n_grams * heads_per_ngram;
+    int last_eos = -1;                                    /* posizione dell'ultimo EOS strettamente prima di p */
+    const int p0 = L - n_tokens;
+    for (int p = 0; p < L; p++) {
+        if (p >= p0) {
+            const int pis = p - last_eos - 1;             /* posizione nel segmento */
+            int64_t sh_tok[16];
+            for (int sh = 0; sh < ngram_size && sh < 16; sh++) {
+                if (sh == 0) sh_tok[0] = (int64_t)tok[p];
+                else { const int src = p - sh; sh_tok[sh] = (pis >= sh && src >= 0) ? (int64_t)tok[src] : eos; }
+            }
+            uint32_t* o = out + (size_t)(p - p0) * (size_t)n_heads;
+            for (int g = 0; g < n_grams; g++) {
+                const int ngram = g + 2;
+                uint64_t mixed = (uint64_t)sh_tok[0] * (uint64_t)c->mult[0];
+                for (int k = 1; k < ngram; k++) mixed ^= (uint64_t)sh_tok[k] * (uint64_t)c->mult[k];
+                for (int hh = 0; hh < heads_per_ngram; hh++) {
+                    const int h = g * heads_per_ngram + hh;
+                    int64_t r = (int64_t)mixed % c->vsz[h]; if (r < 0) r += c->vsz[h];     /* resto con segno del divisore */
+                    o[h] = (uint32_t)(r + c->voff[h]);
+                }
+            }
+        }
+        if ((int64_t)tok[p] == eos) last_eos = p;
+    }
+}
+
 /* Qwen4-Exp N-gram/PLE (qwen4_exp.py righe 933-1172) -- iniezione additiva su hidden_states
  * PRIMA dell'hyper-connection, sui soli layer in ple_layer_ids. Ritorna false SENZA
  * scrivere *out se una qualunque precondizione manca (tabella non caricata, side-channel
@@ -498,30 +563,17 @@ static bool qwen4_exp_ple_inject(LlmMlxModel* m, int layer_idx, int cache_offset
     ok = ok && multishard_get(&m->weights, namebuf, &vsz);
     CHK(ok, "ple_embedding metadata lookup");
 
-    mlx_array mult_i64 = mlx_array_new();
-    if (ok) { ok = mlx_astype(&mult_i64, mult_arr, MLX_INT64, s) == 0 && mlx_array_eval(mult_i64) == 0; CHK(ok, "layer_multipliers readback"); }
-    const int64_t* mult_host = ok ? mlx_array_data_int64(mult_i64) : NULL;
-    if (ok && (mult_host == NULL || (int)mlx_array_size(mult_i64) != ngram_size)) { CHK(false, "layer_multipliers shape"); }
-
-    mlx_array history = mlx_array_new();
+    /* id N-gram sull'host: nessun eval, nessun array storia (vedi ple_ngram_ids_host) */
+    const PleConst* pc = ok ? ple_layer_const(m, layer_idx, mult_arr, vsz, voff) : NULL;
+    if (ok && (pc == NULL || pc->n_mult != ngram_size || pc->n_heads != n_heads)) { CHK(false, "ple costanti di layer"); }
+    uint32_t* row_ids = NULL;
     if (ok) {
-        int64_t* h64 = (int64_t*)malloc((size_t)m->q4e_ctx_len * sizeof(int64_t));
-        if (h64 == NULL) { CHK(false, "history alloc"); }
-        else {
-            for (int i = 0; i < m->q4e_ctx_len; i++) h64[i] = (int64_t)m->q4e_ctx_ids[i];
-            const int hshape[2] = {1, m->q4e_ctx_len};
-            history = mlx_array_new_data(h64, hshape, 2, MLX_INT64);
-            free(h64);
-        }
+        row_ids = (uint32_t*)malloc((size_t)n_tokens * (size_t)n_heads * sizeof(uint32_t));
+        if (row_ids == NULL) { CHK(false, "ple row ids alloc"); }
+        else ple_ngram_ids_host(row_ids, m->q4e_ctx_ids, m->q4e_ctx_len, n_tokens, ngram_size, heads_per_ngram, pc, (int64_t)m->cfg.eos_token_id);
     }
 
-    mlx_array ids = mlx_array_new();
-    if (ok) { ok = llm_mlx_qwen4exp_ngram_compute_ids(&ids, history, n_tokens, ngram_size, heads_per_ngram,
-                                                       mult_host, vsz, voff, m->cfg.eos_token_id, s);
-              CHK(ok, "ngram_compute_ids"); }
-
     mlx_array embeddings = mlx_array_new();
-    mlx_array ids_u32 = mlx_array_new();
     mlx_array w_rows_flat = mlx_array_new(), s_rows_flat = mlx_array_new(), b_rows_flat = mlx_array_new();
     mlx_array w_rows = mlx_array_new(), s_rows = mlx_array_new(), b_rows = mlx_array_new();
     mlx_array gathered = mlx_array_new();
@@ -533,22 +585,11 @@ static bool qwen4_exp_ple_inject(LlmMlxModel* m, int layer_idx, int cache_offset
          * a materializzare l'intera tabella per estrarre poche righe: root cause verificata
          * dello swap thrashing/157s-per-token. Vedi Piano-Correzioni-Modelli-MLX.md §C17
          * "PIANO -- memoria" (2026-09-07). */
-        ok = mlx_astype(&ids_u32, ids, MLX_UINT32, s) == 0;
-        if (ok) ok = mlx_array_eval(ids_u32) == 0;
-        CHK(ok, "ngram ids astype/eval");
-        if (ok && llm_env_isset("LLM_QWEN4EXP_PLE_DEBUG")) {
-            const uint32_t* rid = mlx_array_data_uint32(ids_u32);
-            int d0 = mlx_array_dim(ids_u32, 0), d1 = mlx_array_dim(ids_u32, 1), d2 = mlx_array_dim(ids_u32, 2);
-            fprintf(stderr, "[ple-ids][layer=%d] shape=[%d,%d,%d] last:", layer_idx, d0, d1, d2);
-            for (int i = 0; i < d2; i++) fprintf(stderr, " %u", rid[(size_t)(d1 - 1) * (size_t)d2 + (size_t)i]);
-            fprintf(stderr, "\n");
-        }
-        const size_t n_rows = ok ? mlx_array_size(ids_u32) : 0;
-        const uint32_t* row_ids = ok ? mlx_array_data_uint32(ids_u32) : NULL;
+        const size_t n_rows = ok ? (size_t)n_tokens * (size_t)n_heads : 0;
         if (ok) ok = qwen4_exp_ngram_read_rows(m, row_ids, n_rows, &w_rows_flat, &s_rows_flat, have_b ? &b_rows_flat : NULL);
         CHK(ok, "ngram table targeted row read");
         if (ok) {
-            const int d0 = mlx_array_dim(ids_u32, 0), d1 = mlx_array_dim(ids_u32, 1), d2 = mlx_array_dim(ids_u32, 2);
+            const int d0 = 1, d1 = n_tokens, d2 = n_heads;
             const int ws[4] = {d0, d1, d2, m->ngram_w_cols};
             const int ss[4] = {d0, d1, d2, m->ngram_s_cols};
             ok = mlx_reshape(&w_rows, w_rows_flat, ws, 4, s) == 0 &&
@@ -623,8 +664,8 @@ static bool qwen4_exp_ple_inject(LlmMlxModel* m, int layer_idx, int cache_offset
     PLEDBG_F("ple_out", *out);
     if (ok && conv_cache != NULL) { mlx_array_free(*conv_cache); *conv_cache = mlx_array_new(); mlx_array_set(conv_cache, conv_state_out); }
 
-    mlx_array_free(mult_arr); mlx_array_free(voff); mlx_array_free(vsz); mlx_array_free(mult_i64);
-    mlx_array_free(history); mlx_array_free(ids); mlx_array_free(ids_u32);
+    mlx_array_free(mult_arr); mlx_array_free(voff); mlx_array_free(vsz);
+    free(row_ids);
     mlx_array_free(w_rows); mlx_array_free(s_rows); mlx_array_free(b_rows); mlx_array_free(gathered);
     mlx_array_free(w_rows_flat); mlx_array_free(s_rows_flat); mlx_array_free(b_rows_flat);
     mlx_array_free(embeddings);
