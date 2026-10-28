@@ -15,7 +15,6 @@ LLMToken(1)   LLMCodec(2)   LLMDesc(3)   LLMMetal(4)
                      ├── LLMEngineLlama (llama/)
                      └── LLMEngineMoE  (moe/)
                  LLMModelIO(6)  ← 1,2,3
-common/  → include/build/helper CONDIVISI fra i layer
 ```
 
 | # | progetto | responsabilità | dip. |
