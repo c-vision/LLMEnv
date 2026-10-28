@@ -28,7 +28,6 @@ int  llm_mlx_packed_open(const char* safetensors_path, const char* base_name,
                          int bits, int group, LlmMlxPackedW* out);
 void llm_mlx_packed_close(LlmMlxPackedW* w);
 
-#endif
 /* (append) vista 3D per esperti: [E, rows, cols] quantizzato affine. */
 typedef struct {
     const uint32_t* w; const uint16_t* scales; const uint16_t* biases;
@@ -40,3 +39,5 @@ typedef struct {
 
 int  llm_mlx_packed_open3d(const char* safetensors_path, const char* base, int bits, int group, LlmMlxPackedW3* out);
 void llm_mlx_packed_close3d(LlmMlxPackedW3* w);
+
+#endif

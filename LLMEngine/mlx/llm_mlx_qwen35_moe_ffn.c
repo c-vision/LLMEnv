@@ -4,6 +4,7 @@
  * ============================================================================ */
 #include "llmengine_mlx.h"
 #include "llm_mlx_internal.h"
+#include "llm_mlx_qwen4_moe_packed.h"
 #include "llm_mlx_ops.h"
 #include "llm_mlx_lora.h"
 #include "llm_mlx_swiglu_kernel.h"
@@ -532,6 +533,11 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
  * il chiamante via llm_mlx_hc_combine (schema hyper-connection, diverso da "h+moe_out"). */
 bool qwen4_exp_moe_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out) {
     bool ok = true;
+    if (n_tokens == 1) {                                  /* solo decode: percHesso packed */
+        mlx_array pk = mlx_array_new();
+        if (qwen4_exp_moe_packed_try(&pk, m, layer_idx, h) == 0) { *out = pk; return true; }
+        mlx_array_free(pk);
+    }
     const int gsz = m->cfg.quant_group_size;
     const int bts = m->cfg.quant_bits;
     char namebuf[256];
