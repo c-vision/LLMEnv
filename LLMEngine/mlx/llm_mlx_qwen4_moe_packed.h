@@ -16,6 +16,7 @@
 static int q4mp_shard_of(const LlmMlxModel* m, const char* base, char* path, size_t cap) {
     char ip[1200]; snprintf(ip, sizeof ip, "%s/model.safetensors.index.json", m->model_dir);
     snprintf(path, cap, "%s/model.safetensors", m->model_dir);
+    const size_t rootlen = strlen(m->model_dir);
     FILE* f = fopen(ip, "rb"); if (!f) return 0;
     fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
     if (n<=0) { fclose(f); return 0; }
@@ -23,7 +24,7 @@ static int q4mp_shard_of(const LlmMlxModel* m, const char* base, char* path, siz
     if (fread(j,1,(size_t)n,f)!=(size_t)n){free(j);fclose(f);return 0;} fclose(f); j[n]=0;
     char key[700]; snprintf(key,sizeof key,"%s.weight",base);
     char* p = strstr(j, key);
-    if (p) { char* q = strstr(p, ".safetensors"); if (q) { char* b=q; while (b>j && b[-1]!='"') --b; size_t len=(size_t)(q+12-b); if (len<cap){memcpy(path,b,len);path[len]=0;} } }
+    if (p) { char* q = strstr(p, ".safetensors"); if (q) { char* b=q; while (b>j && b[-1]!='"') --b; size_t len=(size_t)(q+12-b); if (rootlen+1+len<cap){memcpy(path,m->model_dir,rootlen);path[rootlen]='/';memcpy(path+rootlen+1,b,len);path[rootlen+1+len]=0;} } }
     free(j); return 0;
 }
 
@@ -55,6 +56,7 @@ static int q4mp_gemv(const char* path, const char* base, int expert, int bits, i
 
 /* Rilascia dal map gli array dei tensori MoE del layer: il forward packed non li usa.
  * Chiamata SOLO dopo un calcolo packed riuscito (mai prima), così il fallback resta sicuro. */
+#undef Q4J
 static void q4mp_release_layer(LlmMlxModel* m, int layer_idx) {
     static const char* suf[] = {
         ".mlp.switch_mlp.gate_proj", ".mlp.switch_mlp.up_proj", ".mlp.switch_mlp.down_proj",
@@ -78,97 +80,109 @@ static int qwen4_exp_moe_packed_try(mlx_array* out, LlmMlxModel* m, int layer_id
     if (!out || !m) return 1;
     if (!llm_mlx_weights_backend_packed() || m->cfg.quant_bits != 4) return 1;
     if (m->cfg.model_type[0] && !strstr(m->cfg.model_type, "qwen4")) return 1;
+    const int nd0 = mlx_array_ndim(x);
+    if (nd0 != 2 && nd0 != 3) return 1;
+    const int* xs = mlx_array_shape(x);
+    int nrow0 = 1; for (int d = 0; d < nd0-1; d++) nrow0 *= xs[d];
+    mlx_array xflat = mlx_array_new();
+    if (nd0 == 3) { int sh2[2] = {nrow0, xs[nd0-1]}; if (mlx_reshape(&xflat, x, sh2, 2, m->stream) != 0) { mlx_array_free(xflat); return 1; } }
+    else if (mlx_array_set(&xflat, x) != 0) { mlx_array_free(xflat); return 1; }
     const char* pre = m->cfg.layer_prefix; const int g = m->cfg.quant_group_size;
     char pg[256], pu[256], pd[256], pathg[1600];
-    snprintf(pg,sizeof pg,"%s.%d.mlp.switch_mlp.gate_proj",pre,layer_idx);
-    snprintf(pu,sizeof pu,"%s.%d.mlp.switch_mlp.up_proj",pre,layer_idx);
-    snprintf(pd,sizeof pd,"%s.%d.mlp.switch_mlp.down_proj",pre,layer_idx);
+    #define Q4J(name,tail) snprintf(name,sizeof name,"%s%d.%s", pre, layer_idx, tail)
+    Q4J(pg,"mlp.switch_mlp.gate_proj"); Q4J(pu,"mlp.switch_mlp.up_proj"); Q4J(pd,"mlp.switch_mlp.down_proj");
     q4mp_shard_of(m, pg, pathg, sizeof pathg);
     { LlmMlxPackedW3 G; if (llm_mlx_packed_open3d(pathg, pg, 4, g, &G) != 0) return 1;
       int F=(int)G.rows, E=(int)G.cols, NE=(int)G.experts; llm_mlx_packed_close3d(&G);
       int K=m->cfg.top_k; if (F<=0||E<=0||NE<=0||K<=0||K>16) return 1;
 
-      /* router (2D packed) */
-      char rg[256], pathr[1600]; snprintf(rg,sizeof rg,"%s.%d.mlp.gate",pre,layer_idx);
+      /* router (2D packed) su tutte le righe */
+      char rg[256], pathr[1600]; Q4J(rg,"mlp.gate");
       q4mp_shard_of(m, rg, pathr, sizeof pathr);
-      float* gates=(float*)malloc((size_t)NE*4); float* xh=(float*)malloc((size_t)E*4);
+      float* gates=(float*)malloc((size_t)NE*4*(size_t)nrow0);
+      float* xh=(float*)malloc((size_t)E*4*(size_t)nrow0);
       if (!gates || !xh) { free(gates); free(xh); return 1; }
-      { mlx_vector_array ev=mlx_vector_array_new(); mlx_vector_array_append_value(ev,x); mlx_eval(ev); mlx_vector_array_free(ev); }
-      memcpy(xh, mlx_array_data_float32(x), (size_t)E*4);
+      { mlx_vector_array ev=mlx_vector_array_new(); mlx_vector_array_append_value(ev,xflat); mlx_eval(ev); mlx_vector_array_free(ev); }
+      memcpy(xh, mlx_array_data_float32(xflat), (size_t)E*4*(size_t)nrow0);
       LlmMlxPackedLinear L;
       if (llm_mlx_linear_packed_open(pathr, rg, 4, g, &L) != 0) { free(gates); free(xh); return 1; }
       mlx_array go = mlx_array_new();
-      if (llm_mlx_linear_packed_run(&L, x, &go, m->stream) != 0) { llm_mlx_linear_packed_close(&L); mlx_array_free(go); free(gates); free(xh); return 1; }
-      q4mp_eval(go); memcpy(gates, mlx_array_data_float32(go), (size_t)NE*4);
+      if (llm_mlx_linear_packed_run(&L, xflat, &go, m->stream) != 0) { llm_mlx_linear_packed_close(&L); mlx_array_free(go); free(gates); free(xh); return 1; }
+      q4mp_eval(go); memcpy(gates, mlx_array_data_float32(go), (size_t)NE*4*(size_t)nrow0);
       llm_mlx_linear_packed_close(&L); mlx_array_free(go);
-
-      double mx=-1e300; for (int i=0;i<NE;i++) if (gates[i]>mx) mx=gates[i];
-      double sum=0; for (int i=0;i<NE;i++) sum+=exp((double)gates[i]-mx);
-      double inv=sum>0?1.0/sum:0.0;
-      char* used=(char*)calloc((size_t)NE,1); int sel[16]; double wts[16]; double wsum=0;
-      for (int k=0;k<K;k++){ int bi=-1; double bp=-1;
-        for (int e=0;e<NE;e++){ if(used[e]) continue; double p=exp((double)gates[e]-mx)*inv; if(p>bp){bp=p;bi=e;} }
-        if (bi<0) { free(used); free(gates); free(xh); return 1; }
-        used[bi]=1; sel[k]=bi; wts[k]=bp; wsum+=bp; }
-      if (wsum>0) for (int k=0;k<K;k++) wts[k]/=wsum;
-      free(used); free(gates);
 
       float *gk=(float*)malloc((size_t)F*4), *uk=(float*)malloc((size_t)F*4), *yk=(float*)malloc((size_t)E*4);
       double* acc=(double*)calloc((size_t)E,sizeof(double));
-      int rc=0;
-      if (!gk||!uk||!yk||!acc) rc=1;
-      for (int k=0;k<K && !rc;k++) {
-        if (q4mp_gemv(pathg, pg, sel[k], 4, g, xh, E, gk, F) != 0) { rc=1; break; }
-        if (q4mp_gemv(pathg, pu, sel[k], 4, g, xh, E, uk, F) != 0) { rc=1; break; }
-        for (int f=0;f<F;f++) gk[f]=q4mp_silu(gk[f])*uk[f];
-        if (q4mp_gemv(pathg, pd, sel[k], 4, g, gk, F, yk, E) != 0) { rc=1; break; }
-        for (int d=0;d<E;d++) acc[d]+=wts[k]*(double)yk[d];
-      }
-      /* shared expert */
-      if (!rc) {
-        char sg[256],su[256],sd[256],sgt[256],ps[1600];
-        snprintf(sg,sizeof sg,"%s.%d.mlp.shared_expert.gate_proj",pre,layer_idx);
-        snprintf(su,sizeof su,"%s.%d.mlp.shared_expert.up_proj",pre,layer_idx);
-        snprintf(sd,sizeof sd,"%s.%d.mlp.shared_expert.down_proj",pre,layer_idx);
-        snprintf(sgt,sizeof sgt,"%s.%d.mlp.shared_expert_gate",pre,layer_idx);
-        float* hg=(float*)malloc((size_t)F*4); float* hu=(float*)malloc((size_t)F*4); float* hy=(float*)malloc((size_t)E*4);
-        float sw=0; int okp = hg&&hu&&hy;
-        if (okp) {
-          LlmMlxPackedLinear Lg,Lu,Ld,Ls;
-          for (int t=0;t<4 && okp;t++) {
-            const char* b = t==0?sg:t==1?su:t==2?sd:sgt;
-            LlmMlxPackedLinear* Lp = t==0?&Lg:t==1?&Lu:t==2?&Ld:&Ls;
-            q4mp_shard_of(m,b,ps,sizeof ps);
-            if (llm_mlx_linear_packed_open(ps,b,4,g,Lp)!=0) { okp=0; break; }
-            mlx_array o=mlx_array_new();
-            if (llm_mlx_linear_packed_run(Lp,x,&o,m->stream)!=0) { mlx_array_free(o); llm_mlx_linear_packed_close(Lp); okp=0; break; }
-            q4mp_eval(o);
-            if (t==0) memcpy(hg, mlx_array_data_float32(o), (size_t)F*4);
-            else if (t==1) memcpy(hu, mlx_array_data_float32(o), (size_t)F*4);
-            else if (t==3) sw = mlx_array_data_float32(o)[0];
-            else { /* down: non usato qui */ }
-            mlx_array_free(o);
-            if (t != 2) llm_mlx_linear_packed_close(Lp);   /* Ld resta aperto per il down */
+      float* obuf=(float*)malloc((size_t)E*4*(size_t)nrow0);
+      int rc = (gk&&uk&&yk&&acc&&obuf) ? 0 : 1;
+      for (int r=0;r<nrow0 && !rc;r++) {
+          const float* gr = gates + (size_t)r*NE;
+          double mx=-1e300; for (int i=0;i<NE;i++) if (gr[i]>mx) mx=gr[i];
+          double sum=0; for (int i=0;i<NE;i++) sum+=exp((double)gr[i]-mx);
+          double inv=sum>0?1.0/sum:0.0;
+          char* used=(char*)calloc((size_t)NE,1); int sel[16]; double wts[16]; double wsum=0;
+          for (int k=0;k<K;k++){ int bi=-1; double bp=-1;
+            for (int e=0;e<NE;e++){ if(used[e]) continue; double pr=exp((double)gr[e]-mx)*inv; if(pr>bp){bp=pr;bi=e;} }
+            if (bi<0){ free(used); rc=1; break; }
+            used[bi]=1; sel[k]=bi; wts[k]=bp; wsum+=bp; }
+          if (!rc && wsum>0) for (int k=0;k<K;k++) wts[k]/=wsum;
+          free(used);
+          if (rc) break;
+          memset(acc, 0, (size_t)E*sizeof(double));
+          for (int k=0;k<K && !rc;k++) {
+              if (q4mp_gemv(pathg, pg, sel[k], 4, g, xh + (size_t)r*E, E, gk, F) != 0) { rc=1; break; }
+              if (q4mp_gemv(pathg, pu, sel[k], 4, g, xh + (size_t)r*E, E, uk, F) != 0) { rc=1; break; }
+              for (int f=0;f<F;f++) gk[f]=q4mp_silu(gk[f])*uk[f];
+              if (q4mp_gemv(pathg, pd, sel[k], 4, g, gk, F, yk, E) != 0) { rc=1; break; }
+              for (int d=0;d<E;d++) acc[d]+=wts[k]*(double)yk[d];
           }
-          if (okp) {
-            for (int f=0;f<F;f++) hg[f]=q4mp_silu(hg[f])*hu[f];
-            int sh[2]={1,F}; mlx_array gsa=mlx_array_new_data(hg, sh, 2, MLX_FLOAT32);
-            mlx_array o=mlx_array_new();
-            if (llm_mlx_linear_packed_run(&Ld, gsa, &o, m->stream)==0) {
-              q4mp_eval(o); const float* yd=mlx_array_data_float32(o);
-              float sv = sw>=0? 1.f/(1.f+expf(-sw)) : expf(sw)/(1.f+expf(sw));
-              for (int d=0;d<E;d++) acc[d]+=(double)sv*(double)yd[d];
-            } else okp=0;
-            mlx_array_free(gsa); mlx_array_free(o); llm_mlx_linear_packed_close(&Ld);
+          /* shared expert per riga */
+          if (!rc) {
+              char sg[256],su[256],sd[256],sgt[256],ps[1600];
+              Q4J(sg,"mlp.shared_expert.gate_proj"); Q4J(su,"mlp.shared_expert.up_proj");
+              Q4J(sd,"mlp.shared_expert.down_proj"); Q4J(sgt,"mlp.shared_expert_gate");
+              float* hg=(float*)malloc((size_t)F*4); float* hu=(float*)malloc((size_t)F*4);
+              float sw=0; int okp = hg&&hu;
+              if (okp) {
+                  LlmMlxPackedLinear Lg,Lu,Ld,Ls;
+                  for (int t=0;t<4 && okp;t++) {
+                      const char* bb = t==0?sg:t==1?su:t==2?sd:sgt;
+                      LlmMlxPackedLinear* Lp = t==0?&Lg:t==1?&Lu:t==2?&Ld:&Ls;
+                      q4mp_shard_of(m,bb,ps,sizeof ps);
+                      if (llm_mlx_linear_packed_open(ps,bb,4,g,Lp)!=0) { okp=0; break; }
+                      int sh1[2]={1,E}; mlx_array xrow = mlx_array_new_data(xh + (size_t)r*E, sh1, 2, MLX_FLOAT32);
+                      mlx_array o=mlx_array_new();
+                      if (llm_mlx_linear_packed_run(Lp,xrow,&o,m->stream)!=0) { mlx_array_free(xrow); mlx_array_free(o); llm_mlx_linear_packed_close(Lp); okp=0; break; }
+                      q4mp_eval(o);
+                      if (t==0) memcpy(hg, mlx_array_data_float32(o), (size_t)F*4);
+                      else if (t==1) memcpy(hu, mlx_array_data_float32(o), (size_t)F*4);
+                      else if (t==3) sw = mlx_array_data_float32(o)[0];
+                      mlx_array_free(xrow); mlx_array_free(o);
+                      if (t != 2) llm_mlx_linear_packed_close(Lp);
+                  }
+                  if (okp) {
+                      for (int f=0;f<F;f++) hg[f]=q4mp_silu(hg[f])*hu[f];
+                      int sh[2]={1,F}; mlx_array gsa=mlx_array_new_data(hg, sh, 2, MLX_FLOAT32);
+                      mlx_array o=mlx_array_new();
+                      if (llm_mlx_linear_packed_run(&Ld, gsa, &o, m->stream)==0) {
+                          q4mp_eval(o); const float* yd=mlx_array_data_float32(o);
+                          float sv = sw>=0? 1.f/(1.f+expf(-sw)) : expf(sw)/(1.f+expf(sw));
+                          for (int d=0;d<E;d++) acc[d]+=(double)sv*(double)yd[d];
+                      } else okp=0;
+                      mlx_array_free(gsa); mlx_array_free(o); llm_mlx_linear_packed_close(&Ld);
+                  }
+              }
+              free(hg); free(hu); if (!okp) rc=1;
           }
-        }
-        free(hg); free(hu); free(hy); if (!okp) rc=1;
+          if (!rc) for (int d=0;d<E;d++) obuf[(size_t)r*E+d]=(float)acc[d];
       }
       if (!rc) {
-        float* o=(float*)malloc((size_t)E*4);
-        if (o) { for (int d=0;d<E;d++) o[d]=(float)acc[d]; int sh[2]={1,E}; *out=mlx_array_new_data(o, sh, 2, MLX_FLOAT32); free(o); }
-        else rc=1;
+          int sh[2]={nrow0,E};
+          mlx_array flatout = mlx_array_new_data(obuf, sh, 2, MLX_FLOAT32);
+          if (nd0 == 3) { int osh[3] = {xs[0], xs[1], E}; rc = mlx_reshape(out, flatout, osh, 3, m->stream); mlx_array_free(flatout); }
+          else { *out = flatout; }
       }
+      free(obuf); free(acc); free(gk); free(uk); free(yk); free(xh); free(gates);
       free(acc); free(gk); free(uk); free(yk); free(xh);
       return rc;
     }

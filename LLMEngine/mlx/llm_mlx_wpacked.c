@@ -21,7 +21,7 @@ int llm_mlx_packed_open(const char* path, const char* base, int bits, int group,
     if (!path || !base || !out || bits <= 0 || group <= 0) return -1;
     memset(out, 0, sizeof *out);
     LlmCodecStTensorInfo* ti = NULL; int n = 0; uint64_t base_off = 0;
-    if (llmcodec_safetensors_read(path, &ti, &n, &base_off) != 0) return -1;
+    if (llmcodec_safetensors_read(path, &ti, &n, &base_off) != 0) { fprintf(stderr, "[wpacked3d] read header FALLITA: %s\n", path); return -1; }
     char nm[1024];
     uint64_t wo = 0, wl = 0, so = 0, sl = 0, bo = 0, bl = 0; const char *dtw = NULL, *dts = NULL, *dtb = NULL;
     snprintf(nm, sizeof nm, "%s.weight", base);
@@ -66,6 +66,7 @@ void llm_mlx_packed_close(LlmMlxPackedW* w) {
 
 /* ---- vista 3D (esperti): [E, rows, cols] ---- */
 int llm_mlx_packed_open3d(const char* path, const char* base, int bits, int group, LlmMlxPackedW3* out) {
+    fprintf(stderr, "[wpacked3d] entry path=%s base=%s\n", path?path:"(null)", base?base:"(null)");
     if (!path || !base || !out) return -1;
     memset(out, 0, sizeof *out);
     LlmCodecStTensorInfo* ti = NULL; int n = 0; uint64_t base_off = 0;
@@ -82,9 +83,14 @@ int llm_mlx_packed_open3d(const char* path, const char* base, int bits, int grou
         for (int i=0;i<n;i++) if (strcmp(ti[i].name,nm)==0) scols=ti[i].shape[2];
     }
     llmcodec_safetensors_info_free(ti);
-    if (!ok || E==0 || rows==0 || wcols==0) return -1;
+    if (!ok || E==0 || rows==0 || wcols==0) { fprintf(stderr, "[wpacked3d] %s: E=%llu rows=%llu wcols=%llu has_b=%d\n", base,(unsigned long long)E,(unsigned long long)rows,(unsigned long long)wcols,has_b); return -1; }
     uint64_t cols = wcols*32ull/(uint64_t)bits;
-    if (scols != cols/(uint64_t)group) return -1;
+    if (scols != cols/(uint64_t)group) {
+        fprintf(stderr, "[wpacked3d] %s: wcols=%llu scols=%llu cols=%llu group=%d (E=%llu rows=%llu)\n",
+                base, (unsigned long long)wcols, (unsigned long long)scols,
+                (unsigned long long)cols, group, (unsigned long long)E, (unsigned long long)rows);
+        return -1;
+    }
     int fd = open(path, O_RDONLY); if (fd<0) return -1;
     struct stat st; if (fstat(fd,&st)!=0){close(fd);return -1;}
     void* map = mmap(NULL,(size_t)st.st_size,PROT_READ,MAP_PRIVATE,fd,0); close(fd);

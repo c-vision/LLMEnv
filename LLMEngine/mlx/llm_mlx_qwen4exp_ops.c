@@ -696,7 +696,7 @@ bool qwen4_exp_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offse
     tname(m->cfg.layer_prefix, layer_idx, "attn_hyper_connection.hc_norm.weight", namebuf, sizeof(namebuf));
     ok = ok && multishard_get(&m->weights, namebuf, &hc_norm_w);
     mlx_array mixed = mlx_array_new(), residual = mlx_array_new(), injection = mlx_array_new();
-    if (ok && n_tokens == 1 &&
+    if (ok &&
         qwen4_hc_packed_try(m, layer_idx, "attn_hyper_connection", x_ple, hc_norm_w, &mixed, &residual, &injection) == 0) {
         /* packed: pesi letti dai descrittori, nessun array caricato */
     } else if (ok) {
@@ -780,7 +780,7 @@ bool qwen4_exp_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arr
     tname(m->cfg.layer_prefix, layer_idx, "mlp_hyper_connection.hc_norm.weight", namebuf, sizeof(namebuf));
     ok = ok && multishard_get(&m->weights, namebuf, &hc_norm_w);
     mlx_array mixed = mlx_array_new(), residual = mlx_array_new(), injection = mlx_array_new();
-    if (ok && n_tokens == 1 &&
+    if (ok &&
         qwen4_hc_packed_try(m, layer_idx, "mlp_hyper_connection", h, hc_norm_w, &mixed, &residual, &injection) == 0) {
         /* packed */
     } else if (ok) {

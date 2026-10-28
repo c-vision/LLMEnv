@@ -104,26 +104,35 @@ bool read_mlx_meta_file(const char* path, MlxSwapMeta* out) {
 static void llm_engine_opt_auto(const char* name, const char* value) {
     if (llm_ai_mlx_opt_is_set(name)) return;
     (void)llm_ai_mlx_opt_set(name, value);
-}
-
-/* ── Registrazione qparams PER-MODULO dal config (`quantization` con chiavi modulo) ─────────
+}/* ── Registrazione qparams PER-MODULO dal config (`quantization` con chiavi modulo) ─────────
  * I checkpoint MLX reali non sono uniformi (router 8/64, PLE 4/32, esperti 2/32). Si registra
  * (array.ctx -> group,bits) cosi' `quantized_linear_cfg` usa i valori giusti per ogni tensore.
  * Solo per modelli da dir MLX (chiavi HF); per GGUF la role map resta l'autorita'. */
+
 /* PACKED (sperimentale): libera gli array dei tensori che il forward legge dai descrittori
  * zero-copy. Rilasciare l'entry del map fa scendere il footprint Metal del modello; il forward
  * (attention q/k/v/o, GDN qkv/z/out, router) usa il descrittore mmap. Default: no-op. */
 
+
+/* join prefix+layer: alcuni modelli hanno layer_prefix con '.' finale (qwen4). */
+static void llm_mlx_join_layer(const char* prefix, int il, const char* tail, char* out, size_t cap) {
+    size_t n = strlen(prefix);
+    if (n && prefix[n-1] == '.') snprintf(out, cap, "%s%d.%s", prefix, il, tail);
+    else snprintf(out, cap, "%s.%d.%s", prefix, il, tail);
+}
+
+static int llm_mlx_cmp_str(const void* a, const void* b) {
+    return strcmp(*(const char* const*)a, *(const char* const*)b);
+}
+
 static void llm_mlx_packed_release_wired(LlmMlxModel* m) {
     if (!llm_mlx_weights_backend_packed() || !m) return;
-    /* Solo architetture con i call site cablati (qwen4_exp): per le altre NON si tocca nulla. */
     if (m->cfg.model_type[0] && strstr(m->cfg.model_type, "qwen4") == NULL) return;
-    /* Verifica preliminare: se un solo layer non è packed (MoE o HC), NON si rilascia nulla. */
     for (int il = 0; il < m->cfg.n_layers; il++) {
-        static const char* chk[][2] = {{"mlp.switch_mlp.gate_proj","3d"},{"attn_hyper_connection.input_mix_weight_down","2d"}};
+        static const char* chk[][2] = {{"mlp.switch_mlp.gate_proj","3"},{"attn_hyper_connection.input_mix_weight_down","2"}};
         for (int c = 0; c < 2; c++) {
             char base[256], path[1600];
-            snprintf(base, sizeof base, "%s.%d.%s", m->cfg.layer_prefix, il, chk[c][0]);
+            llm_mlx_join_layer(m->cfg.layer_prefix, il, chk[c][0], base, sizeof base);
             snprintf(path, sizeof path, "%s/model.safetensors", m->model_dir);
             { char ip[1200]; snprintf(ip, sizeof ip, "%s/model.safetensors.index.json", m->model_dir);
               FILE* f = fopen(ip, "rb");
@@ -131,7 +140,8 @@ static void llm_mlx_packed_release_wired(LlmMlxModel* m) {
                 char* j=(char*)malloc((size_t)n+1);
                 if (j && fread(j,1,(size_t)n,f)==(size_t)n) { j[n]=0; char key[700]; snprintf(key,sizeof key,"%s.weight",base);
                   char* p=strstr(j,key); if (p) { char* q=strstr(p,".safetensors"); if (q) { char* b=q; while (b>j && b[-1]!='"') --b;
-                    size_t len=(size_t)(q+12-b); if (len<sizeof path) { memcpy(path,b,len); path[len]=0; } } } }
+                    size_t len=(size_t)(q+12-b); size_t rl=strlen(m->model_dir);
+                    if (rl+1+len<sizeof path) { memcpy(path,m->model_dir,rl); path[rl]='/'; memcpy(path+rl+1,b,len); path[rl+1+len]=0; } } } }
                 free(j); }
               fclose(f); }
             int okv;
@@ -151,19 +161,29 @@ static void llm_mlx_packed_release_wired(LlmMlxModel* m) {
         "mlp_hyper_connection.input_mix_weight_down", "mlp_hyper_connection.input_mix_weight_up",
         "mlp_hyper_connection.block_inject_weight"
     };
-    const char* aux[] = {".weight", ".scales", ".biases"};
-    for (int il = 0; il < m->cfg.n_layers; il++) {
-        for (size_t b = 0; b < sizeof base_suffix / sizeof base_suffix[0]; b++) {
-            char base[256]; snprintf(base, sizeof base, "%s.%d.%s", m->cfg.layer_prefix, il, base_suffix[b]);
+    static const char* aux[] = {".weight", ".scales", ".biases"};
+    /* mlx-c non permette entry vuote: si sostituisce con un array dummy valido. Il forward
+     * packed non legge queste entry (lette dai descrittori); il fallback e' escluso dalla
+     * verifica preliminare qui sopra. */
+    mlx_array dummy = mlx_array_new_float32(0.0f);
+    size_t nrel = 0;
+    for (int il = 0; il < m->cfg.n_layers; il++)
+        for (size_t b = 0; b < sizeof base_suffix / sizeof base_suffix[0]; b++)
             for (int a = 0; a < 3; a++) {
-                char nm[300]; snprintf(nm, sizeof nm, "%s%s", base, aux[a]);
-                mlx_array empty = mlx_array_new();
+                char base[256], nm[300];
+                llm_mlx_join_layer(m->cfg.layer_prefix, il, base_suffix[b], base, sizeof base);
+                snprintf(nm, sizeof nm, "%s%s", base, aux[a]);
                 for (int si = 0; si < m->weights.count; si++)
-                    (void)mlx_map_string_to_array_insert(m->weights.shards[si], nm, empty);
-                mlx_array_free(empty);
+                    (void)mlx_map_string_to_array_insert(m->weights.shards[si], nm, dummy);
+                nrel++;
             }
-        }
-    }
+    mlx_array_free(dummy);
+    mlx_clear_cache();
+    { size_t act = 0; (void)mlx_get_active_memory(&act);
+      fprintf(stderr, "[packed-release] %zu entry sostituite; active=%.2fGB\n", nrel, (double)act / 1073741824.0);
+      m->p4_weights_bytes = act; }
+    m->p4_plan_done = 0;
+    llm_p4_plan_init(m);
 }
 
 static void llm_mlx_register_module_qparams(const char* dir, MultiShardWeights* W, LlmMlxModel* m) {
