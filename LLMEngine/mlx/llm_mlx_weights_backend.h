@@ -11,7 +11,7 @@
 #define LLM_MLX_WEIGHTS_BACKEND_H
 
 #include <string.h>
-#include "../Options/llm_ai_mlx_options.h"
+#include "../Options/llm_engine_opts.h"
 
 static inline int llm_mlx_weights_backend_packed(void) {
     char b[16];
