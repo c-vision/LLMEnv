@@ -7,6 +7,8 @@
 #include "llm_mlx_internal.h"
 #include "llm_mlx_weights_backend.h"
 #include "llm_mlx_linear_packed_model.h"
+#include "llm_mlx_hc_fused.h"
+#include <pthread.h>
 
 static int q4hc_linear(LlmMlxModel* m, int layer_idx, const char* hc, const char* leaf,
                        mlx_array x, mlx_array* out) {
@@ -18,6 +20,79 @@ static int q4hc_linear(LlmMlxModel* m, int layer_idx, const char* hc, const char
     return llm_mlx_linear_packed_model(&m->packed, m->model_dir, base, 4, m->cfg.quant_group_size, x, out, m->stream) == 0 ? 0 : 1;
 }
 
+/* Cache f32 dei pesi hc_norm per (layer, hc): evita un astype per chiamata (l'array valutato resta riusabile). */
+typedef struct { int layer; char hc[32]; mlx_array w32; } Q4hcW;
+static Q4hcW* q4hc_wtab; static int q4hc_wn, q4hc_wcap;
+static pthread_mutex_t q4hc_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int q4hc_w32(LlmMlxModel* m, int layer_idx, const char* hc, mlx_array w, mlx_array* out) {
+    pthread_mutex_lock(&q4hc_mu);
+    for (int i = 0; i < q4hc_wn; i++) if (q4hc_wtab[i].layer == layer_idx && strcmp(q4hc_wtab[i].hc, hc) == 0) { int r = mlx_array_set(out, q4hc_wtab[i].w32); pthread_mutex_unlock(&q4hc_mu); return r; }
+    mlx_array w32 = mlx_array_new();
+    if (mlx_astype(&w32, w, MLX_FLOAT32, m->stream) != 0) { mlx_array_free(w32); pthread_mutex_unlock(&q4hc_mu); return -1; }
+    { mlx_vector_array ev = mlx_vector_array_new(); mlx_vector_array_append_value(ev, w32); mlx_eval(ev); mlx_vector_array_free(ev); }
+    if (q4hc_wn >= q4hc_wcap) { int nc = q4hc_wcap ? q4hc_wcap * 2 : 128; Q4hcW* nt = (Q4hcW*)realloc(q4hc_wtab, (size_t)nc * sizeof *nt); if (!nt) { mlx_array_free(w32); pthread_mutex_unlock(&q4hc_mu); return -1; } q4hc_wtab = nt; q4hc_wcap = nc; }
+    q4hc_wtab[q4hc_wn].layer = layer_idx; snprintf(q4hc_wtab[q4hc_wn].hc, sizeof q4hc_wtab[q4hc_wn].hc, "%s", hc); q4hc_wtab[q4hc_wn].w32 = w32; q4hc_wn++;
+    int r = mlx_array_set(out, w32);
+    pthread_mutex_unlock(&q4hc_mu);
+    return r;
+}
+
+static LlmMlxPackedEntry* q4hc_entry(LlmMlxModel* m, int layer_idx, const char* hc, const char* leaf) {
+    char base[256];
+    size_t n = strlen(m->cfg.layer_prefix);
+    if (n && m->cfg.layer_prefix[n-1] == '.') snprintf(base, sizeof base, "%s%d.%s.%s", m->cfg.layer_prefix, layer_idx, hc, leaf);
+    else snprintf(base, sizeof base, "%s.%d.%s.%s", m->cfg.layer_prefix, layer_idx, hc, leaf);
+    LlmMlxPackedEntry* e = llm_mlx_packed_reg_entry(&m->packed, m->model_dir, base, 4, m->cfg.quant_group_size);
+    if (!e || e->w.bits != 4 || llm_mlx_lazy_build(&e->lazy, &e->w) != 0) return NULL;
+    return e;
+}
+
+/* Percorso fuso (3 nodi lazy). 0 = fatto; 1 = non gestito (nessun effetto). */
+static int q4hc_try_fused(LlmMlxModel* m, int layer_idx, const char* hc, mlx_array hyper_input, mlx_array hc_norm_w,
+                          mlx_array* out_mixed, mlx_array* out_residual, mlx_array* out_injection) {
+    if (m->cfg.bfloat16_input || m->cfg.hc_count != 4 || mlx_array_dtype(hyper_input) != MLX_FLOAT32) return 1;
+    const int nd = mlx_array_ndim(hyper_input), hcn = m->cfg.hc_count, h = m->cfg.hidden_size, W = hcn * h;
+    if ((nd != 2 && nd != 3) || (int)mlx_array_dim(hyper_input, nd - 1) != W) return 1;
+    int nt = 1; for (int d = 0; d < nd - 1; d++) nt *= (int)mlx_array_dim(hyper_input, d);
+    LlmMlxPackedEntry *ed = q4hc_entry(m, layer_idx, hc, "input_mix_weight_down"), *eu = q4hc_entry(m, layer_idx, hc, "input_mix_weight_up"),
+                      *ei = q4hc_entry(m, layer_idx, hc, "block_inject_weight");
+    if (!ed || !eu || !ei) return 1;
+    mlx_array hw32 = mlx_array_new(), flat = mlx_array_new(), mixed = mlx_array_new(), inj = mlx_array_new();
+    int rc = 1;
+    int sh2[2] = { nt, W };
+    if (q4hc_w32(m, layer_idx, hc, hc_norm_w, &hw32) != 0 || mlx_reshape(&flat, hyper_input, sh2, 2, m->stream) != 0) goto out;
+    if (llm_hc_mix_fused(&mixed, &inj, flat, nt, hcn, h, hw32, m->cfg.rms_norm_eps, &ed->lazy, &ed->w, &eu->lazy, &eu->w, &ei->lazy, &ei->w, m->stream) != 0) goto out;
+    if (nd == 3) { int osh[3] = { (int)mlx_array_dim(hyper_input, 0), (int)mlx_array_dim(hyper_input, 1), h }; if (mlx_reshape(out_mixed, mixed, osh, 3, m->stream) != 0) goto out; }
+    else if (mlx_array_set(out_mixed, mixed) != 0) goto out;
+    if (out_residual && mlx_array_set(out_residual, hyper_input) != 0) goto out;
+    if (out_injection && mlx_array_set(out_injection, inj) != 0) goto out;
+    rc = 0;
+out:
+    mlx_array_free(hw32); mlx_array_free(flat); mlx_array_free(mixed); mlx_array_free(inj);
+    return rc;
+}
+
+/* residual + sub (x) injection in un kernel. 0 = fatto; 1 = non gestito. */
+static int llm_mlx_hc_combine_packed(mlx_array* out, mlx_array sub, mlx_array residual, mlx_array injection, LlmMlxModel* m) {
+    if (!llm_mlx_weights_backend_packed() || m->cfg.bfloat16_input || m->cfg.hc_count != 4) return 1;
+    if (mlx_array_dtype(sub) != MLX_FLOAT32 || mlx_array_dtype(residual) != MLX_FLOAT32 || mlx_array_dtype(injection) != MLX_FLOAT32) return 1;
+    const int hcn = m->cfg.hc_count, h = m->cfg.hidden_size, W = hcn * h;
+    const size_t inj_n = mlx_array_size(injection), res_n = mlx_array_size(residual), sub_n = mlx_array_size(sub);
+    if (inj_n == 0 || inj_n % 4 != 0) return 1;
+    const int nt = (int)(inj_n / 4);
+    if (res_n != (size_t)nt * (size_t)W || sub_n != (size_t)nt * (size_t)h) return 1;
+    mlx_array tmp = mlx_array_new();
+    int rc = llm_hc_combine_fused(&tmp, sub, residual, injection, nt, hcn, h, m->stream);
+    if (rc == 0) {
+        const int nd = mlx_array_ndim(residual); int sh[8];
+        for (int d = 0; d < nd && d < 8; d++) sh[d] = (int)mlx_array_dim(residual, d);
+        rc = mlx_reshape(out, tmp, sh, nd, m->stream);
+    }
+    mlx_array_free(tmp);
+    return rc == 0 ? 0 : 1;
+}
+
 /* out_injection opzionale: passa NULL per saltarla (come ctx==NULL nel percorso MLX). */
 static int qwen4_hc_packed_try(LlmMlxModel* m, int layer_idx, const char* hc,
                                mlx_array hyper_input, mlx_array hc_norm_w,
@@ -27,6 +102,7 @@ static int qwen4_hc_packed_try(LlmMlxModel* m, int layer_idx, const char* hc,
     if (!m->cfg.model_type[0] || !strstr(m->cfg.model_type, "qwen4")) return 1;
     const int nd = mlx_array_ndim(hyper_input);
     if (nd != 2 && nd != 3) return 1;
+    if (q4hc_try_fused(m, layer_idx, hc, hyper_input, hc_norm_w, out_mixed, out_residual, out_injection) == 0) return 0;
     const int hc_count = m->cfg.hc_count, hidden = m->cfg.hidden_size;
     const int* hs = mlx_array_shape(hyper_input);
     if (!hs || hs[nd-1] != hc_count * hidden) return 1;
