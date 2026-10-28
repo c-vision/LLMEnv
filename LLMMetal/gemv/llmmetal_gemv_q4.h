@@ -211,6 +211,69 @@ static const char llmmetal_gemv_q4_src[] =
 "        if (lane == 0) out[(size_t)tgid.y * p.M + row] = d;\n"
 "    }\n"
 "}\n"
+"struct Q4RtParams { uint H; uint NE; uint K; uint rows_per_tg; };\n"
+"kernel void moe_gates(const device float* x [[buffer(0)]], const device float* W [[buffer(1)]], device float* gates [[buffer(2)]],\n"
+"    constant Q4RtParams& p [[buffer(3)]], uint3 tgid [[threadgroup_position_in_grid]],\n"
+"    uint lane [[thread_index_in_simdgroup]], uint simd_id [[simdgroup_index_in_threadgroup]])\n"
+"{\n"
+"    const uint row = tgid.x * p.rows_per_tg + simd_id;\n"
+"    if (row > p.NE) return;   /* NE+1 righe: l'ultima e' il gate dello shared expert */\n"
+"    const device float* w = W + (ulong)row * p.H;\n"
+"    float acc = 0.0f;\n"
+"    for (uint i = lane; i < p.H; i += 32) acc += w[i] * x[i];\n"
+"    const float s = simd_sum(acc);\n"
+"    if (lane == 0) gates[row] = s;\n"
+"}\n"
+"kernel void moe_topk(const device float* gates [[buffer(0)]], device int* sel [[buffer(1)]], device float* wts [[buffer(2)]],\n"
+"    constant Q4RtParams& p [[buffer(3)]], threadgroup float* sh [[threadgroup(0)]], uint tid [[thread_index_in_threadgroup]])\n"
+"{\n"
+"    /* 512 thread. softmax sui NE logit, top-K (a pari valore vince l'indice minore, come la versione CPU),\n"
+"     * pesi normalizzati sui K scelti; wts[K] = sigmoid(logit dello shared expert). */\n"
+"    threadgroup float* sv = sh;\n"
+"    threadgroup int* si = (threadgroup int*)(sh + 512);\n"
+"    threadgroup int* chosen = (threadgroup int*)(sh + 1024);\n"
+"    threadgroup float* chosenv = sh + 1040;\n"
+"    float mx = -INFINITY;\n"
+"    for (uint i = tid; i < p.NE; i += 512) mx = max(mx, gates[i]);\n"
+"    sv[tid] = mx; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    for (uint s = 256; s > 0; s >>= 1) { if (tid < s) sv[tid] = max(sv[tid], sv[tid + s]); threadgroup_barrier(mem_flags::mem_threadgroup); }\n"
+"    mx = sv[0]; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    for (uint k = 0; k < p.K; k++) {\n"
+"        float best = -INFINITY; int bi = 0x7fffffff;\n"
+"        for (uint i = tid; i < p.NE; i += 512) {\n"
+"            bool used = false;\n"
+"            for (uint j = 0; j < k; j++) used = used || (chosen[j] == (int)i);\n"
+"            if (used) continue;\n"
+"            const float v = gates[i];\n"
+"            if (v > best) { best = v; bi = (int)i; }\n"
+"        }\n"
+"        sv[tid] = best; si[tid] = bi; threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        for (uint s = 256; s > 0; s >>= 1) {\n"
+"            if (tid < s) {\n"
+"                const float ov = sv[tid + s]; const int oi = si[tid + s];\n"
+"                if (ov > sv[tid] || (ov == sv[tid] && oi < si[tid])) { sv[tid] = ov; si[tid] = oi; }\n"
+"            }\n"
+"            threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"        }\n"
+"        if (tid == 0) { chosen[k] = si[0]; chosenv[k] = sv[0]; }\n"
+"        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    }\n"
+"    if (tid == 0) {\n"
+"        float ws = 0.0f;\n"
+"        for (uint k = 0; k < p.K; k++) ws += exp(chosenv[k] - mx);\n"
+"        for (uint k = 0; k < p.K; k++) { sel[k] = chosen[k]; wts[k] = exp(chosenv[k] - mx) / ws; }\n"
+"        sel[p.K] = 0;\n"
+"        wts[p.K] = 1.0f / (1.0f + exp(-gates[p.NE]));\n"
+"    }\n"
+"}\n"
+"kernel void moe_combine(const device float* down [[buffer(0)]], const device float* wts [[buffer(1)]], device float* out [[buffer(2)]],\n"
+"    constant Q4RtParams& p [[buffer(3)]], uint d [[thread_position_in_grid]])\n"
+"{\n"
+"    if (d >= p.H) return;\n"
+"    float a = 0.0f;\n"
+"    for (uint k = 0; k <= p.K; k++) a += wts[k] * down[(ulong)k * p.H + d];\n"
+"    out[d] = a;\n"
+"}\n"
 ;
 
 typedef struct {
@@ -225,6 +288,8 @@ typedef struct {
     id<MTLBuffer> w_buf, scale_buf, bias_buf, out_buf, x_buf;
     id<MTLComputePipelineState> pso_multi;   /* esperto-major: K esperti in UN dispatch */
     id<MTLComputePipelineState> pso_mid, pso_down;  /* fusi come ds4: mid(silu) e down(accumulo) */
+    id<MTLComputePipelineState> pso_gates, pso_topk, pso_comb;   /* router + top-k + combine su GPU */
+    id<MTLBuffer> mk_rw, mk_gates, mk_wts, mk_comb; uint32_t rt_ne;
     id<MTLBuffer> mk_w, mk_s, mk_b, mk_x, mk_out, mk_sel;   /* riusati a ogni token: nessuna alloc per dispatch */
     size_t mk_lw, mk_ls, mk_lb; uint32_t mk_cap_x, mk_cap_out;
     size_t lead_w, lead_s, lead_b;   /* offset del tensore dentro la view page-aligned (nocopy) */
@@ -301,6 +366,7 @@ static id<MTLDevice> g_gq4_device = nil; static id<MTLCommandQueue> g_gq4_queue 
 static id<MTLLibrary> g_gq4_library = nil; static id<MTLComputePipelineState> g_gq4_pso = nil;
 static id<MTLComputePipelineState> g_gq4_pso_multi = nil;
 static id<MTLComputePipelineState> g_gq4_pso_mid = nil, g_gq4_pso_down = nil;
+static id<MTLComputePipelineState> g_gq4_pso_gates = nil, g_gq4_pso_topk = nil, g_gq4_pso_comb = nil;
 static id<MTLResidencySet> g_gq4_rset = nil;   /* le viste 3D (centinaia di MB) restano residenti: evita la validazione a ogni commit */
 static void llmmetal_gq4_make_resident(id<MTLDevice> dev, id<MTLCommandQueue> q, NSArray* bufs) {
     if (@available(macOS 15.0, *)) {
@@ -349,7 +415,7 @@ static int llmmetal_gemv_q4_init(LlmMetalGemvQ4Ctx* ctx) {
     ctx->device = nil; ctx->queue = nil; ctx->library = nil; ctx->pso = nil;
     ctx->w_buf = nil; ctx->scale_buf = nil; ctx->bias_buf = nil; ctx->out_buf = nil; ctx->x_buf = nil;
     @synchronized([NSProcessInfo processInfo]) {
-        if (g_gq4_pso) { ctx->device = g_gq4_device; ctx->queue = g_gq4_queue; ctx->library = g_gq4_library; ctx->pso = g_gq4_pso; ctx->pso_multi = g_gq4_pso_multi; ctx->pso_mid = g_gq4_pso_mid; ctx->pso_down = g_gq4_pso_down; return 0; }
+        if (g_gq4_pso) { ctx->device = g_gq4_device; ctx->queue = g_gq4_queue; ctx->library = g_gq4_library; ctx->pso = g_gq4_pso; ctx->pso_multi = g_gq4_pso_multi; ctx->pso_mid = g_gq4_pso_mid; ctx->pso_down = g_gq4_pso_down; ctx->pso_gates = g_gq4_pso_gates; ctx->pso_topk = g_gq4_pso_topk; ctx->pso_comb = g_gq4_pso_comb; return 0; }
     }
     ctx->device = MTLCreateSystemDefaultDevice();
     if (!ctx->device) { fprintf(stderr, "llmmetal_gemv_q4_init: nessun device Metal\n"); return -1; }
@@ -369,7 +435,12 @@ static int llmmetal_gemv_q4_init(LlmMetalGemvQ4Ctx* ctx) {
     ctx->pso_mid = fmid ? [ctx->device newComputePipelineStateWithFunction:fmid error:&err] : nil;
     ctx->pso_down = fdown ? [ctx->device newComputePipelineStateWithFunction:fdown error:&err] : nil;
     if (!ctx->pso_mid || !ctx->pso_down) fprintf(stderr, "llmmetal_gemv_q4_init: pso moe non disponibile\n");
-    @synchronized([NSProcessInfo processInfo]) { g_gq4_device = ctx->device; g_gq4_queue = ctx->queue; g_gq4_library = ctx->library; g_gq4_pso = ctx->pso; g_gq4_pso_multi = ctx->pso_multi; g_gq4_pso_mid = ctx->pso_mid; g_gq4_pso_down = ctx->pso_down; }
+    { id<MTLFunction> f1 = [ctx->library newFunctionWithName:@"moe_gates"], f2 = [ctx->library newFunctionWithName:@"moe_topk"], f3 = [ctx->library newFunctionWithName:@"moe_combine"];
+      ctx->pso_gates = f1 ? [ctx->device newComputePipelineStateWithFunction:f1 error:&err] : nil;
+      ctx->pso_topk = f2 ? [ctx->device newComputePipelineStateWithFunction:f2 error:&err] : nil;
+      ctx->pso_comb = f3 ? [ctx->device newComputePipelineStateWithFunction:f3 error:&err] : nil;
+      if (!ctx->pso_gates || !ctx->pso_topk || !ctx->pso_comb) fprintf(stderr, "llmmetal_gemv_q4_init: pso router non disponibile (%s)\n", err.localizedDescription.UTF8String); }
+    @synchronized([NSProcessInfo processInfo]) { g_gq4_device = ctx->device; g_gq4_queue = ctx->queue; g_gq4_library = ctx->library; g_gq4_pso = ctx->pso; g_gq4_pso_multi = ctx->pso_multi; g_gq4_pso_mid = ctx->pso_mid; g_gq4_pso_down = ctx->pso_down; g_gq4_pso_gates = ctx->pso_gates; g_gq4_pso_topk = ctx->pso_topk; g_gq4_pso_comb = ctx->pso_comb; }
     return 0;
 }
 
@@ -627,6 +698,85 @@ static int llmmetal_gemv_q4_run_moe_down(LlmMetalGemvQ4Ctx* cd, LlmMetalGemvQ4Ct
     return 0;
 }
 
+
+/* Router + top-k + mid + down + combine in UN SOLO command buffer (come ds4: nessun passaggio dalla CPU fra i layer-stage).
+ * Il tensore dei pesi del router ([NE+1][H] f32, l'ultima riga = gate dello shared expert) si carica una volta su cg. */
+static int llmmetal_gemv_q4_router_upload(LlmMetalGemvQ4Ctx* cg, const float* W, int rows, int H) {
+    if (!cg || !W || rows < 2 || H <= 0 || (uint32_t)H != cg->H) return -1;
+    cg->rt_ne = (uint32_t)(rows - 1);
+    cg->mk_rw = [cg->device newBufferWithBytes:W length:(size_t)rows * (size_t)H * 4 options:MTLResourceStorageModeShared];
+    cg->mk_gates = [cg->device newBufferWithLength:(size_t)rows * 4 options:MTLResourceStorageModeShared];
+    cg->mk_wts = [cg->device newBufferWithLength:17 * 4 options:MTLResourceStorageModeShared];
+    cg->mk_comb = [cg->device newBufferWithLength:(size_t)H * 4 options:MTLResourceStorageModeShared];
+    if (!cg->mk_rw || !cg->mk_gates || !cg->mk_wts || !cg->mk_comb) return -1;
+    llmmetal_gq4_make_resident(cg->device, cg->queue, @[cg->mk_rw]);
+    return 0;
+}
+
+static int llmmetal_gemv_q4_run_moe_gpu(LlmMetalGemvQ4Ctx* cg, LlmMetalGemvQ4Ctx* cu, LlmMetalGemvQ4Ctx* sg, LlmMetalGemvQ4Ctx* su,
+                                        LlmMetalGemvQ4Ctx* cd, LlmMetalGemvQ4Ctx* sd, const float* x, float* out, int K) {
+    if (!cg || !cu || !cd || !sg || !su || !sd || !cg->pso_mid || !cd->pso_down || !cg->pso_gates || !cg->pso_topk || !cg->pso_comb ||
+        !cg->mk_rw || K <= 0 || K > 15 || cd->M != cg->H || cg->rt_ne > 512) return -1;
+    memcpy(cg->mk_x.contents, x, (size_t)cg->H * sizeof(float));
+    id<MTLCommandBuffer> cb = [cg->queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    struct { uint32_t H, NE, K, rows_per_tg; } rp = { cg->H, cg->rt_ne, (uint32_t)K, LLMMETAL_GEMV_ROWS_PER_TG };
+    /* 1) gates = X . W_router^T (+ riga dello shared expert) */
+    [enc setComputePipelineState:cg->pso_gates];
+    [enc setBuffer:cg->mk_x offset:0 atIndex:0]; [enc setBuffer:cg->mk_rw offset:0 atIndex:1]; [enc setBuffer:cg->mk_gates offset:0 atIndex:2];
+    [enc setBytes:&rp length:sizeof(rp) atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake((cg->rt_ne + 1 + LLMMETAL_GEMV_ROWS_PER_TG - 1) / LLMMETAL_GEMV_ROWS_PER_TG, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(LLMMETAL_GEMV_ROWS_PER_TG * 32, 1, 1)];
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    /* 2) softmax + top-K + pesi normalizzati -> sel[], wts[] */
+    [enc setComputePipelineState:cg->pso_topk];
+    [enc setBuffer:cg->mk_gates offset:0 atIndex:0]; [enc setBuffer:cg->mk_sel offset:0 atIndex:1]; [enc setBuffer:cg->mk_wts offset:0 atIndex:2];
+    [enc setBytes:&rp length:sizeof(rp) atIndex:3];
+    [enc setThreadgroupMemoryLength:1056 * sizeof(float) atIndex:0];
+    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(512, 1, 1)];
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    /* 3) mid */
+    struct { uint32_t H, M, group_size, rows_per_tg, scale_bf16; uint32_t w_stride, s_stride, x_stride; uint32_t n_shared, n_routed; } pm = {
+        cg->H, cg->M, cg->group_size, LLMMETAL_GEMV_ROWS_PER_TG, cg->scale_bf16,
+        (uint32_t)cg->w_stride, (uint32_t)cg->s_stride, 0, 1u, (uint32_t)K };
+    [enc setComputePipelineState:cg->pso_mid];
+    [enc setBuffer:cg->mk_x offset:0 atIndex:0];
+    [enc setBuffer:cg->mk_w offset:cg->mk_lw atIndex:1]; [enc setBuffer:cg->mk_s offset:cg->mk_ls atIndex:2]; [enc setBuffer:cg->mk_b offset:cg->mk_lb atIndex:3];
+    [enc setBuffer:cu->mk_w offset:cu->mk_lw atIndex:4]; [enc setBuffer:cu->mk_s offset:cu->mk_ls atIndex:5]; [enc setBuffer:cu->mk_b offset:cu->mk_lb atIndex:6];
+    [enc setBuffer:sg->w_buf offset:sg->lead_w atIndex:7]; [enc setBuffer:sg->scale_buf offset:sg->lead_s atIndex:8]; [enc setBuffer:sg->bias_buf offset:sg->lead_b atIndex:9];
+    [enc setBuffer:su->w_buf offset:su->lead_w atIndex:10]; [enc setBuffer:su->scale_buf offset:su->lead_s atIndex:11]; [enc setBuffer:su->bias_buf offset:su->lead_b atIndex:12];
+    [enc setBuffer:cg->mk_out offset:0 atIndex:13]; [enc setBuffer:cg->mk_sel offset:0 atIndex:14];
+    [enc setBytes:&pm length:sizeof(pm) atIndex:15];
+    [enc setThreadgroupMemoryLength:(cg->H * sizeof(float)) atIndex:0];
+    [enc dispatchThreadgroups:MTLSizeMake((cg->M + 2*LLMMETAL_GEMV_ROWS_PER_TG - 1) / (2*LLMMETAL_GEMV_ROWS_PER_TG), (NSUInteger)(K + 1), 1)
+        threadsPerThreadgroup:MTLSizeMake(LLMMETAL_GEMV_ROWS_PER_TG*32, 1, 1)];
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    /* 4) down (legge act da cg->mk_out, sel dallo STESSO buffer scritto dal top-k) */
+    struct { uint32_t H, M, group_size, rows_per_tg, scale_bf16; uint32_t w_stride, s_stride, x_stride; uint32_t n_shared, n_routed; } pd = {
+        cd->H, cd->M, cd->group_size, LLMMETAL_GEMV_ROWS_PER_TG, cd->scale_bf16,
+        (uint32_t)cd->w_stride, (uint32_t)cd->s_stride, cd->H, 1u, (uint32_t)K };
+    [enc setComputePipelineState:cd->pso_down];
+    [enc setBuffer:cg->mk_out offset:0 atIndex:0];
+    [enc setBuffer:cd->mk_w offset:cd->mk_lw atIndex:1]; [enc setBuffer:cd->mk_s offset:cd->mk_ls atIndex:2]; [enc setBuffer:cd->mk_b offset:cd->mk_lb atIndex:3];
+    [enc setBuffer:sd->w_buf offset:sd->lead_w atIndex:4]; [enc setBuffer:sd->scale_buf offset:sd->lead_s atIndex:5]; [enc setBuffer:sd->bias_buf offset:sd->lead_b atIndex:6];
+    [enc setBuffer:cd->mk_out offset:0 atIndex:7]; [enc setBuffer:cg->mk_sel offset:0 atIndex:8];
+    [enc setBytes:&pd length:sizeof(pd) atIndex:9];
+    [enc setThreadgroupMemoryLength:(cd->H * sizeof(float)) atIndex:0];
+    [enc dispatchThreadgroups:MTLSizeMake((cd->M + 2*LLMMETAL_GEMV_ROWS_PER_TG - 1) / (2*LLMMETAL_GEMV_ROWS_PER_TG), (NSUInteger)(K + 1), 1)
+        threadsPerThreadgroup:MTLSizeMake(LLMMETAL_GEMV_ROWS_PER_TG*32, 1, 1)];
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    /* 5) combine pesata: out = sum_{k<=K} wts[k] * down[k] */
+    struct { uint32_t H, NE, K, rows_per_tg; } cp = { cd->M, cg->rt_ne, (uint32_t)K, 0 };
+    [enc setComputePipelineState:cg->pso_comb];
+    [enc setBuffer:cd->mk_out offset:0 atIndex:0]; [enc setBuffer:cg->mk_wts offset:0 atIndex:1]; [enc setBuffer:cg->mk_comb offset:0 atIndex:2];
+    [enc setBytes:&cp length:sizeof(cp) atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake((cd->M + 255) / 256, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [enc endEncoding];
+    [cb commit]; [cb waitUntilCompleted];
+    if (cb.error) { fprintf(stderr, "[moe-gpu] cb error: %s\n", cb.error.localizedDescription.UTF8String); return -1; }
+    memcpy(out, cg->mk_comb.contents, (size_t)cd->M * sizeof(float));
+    return 0;
+}
 /* Batch: N gemv (anche su contesti/tensori diversi) in UN solo command buffer. expert < 0 = lineare 2D (viste del contesto).
  * x/out sono buffer transitori per job, quindi lo stesso contesto puo' comparire piu' volte (esperti diversi). */
 typedef struct { LlmMetalGemvQ4Ctx* ctx; int64_t expert; const uint16_t* x; uint16_t* out; } LlmMetalGemvQ4Job;

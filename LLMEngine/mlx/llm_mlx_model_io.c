@@ -225,7 +225,7 @@ static void llm_mlx_register_module_qparams(const char* dir, MultiShardWeights* 
                 /* registra ogni tensore `.weight` il cui nome inizia con questo modulo */
                 for (int si = 0; si < W->count; ++si) {
                     mlx_map_string_to_array_iterator it = mlx_map_string_to_array_iterator_new(W->shards[si]);
-                    const char* key = NULL; mlx_array val;
+                    const char* key = NULL; mlx_array val = mlx_array_new();   /* NON lasciarlo non inizializzato: iterator_next vi assegna dentro */
                     while (mlx_map_string_to_array_iterator_next(&key, &val, it) == 0) {
                         if (key == NULL || val.ctx == NULL) continue;
                         size_t klen = strlen(key);
@@ -233,10 +233,11 @@ static void llm_mlx_register_module_qparams(const char* dir, MultiShardWeights* 
                         if (strncmp(key, mod, kl) == 0 && (key[kl] == '.' || key[kl] == 0)) {
                             { int rr = (mlx_array_ndim(val) >= 2) ? (int)mlx_array_shape(val)[0] : 0;
                               int pp = (mlx_array_ndim(val) >= 2) ? (int)mlx_array_shape(val)[mlx_array_ndim(val) - 1] : 0;
-                              llm_mlx_qp_register(val.ctx, rr, pp, mg, mb);
+                              /* niente registrazione per ctx: val e' una copia riusata a ogni iterazione (e liberata a fine ciclo), il ctx non identifica il tensore; vale la chiave per forma */
                               llm_mlx_qp_register_shape(rr, pp, mg, mb); }
                         }
                     }
+                    mlx_array_free(val);
                     mlx_map_string_to_array_iterator_free(it);
                 }
             }

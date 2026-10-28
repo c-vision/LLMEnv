@@ -45,6 +45,12 @@ int llm_gemvq4_load_weights_3d_nocopy(LlmGemvQ4Ctx* ctx, const uint8_t* Wq, cons
 int llm_gemvq4_run_expert(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out, uint32_t expert);
 
 /* Batch di gemv in un solo command buffer. expert < 0 = lineare 2D del contesto. */
+/* Router + top-K + mid + down + combine pesata in UN command buffer. W: [NE+1][H] f32 (ultima riga = gate shared expert).
+ * upload una volta sul contesto gate (cg); run: x [H] f32 -> out [H] f32. */
+int llm_gemvq4_router_upload(LlmGemvQ4Ctx* cg, const float* W, int rows, int H);
+int llm_gemvq4_run_moe_gpu(LlmGemvQ4Ctx* cg, LlmGemvQ4Ctx* cu, LlmGemvQ4Ctx* sg, LlmGemvQ4Ctx* su,
+                           LlmGemvQ4Ctx* cd, LlmGemvQ4Ctx* sd, const float* x, float* out, int K);
+
 typedef struct { LlmGemvQ4Ctx* ctx; int expert; const uint16_t* x; uint16_t* out; } LlmGemvQ4Job;
 int llm_gemvq4_run_batch(const LlmGemvQ4Job* jobs, int n);
 /* Esperto-major (come ds4): K esperti selezionati in UN solo dispatch. out_all = K*rows. */

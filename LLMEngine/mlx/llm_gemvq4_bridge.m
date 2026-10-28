@@ -95,3 +95,13 @@ int llm_gemvq4_run_batch(const LlmGemvQ4Job* jobs, int n) {
     }
     return llmmetal_gemv_q4_run_batch(mj, n);
 }
+
+int llm_gemvq4_router_upload(LlmGemvQ4Ctx* cg, const float* W, int rows, int H) {
+    if (!cg) return -1;
+    return llmmetal_gemv_q4_router_upload(&cg->inner, W, rows, H);
+}
+int llm_gemvq4_run_moe_gpu(LlmGemvQ4Ctx* cg, LlmGemvQ4Ctx* cu, LlmGemvQ4Ctx* sg, LlmGemvQ4Ctx* su,
+                           LlmGemvQ4Ctx* cd, LlmGemvQ4Ctx* sd, const float* x, float* out, int K) {
+    if (!cg || !cu || !cd || !sg || !su || !sd) return -1;
+    return llmmetal_gemv_q4_run_moe_gpu(&cg->inner, &cu->inner, &sg->inner, &su->inner, &cd->inner, &sd->inner, x, out, K);
+}
