@@ -1,23 +1,36 @@
 # LLMCodec
 
-Progetto C autonomo di LLMEnv: formati GGUF/safetensors + codec quant (plugin `dlopen`).
+Reads model files and decodes quantized weights. Quantization stores weights with fewer bits (2, 4, 8
+and so on) so a model takes less memory. There are many schemes, and each needs its own decoder.
+LLMCodec provides them.
 
-- ABI pubblica: `include/llmcodec.h` (registry plugin + tipo `LlmCodec`).
-- Tassonomia d'errore GGUF: `include/llmcodec_gguf_status.h` (`LlmCodecGgufStatus`, un codice per
-  causa) + le varianti `llmcodec_gguf_parse_mem_status` / `llmcodec_gguf_read_{meta,info}_status`
-  in `llmcodec_gguf_read.h`.
-- Gate differenziale del dequant (manuale, fuori CMake): `tools/quant_diff.c` con i testimoni
-  `tools/quant_diff_ggml.c` (llama.cpp/ggml) e `tools/quant_diff_gguflib.c` (gguflib).
-- Confini: nessuna dipendenza esterna oltre `libm` e i propri plugin (caricati a runtime).
-- Il CLI `gguf_convert` (conversione MLX/safetensors → GGUF) richiede LLMToken ed è opzionale:
-  `-DLLMCODEC_BUILD_CONVERTER=ON`.
+## What it does
 
-## Build standalone
+- **File formats**: reads and writes GGUF, and reads safetensors.
+- **Quantization formats** (one plugin each): MLX affine, GGML (K-quants and IQ types), AWQ, GPTQ,
+  bitsandbytes, MXFP4 and MXFP8, NVFP, FP8/FP4, HQQ, SpQR, VPTQ, AQLM, BitNet, TurboQuant, Higgs.
+- **Plugins**: each format lives in its own shared library (`libllmcodec_<name>.dylib`) that is loaded
+  at run time, so a new format does not require rebuilding the rest.
+
+The library has no external dependencies beyond the C math library.
+
+## Main headers (`include/`)
+
+| Header | Purpose |
+|---|---|
+| `llmcodec.h` | Plugin registry and the `LlmCodec` type |
+| `llmcodec_gguf_read.h`, `llmcodec_gguf_writer.h`, `llmcodec_gguf_meta.h` | GGUF reading and writing |
+| `llmcodec_gguf_status.h` | One error code per failure cause |
+| `llmcodec_safetensors.h` | safetensors reader |
+| `llmcodec_quant_*.h`, `llmcodec_ggml_quants.h` | Dequantization routines |
+
+## Building and testing
 
 ```sh
-cmake -S LLMCodec -B /tmp/b-codec
-cmake --build /tmp/b-codec -j
-ctest --test-dir /tmp/b-codec --output-on-failure
+cmake -S LLMCodec -B build/codec
+cmake --build build/codec -j
+ctest --test-dir build/codec --output-on-failure
 ```
 
-Le `.llmarch` usate dai test sono in `ABI/`, le fixture reali in `tools/Fixtures/codec/`.
+The tests compare decoded output with reference data from real models, stored in `tools/Fixtures/codec/`.
+A manual differential check against ggml and gguflib is in `tools/quant_diff*.c`.

@@ -1,4 +1,8 @@
-# bridge/ — glue nostra (non upstream)
-- `ds4_bridge.{c,h}`: API token-level (open/sync/argmax/logits) sopra `ds4_engine`/`ds4_session`.
-- Adattatore alla vtable `LlmEngine` (`llmengine.h`): **fase F3** del piano, non ancora presente.
-Qui si può modificare liberamente: non è codice vendorizzato (upstream resta in `vendor/`).
+# bridge
+
+Our own code around ds4 (not part of upstream, so it can be changed freely):
+
+- `ds4_bridge.{c,h}`: a token-level interface (open a model, sync tokens, get the best next token or
+  the logits) on top of ds4's engine and session objects.
+- the adapter that exposes ds4 through the common interface in `../../include/llmengine.h`, so a
+  program can use it like any other back end.

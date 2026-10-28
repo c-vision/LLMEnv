@@ -1,58 +1,31 @@
-# Golden DFlash2 — oracolo reference (port nativo motore MLX)
+# dflash2 goldens
 
-Golden prodotti dall'oracolo REFERENCE reale (non sintetico) per il port del
-drafter DFlash2 (`Qwen3.8-27B-DFlash2`, BF16, block-diffusion) nel motore MLX.
+Reference data and test programs for **DFlash2**, a speculative-decoding draft model (block diffusion)
+used with the MLX engine. Speculative decoding lets a small draft model propose several tokens that the
+main model then checks in one step; the output must stay identical to what the main model alone would say.
 
-## Come sono stati prodotti
+## The reference run
 
-`dflash_oracle.py` (questo file) esegue il round-loop DFlash REALE di mlx-vlm
-0.6.3 (`generate_step` + drafter vendored in `Rapid-MLX-NextGen`, 
-`vllm_mlx/speculative/dflash/drafters/qwen3_dflash.py`, che implementa two-tap
-conv + CandidateSelector) con:
+The reference data came from the original DFlash implementation, with the target model
+`Qwen3.8-27B-8bit` and the draft model `Qwen3.8-27B-DFlash2`, on the prompt "The capital of France is"
+with greedy decoding (8 rounds, block size 8). For every round it records the last verified token
+(`anchor`), the target's hidden features (`ctx`), the block the draft proposed, and the final
+`transcript` of emitted tokens.
 
-- target: `~/ai/Models/Qwen3.8-27B-8bit` (multimodale MLX; embed/lm_head sotto
-  `language_model.*`), caricato via `mlx_vlm.load`
-- draft: `~/ai/Models/Qwen3.8-27B-DFlash2` (bind di embed+lm_head dal target)
-- prompt fisso `"The capital of France is"`, greedy (temperature 0),
-  max_tokens 20, block_size 8
+## What is in this folder
 
-Esecuzione:
-```bash
-source ~/ai/env312/bin/activate
-cd native/llmengine_mlx/goldens/dflash2 && python3 dflash_oracle.py
-```
+| File | Purpose |
+|---|---|
+| `dflash_goldens.json` | Round metadata and the final transcript. |
+| `round0.bin` | Binary data for round 0. |
+| `dflash2_validate.c` | Checks that our draft step produces the recorded `draft` tokens. |
+| `dflash2_transcript.c` | Checks that the full speculative decode emits the recorded `transcript`. |
+| `dflash2_bench.c` | Compares plain greedy decoding with DFlash2. |
 
-## Contenuto (`dflash_goldens.npz` + `.json`)
+All three programs link against `libllm_ai_mlx`.
 
-Per OGNI `draft_block` invocato dal reference (8 round):
-- `round{i}_anchor`  — ultimo token verificato (int)
-- `round{i}_ctx`     — ctx feature in ingresso `[S, 25600]` fp32 = concat degli
-                       hidden del target ai layer [5,19,33,47,61] (S posizioni)
-- `round{i}_draft`   — blocco proposto dal draft (token int, len = block_size-1)
-- `round{i}_block_size` (json)
-- `transcript`       — token emessi (greedy del target, incl. bonus): il golden
-                       finale di parità per l'intero decode speculativo
+## What to expect
 
-I ctx hidden catturano anche lo stato di cache del draft tra round: il replay
-C deve mantenere la stessa cache rotante per layer e riprodurre round-per-round
-gli stessi `draft` dati (`anchor`, `ctx`).
-
-## Uso
-
-1. **Draft forward C**: dato (anchor, ctx) e la cache al round i, il loader
-   nativo DFlash2 (conv + selector lattice, embed/lm_head bind-ati al target)
-   deve produrre `draft_tokens == round{i}_draft`.
-2. **Parità end-to-end**: il decode speculativo dflash in LLMEnv deve emettere
-   `transcript` identico (output == greedy del target, lossless per costruzione).
-
-Deviazioni da DEBUGGARE con:
-- `round{i}_ctx` + `round{i}_draft`: se il blocco differisce, confrontare con
-  l'hidden post-backbone e gli input selector (rigenerando golden intermedi con
-  `dflash_oracle.py` esteso) per isolare conv / attenzione-kv-injection / head.
-
-## Benchmark (120 token greedy, target Qwen3.8-27B-8bit, 2026-09-02)
-
-- plain greedy : 120 tok in 11.99s -> 10.0 tok/s
-- dflash2      : 120 tok in 8.08s  -> 14.8 tok/s  (~1.48x, PARITY==OK)
-
-Harness: `dflash2_bench.c` (compila linkando `libllm_ai_mlx`, `DF2_STATS=1` per l'accettanza per-round).
+Speculative decoding is lossless: the output must equal the target model's own greedy output. On the
+reference setup (120 tokens) plain greedy ran at about 10 tok/s and DFlash2 at about 14.8 tok/s (1.48x),
+with identical output.

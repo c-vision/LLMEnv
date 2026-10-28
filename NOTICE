@@ -25,6 +25,8 @@ This product includes or derives from software developed by third parties:
   * ggml               - MIT License - Copyright (c) 2023-2026 The ggml authors
   * DeepSeek           - MIT License - Copyright (c) 2023 DeepSeek
   * MLX / mlx-lm       - MIT License - Copyright (c) 2023 Apple Inc.
+  * qwen-asr           - MIT License - Copyright (c) Salvatore Sanfilippo (antirez), https://github.com/antirez/qwen-asr
+  * oMLX               - Apache License 2.0 - https://github.com/jundot/omlx (see LLMMetal/oq_a8/THIRD_PARTY_NOTICES.md)
   * gguflib            - (vedi il suo LICENSE nel repo di origine)
 
 Each notice above is retained per the terms of the respective license.

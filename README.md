@@ -101,7 +101,7 @@ The ds4 engine in `LLMEngine/ds4` is a copy of [ds4](https://github.com/antirez/
 Salvatore Sanfilippo (antirez) and released under the MIT license, with small changes of our own
 (kept as separate patches and a bridge layer). Many thanks to him and to the ds4 contributors. It
 also builds on the work of the [ggml](https://github.com/ggml-org/ggml) authors, Apple's
-[MLX](https://github.com/ml-explore/mlx) and DeepSeek. Full notices are in [NOTICE](NOTICE).
+[MLX](https://github.com/ml-explore/mlx) and DeepSeek. The speech-to-text code in `LLMEngine/asr` is a port of [qwen-asr](https://github.com/antirez/qwen-asr) by the same author (MIT), and the `oq_a8` kernels in `LLMMetal` come from [oMLX](https://github.com/jundot/omlx) (Apache-2.0). Full notices are in [NOTICE](NOTICE).
 
 ## License
 

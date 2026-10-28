@@ -1,20 +1,25 @@
-# LLMEngine/ds4 — motore nativo GGUF (ds4) + kernel
+# ds4
 
-Layout pensato per aggiornare ds4 senza toccare il nostro codice:
+A fast engine for large GGUF models (mixture-of-experts in particular), built on
+[ds4](https://github.com/antirez/ds4) by Salvatore Sanfilippo (antirez), MIT license. ds4 is included
+here as a copy, together with a few changes of ours, laid out so that updating to a newer ds4 never
+touches our own code.
 
-- `vendor/`  : sorgenti ds4 **non modificati** (MIT) + `metal/` + `licenses/` + MANIFEST.sha256
-- `patches/` : nostre modifiche a ds4, in serie (`0001-*.patch`, …), applicate dal sync
-- `bridge/`  : glue nostra (token-level `ds4_bridge`, adattatore ABI `LlmEngine`) — non è vendor
-- `tools/`   : `ds4_sync.sh` (aggiorna da upstream), `ds4_check.sh` (verifica manifest)
+| Folder | Contents |
+|---|---|
+| `vendor/` | The ds4 sources, **unmodified**, with its Metal kernels, licenses and a checksum manifest. |
+| `patches/` | Our changes to ds4, as a numbered series of patches. |
+| `bridge/` | Our glue code: a token-level API on top of ds4 and the adapter to the common interface. |
+| `tools/` | `ds4_sync.sh` (update from upstream) and `ds4_check.sh` (verify the manifest). |
 
-## Aggiornare ds4
-```bash
-LLMEngine/ds4/tools/ds4_check.sh                 # deve essere pulito
-LLMEngine/ds4/tools/ds4_sync.sh /path/ds4        # o un URL git + ref
+## Updating ds4
+
+```sh
+LLMEngine/ds4/tools/ds4_check.sh                  # must report a clean tree
+LLMEngine/ds4/tools/ds4_sync.sh /path/to/ds4      # or a git URL and a ref
 ```
-Se serve una modifica al codice upstream: si crea un file in `patches/` (mai editare `vendor/`),
-così il prossimo sync la riapplica e il conflitto è esplicito.
 
-## Build
-`CMakeLists.txt` definisce il target `ds4engine` (opzione `DS4ENGINE_STANDALONE=ON`), **non**
-ancora collegato a `llm_ai_mlx`: l'integrazione avviene nella fase F3 del piano.
+The sync copies the new sources, reapplies the patches and rewrites the manifest. If a change to ds4 is
+needed, add a patch in `patches/`. Never edit `vendor/` by hand, or the manifest check fails.
+
+The snapshot in use is recorded in `UPSTREAM.md`.
