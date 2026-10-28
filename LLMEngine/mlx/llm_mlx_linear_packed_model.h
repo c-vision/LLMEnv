@@ -27,7 +27,7 @@ static inline int llm_mlx_linear_packed_model(LlmMlxPackedCtx* c, const char* mo
     LlmMlxPackedEntry* e = llm_mlx_packed_reg_entry(&c->reg, model_dir, tensor_base, bits, group);
     if (!e) return 1;
     const LlmMlxPackedW* w = &e->w;
-    if (w->bits != 4) return 1;   /* v1: solo Q4 */
+    if (w->bits != 4 && w->bits != 2) return 1;   /* Q4 e Q2 */
     if (llm_mlx_lazy_build(&e->lazy, w) != 0) return 1;
     /* nodo lazy del grafo: nessun eval, nessuna attesa (il gemv e' un mlx_fast_metal_kernel su viste zero-copy) */
     return llm_mlx_lazy_linear(&e->lazy, w, x, out, s) == 0 ? 0 : -1;

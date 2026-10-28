@@ -43,8 +43,8 @@ static LlmMlxPackedEntry* q4hc_entry(LlmMlxModel* m, int layer_idx, const char* 
     size_t n = strlen(m->cfg.layer_prefix);
     if (n && m->cfg.layer_prefix[n-1] == '.') snprintf(base, sizeof base, "%s%d.%s.%s", m->cfg.layer_prefix, layer_idx, hc, leaf);
     else snprintf(base, sizeof base, "%s.%d.%s.%s", m->cfg.layer_prefix, layer_idx, hc, leaf);
-    LlmMlxPackedEntry* e = llm_mlx_packed_reg_entry(&m->packed, m->model_dir, base, 4, m->cfg.quant_group_size);
-    if (!e || e->w.bits != 4 || llm_mlx_lazy_build(&e->lazy, &e->w) != 0) return NULL;
+    LlmMlxPackedEntry* e = llm_mlx_packed_reg_entry_cfg(&m->packed, m->model_dir, base, m->cfg.quant_bits, m->cfg.quant_group_size);
+    if (!e || (e->w.bits != 4 && e->w.bits != 2) || llm_mlx_lazy_build(&e->lazy, &e->w) != 0) return NULL;
     return e;
 }
 
@@ -123,7 +123,7 @@ static int qwen4_hc_packed_try(LlmMlxModel* m, int layer_idx, const char* hc,
                                mlx_array hyper_input, mlx_array hc_norm_w,
                                mlx_array* out_mixed, mlx_array* out_residual, mlx_array* out_injection) {
     if (!m || !hc || !out_mixed) return 1;
-    if (!llm_mlx_weights_backend_packed() || m->cfg.quant_bits != 4) return 1;
+    if (!llm_mlx_weights_backend_packed() || (m->cfg.quant_bits != 4 && m->cfg.quant_bits != 2)) return 1;
     if (!m->cfg.model_type[0] || !strstr(m->cfg.model_type, "qwen4")) return 1;
     const int nd = mlx_array_ndim(hyper_input);
     if (nd != 2 && nd != 3) return 1;

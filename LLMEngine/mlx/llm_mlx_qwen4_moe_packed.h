@@ -13,6 +13,7 @@
 #include "llm_mlx_wpacked.h"
 #include "llm_mlx_packed_lazy.h"
 #include "llm_mlx_q4_msl.h"
+int llm_mlx_qp_name_get(const char* name, int* group, int* bits);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,7 +70,22 @@ static void q4mp_cache_reset(void) {
 static int q4mp_dense_f32(LlmMlxModel* m, const char* base, float** out, int* rows, int* cols) {
     mlx_array w = mlx_array_new(), sc = mlx_array_new(), b = mlx_array_new(), d = mlx_array_new();
     int ok = 0;
-    if (multishard_get_triple(&m->weights, base, &w, &sc, &b)) {
+    char skey[330]; snprintf(skey, sizeof skey, "%s.scales", base);
+    mlx_array probe = mlx_array_new();
+    const int quantized = multishard_get(&m->weights, skey, &probe);
+    mlx_array_free(probe);
+    if (!quantized) {   /* router/gate non quantizzati (checkpoint 2 bit): peso bf16/f32 piano */
+        char wkey[330]; snprintf(wkey, sizeof wkey, "%s.weight", base);
+        if (multishard_get(&m->weights, wkey, &w) && mlx_astype(&d, w, MLX_FLOAT32, m->stream) == 0) {
+            q4mp_eval(d);
+            const float* p = mlx_array_data_float32(d);
+            if (p && mlx_array_ndim(d) == 2) {
+                size_t n = mlx_array_size(d);
+                *out = (float*)malloc(n * sizeof(float));
+                if (*out) { memcpy(*out, p, n * sizeof(float)); *rows = mlx_array_dim(d, 0); *cols = mlx_array_dim(d, 1); ok = 1; }
+            }
+        }
+    } else if (multishard_get_triple(&m->weights, base, &w, &sc, &b)) {
         int g = m->cfg.quant_group_size, bt = m->cfg.quant_bits; char mode[16];
         llm_mlx_quant_derive(w, sc, g, bt, "affine", &g, &bt, mode, sizeof mode);
         mlx_optional_dtype dt = { MLX_FLOAT32, true };
@@ -87,7 +103,14 @@ static int q4mp_dense_f32(LlmMlxModel* m, const char* base, float** out, int* ro
     return ok;
 }
 
-static void q4mp_pset(int32_t* P, int t, int group, int bf, int lw, int ls, int lb, size_t wst, size_t sst) {
+static int q4mp_bits_of(const LlmMlxModel* m, const char* base) {
+    int qg = 0, qb = 0;
+    if (llm_mlx_qp_name_get(base, &qg, &qb) && qb > 0) return qb;
+    return m->cfg.quant_bits;
+}
+
+static void q4mp_pset(int32_t* P, int t, int group, int bf, int lw, int ls, int lb, size_t wst, size_t sst, int bits) {
+    P[t*8+7] = bits;
     P[t*8+0] = group; P[t*8+1] = bf; P[t*8+2] = lw; P[t*8+3] = ls; P[t*8+4] = lb; P[t*8+5] = (int32_t)wst; P[t*8+6] = (int32_t)sst;
 }
 
@@ -100,21 +123,23 @@ static int q4mp_layer_build(LlmMlxModel* m, Q4mpLayer* l, int layer_idx) {
     int32_t P[96]; memset(P, 0, sizeof P);
     for (int t = 0; t < 3; t++) {
         snprintf(base, sizeof base, "%s%d.%s", pre, layer_idx, leaf3[t]); q4mp_shard_of(m, base, path, sizeof path);
-        if (llm_mlx_packed_open3d(path, base, 4, g, &l->w3[t]) != 0 || !l->w3[t].biases) return -1;
+        if (llm_mlx_packed_open3d(path, base, q4mp_bits_of(m, base), g, &l->w3[t]) != 0 || !l->w3[t].biases) return -1;
+        if (l->w3[t].bits != 4 && l->w3[t].bits != 2) return -1;
         const LlmMlxPackedW3* w = &l->w3[t];
         size_t wb = (size_t)w->experts * w->w_stride, sb = (size_t)w->experts * w->s_stride;
         int lw, ls, lb;
         l->v[t][0] = llm_mlx_lazy_view(w->w, wb, &lw); l->v[t][1] = llm_mlx_lazy_view(w->scales, sb, &ls); l->v[t][2] = llm_mlx_lazy_view(w->biases, sb, &lb);
-        q4mp_pset(P, t, w->group, w->scale_bf16, lw, ls, lb, w->w_stride, w->s_stride);
+        q4mp_pset(P, t, w->group, w->scale_bf16, lw, ls, lb, w->w_stride, w->s_stride, w->bits);
     }
     for (int t = 0; t < 3; t++) {
         snprintf(base, sizeof base, "%s%d.%s", pre, layer_idx, leaf2[t]); q4mp_shard_of(m, base, path, sizeof path);
-        if (llm_mlx_packed_open(path, base, 4, g, &l->w2[t]) != 0 || !l->w2[t].biases) return -1;
+        if (llm_mlx_packed_open(path, base, q4mp_bits_of(m, base), g, &l->w2[t]) != 0 || !l->w2[t].biases) return -1;
+        if (l->w2[t].bits != 4 && l->w2[t].bits != 2) return -1;
         const LlmMlxPackedW* w = &l->w2[t];
-        size_t wb = (size_t)w->rows * (w->cols / 2), sb = (size_t)w->rows * (w->cols / (uint32_t)w->group) * 2;
+        size_t wb = (size_t)w->rows * (w->cols * (uint32_t)w->bits / 8), sb = (size_t)w->rows * (w->cols / (uint32_t)w->group) * 2;
         int lw, ls, lb;
         l->v[3+t][0] = llm_mlx_lazy_view(w->w, wb, &lw); l->v[3+t][1] = llm_mlx_lazy_view(w->scales, sb, &ls); l->v[3+t][2] = llm_mlx_lazy_view(w->biases, sb, &lb);
-        q4mp_pset(P, 3+t, w->group, w->scale_bf16, lw, ls, lb, 0, 0);
+        q4mp_pset(P, 3+t, w->group, w->scale_bf16, lw, ls, lb, 0, 0, w->bits);
     }
     l->F = (int)l->w3[0].rows; l->E = (int)l->w3[0].cols; l->NE = (int)l->w3[0].experts; l->K = m->cfg.top_k;
     if (l->F <= 0 || l->E <= 0 || l->NE <= 0 || l->NE > 512 || l->K <= 0 || l->K > 15) return -1;
@@ -219,13 +244,13 @@ static const char q4mp_src_mid[] =
 "uint gi = sh ? 3u : 0u, ui = sh ? 4u : 1u;\n"
 "ulong gow = (ulong)P[gi*8+2] + (ulong)e * (uint)P[gi*8+5], gos = (ulong)P[gi*8+3] + (ulong)e * (uint)P[gi*8+6], gob = (ulong)P[gi*8+4] + (ulong)e * (uint)P[gi*8+6];\n"
 "ulong uow = (ulong)P[ui*8+2] + (ulong)e * (uint)P[ui*8+5], uos = (ulong)P[ui*8+3] + (ulong)e * (uint)P[ui*8+6], uob = (ulong)P[ui*8+4] + (ulong)e * (uint)P[ui*8+6];\n"
-"uint gg = P[gi*8+0], gbf = P[gi*8+1], ug = P[ui*8+0], ubf = P[ui*8+1];\n"
+"uint gg = P[gi*8+0], gbf = P[gi*8+1], gbt = P[gi*8+7], ug = P[ui*8+0], ubf = P[ui*8+1], ubt = P[ui*8+7];\n"
 "const device uchar* gW = (sh ? WSG : WG) + gow; const device uchar* gS = (sh ? SSG : SG) + gos; const device uchar* gB = (sh ? BSG : BG) + gob;\n"
 "const device uchar* uW = (sh ? WSU : WU) + uow; const device uchar* uS = (sh ? SSU : SU) + uos; const device uchar* uB = (sh ? BSU : BU) + uob;\n"
-"ulong rw = (ulong)(E / 2), gsr = (ulong)(E / gg) * 2, usr = (ulong)(E / ug) * 2;\n"
+"ulong grw = (ulong)(E * gbt / 8), urw = (ulong)(E * ubt / 8), gsr = (ulong)(E / gg) * 2, usr = (ulong)(E / ug) * 2;\n"
 "float og[4], ou[4];\n"
-"q4_dotn(og, nr, gW + base * rw, gW + r1 * rw, gW, gW, gS + base * gsr, gS + r1 * gsr, gS, gS, gB + base * gsr, gB + r1 * gsr, gB, gB, (uint)(gow & 3), x, E, gg, gbf, lane);\n"
-"q4_dotn(ou, nr, uW + base * rw, uW + r1 * rw, uW, uW, uS + base * usr, uS + r1 * usr, uS, uS, uB + base * usr, uB + r1 * usr, uB, uB, (uint)(uow & 3), x, E, ug, ubf, lane);\n"
+"q4_dotn(og, nr, gW + base * grw, gW + r1 * grw, gW, gW, gS + base * gsr, gS + r1 * gsr, gS, gS, gB + base * gsr, gB + r1 * gsr, gB, gB, (uint)(gow & 3), x, E, gg, gbf, gbt, lane);\n"
+"q4_dotn(ou, nr, uW + base * urw, uW + r1 * urw, uW, uW, uS + base * usr, uS + r1 * usr, uS, uS, uB + base * usr, uB + r1 * usr, uB, uB, (uint)(uow & 3), x, E, ug, ubf, ubt, lane);\n"
 "if (lane == 0) for (uint i = 0; i < nr; i++) ACT[((ulong)t * (K + 1) + slot) * F + base + i] = og[i] / (1.0f + exp(-og[i])) * ou[i];\n";
 
 static const char q4mp_src_down[] =
@@ -239,12 +264,12 @@ static const char q4mp_src_down[] =
 "uint nr = min(4u, E - base); uint r1 = min(base + 1u, E - 1u), r2 = min(base + 2u, E - 1u), r3 = min(base + 3u, E - 1u);\n"
 "uint di = sh ? 5u : 2u;\n"
 "ulong dow = (ulong)P[di*8+2] + (ulong)e * (uint)P[di*8+5], dos = (ulong)P[di*8+3] + (ulong)e * (uint)P[di*8+6], dob = (ulong)P[di*8+4] + (ulong)e * (uint)P[di*8+6];\n"
-"uint dg = P[di*8+0], dbf = P[di*8+1];\n"
+"uint dg = P[di*8+0], dbf = P[di*8+1], dbt = P[di*8+7];\n"
 "const device uchar* dW = (sh ? WSD : WD) + dow; const device uchar* dS = (sh ? SSD : SD) + dos; const device uchar* dB = (sh ? BSD : BD) + dob;\n"
-"ulong rw = (ulong)(F / 2), sr = (ulong)(F / dg) * 2;\n"
+"ulong rw = (ulong)(F * dbt / 8), sr = (ulong)(F / dg) * 2;\n"
 "float od[4];\n"
 "q4_dotn(od, nr, dW + base * rw, dW + r1 * rw, dW + r2 * rw, dW + r3 * rw, dS + base * sr, dS + r1 * sr, dS + r2 * sr, dS + r3 * sr,\n"
-"        dB + base * sr, dB + r1 * sr, dB + r2 * sr, dB + r3 * sr, (uint)(dow & 3), a, F, dg, dbf, lane);\n"
+"        dB + base * sr, dB + r1 * sr, dB + r2 * sr, dB + r3 * sr, (uint)(dow & 3), a, F, dg, dbf, dbt, lane);\n"
 "if (lane == 0) for (uint i = 0; i < nr; i++) DOWN[((ulong)t * (K + 1) + slot) * E + base + i] = od[i];\n";
 
 static const char q4mp_src_comb[] =
@@ -294,7 +319,7 @@ static int q4mp_apply(int k, const mlx_array* in, int nin, const int (*shape)[3]
 
 static int qwen4_exp_moe_packed_try_locked(mlx_array* out, LlmMlxModel* m, int layer_idx, mlx_array x) {
     if (!out || !m) return 1;
-    if (!llm_mlx_weights_backend_packed() || m->cfg.quant_bits != 4) return 1;
+    if (!llm_mlx_weights_backend_packed() || (m->cfg.quant_bits != 4 && m->cfg.quant_bits != 2)) return 1;
     if (m->cfg.model_type[0] && !strstr(m->cfg.model_type, "qwen4")) return 1;
     const int nd0 = mlx_array_ndim(x);
     if (nd0 != 2 && nd0 != 3) return 1;

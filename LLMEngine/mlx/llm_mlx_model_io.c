@@ -121,6 +121,8 @@ static void llm_mlx_join_layer(const char* prefix, int il, const char* tail, cha
     else snprintf(out, cap, "%s.%d.%s", prefix, il, tail);
 }
 
+int llm_mlx_qp_name_get(const char* name, int* group, int* bits);
+
 void* g_mlx_release_dummy = NULL;
 
 static int llm_mlx_cmp_str(const void* a, const void* b) {
@@ -146,9 +148,11 @@ static void llm_mlx_packed_release_wired(LlmMlxModel* m) {
                     if (rl+1+len<sizeof path) { memcpy(path,m->model_dir,rl); path[rl]='/'; memcpy(path+rl+1,b,len); path[rl+1+len]=0; } } } }
                 free(j); }
               fclose(f); }
-            int okv;
-            if (chk[c][1][0] == '3') { LlmMlxPackedW3 w3; okv = (llm_mlx_packed_open3d(path, base, 4, m->cfg.quant_group_size, &w3) == 0); if (okv) llm_mlx_packed_close3d(&w3); }
-            else { LlmMlxPackedW w2; okv = (llm_mlx_packed_open(path, base, 4, m->cfg.quant_group_size, &w2) == 0); if (okv) llm_mlx_packed_close(&w2); }
+            int okv, ckb = m->cfg.quant_bits, ckg = 0, ckq = 0;
+            if (llm_mlx_qp_name_get(base, &ckg, &ckq) && ckq > 0) ckb = ckq;
+            if (ckb != 4 && ckb != 2) return;
+            if (chk[c][1][0] == '3') { LlmMlxPackedW3 w3; okv = (llm_mlx_packed_open3d(path, base, ckb, m->cfg.quant_group_size, &w3) == 0); if (okv) llm_mlx_packed_close3d(&w3); }
+            else { LlmMlxPackedW w2; okv = (llm_mlx_packed_open(path, base, ckb, m->cfg.quant_group_size, &w2) == 0); if (okv) llm_mlx_packed_close(&w2); }
             if (!okv) return;
         }
     }
@@ -718,7 +722,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
        * 122B-mxfp4 34,9 -> 21,2 ms/tok (1,65x); gpt-oss-120b 20,8 -> 15,2 (1,37x);
        * GLM-4.5-Air 34,0 -> 28,5 (1,19x); Qwen3-8B 12,39 -> 12,04 (neutro). Nessun danno trovato.
        * Kill-switch: LLM_NO_WIRE=1 (o LLM_MLX_WIRED_GB=N per forzare). */
-      else if (nw == NULL && fp_gib >= 64) {
+      else if (nw == NULL && fp_gib >= 64 && !llm_mlx_weights_backend_packed()) {   /* packed: i pesi sono mmap a richiesta, non vanno pinnati (il pin li leggerebbe tutti) */
           /* Massimo consentito dall'OS/MLX = lo stesso valore che pinna mlx_lm. */
           long maxrec_gb = 0;
           { mlx_device_info info = mlx_device_info_new();

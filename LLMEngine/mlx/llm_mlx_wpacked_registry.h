@@ -66,6 +66,15 @@ static inline LlmMlxPackedEntry* llm_mlx_packed_reg_entry(LlmMlxPackedReg* r, co
     return e;
 }
 
+int llm_mlx_qp_name_get(const char* name, int* group, int* bits);
+
+/* Come reg_entry, ma i bit/gruppo per-tensore di config.json (modelli misti 2/4 bit) hanno la precedenza sui default del modello. */
+static inline LlmMlxPackedEntry* llm_mlx_packed_reg_entry_cfg(LlmMlxPackedReg* r, const char* model_dir, const char* base, int bits, int group) {
+    int qg = 0, qb = 0;
+    if (base && llm_mlx_qp_name_get(base, &qg, &qb) && qb > 0) { bits = qb; if (qg > 0) group = qg; }
+    return llm_mlx_packed_reg_entry(r, model_dir, base, bits, group);
+}
+
 static inline const LlmMlxPackedW* llm_mlx_packed_reg_get(LlmMlxPackedReg* r, const char* model_dir,
                                                           const char* base, int bits, int group) {
     LlmMlxPackedEntry* e = llm_mlx_packed_reg_entry(r, model_dir, base, bits, group);

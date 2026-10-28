@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,25 +27,49 @@ static int find_info(const LlmCodecStTensorInfo* ti, int n, const char* nm) {
     return -1;
 }
 
-/* Cerca `name` nell'header di `path`; se presente mappa il file e riempie `L`. 0 ok, 1 assente, -1 errore. */
-static int locate_in_file(const char* path, const char* name, Loc* L) {
-    LlmCodecStTensorInfo* ti = NULL; int n = 0; uint64_t base_off = 0;
-    if (llmcodec_safetensors_read(path, &ti, &n, &base_off) != 0) return -1;
-    int i = find_info(ti, n, name);
-    if (i < 0) { llmcodec_safetensors_info_free(ti); return 1; }
-    memset(L, 0, sizeof *L);
-    L->len = ti[i].end - ti[i].begin; L->ndim = ti[i].ndim;
-    for (int d = 0; d < ti[i].ndim && d < 8; d++) L->shape[d] = ti[i].shape[d];
-    L->bf16 = strcmp(ti[i].dtype, "BF16") == 0;
-    uint64_t off = base_off + ti[i].begin;
-    llmcodec_safetensors_info_free(ti);
-    int fd = open(path, O_RDONLY); if (fd < 0) return -1;
-    struct stat st; if (fstat(fd, &st) != 0) { close(fd); return -1; }
+/* Cache per file: header (tabella tensori) e mappa si ottengono UNA volta per shard. Senza cache ogni open rimappava l'intero
+ * file (e ne riparsava l'header) tre volte per tensore: con un checkpoint a file unico da 80 GB lo spazio di indirizzi finiva
+ * dopo ~37 layer (mmap falliva). Le mappe della cache vivono quanto il processo; i Loc non le possiedono. */
+typedef struct { char path[1600]; LlmCodecStTensorInfo* ti; int n; uint64_t base_off; void* map; size_t map_bytes; } FileEnt;
+static FileEnt* g_files; static int g_nfiles, g_cfiles;
+static pthread_mutex_t g_files_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static FileEnt* file_ent(const char* path) {   /* g_files_mu preso dal chiamante */
+    for (int i = 0; i < g_nfiles; i++) if (strcmp(g_files[i].path, path) == 0) return &g_files[i];
+    FileEnt e; memset(&e, 0, sizeof e);
+    if (strlen(path) >= sizeof e.path) return NULL;
+    if (llmcodec_safetensors_read(path, &e.ti, &e.n, &e.base_off) != 0) return NULL;
+    int fd = open(path, O_RDONLY); if (fd < 0) { llmcodec_safetensors_info_free(e.ti); return NULL; }
+    struct stat st; if (fstat(fd, &st) != 0) { close(fd); llmcodec_safetensors_info_free(e.ti); return NULL; }
     void* map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
-    if (map == MAP_FAILED) return -1;
-    L->map = map; L->map_bytes = (size_t)st.st_size; L->owns_map = 1;
-    L->ptr = (const uint8_t*)map + off;
+    if (map == MAP_FAILED) { llmcodec_safetensors_info_free(e.ti); return NULL; }
+    e.map = map; e.map_bytes = (size_t)st.st_size; snprintf(e.path, sizeof e.path, "%s", path);
+    if (g_nfiles >= g_cfiles) {
+        int nc = g_cfiles ? g_cfiles * 2 : 16;
+        FileEnt* nf = (FileEnt*)realloc(g_files, (size_t)nc * sizeof *nf);
+        if (!nf) { munmap(map, e.map_bytes); llmcodec_safetensors_info_free(e.ti); return NULL; }
+        g_files = nf; g_cfiles = nc;
+    }
+    g_files[g_nfiles] = e;
+    return &g_files[g_nfiles++];
+}
+
+/* Cerca `name` nell'header di `path`; se presente riempie `L` con la mappa condivisa. 0 ok, 1 assente, -1 errore. */
+static int locate_in_file(const char* path, const char* name, Loc* L) {
+    pthread_mutex_lock(&g_files_mu);
+    FileEnt* fe = file_ent(path);
+    if (!fe) { pthread_mutex_unlock(&g_files_mu); return -1; }
+    int i = find_info(fe->ti, fe->n, name);
+    if (i < 0) { pthread_mutex_unlock(&g_files_mu); return 1; }
+    const LlmCodecStTensorInfo* t = &fe->ti[i];
+    memset(L, 0, sizeof *L);
+    L->len = t->end - t->begin; L->ndim = t->ndim;
+    for (int d = 0; d < t->ndim && d < 8; d++) L->shape[d] = t->shape[d];
+    L->bf16 = strcmp(t->dtype, "BF16") == 0;
+    L->ptr = (const uint8_t*)fe->map + fe->base_off + t->begin;
+    L->map = NULL; L->map_bytes = 0; L->owns_map = 0;   /* la mappa e' della cache */
+    pthread_mutex_unlock(&g_files_mu);
     return 0;
 }
 

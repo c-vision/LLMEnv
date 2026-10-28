@@ -686,8 +686,7 @@ static int qwen4_gdn_decode_fused(LlmMlxModel* m, int layer_idx, mlx_array x, ml
       const LlmMlxPackedLazy* lz[4]; const LlmMlxPackedW* pw[4]; mlx_array outs4[4];
       for (int i = 0; i < 4; i++) {
           tname(m->cfg.layer_prefix, layer_idx, leaf[i], namebuf, sizeof(namebuf));
-          LlmMlxPackedEntry* e = llm_mlx_packed_reg_entry(&m->packed, m->model_dir, namebuf, bts, gsz);
-          if (!e || e->w.bits != 4 || llm_mlx_lazy_build(&e->lazy, &e->w) != 0) goto out;
+          LlmMlxPackedEntry* e = llm_mlx_packed_reg_entry_cfg(&m->packed, m->model_dir, namebuf, bts, gsz);          if (!e || (e->w.bits != 4 && e->w.bits != 2) || llm_mlx_lazy_build(&e->lazy, &e->w) != 0) goto out;
           lz[i] = &e->lazy; pw[i] = &e->w; outs4[i] = mlx_array_new();
       }
       const int mrc = llm_mlx_lazy_linear_multi(4, lz, pw, x, outs4, s);

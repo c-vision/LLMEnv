@@ -34,13 +34,13 @@ static inline mlx_array llm_mlx_lazy_view(const void* p, size_t len, int* lead) 
 
 static inline int llm_mlx_lazy_build(LlmMlxPackedLazy* z, const LlmMlxPackedW* w) {
     if (z->ready) return 0;
-    if (!w || w->bits != 4 || !w->biases) return -1;
-    const size_t wb = (size_t)w->rows * (w->cols / 2), sb = (size_t)w->rows * (w->cols / (uint32_t)w->group) * 2;
+    if (!w || (w->bits != 4 && w->bits != 2) || !w->biases) return -1;
+    const size_t wb = (size_t)w->rows * (w->cols * (uint32_t)w->bits / 8), sb = (size_t)w->rows * (w->cols / (uint32_t)w->group) * 2;
     int lw = 0, ls = 0, lb = 0;
     z->w = llm_mlx_lazy_view(w->w, wb, &lw);
     z->s = llm_mlx_lazy_view(w->scales, sb, &ls);
     z->b = llm_mlx_lazy_view(w->biases, sb, &lb);
-    int32_t pv[8] = { (int32_t)w->cols, (int32_t)w->rows, w->group, lw, ls, lb, w->scale_bf16, 0 };
+    int32_t pv[8] = { (int32_t)w->cols, (int32_t)w->rows, w->group, lw, ls, lb, w->scale_bf16, w->bits };
     int psh[1] = { 8 };
     z->p = mlx_array_new_data(pv, psh, 1, MLX_INT32);
     z->ready = 1;
@@ -56,16 +56,16 @@ static inline void llm_mlx_lazy_free(LlmMlxPackedLazy* z) {
 static const char llm_mlx_lazy_gemv_src[] =
 "uint tg = threadgroup_position_in_grid.x; uint t = threadgroup_position_in_grid.y;\n"
 "uint sg = simdgroup_index_in_threadgroup; uint lane = thread_index_in_simdgroup;\n"
-"uint H = P[0], M = P[1], gs = P[2]; ulong lw = P[3], ls = P[4], lb = P[5]; uint bf = P[6];\n"
+"uint H = P[0], M = P[1], gs = P[2]; ulong lw = P[3], ls = P[4], lb = P[5]; uint bf = P[6], bits = P[7];\n"
 "uint r0 = (tg * 8 + sg) * 4;\n"
 "if (r0 >= M) return;\n"
 "uint nr = min(4u, M - r0);\n"
 "uint r1 = min(r0 + 1u, M - 1u), r2 = min(r0 + 2u, M - 1u), r3 = min(r0 + 3u, M - 1u);\n"
-"ulong rw = (ulong)(H / 2), sr = (ulong)(H / gs) * 2;\n"
+"ulong rw = (ulong)(H * bits / 8), sr = (ulong)(H / gs) * 2;\n"
 "const device uchar* wp = W + lw; const device uchar* sp = S + ls; const device uchar* bp = B + lb;\n"
 "float o[4];\n"
 "q4_dotn(o, nr, wp + r0 * rw, wp + r1 * rw, wp + r2 * rw, wp + r3 * rw, sp + r0 * sr, sp + r1 * sr, sp + r2 * sr, sp + r3 * sr,\n"
-"        bp + r0 * sr, bp + r1 * sr, bp + r2 * sr, bp + r3 * sr, (uint)(lw & 3), X + (ulong)t * H, H, gs, bf, lane);\n"
+"        bp + r0 * sr, bp + r1 * sr, bp + r2 * sr, bp + r3 * sr, (uint)(lw & 3), X + (ulong)t * H, H, gs, bf, bits, lane);\n"
 "if (lane == 0) for (uint i = 0; i < nr; i++) OUT[(ulong)t * M + r0 + i] = o[i];\n";
 
 static mlx_fast_metal_kernel g_llm_mlx_lazy_gemv;
@@ -147,16 +147,16 @@ static void llm_mlx_multi_src(int n, char* dst, size_t cap) {
             "    uint r0 = (tgl * 8 + sg) * 4;\n"
             "    if (r0 < M%d) {\n"
             "        uint nr = min(4u, M%d - r0); uint r1 = min(r0 + 1u, M%d - 1u), r2 = min(r0 + 2u, M%d - 1u), r3 = min(r0 + 3u, M%d - 1u);\n"
-            "        ulong lw = P%d[3], ls = P%d[4], lb = P%d[5]; uint gs = P%d[2], bf = P%d[6];\n"
-            "        ulong rw = (ulong)(H / 2), sr = (ulong)(H / gs) * 2;\n"
+            "        ulong lw = P%d[3], ls = P%d[4], lb = P%d[5]; uint gs = P%d[2], bf = P%d[6], bits = P%d[7];\n"
+            "        ulong rw = (ulong)(H * bits / 8), sr = (ulong)(H / gs) * 2;\n"
             "        const device uchar* wp = W%d + lw; const device uchar* sp = S%d + ls; const device uchar* bp = B%d + lb;\n"
             "        float o[4];\n"
             "        q4_dotn(o, nr, wp + r0 * rw, wp + r1 * rw, wp + r2 * rw, wp + r3 * rw, sp + r0 * sr, sp + r1 * sr, sp + r2 * sr, sp + r3 * sr,\n"
-            "                bp + r0 * sr, bp + r1 * sr, bp + r2 * sr, bp + r3 * sr, (uint)(lw & 3), X + (ulong)t * H, H, gs, bf, lane);\n"
+            "                bp + r0 * sr, bp + r1 * sr, bp + r2 * sr, bp + r3 * sr, (uint)(lw & 3), X + (ulong)t * H, H, gs, bf, bits, lane);\n"
             "        if (lane == 0) for (uint i = 0; i < nr; i++) O%d[(ulong)t * M%d + r0 + i] = o[i];\n"
             "    }\n"
             "}\n",
-            i == 0 ? "" : "else ", i, i == 0 ? "0u" : (i == 1 ? "C0" : (i == 2 ? "C1" : "C2")), i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
+            i == 0 ? "" : "else ", i, i == 0 ? "0u" : (i == 1 ? "C0" : (i == 2 ? "C1" : "C2")), i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
     }
 }
 

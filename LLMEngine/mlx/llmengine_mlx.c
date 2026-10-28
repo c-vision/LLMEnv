@@ -1463,11 +1463,17 @@ int llm_mlx_embed_qp(int* g, int* b) { if (g) *g = g_embed_qg; if (b) *b = g_emb
 /* Tabella nome-modulo -> qparams (riempita dal config): multishard_get registra l'array
  * restituito, cosi' il call-site (che riceve QUEL ctx) trova i valori giusti. */
 typedef struct { char key[192]; int g, b; } LlmMlxQpName;
-static LlmMlxQpName g_qpn[1024]; static int g_nqpn = 0;
+static LlmMlxQpName* g_qpn = NULL; static int g_nqpn = 0, g_cqpn = 0;   /* dinamica: i config per-modulo (modelli misti 2/4 bit) hanno oltre 1024 voci */
 void llm_mlx_qp_name_set(const char* key, int g, int b) {
     if (key == NULL || g <= 0 || b <= 0) return;
     for (int i = 0; i < g_nqpn; ++i) if (strcmp(g_qpn[i].key, key) == 0) { g_qpn[i].g = g; g_qpn[i].b = b; return; }
-    if (g_nqpn < 1024) { snprintf(g_qpn[g_nqpn].key, sizeof g_qpn[0].key, "%s", key); g_qpn[g_nqpn].g = g; g_qpn[g_nqpn].b = b; g_nqpn++; }
+    if (g_nqpn >= g_cqpn) {
+        int nc = g_cqpn ? g_cqpn * 2 : 1024;
+        LlmMlxQpName* nt = (LlmMlxQpName*)realloc(g_qpn, (size_t)nc * sizeof *nt);
+        if (!nt) return;
+        g_qpn = nt; g_cqpn = nc;
+    }
+    snprintf(g_qpn[g_nqpn].key, sizeof g_qpn[0].key, "%s", key); g_qpn[g_nqpn].g = g; g_qpn[g_nqpn].b = b; g_nqpn++;
 }
 int llm_mlx_qp_name_get(const char* name, int* g, int* b) {
     if (name == NULL) return 0;
