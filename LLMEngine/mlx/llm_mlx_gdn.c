@@ -1068,7 +1068,8 @@ bool qwen4_linear_gdn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
             }
             mlx_array_free(vf);
         } }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "out_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&r, gated_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
+    if (out_packed2) { mlx_array_free(r); r = out_pk2; out_pk2 = mlx_array_new(); }   /* PRIMA del set: altrimenti out_h riceve l'array vuoto */
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "out_proj"); if (li >= 0 && ok && !out_packed2) ok = llm_mlx_lora_apply_mlx(&r, gated_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     mlx_array_set(out_h, r);
 
     mlx_array_free(q_part); mlx_array_free(k_part); mlx_array_free(v_part);
@@ -1080,6 +1081,7 @@ bool qwen4_linear_gdn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
     mlx_array_free(q_rep); mlx_array_free(k_rep);
     mlx_array_free(conv_state); mlx_array_free(state); mlx_vector_array_free(ys); mlx_array_free(y_stack);
     mlx_array_free(norm_w); mlx_array_free(z4); mlx_array_free(gated); mlx_array_free(gated_flat);
+    mlx_array_free(out_pk2);
     mlx_array_free(out_w); mlx_array_free(out_sc); mlx_array_free(out_b); mlx_array_free(r);
     mlx_array_free(inv1); mlx_array_free(zero_arr);
     mlx_vector_array_free(kv_split);

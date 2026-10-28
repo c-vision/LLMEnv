@@ -117,6 +117,8 @@ bool multishard_get(const MultiShardWeights* mw, const char* name, mlx_array* ou
     }
     for (int i = 0; i < mw->count; i++) {
         if (mlx_map_string_to_array_get(out, mw->shards[i], name) == 0) {
+            if (g_mlx_release_dummy && out->ctx == g_mlx_release_dummy)
+                fprintf(stderr, "[release-hit] lookup di tensore RILASCIATO: %s\n", name);
             { int qg = 0, qb = 0; if (llm_mlx_qp_name_get(name, &qg, &qb)) {
                 int rr = (mlx_array_ndim(*out) >= 2) ? (int)mlx_array_shape(*out)[0] : 0;
                 int pp = (mlx_array_ndim(*out) >= 2) ? (int)mlx_array_shape(*out)[mlx_array_ndim(*out)-1] : 0;

@@ -42,6 +42,7 @@ static int q4mp_gemv(const char* path, const char* base, int expert, int bits, i
     int rc = -1;
     LlmGemvQ4Ctx* g = llm_gemvq4_create();
     if (g && llm_gemvq4_load_weights_wonly_nocopy(g, wp, (const uint16_t*)sp, (const uint16_t*)bp, w3.cols, w3.rows, (uint32_t)group) == 0) {
+        llm_gemvq4_set_scale_bf16(g, w3.scale_bf16);
         uint16_t* xh = (uint16_t*)malloc((size_t)n_in*2), *yh = (uint16_t*)malloc((size_t)n_out*2);
         if (xh && yh) {
             for (int i=0;i<n_in;i++){ _Float16 h=(_Float16)x[i]; memcpy(&xh[i],&h,2); }
@@ -60,8 +61,7 @@ static int q4mp_gemv(const char* path, const char* base, int expert, int bits, i
 static void q4mp_release_layer(LlmMlxModel* m, int layer_idx) {
     static const char* suf[] = {
         ".mlp.switch_mlp.gate_proj", ".mlp.switch_mlp.up_proj", ".mlp.switch_mlp.down_proj",
-        ".mlp.shared_expert.gate_proj", ".mlp.shared_expert.up_proj", ".mlp.shared_expert.down_proj",
-        ".mlp.shared_expert_gate"
+        ".mlp.shared_expert.gate_proj", ".mlp.shared_expert.up_proj", ".mlp.shared_expert.down_proj"
     };
     static const char* aux[] = {".weight",".scales",".biases"};
     for (size_t b=0;b<sizeof suf/sizeof suf[0];b++)
@@ -71,6 +71,24 @@ static void q4mp_release_layer(LlmMlxModel* m, int layer_idx) {
             for (int si=0; si<m->weights.count; si++) (void)mlx_map_string_to_array_insert(m->weights.shards[si], nm, e);
             mlx_array_free(e);
         }
+}
+
+/* y[r*n_out+j] = x_row r @ W^T (tensore quantizzato qualsiasi bits/group, letto dal map MLX). 1 = ok. */
+static int q4mp_mlx_small(LlmMlxModel* m, const char* base, mlx_array xflat, float* y, int n_out, int nrow) {
+    char nm[300]; mlx_array w = mlx_array_new(), sc = mlx_array_new(), b = mlx_array_new();
+    mlx_array o = mlx_array_new(), o32 = mlx_array_new(); int ok = 0;
+    snprintf(nm, sizeof nm, "%s", base);
+    if (multishard_get_triple(&m->weights, nm, &w, &sc, &b)) {
+        int g = m->cfg.quant_group_size, bt = m->cfg.quant_bits; char mode[16];
+        llm_mlx_quant_derive(w, sc, g, bt, "affine", &g, &bt, mode, sizeof mode);
+        if (quantized_linear_cfg(&o, xflat, w, sc, b, g, bt, mode, m->stream) && mlx_astype(&o32, o, MLX_FLOAT32, m->stream) == 0) {
+            q4mp_eval(o32);
+            const float* d = mlx_array_data_float32(o32);
+            if (d && (int)mlx_array_size(o32) == n_out * nrow) { memcpy(y, d, sizeof(float) * (size_t)n_out * (size_t)nrow); ok = 1; }
+        }
+    }
+    mlx_array_free(w); mlx_array_free(sc); mlx_array_free(b); mlx_array_free(o); mlx_array_free(o32);
+    return ok;
 }
 
 static float q4mp_silu(float v){ return v>=0? v/(1.f+expf(-v)) : v*expf(v)/(1.f+expf(v)); }
@@ -88,10 +106,12 @@ static int qwen4_exp_moe_packed_try(mlx_array* out, LlmMlxModel* m, int layer_id
     if (nd0 == 3) { int sh2[2] = {nrow0, xs[nd0-1]}; if (mlx_reshape(&xflat, x, sh2, 2, m->stream) != 0) { mlx_array_free(xflat); return 1; } }
     else if (mlx_array_set(&xflat, x) != 0) { mlx_array_free(xflat); return 1; }
     const char* pre = m->cfg.layer_prefix; const int g = m->cfg.quant_group_size;
-    char pg[256], pu[256], pd[256], pathg[1600];
+    char pg[256], pu[256], pd[256], pathg[1600], pathu[1600], pathd[1600];
+    char rgt[256];
     #define Q4J(name,tail) snprintf(name,sizeof name,"%s%d.%s", pre, layer_idx, tail)
-    Q4J(pg,"mlp.switch_mlp.gate_proj"); Q4J(pu,"mlp.switch_mlp.up_proj"); Q4J(pd,"mlp.switch_mlp.down_proj");
+    Q4J(rgt,"mlp.shared_expert_gate"); Q4J(pg,"mlp.switch_mlp.gate_proj"); Q4J(pu,"mlp.switch_mlp.up_proj"); Q4J(pd,"mlp.switch_mlp.down_proj");
     q4mp_shard_of(m, pg, pathg, sizeof pathg);
+    q4mp_shard_of(m, pu, pathu, sizeof pathu); q4mp_shard_of(m, pd, pathd, sizeof pathd);   /* gli shard possono differire per tensore */
     { LlmMlxPackedW3 G; if (llm_mlx_packed_open3d(pathg, pg, 4, g, &G) != 0) return 1;
       int F=(int)G.rows, E=(int)G.cols, NE=(int)G.experts; llm_mlx_packed_close3d(&G);
       int K=m->cfg.top_k; if (F<=0||E<=0||NE<=0||K<=0||K>16) return 1;
@@ -102,14 +122,14 @@ static int qwen4_exp_moe_packed_try(mlx_array* out, LlmMlxModel* m, int layer_id
       float* gates=(float*)malloc((size_t)NE*4*(size_t)nrow0);
       float* xh=(float*)malloc((size_t)E*4*(size_t)nrow0);
       if (!gates || !xh) { free(gates); free(xh); return 1; }
+      { mlx_array x32 = mlx_array_new(); if (mlx_astype(&x32, xflat, MLX_FLOAT32, m->stream) != 0) { mlx_array_free(x32); free(gates); free(xh); return 1; } mlx_array_free(xflat); xflat = x32; }
       { mlx_vector_array ev=mlx_vector_array_new(); mlx_vector_array_append_value(ev,xflat); mlx_eval(ev); mlx_vector_array_free(ev); }
       memcpy(xh, mlx_array_data_float32(xflat), (size_t)E*4*(size_t)nrow0);
-      LlmMlxPackedLinear L;
-      if (llm_mlx_linear_packed_open(pathr, rg, 4, g, &L) != 0) { free(gates); free(xh); return 1; }
-      mlx_array go = mlx_array_new();
-      if (llm_mlx_linear_packed_run(&L, xflat, &go, m->stream) != 0) { llm_mlx_linear_packed_close(&L); mlx_array_free(go); free(gates); free(xh); return 1; }
-      q4mp_eval(go); memcpy(gates, mlx_array_data_float32(go), (size_t)NE*4*(size_t)nrow0);
-      llm_mlx_linear_packed_close(&L); mlx_array_free(go);
+      /* router e shared_expert_gate sono Q8/gs64 nel checkpoint (config.json, override per-modulo): il kernel packed e' solo Q4,
+       * quindi restano sul percorso MLX (tensori minuscoli, NON rilasciati da packed_release_wired). */
+      float* sgate = (float*)malloc(sizeof(float) * (size_t)nrow0);
+      if (!sgate) { free(gates); free(xh); return 1; }
+      if (!q4mp_mlx_small(m, rg, xflat, gates, NE, nrow0) || !q4mp_mlx_small(m, rgt, xflat, sgate, 1, nrow0)) { free(sgate); free(gates); free(xh); return 1; }
 
       float *gk=(float*)malloc((size_t)F*4), *uk=(float*)malloc((size_t)F*4), *yk=(float*)malloc((size_t)E*4);
       double* acc=(double*)calloc((size_t)E,sizeof(double));
@@ -123,7 +143,7 @@ static int qwen4_exp_moe_packed_try(mlx_array* out, LlmMlxModel* m, int layer_id
           char* used=(char*)calloc((size_t)NE,1); int sel[16]; double wts[16]; double wsum=0;
           for (int k=0;k<K;k++){ int bi=-1; double bp=-1;
             for (int e=0;e<NE;e++){ if(used[e]) continue; double pr=exp((double)gr[e]-mx)*inv; if(pr>bp){bp=pr;bi=e;} }
-            if (bi<0){ free(used); rc=1; break; }
+            if (bi<0){ fprintf(stderr, "[moe-packed] riga %d: router senza esperto selezionabile (NaN nei gates?)\n", r); rc=1; break; }
             used[bi]=1; sel[k]=bi; wts[k]=bp; wsum+=bp; }
           if (!rc && wsum>0) for (int k=0;k<K;k++) wts[k]/=wsum;
           free(used);
@@ -131,32 +151,32 @@ static int qwen4_exp_moe_packed_try(mlx_array* out, LlmMlxModel* m, int layer_id
           memset(acc, 0, (size_t)E*sizeof(double));
           for (int k=0;k<K && !rc;k++) {
               if (q4mp_gemv(pathg, pg, sel[k], 4, g, xh + (size_t)r*E, E, gk, F) != 0) { rc=1; break; }
-              if (q4mp_gemv(pathg, pu, sel[k], 4, g, xh + (size_t)r*E, E, uk, F) != 0) { rc=1; break; }
+              if (q4mp_gemv(pathu, pu, sel[k], 4, g, xh + (size_t)r*E, E, uk, F) != 0) { rc=1; break; }
               for (int f=0;f<F;f++) gk[f]=q4mp_silu(gk[f])*uk[f];
-              if (q4mp_gemv(pathg, pd, sel[k], 4, g, gk, F, yk, E) != 0) { rc=1; break; }
+              if (q4mp_gemv(pathd, pd, sel[k], 4, g, gk, F, yk, E) != 0) { rc=1; break; }
               for (int d=0;d<E;d++) acc[d]+=wts[k]*(double)yk[d];
           }
           /* shared expert per riga */
           if (!rc) {
               char sg[256],su[256],sd[256],sgt[256],ps[1600];
               Q4J(sg,"mlp.shared_expert.gate_proj"); Q4J(su,"mlp.shared_expert.up_proj");
-              Q4J(sd,"mlp.shared_expert.down_proj"); Q4J(sgt,"mlp.shared_expert_gate");
+              Q4J(sd,"mlp.shared_expert.down_proj");
               float* hg=(float*)malloc((size_t)F*4); float* hu=(float*)malloc((size_t)F*4);
-              float sw=0; int okp = hg&&hu;
+              float sw = sgate[r]; int okp = hg&&hu;
               if (okp) {
-                  LlmMlxPackedLinear Lg,Lu,Ld,Ls;
-                  for (int t=0;t<4 && okp;t++) {
-                      const char* bb = t==0?sg:t==1?su:t==2?sd:sgt;
-                      LlmMlxPackedLinear* Lp = t==0?&Lg:t==1?&Lu:t==2?&Ld:&Ls;
+                  LlmMlxPackedLinear Lg,Lu,Ld;
+                  for (int t=0;t<3 && okp;t++) {
+                      const char* bb = t==0?sg:t==1?su:sd;
+                      LlmMlxPackedLinear* Lp = t==0?&Lg:t==1?&Lu:&Ld;
                       q4mp_shard_of(m,bb,ps,sizeof ps);
                       if (llm_mlx_linear_packed_open(ps,bb,4,g,Lp)!=0) { okp=0; break; }
+                      if (t==2) continue;   /* down_proj: ingresso = attivazione F, eseguito dopo; qui solo aperto */
                       int sh1[2]={1,E}; mlx_array xrow = mlx_array_new_data(xh + (size_t)r*E, sh1, 2, MLX_FLOAT32);
                       mlx_array o=mlx_array_new();
                       if (llm_mlx_linear_packed_run(Lp,xrow,&o,m->stream)!=0) { mlx_array_free(xrow); mlx_array_free(o); llm_mlx_linear_packed_close(Lp); okp=0; break; }
                       q4mp_eval(o);
                       if (t==0) memcpy(hg, mlx_array_data_float32(o), (size_t)F*4);
                       else if (t==1) memcpy(hu, mlx_array_data_float32(o), (size_t)F*4);
-                      else if (t==3) sw = mlx_array_data_float32(o)[0];
                       mlx_array_free(xrow); mlx_array_free(o);
                       if (t != 2) llm_mlx_linear_packed_close(Lp);
                   }
@@ -182,8 +202,7 @@ static int qwen4_exp_moe_packed_try(mlx_array* out, LlmMlxModel* m, int layer_id
           if (nd0 == 3) { int osh[3] = {xs[0], xs[1], E}; rc = mlx_reshape(out, flatout, osh, 3, m->stream); mlx_array_free(flatout); }
           else { *out = flatout; }
       }
-      free(obuf); free(acc); free(gk); free(uk); free(yk); free(xh); free(gates);
-      free(acc); free(gk); free(uk); free(yk); free(xh);
+      free(obuf); free(acc); free(gk); free(uk); free(yk); free(xh); free(gates); free(sgate); mlx_array_free(xflat);
       return rc;
     }
 }

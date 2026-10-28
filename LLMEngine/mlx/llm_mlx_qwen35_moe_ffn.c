@@ -535,7 +535,9 @@ bool qwen4_exp_moe_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
     bool ok = true;
     {                                                     /* packed anche in prefill (righe N) */
         mlx_array pk = mlx_array_new();
-        if (qwen4_exp_moe_packed_try(&pk, m, layer_idx, h) == 0) { *out = pk; return true; }
+        int prc = qwen4_exp_moe_packed_try(&pk, m, layer_idx, h);
+        if (prc == 0) { *out = pk; return true; }
+        fprintf(stderr, "[moe-packed] layer=%d rc=%d -> fallback MLX\n", layer_idx, prc);
         mlx_array_free(pk);
     }
     const int gsz = m->cfg.quant_group_size;
