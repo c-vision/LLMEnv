@@ -152,6 +152,7 @@ const LlmMlxArchOps* find_arch_ops(const char* model_type) {
 
 void llm_mlx_model_init(LlmMlxModel* m) {
     memset(m, 0, sizeof(*m));
+    llm_mlx_packed_ctx_init(&m->packed);
     m->device = mlx_device_new_type(MLX_CPU, 0);
     m->stream = mlx_stream_new();
     m->prefix_max = 16; /* default: eviction LRU oltre 16 prefissi salvati */

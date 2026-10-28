@@ -663,8 +663,10 @@ typedef struct {
     int ctx_pos;              /* righe ctx accumulate nella cache (per layer) */
 } Df2CtxState;
 
+#include "llm_mlx_linear_packed_model.h"
 struct LlmMlxModel {
     char model_dir[1024];   /* MTP: dove sta mtp.safetensors */
+    LlmMlxPackedCtx packed; /* M3.2: descrittori packed (usati solo con weights_backend="packed") */
     /* Ternary-Bonsai 2 27B (PrismML): contratto Hadamard del pack (block, sign per width,
      * weight_names da ruotare, inverse_weight_names). Non NULL SOLO se model_type ==
      * prism_hadamard_qwen35. Gli hook per-proiezione che lo USANO sono in corso (vedi todo
