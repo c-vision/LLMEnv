@@ -14,9 +14,13 @@ __pycache__/
 LLMEngine/mlx/build-gmbasic/
 libs/mlx-deps/precompiled/
 
-# oracoli: script e binari di misura locali, NON tracciati (vedi
-# AiWiki/01-Projects/LLMEnv/Knowledge/oracoli.md)
-oracoli/
+# oracoli: si tracciano i SORGENTI (c/h/sh/README, vedi AiWiki/01-Projects/LLMEnv/Knowledge/oracoli.md);
+# restano ignorati binari di misura, log, cache e script Python (Python-free).
+**/oracoli/*
+!**/oracoli/*.c
+!**/oracoli/*.h
+!**/oracoli/*.sh
+!**/oracoli/README.md
 
 # tool ritirati (A/B vendored+ds-minimal): non tracciati
 backups/tools/
