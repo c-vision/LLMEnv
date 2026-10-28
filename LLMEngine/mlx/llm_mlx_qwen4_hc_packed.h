@@ -51,7 +51,7 @@ static int qwen4_hc_packed_try(LlmMlxModel* m, int layer_idx, const char* hc,
 
     /* [1, hc*hidden] -> [1, hc, hidden] per mix e normed, poi media sull'asse hc. */
     { mlx_array mix_r = mlx_array_new(), normed_r = mlx_array_new(), prod = mlx_array_new();
-      int sh[3] = {1, hcn, h};
+      int sh[3] = {mlx_array_dim(hyper_input, 0), hcn, h};
       int rc = mlx_reshape(&mix_r, sig, sh, 3, m->stream);
       if (rc == 0) rc = mlx_reshape(&normed_r, normed, sh, 3, m->stream);
       if (rc == 0) rc = mlx_multiply(&prod, mix_r, normed_r, m->stream);

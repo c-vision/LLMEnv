@@ -41,7 +41,8 @@ static inline void llm_mlx_linear_packed_close(LlmMlxPackedLinear* L) {
 static inline int llm_mlx_linear_packed_run(const LlmMlxPackedLinear* L, mlx_array x, mlx_array* out,
                                             mlx_stream s) {
     if (!L || !L->g || !out || mlx_array_ndim(x) != 2) return -1;
-    if (mlx_array_dim(x, 0) != 1 || mlx_array_dim(x, 1) != (int)L->w.cols) return -1;
+    const int nrow = mlx_array_dim(x, 0);
+    if (nrow < 1 || mlx_array_dim(x, 1) != (int)L->w.cols) return -1;
     if (L->w.bits != 4) return -2;   /* v1: solo Q4 */
     { mlx_vector_array ev = mlx_vector_array_new(); mlx_vector_array_append_value(ev, x);
       mlx_eval(ev); mlx_vector_array_free(ev); }
@@ -49,19 +50,16 @@ static inline int llm_mlx_linear_packed_run(const LlmMlxPackedLinear* L, mlx_arr
     if (!xf) return -1;
     uint16_t* xh = malloc((size_t)L->w.cols * 2);
     uint16_t* yh = malloc((size_t)L->w.rows * 2);
-    if (!xh || !yh) { free(xh); free(yh); return -1; }
-    for (uint32_t c = 0; c < L->w.cols; c++) { _Float16 h = (_Float16)xf[c]; memcpy(&xh[c], &h, 2); }
-    int rc = llm_gemvq4_run(L->g, xh, yh);
-    if (rc == 0) {
-        float* yf = malloc((size_t)L->w.rows * 4);
-        if (!yf) rc = -1;
-        else {
-            for (uint32_t r = 0; r < L->w.rows; r++) { _Float16 h; memcpy(&h, &yh[r], 2); yf[r] = (float)h; }
-            int sh[2] = {1, (int)L->w.rows};
-            *out = mlx_array_new_data(yf, sh, 2, MLX_FLOAT32);
-            free(yf);
-        }
+    float* yf = malloc((size_t)L->w.rows * (size_t)nrow * 4);
+    if (!xh || !yh || !yf) { free(xh); free(yh); free(yf); return -1; }
+    int rc = 0;
+    for (int t = 0; t < nrow && rc == 0; t++) {
+        const float* xt = xf + (size_t)t * L->w.cols;
+        for (uint32_t c = 0; c < L->w.cols; c++) { _Float16 h = (_Float16)xt[c]; memcpy(&xh[c], &h, 2); }
+        rc = llm_gemvq4_run(L->g, xh, yh);
+        if (rc == 0) for (uint32_t r = 0; r < L->w.rows; r++) { _Float16 h; memcpy(&h, &yh[r], 2); yf[(size_t)t*L->w.rows + r] = (float)h; }
     }
+    if (rc == 0) { int sh[2] = {nrow, (int)L->w.rows}; *out = mlx_array_new_data(yf, sh, 2, MLX_FLOAT32); }
     free(xh); free(yh);
     (void)s;
     return rc;

@@ -118,10 +118,38 @@ static void llm_mlx_packed_release_wired(LlmMlxModel* m) {
     if (!llm_mlx_weights_backend_packed() || !m) return;
     /* Solo architetture con i call site cablati (qwen4_exp): per le altre NON si tocca nulla. */
     if (m->cfg.model_type[0] && strstr(m->cfg.model_type, "qwen4") == NULL) return;
+    /* Verifica preliminare: se un solo layer non è packed (MoE o HC), NON si rilascia nulla. */
+    for (int il = 0; il < m->cfg.n_layers; il++) {
+        static const char* chk[][2] = {{"mlp.switch_mlp.gate_proj","3d"},{"attn_hyper_connection.input_mix_weight_down","2d"}};
+        for (int c = 0; c < 2; c++) {
+            char base[256], path[1600];
+            snprintf(base, sizeof base, "%s.%d.%s", m->cfg.layer_prefix, il, chk[c][0]);
+            snprintf(path, sizeof path, "%s/model.safetensors", m->model_dir);
+            { char ip[1200]; snprintf(ip, sizeof ip, "%s/model.safetensors.index.json", m->model_dir);
+              FILE* f = fopen(ip, "rb");
+              if (f) { fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
+                char* j=(char*)malloc((size_t)n+1);
+                if (j && fread(j,1,(size_t)n,f)==(size_t)n) { j[n]=0; char key[700]; snprintf(key,sizeof key,"%s.weight",base);
+                  char* p=strstr(j,key); if (p) { char* q=strstr(p,".safetensors"); if (q) { char* b=q; while (b>j && b[-1]!='"') --b;
+                    size_t len=(size_t)(q+12-b); if (len<sizeof path) { memcpy(path,b,len); path[len]=0; } } } }
+                free(j); }
+              fclose(f); }
+            int okv;
+            if (chk[c][1][0] == '3') { LlmMlxPackedW3 w3; okv = (llm_mlx_packed_open3d(path, base, 4, m->cfg.quant_group_size, &w3) == 0); if (okv) llm_mlx_packed_close3d(&w3); }
+            else { LlmMlxPackedW w2; okv = (llm_mlx_packed_open(path, base, 4, m->cfg.quant_group_size, &w2) == 0); if (okv) llm_mlx_packed_close(&w2); }
+            if (!okv) return;
+        }
+    }
     static const char* base_suffix[] = {
         "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
         "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.out_proj",
-        "mlp.gate"
+        "mlp.gate", "mlp.switch_mlp.gate_proj", "mlp.switch_mlp.up_proj", "mlp.switch_mlp.down_proj",
+        "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj",
+        "mlp.shared_expert_gate",
+        "attn_hyper_connection.input_mix_weight_down", "attn_hyper_connection.input_mix_weight_up",
+        "attn_hyper_connection.block_inject_weight",
+        "mlp_hyper_connection.input_mix_weight_down", "mlp_hyper_connection.input_mix_weight_up",
+        "mlp_hyper_connection.block_inject_weight"
     };
     const char* aux[] = {".weight", ".scales", ".biases"};
     for (int il = 0; il < m->cfg.n_layers; il++) {
