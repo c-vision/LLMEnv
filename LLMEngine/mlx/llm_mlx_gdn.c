@@ -681,16 +681,19 @@ static int qwen4_gdn_decode_fused(LlmMlxModel* m, int layer_idx, mlx_array x, ml
     mlx_array tmp = mlx_array_new();
     const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
 
-    tname(m->cfg.layer_prefix, layer_idx, "linear_attn.in_proj_qkv", namebuf, sizeof(namebuf));
-    if (llm_mlx_linear_packed_model(&m->packed, m->model_dir, namebuf, bts, gsz, x, &qkv, s) != 0) goto out;
-    tname(m->cfg.layer_prefix, layer_idx, "linear_attn.in_proj_z", namebuf, sizeof(namebuf));
-    if (llm_mlx_linear_packed_model(&m->packed, m->model_dir, namebuf, bts, gsz, x, &z, s) != 0) goto out;
-    tname(m->cfg.layer_prefix, layer_idx, "linear_attn.in_proj_a", namebuf, sizeof(namebuf));
-    if (!multishard_get_triple(&m->weights, namebuf, &a_w, &a_sc, &a_b)) goto out;
-    tname(m->cfg.layer_prefix, layer_idx, "linear_attn.in_proj_b", namebuf, sizeof(namebuf));
-    if (!multishard_get_triple(&m->weights, namebuf, &b_w, &b_sc, &b_b)) goto out;
-    if (!quantized_linear_cfg(&av, x, a_w, a_sc, a_b, gsz, bts, m->cfg.quant_mode, s)) goto out;
-    if (!quantized_linear_cfg(&bv, x, b_w, b_sc, b_b, gsz, bts, m->cfg.quant_mode, s)) goto out;
+    /* qkv, z, a, b: UN solo nodo (stesso x, tutti Q4 packed) invece di 2 nodi custom + 2 QuantizedMatmul MLX con i loro cast */
+    { static const char* const leaf[4] = { "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.in_proj_a", "linear_attn.in_proj_b" };
+      const LlmMlxPackedLazy* lz[4]; const LlmMlxPackedW* pw[4]; mlx_array outs4[4];
+      for (int i = 0; i < 4; i++) {
+          tname(m->cfg.layer_prefix, layer_idx, leaf[i], namebuf, sizeof(namebuf));
+          LlmMlxPackedEntry* e = llm_mlx_packed_reg_entry(&m->packed, m->model_dir, namebuf, bts, gsz);
+          if (!e || e->w.bits != 4 || llm_mlx_lazy_build(&e->lazy, &e->w) != 0) goto out;
+          lz[i] = &e->lazy; pw[i] = &e->w; outs4[i] = mlx_array_new();
+      }
+      const int mrc = llm_mlx_lazy_linear_multi(4, lz, pw, x, outs4, s);
+      if (mrc == 0) { mlx_array_set(&qkv, outs4[0]); mlx_array_set(&z, outs4[1]); mlx_array_set(&av, outs4[2]); mlx_array_set(&bv, outs4[3]); }
+      for (int i = 0; i < 4; i++) mlx_array_free(outs4[i]);
+      if (mrc != 0) goto out; }
 
     { mlx_array* cw = llm_mlx_gdn_conv_cached(m, layer_idx);
       if (cw) { if (mlx_array_set(&tmp, *cw) != 0) goto out; }

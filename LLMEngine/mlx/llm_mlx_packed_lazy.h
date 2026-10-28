@@ -127,4 +127,94 @@ done:
     return rc == 0 ? 0 : -1;
 }
 
+/* ── Proiezioni multiple sullo STESSO x in un solo nodo ──────────────────────────────────────────────────────
+ * N tensori (2..4) con ingresso comune (GDN: qkv+z+a+b; QSA: q+k+v): un solo kernel, i threadgroup scorrono i tensori in
+ * sequenza (T_i = ceil(M_i/32)). Un nodo e una costruzione invece di N. Tutti con la stessa H e Q4 packed. */
+static mlx_fast_metal_kernel g_llm_mlx_multi_k[5]; static int g_llm_mlx_multi_ready[5];
+
+static void llm_mlx_multi_src(int n, char* dst, size_t cap) {
+    size_t o = 0;
+    o += (size_t)snprintf(dst + o, cap - o,
+        "uint tg = threadgroup_position_in_grid.x; uint t = threadgroup_position_in_grid.y;\n"
+        "uint sg = simdgroup_index_in_threadgroup; uint lane = thread_index_in_simdgroup;\n"
+        "uint H = P0[0];\n");
+    for (int i = 0; i < n; i++) o += (size_t)snprintf(dst + o, cap - o, "uint M%d = P%d[1]; uint T%d = (M%d + 31) / 32;\n", i, i, i, i);
+    o += (size_t)snprintf(dst + o, cap - o, "uint C0 = T0;\n");
+    for (int i = 1; i < n; i++) o += (size_t)snprintf(dst + o, cap - o, "uint C%d = C%d + T%d;\n", i, i - 1, i);
+    for (int i = 0; i < n; i++) {
+        o += (size_t)snprintf(dst + o, cap - o,
+            "%sif (tg < C%d) { uint tgl = tg - %s;\n"
+            "    uint r0 = (tgl * 8 + sg) * 4;\n"
+            "    if (r0 < M%d) {\n"
+            "        uint nr = min(4u, M%d - r0); uint r1 = min(r0 + 1u, M%d - 1u), r2 = min(r0 + 2u, M%d - 1u), r3 = min(r0 + 3u, M%d - 1u);\n"
+            "        ulong lw = P%d[3], ls = P%d[4], lb = P%d[5]; uint gs = P%d[2], bf = P%d[6];\n"
+            "        ulong rw = (ulong)(H / 2), sr = (ulong)(H / gs) * 2;\n"
+            "        const device uchar* wp = W%d + lw; const device uchar* sp = S%d + ls; const device uchar* bp = B%d + lb;\n"
+            "        float o[4];\n"
+            "        q4_dotn(o, nr, wp + r0 * rw, wp + r1 * rw, wp + r2 * rw, wp + r3 * rw, sp + r0 * sr, sp + r1 * sr, sp + r2 * sr, sp + r3 * sr,\n"
+            "                bp + r0 * sr, bp + r1 * sr, bp + r2 * sr, bp + r3 * sr, (uint)(lw & 3), X + (ulong)t * H, H, gs, bf, lane);\n"
+            "        if (lane == 0) for (uint i = 0; i < nr; i++) O%d[(ulong)t * M%d + r0 + i] = o[i];\n"
+            "    }\n"
+            "}\n",
+            i == 0 ? "" : "else ", i, i == 0 ? "0u" : (i == 1 ? "C0" : (i == 2 ? "C1" : "C2")), i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
+    }
+}
+
+static inline int llm_mlx_lazy_linear_multi(int n, const LlmMlxPackedLazy* const* z, const LlmMlxPackedW* const* w,
+                                            mlx_array x, mlx_array* outs, mlx_stream s) {
+    if (n < 2 || n > 4) return -1;
+    for (int i = 0; i < n; i++) if (!z[i] || !z[i]->ready || !w[i] || w[i]->cols != w[0]->cols) return -1;
+    pthread_mutex_lock(&g_llm_mlx_lazy_mu);
+    if (!g_llm_mlx_multi_ready[n]) {
+        static char src[8192];
+        char names[4][8][4]; const char* ins[20]; const char* outn[4]; int ni = 0;
+        for (int i = 0; i < n; i++) {
+            snprintf(names[i][0], 4, "W%d", i); snprintf(names[i][1], 4, "S%d", i); snprintf(names[i][2], 4, "B%d", i); snprintf(names[i][3], 4, "P%d", i);
+            snprintf(names[i][4], 4, "O%d", i);
+            ins[ni++] = names[i][0]; ins[ni++] = names[i][1]; ins[ni++] = names[i][2]; ins[ni++] = names[i][3]; outn[i] = names[i][4];
+        }
+        ins[ni++] = "X";
+        llm_mlx_multi_src(n, src, sizeof src);
+        char kname[32]; snprintf(kname, sizeof kname, "llm_packed_multi%d", n);
+        g_llm_mlx_multi_k[n] = llm_mlx_lazy_kernel(kname, ins, ni, outn, n, src);
+        g_llm_mlx_multi_ready[n] = 1;
+    }
+    mlx_fast_metal_kernel k = g_llm_mlx_multi_k[n];
+    pthread_mutex_unlock(&g_llm_mlx_lazy_mu);
+
+    const int nd = mlx_array_ndim(x), H = (int)w[0]->cols;
+    if (nd < 1 || (int)mlx_array_dim(x, nd - 1) != H) return -1;
+    int nt = 1; for (int d = 0; d < nd - 1; d++) nt *= (int)mlx_array_dim(x, d);
+    mlx_array x32 = mlx_array_new(), x2 = mlx_array_new();
+    int rc = -1; int sh2[2] = { nt, H };
+    if (nd == 2 && mlx_array_dtype(x) == MLX_FLOAT32) { if (mlx_array_set(&x2, x) != 0) goto done; }
+    else if (mlx_astype(&x32, x, MLX_FLOAT32, s) != 0 || mlx_reshape(&x2, x32, sh2, 2, s) != 0) goto done;
+    {
+        mlx_array in[20]; int ni = 0, tgs = 0;
+        for (int i = 0; i < n; i++) { in[ni++] = z[i]->w; in[ni++] = z[i]->s; in[ni++] = z[i]->b; in[ni++] = z[i]->p; tgs += ((int)w[i]->rows + 31) / 32; }
+        in[ni++] = x2;
+        mlx_vector_array vi = mlx_vector_array_new_data(in, (size_t)ni);
+        mlx_fast_metal_kernel_config cfg = mlx_fast_metal_kernel_config_new();
+        for (int i = 0; i < n; i++) { int osh[2] = { nt, (int)w[i]->rows }; mlx_fast_metal_kernel_config_add_output_arg(cfg, osh, 2, MLX_FLOAT32); }
+        mlx_fast_metal_kernel_config_set_grid(cfg, tgs * 256, nt, 1);
+        mlx_fast_metal_kernel_config_set_thread_group(cfg, 256, 1, 1);
+        mlx_vector_array vo = mlx_vector_array_new();
+        int ar = mlx_fast_metal_kernel_apply(&vo, k, vi, cfg, s);
+        if (ar == 0) {
+            rc = 0;
+            for (int i = 0; i < n && rc == 0; i++) {
+                mlx_array y = mlx_array_new(); mlx_vector_array_get(&y, vo, (size_t)i);
+                int osh_n[8]; for (int d = 0; d < nd - 1; d++) osh_n[d] = (int)mlx_array_dim(x, d);
+                osh_n[nd - 1] = (int)w[i]->rows;
+                rc = (nd == 2) ? mlx_array_set(&outs[i], y) : mlx_reshape(&outs[i], y, osh_n, nd, s);
+                mlx_array_free(y);
+            }
+        }
+        mlx_vector_array_free(vo); mlx_fast_metal_kernel_config_free(cfg); mlx_vector_array_free(vi);
+    }
+done:
+    mlx_array_free(x32); mlx_array_free(x2);
+    return rc == 0 ? 0 : -1;
+}
+
 #endif
