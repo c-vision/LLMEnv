@@ -110,6 +110,33 @@ static void llm_engine_opt_auto(const char* name, const char* value) {
  * I checkpoint MLX reali non sono uniformi (router 8/64, PLE 4/32, esperti 2/32). Si registra
  * (array.ctx -> group,bits) cosi' `quantized_linear_cfg` usa i valori giusti per ogni tensore.
  * Solo per modelli da dir MLX (chiavi HF); per GGUF la role map resta l'autorita'. */
+/* PACKED (sperimentale): libera gli array dei tensori che il forward legge dai descrittori
+ * zero-copy. Rilasciare l'entry del map fa scendere il footprint Metal del modello; il forward
+ * (attention q/k/v/o, GDN qkv/z/out, router) usa il descrittore mmap. Default: no-op. */
+static void llm_mlx_packed_release_wired(LlmMlxModel* m) {
+    if (!llm_mlx_weights_backend_packed() || !m) return;
+    /* Solo architetture con i call site cablati (qwen4_exp): per le altre NON si tocca nulla. */
+    if (m->cfg.model_type[0] && strstr(m->cfg.model_type, "qwen4") == NULL) return;
+    static const char* base_suffix[] = {
+        "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
+        "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.out_proj",
+        "mlp.gate"
+    };
+    const char* aux[] = {".weight", ".scales", ".biases"};
+    for (int il = 0; il < m->cfg.n_layers; il++) {
+        for (size_t b = 0; b < sizeof base_suffix / sizeof base_suffix[0]; b++) {
+            char base[256]; snprintf(base, sizeof base, "%s.%d.%s", m->cfg.layer_prefix, il, base_suffix[b]);
+            for (int a = 0; a < 3; a++) {
+                char nm[300]; snprintf(nm, sizeof nm, "%s%s", base, aux[a]);
+                mlx_array empty = mlx_array_new();
+                for (int si = 0; si < m->weights.count; si++)
+                    (void)mlx_map_string_to_array_insert(m->weights.shards[si], nm, empty);
+                mlx_array_free(empty);
+            }
+        }
+    }
+}
+
 static void llm_mlx_register_module_qparams(const char* dir, MultiShardWeights* W, LlmMlxModel* m) {
     if (dir == NULL || W == NULL || W->shards == NULL) return;
     char pth[1200]; snprintf(pth, sizeof pth, "%s/config.json", dir);
@@ -1009,6 +1036,8 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
           if (nl > 0) fprintf(stderr, "[prefix] %d prefissi persistenti caricati da %s\n", nl, pp);
       }
     }
+
+    llm_mlx_packed_release_wired(m);
     return m;
 }
 
