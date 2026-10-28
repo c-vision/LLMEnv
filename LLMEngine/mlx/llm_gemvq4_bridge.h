@@ -14,6 +14,7 @@
 #define LLM_GEMVQ4_BRIDGE_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 typedef struct LlmGemvQ4Ctx LlmGemvQ4Ctx; /* opaco lato C */
 
@@ -37,5 +38,10 @@ int llm_gemvq4_load_weights(LlmGemvQ4Ctx* ctx, const uint8_t* Wq,
 /* 1 = scales/biases BF16 (checkpoint MLX in bf16); 0 = half (default). Da chiamare dopo il load, prima di run. */
 void llm_gemvq4_set_scale_bf16(LlmGemvQ4Ctx* ctx, int bf16);
 int llm_gemvq4_run(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out);
+
+/* Vista 3D zero-copy [E][M][H] (esperti): un contesto per tensore, esperto scelto a run-time. */
+int llm_gemvq4_load_weights_3d_nocopy(LlmGemvQ4Ctx* ctx, const uint8_t* Wq, const uint16_t* scales, const uint16_t* biases,
+                                      uint32_t H, uint32_t M, uint32_t group_size, uint32_t E, size_t w_stride, size_t s_stride);
+int llm_gemvq4_run_expert(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out, uint32_t expert);
 
 #endif /* LLM_GEMVQ4_BRIDGE_H */

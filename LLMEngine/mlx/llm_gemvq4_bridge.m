@@ -50,3 +50,14 @@ int llm_gemvq4_run(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out) {
 void llm_gemvq4_set_scale_bf16(LlmGemvQ4Ctx* ctx, int bf16) {
     if (ctx) ctx->inner.scale_bf16 = bf16 ? 1u : 0u;
 }
+
+int llm_gemvq4_load_weights_3d_nocopy(LlmGemvQ4Ctx* ctx, const uint8_t* Wq, const uint16_t* scales, const uint16_t* biases,
+                                      uint32_t H, uint32_t M, uint32_t group_size, uint32_t E, size_t w_stride, size_t s_stride) {
+    if (!ctx) return -1;
+    return llmmetal_gemv_q4_load_weights_3d_nocopy(&ctx->inner, Wq, scales, biases, H, M, group_size, E, w_stride, s_stride);
+}
+
+int llm_gemvq4_run_expert(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out, uint32_t expert) {
+    if (!ctx) return -1;
+    return llmmetal_gemv_q4_run_expert(&ctx->inner, x, out, expert);
+}

@@ -36,13 +36,15 @@ static const char llmmetal_gemv_q4_src[] =
 "using namespace metal;\n"
 "\n"
 "struct Q4Params { uint H; uint M; uint group_size; uint rows_per_tg; uint lead_w; uint lead_s; uint lead_b; uint scale_bf16; };\n"
-"inline float q4_ld_sb(ushort u, uint bf) { return bf ? as_type<float>(((uint)u) << 16) : (float)as_type<half>(u); }\n"
-"\n"
+"inline float q4_ld_sb(const device uchar* p, uint idx, uint bf) {\n"
+"    const ushort u = (ushort)p[2u * idx] | ((ushort)p[2u * idx + 1u] << 8);   // lettura a byte: i tensori safetensors non sono allineati a 2\n"
+"    return bf ? as_type<float>(((uint)u) << 16) : (float)as_type<half>(u);\n"
+"}\n"
 "kernel void gemv_q4_affine(\n"
 "    const device half*  x       [[buffer(0)]],\n"
 "    const device uchar* Wq      [[buffer(1)]],\n"
-"    const device ushort* scales  [[buffer(2)]],\n"
-"    const device ushort* biases  [[buffer(3)]],\n"
+"    const device uchar* scales  [[buffer(2)]],\n"
+"    const device uchar* biases  [[buffer(3)]],\n"
 "    device half*        out     [[buffer(4)]],\n"
 "    constant Q4Params&  p       [[buffer(5)]],\n"
 "    threadgroup half*   x_shared [[threadgroup(0)]],\n"
@@ -52,8 +54,8 @@ static const char llmmetal_gemv_q4_src[] =
 "    uint  simd_id [[simdgroup_index_in_threadgroup]])\n"
 "{\n"
 "    Wq = (const device uchar*)Wq + p.lead_w;\n"
-"    scales = (const device ushort*)((const device uchar*)scales + p.lead_s);\n"
-"    biases = (const device ushort*)((const device uchar*)biases + p.lead_b);\n"
+"    scales = scales + p.lead_s;\n"
+"    biases = biases + p.lead_b;\n"
 "    const uint ltid = ltid3.x;\n"
 "    const uint tg_threads = p.rows_per_tg * 32;\n"
 "    for (uint i = ltid; i < p.H; i += tg_threads) x_shared[i] = x[i];\n"
@@ -65,8 +67,8 @@ static const char llmmetal_gemv_q4_src[] =
 "    const uint per_lane = p.H / 32;\n"
 "    const device uchar* row_packed = Wq + (size_t)row * (p.H / 2);\n"
 "    const uint n_groups = p.H / p.group_size;\n"
-"    const device ushort* row_scales = scales + (size_t)row * n_groups;\n"
-"    const device ushort* row_biases = biases + (size_t)row * n_groups;\n"
+"    const device uchar* row_scales = scales + (size_t)row * n_groups * 2;\n"
+"    const device uchar* row_biases = biases + (size_t)row * n_groups * 2;\n"
 "\n"
 "    // Bug di prestazioni RISOLTO (2026-09-06): con `h = lane*per_lane + i`, a un dato `i` i 32\n"
 "    // lane leggono `row_packed` a byte_idx SPACED `per_lane/2` byte l'uno dall'altro (32\n"
@@ -88,7 +90,7 @@ static const char llmmetal_gemv_q4_src[] =
 "        uchar b = row_packed[byte_idx];\n"
 "        uint nib = (h & 1u) ? (b >> 4) : (b & 0xF);\n"
 "        uint g = h / p.group_size;\n"
-"        float w = (float)nib * q4_ld_sb(row_scales[g], p.scale_bf16) + q4_ld_sb(row_biases[g], p.scale_bf16);\n"
+"        float w = (float)nib * q4_ld_sb(row_scales, g, p.scale_bf16) + q4_ld_sb(row_biases, g, p.scale_bf16);\n"
 "        acc += w * (float)x_shared[h];\n"
 "    }\n"
 "    float sum = simd_sum(acc);\n"
@@ -109,6 +111,9 @@ typedef struct {
     size_t lead_w, lead_s, lead_b;   /* offset del tensore dentro la view page-aligned (nocopy) */
     uint32_t H, M, group_size;
     uint32_t scale_bf16;   /* 1 = scales/biases BF16 (default 0 = half) */
+    size_t w_stride, s_stride;   /* vista 3D (esperti): byte per esperto */
+    uint32_t n_experts;
+    const uint8_t *p_w, *p_s, *p_b;   /* vista 3D: puntatori base ai tensori interi (mmap) */
 } LlmMetalGemvQ4Ctx;
 
 /* Zero-copy: le view Metal puntano DIRETTAMENTE al mmap delle safetensors (page-aligned);
@@ -174,6 +179,21 @@ static int llmmetal_gemv_q4_load_weights_wonly_nocopy(LlmMetalGemvQ4Ctx* ctx, co
 static id<MTLDevice> g_gq4_device = nil; static id<MTLCommandQueue> g_gq4_queue = nil;
 static id<MTLLibrary> g_gq4_library = nil; static id<MTLComputePipelineState> g_gq4_pso = nil;
 
+/* Vista 3D [E][M][H]: zero-copy su pesi, scales e biases dell'INTERO tensore; l'esperto si sceglie a run-time
+ * con gli offset lead_* (nessuna copia e nessun nuovo contesto per esperto). */
+static int llmmetal_gemv_q4_load_weights_3d_nocopy(LlmMetalGemvQ4Ctx* ctx, const uint8_t* Wq,
+                                                   const uint16_t* scales, const uint16_t* biases,
+                                                   uint32_t H, uint32_t M, uint32_t group_size,
+                                                   uint32_t E, size_t w_stride, size_t s_stride) {
+    if (!ctx || !Wq || !scales || !biases || H % 64 != 0 || E == 0) return -1;
+    ctx->H = H; ctx->M = M; ctx->group_size = group_size; ctx->n_experts = E;
+    ctx->w_stride = w_stride; ctx->s_stride = s_stride;
+    ctx->p_w = Wq; ctx->p_s = (const uint8_t*)scales; ctx->p_b = (const uint8_t*)biases;
+    ctx->out_buf = [ctx->device newBufferWithLength:(NSUInteger)M * sizeof(uint16_t) options:MTLResourceStorageModeShared];
+    ctx->x_buf = [ctx->device newBufferWithLength:(NSUInteger)H * sizeof(uint16_t) options:MTLResourceStorageModeShared];
+    return (ctx->out_buf && ctx->x_buf) ? 0 : -1;
+}
+
 static int llmmetal_gemv_q4_init(LlmMetalGemvQ4Ctx* ctx) {
     ctx->device = nil; ctx->queue = nil; ctx->library = nil; ctx->pso = nil;
     ctx->w_buf = nil; ctx->scale_buf = nil; ctx->bias_buf = nil; ctx->out_buf = nil; ctx->x_buf = nil;
@@ -220,19 +240,21 @@ static int llmmetal_gemv_q4_load_weights(LlmMetalGemvQ4Ctx* ctx, const uint8_t* 
 
 /* Un passo di decode: scrive x (memcpy in memoria unificata, come llmmetal_kv_write), esegue
  * il kernel sui pesi gia' residenti, legge out. Nessuna riallocazione/copia dei pesi. */
-static int llmmetal_gemv_q4_run(LlmMetalGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out) {
+static int llmmetal_gemv_q4_run_bufs(LlmMetalGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out,
+                                     id<MTLBuffer> wb, id<MTLBuffer> sb, id<MTLBuffer> bb,
+                                     size_t lead_w, size_t lead_s, size_t lead_b) {
     memcpy(ctx->x_buf.contents, x, (size_t)ctx->H*sizeof(uint16_t));
     struct { uint32_t H, M, group_size, rows_per_tg, lead_w, lead_s, lead_b, scale_bf16; } params = {
         ctx->H, ctx->M, ctx->group_size, LLMMETAL_GEMV_ROWS_PER_TG,
-        (uint32_t)ctx->lead_w, (uint32_t)ctx->lead_s, (uint32_t)ctx->lead_b, ctx->scale_bf16 };
+        (uint32_t)lead_w, (uint32_t)lead_s, (uint32_t)lead_b, ctx->scale_bf16 };
 
     id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     [enc setComputePipelineState:ctx->pso];
     [enc setBuffer:ctx->x_buf offset:0 atIndex:0];
-    [enc setBuffer:ctx->w_buf offset:0 atIndex:1];
-    [enc setBuffer:ctx->scale_buf offset:0 atIndex:2];
-    [enc setBuffer:ctx->bias_buf offset:0 atIndex:3];
+    [enc setBuffer:wb offset:0 atIndex:1];
+    [enc setBuffer:sb offset:0 atIndex:2];
+    [enc setBuffer:bb offset:0 atIndex:3];
     [enc setBuffer:ctx->out_buf offset:0 atIndex:4];
     [enc setBytes:&params length:sizeof(params) atIndex:5];
     [enc setThreadgroupMemoryLength:(ctx->H*sizeof(uint16_t)) atIndex:0];
@@ -243,6 +265,31 @@ static int llmmetal_gemv_q4_run(LlmMetalGemvQ4Ctx* ctx, const uint16_t* x, uint1
     [cb waitUntilCompleted];
     memcpy(out, ctx->out_buf.contents, (size_t)ctx->M*sizeof(uint16_t));
     return 0;
+}
+
+static int llmmetal_gemv_q4_run(LlmMetalGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out) {
+    return llmmetal_gemv_q4_run_bufs(ctx, x, out, ctx->w_buf, ctx->scale_buf, ctx->bias_buf, ctx->lead_w, ctx->lead_s, ctx->lead_b);
+}
+
+/* view zero-copy (page-aligned) su [p, p+len): ritorna il buffer e il lead */
+static id<MTLBuffer> llmmetal_gq4_view(id<MTLDevice> dev, const uint8_t* p, size_t len, size_t* lead) {
+    const size_t page = (size_t)getpagesize();
+    uintptr_t b = (uintptr_t)p & ~(uintptr_t)(page - 1);
+    *lead = (size_t)((uintptr_t)p - b);
+    const size_t l = ((*lead + len + page - 1) / page) * page;
+    return [dev newBufferWithBytesNoCopy:(void*)b length:l options:MTLResourceStorageModeShared deallocator:nil];
+}
+
+/* esperto `e` di una vista 3D (llmmetal_gemv_q4_load_weights_3d_nocopy) */
+static int llmmetal_gemv_q4_run_expert(LlmMetalGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out, uint32_t e) {
+    if (e >= ctx->n_experts) return -1;
+    const size_t wbytes = (size_t)ctx->M * (ctx->H / 2), sbytes = (size_t)ctx->M * (ctx->H / ctx->group_size) * 2;
+    size_t lw = 0, ls = 0, lb = 0;
+    id<MTLBuffer> wb = llmmetal_gq4_view(ctx->device, ctx->p_w + (size_t)e * ctx->w_stride, wbytes, &lw);
+    id<MTLBuffer> sb = llmmetal_gq4_view(ctx->device, ctx->p_s + (size_t)e * ctx->s_stride, sbytes, &ls);
+    id<MTLBuffer> bb = llmmetal_gq4_view(ctx->device, ctx->p_b + (size_t)e * ctx->s_stride, sbytes, &lb);
+    if (!wb || !sb || !bb) return -1;
+    return llmmetal_gemv_q4_run_bufs(ctx, x, out, wb, sb, bb, lw, ls, lb);
 }
 
 #endif /* LLMMETAL_METAL_GEMV_Q4_H */

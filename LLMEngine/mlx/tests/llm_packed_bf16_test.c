@@ -29,6 +29,30 @@ static void ref_gemv(const uint32_t* w, const uint16_t* sc, const uint16_t* bi, 
     }
 }
 
+static int check3d(const char* tag, const LlmMlxPackedW3* w, int expert) {
+    const int rows = (int)w->rows, cols = (int)w->cols;
+    const uint32_t* wq = (const uint32_t*)((const uint8_t*)w->w + (size_t)expert * w->w_stride);
+    const uint16_t* sc = (const uint16_t*)((const uint8_t*)w->scales + (size_t)expert * w->s_stride);
+    const uint16_t* bi = (const uint16_t*)((const uint8_t*)w->biases + (size_t)expert * w->s_stride);
+    float* x = malloc(sizeof(float) * cols); uint16_t* xh = malloc(2 * cols);
+    for (int i = 0; i < cols; i++) { x[i] = 0.5f * sinf(0.37f * (float)i) + 0.1f; _Float16 h = (_Float16)x[i]; memcpy(&xh[i], &h, 2); x[i] = (float)h; }
+    double* yr = malloc(sizeof(double) * rows); uint16_t* yh = malloc(2 * rows);
+    ref_gemv(wq, sc, bi, w->scale_bf16, rows, cols, w->group, x, yr);
+    LlmGemvQ4Ctx* g = llm_gemvq4_create(); int rc = -1; double maxabs = 0, ymax = 0;
+    if (g && llm_gemvq4_load_weights_3d_nocopy(g, (const uint8_t*)w->w, w->scales, w->biases, (uint32_t)cols, (uint32_t)rows, (uint32_t)w->group, w->experts, w->w_stride, w->s_stride) == 0) {
+        llm_gemvq4_set_scale_bf16(g, w->scale_bf16);
+        if (llm_gemvq4_run_expert(g, xh, yh, (uint32_t)expert) == 0) {
+            rc = 0;
+            for (int o = 0; o < rows; o++) { _Float16 h; memcpy(&h, &yh[o], 2); double d = fabs((double)h - yr[o]); if (!(d <= maxabs)) maxabs = d; if (fabs(yr[o]) > ymax) ymax = fabs(yr[o]); }
+        }
+    }
+    if (g) llm_gemvq4_destroy(g);
+    int ok = rc == 0 && maxabs / (ymax > 0 ? ymax : 1) < 2e-3;
+    printf("%s (vista 3D, esperto %d): max|y|=%.4g max|diff|=%.3e  %s\n", tag, expert, ymax, maxabs, ok ? "OK" : "FAIL");
+    free(x); free(xh); free(yr); free(yh);
+    return ok ? 0 : 1;
+}
+
 static int check(const char* tag, const uint32_t* w, const uint16_t* sc, const uint16_t* bi, int bf, int rows, int cols, int group) {
     float* x = malloc(sizeof(float) * cols); uint16_t* xh = malloc(2 * cols);
     for (int i = 0; i < cols; i++) {
@@ -85,6 +109,7 @@ int main(int argc, char** argv) {
                           (const uint16_t*)((const uint8_t*)w.scales + (size_t)ex * w.s_stride),
                           w.biases ? (const uint16_t*)((const uint8_t*)w.biases + (size_t)ex * w.s_stride) : NULL,
                           w.scale_bf16, (int)w.rows, (int)w.cols, w.group);
+            fail += check3d("3D", &w, ex);
             llm_mlx_packed_close3d(&w);
         }
     }
