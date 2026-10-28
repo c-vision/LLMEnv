@@ -15,7 +15,7 @@ int main(int argc, char** argv) {
     Q4nModel m; if (q4n_model_open(&m, argv[1], 64, 1) != 0) { printf("open fail\n"); return 1; }
     const uint64_t V = llm_gguf_u(&m.gguf, "qwen4exp.vocab_size", 0, "qwen4_exp.vocab_size");
     float* logits = malloc((size_t)V * sizeof(float));
-    for (int i = 0; i < np; i++) q4n_model_forward(&m, prompt[i], logits, s);
+    for (int i = 0; i < np; i++) if (q4n_model_forward(&m, prompt[i], logits, s) != 0) { printf("prefill forward fail\n"); return 1; }
     printf("prompt:"); for (int i = 0; i < np; i++) printf(" %d", prompt[i]);
     printf("\ngen:");
     memset(g_q4n_prof, 0, sizeof(double)*12);
@@ -25,7 +25,7 @@ int main(int argc, char** argv) {
         int best = 0; float bv = logits[0];
         for (uint64_t v = 1; v < V; v++) if (logits[v] > bv) { bv = logits[v]; best = (int)v; }
         printf(" %d", best); last = best;
-        if (k + 1 < n_new) q4n_model_forward(&m, last, logits, s);
+        if (k + 1 < n_new) if (q4n_model_forward(&m, last, logits, s) != 0) { printf("forward fail\n"); return 1; }
     }
     clock_gettime(CLOCK_MONOTONIC,&b);
     double dt = (b.tv_sec-a.tv_sec)+1e-9*(b.tv_nsec-a.tv_nsec);

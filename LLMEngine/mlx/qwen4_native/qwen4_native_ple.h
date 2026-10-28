@@ -12,16 +12,43 @@
 
 typedef struct { int prev[4]; mlx_array hist; } Q4nPleState;
 
+/* KV array u64/u32 per nome (owned dal reader): alloca out (da liberare). */
+static long q4n_kv_u64(const LlmEngineMoeGguf* g, const char* key, uint64_t** out) {
+    if (!g || !g->_kvown) return -1;
+    for (int i = 0; i < g->nkv; i++) {
+        if (strcmp(g->keys[i], key) != 0) continue;
+        const LlmCodecGgufMetaKVOwned* kv = &g->_kvown[i];
+        if (kv->type != GGARR || kv->arr_raw == NULL) return -1;
+        long n = (long)kv->arr_count;
+        uint64_t* a = (uint64_t*)malloc(sizeof(uint64_t) * (size_t)n);
+        if (!a && n) return -1;
+        if (kv->arr_type == GGU64 || kv->arr_type == GGI64) memcpy(a, kv->arr_raw, sizeof(uint64_t) * (size_t)n);
+        else if (kv->arr_type == GGU32 || kv->arr_type == GGI32) { const uint32_t* r = (const uint32_t*)kv->arr_raw; for (long j = 0; j < n; j++) a[j] = r[j]; }
+        else { free(a); return -1; }
+        *out = a; return n;
+    }
+    return -1;
+}
+
 typedef struct { float offsets[64], vocab[64]; uint64_t mult[8]; int n_heads; } Q4nPleMeta;
 
 static int q4n_ple_meta(const LlmEngineMoeGguf* g, Q4nHp* hp, Q4nPleMeta* m) {
     int64_t n = 0;
-    float* off = llm_gguf_load_f32(g, "ple.head_offsets", &n);
-    if (!off || n > 64) { free(off); return -1; }
-    memcpy(m->offsets, off, (size_t)n * sizeof(float)); free(off);
-    float* voc = llm_gguf_load_f32(g, "ple.head_vocab_sizes", &n);
-    if (!voc || n > 64) { free(voc); return -1; }
-    memcpy(m->vocab, voc, (size_t)n * sizeof(float)); free(voc);
+    { uint64_t* a = NULL; long na = q4n_kv_u64(g, "qwen4exp.ple.head_offsets", &a);
+      if (na > 0 && na <= 64) { for (long i = 0; i < na; i++) m->offsets[i] = (float)a[i]; free(a); }
+      else { free(a);
+             float* off = llm_gguf_load_f32(g, "ple.head_offsets", &n);
+             if (!off || n > 64) { free(off); return -1; }
+             memcpy(m->offsets, off, (size_t)n * sizeof(float)); free(off); } }
+    { uint64_t* a = NULL; long na = q4n_kv_u64(g, "qwen4exp.ple.head_vocab_sizes", &a);
+      if (na > 0 && na <= 64) { for (long i = 0; i < na; i++) m->vocab[i] = (float)a[i]; free(a); }
+      else { free(a);
+             float* voc = llm_gguf_load_f32(g, "ple.head_vocab_sizes", &n);
+             if (!voc || n > 64) { free(voc); return -1; }
+             memcpy(m->vocab, voc, (size_t)n * sizeof(float)); free(voc); } }
+    { uint64_t* a = NULL; long na = q4n_kv_u64(g, "qwen4exp.ple.layer_multipliers", &a);
+      if (na > 0 && na <= 8) { for (long i = 0; i < na; i++) m->mult[i] = a[i]; free(a); m->n_heads = (hp->ple_ng - 1) * hp->ple_heads; return (m->n_heads > 0) ? 0 : -1; }
+      free(a); }
     int64_t nm = 0;
     float* mul = llm_gguf_load_f32(g, "blk.1.ple_layer_multipliers", &nm);
     if (!mul) mul = llm_gguf_load_f32(g, "blk.0.ple_layer_multipliers", &nm);
@@ -61,6 +88,16 @@ static void q4n_ple_rows(int token, int* prev, const Q4nPleMeta* m, int ng, int 
 /* riga globale -> (shard, riga locale). Supporta PLE packed affine (qs I8 + scales/biases F16)
  * e il vecchio layout .weight (F16/Q8). */
 static int q4n_ple_row_read(const LlmEngineMoeGguf* g, uint32_t row, float* out) {
+    /* Formato ds4: tabella unica BF16 [160 x rows]; row e' gia' globale. */
+    int fi = llm_gguf_find_tensor(g, "per_layer_token_embd.weight");
+    if (fi >= 0) {
+        const int type = g->ti[fi].type;
+        const uint64_t in = g->ti[fi].dims[0];
+        const int rb = (int)llm_ggml_nbytes(type, (int64_t)in);
+        const uint8_t* base = llm_gguf_tensor_data(g, fi, NULL);
+        if (!base || rb <= 0 || row >= g->ti[fi].dims[1]) return -1;
+        return llmcodec_ggml_dequant_row(type, base + (uint64_t)row * (uint64_t)rb, out, (int64_t)in);
+    }
     char nm[64];
     int per_shard = 0, shard = -1, packed = 0;
     for (int s = 0; s < 128; s++) {

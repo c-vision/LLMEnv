@@ -9,6 +9,8 @@
 #include "qwen4_native_gguf.h"
 #include "qwen4_native_router_kernel.h"
 #include <time.h>
+static int q4n_mat_gpu_ok(const Q4nMat* m) { int t = m->type; return m->w && (t==2||t==8||t==10||t==12||t==16); }
+
 static Q4nMat q4n_mat_gguf(const LlmEngineMoeGguf* g, const char* nm) {
     Q4nMat m = {NULL, -1, 0};
     int i = llm_gguf_find_tensor(g, nm);
@@ -232,14 +234,25 @@ static int qwen4_native_moe_quant_gpu(mlx_array* out, mlx_array x, const LlmEngi
                             : q4n_gpu_gemv_q4_0_wide_batch(gpu, wjobs, nj);
         if (drc != 0) return -1;
     } else {
+        /* down: in-dim puo' essere paddato (ds4: 640 -> 768 per Q2_K) */
+        const uint32_t d_in = (uint32_t)g->ti[di].dims[0];
+        float* xpad = NULL;
+        if (d_in != (uint32_t)F) {
+            xpad = calloc((size_t)K * d_in, sizeof(float));
+            if (!xpad) return -1;
+            for (int k = 0; k < K; k++) memcpy(xpad + (size_t)k * d_in, mid + (size_t)k * F, (size_t)F * sizeof(float));
+        }
         LlmDsv4GpuJob dj[32];
         for (int k = 0; k < K; k++) {
             int e = sel[k]; if (e < 0 || e >= NE) continue;
             dj[nj++] = (LlmDsv4GpuJob){ .w = dbase + (size_t)e * d_slab, .ggml_type = dt, .row_bytes = d_rb,
-                                        .n = (uint32_t)F, .out_dim = (uint32_t)E,
-                                        .x = mid + (size_t)k * F, .out = dw + (size_t)k * E };
+                                        .n = d_in, .out_dim = (uint32_t)E,
+                                        .x = xpad ? xpad + (size_t)k * d_in : mid + (size_t)k * F,
+                                        .out = dw + (size_t)k * E };
         }
-        if (q4n_gpu_gemv_batch(gpu, dj, nj) != 0) return -1;
+        int rc2 = q4n_gpu_gemv_batch(gpu, dj, nj);
+        free(xpad);
+        if (rc2 != 0) return -1;
     }
     m4 = q4nm_now(); g_q4n_prof[7] += m4 - m3;
     float outv[4096];

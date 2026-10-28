@@ -60,6 +60,7 @@ static int q4n_hparams(const LlmEngineMoeGguf* g, Q4nHp* hp, char* err, size_t e
     hp->n_rot = (int)HP_U("rope.dimension_count", 0);
     hp->full_interval = (int)HP_U("full_attention_interval", 0);
     hp->nextn = (int)HP_U("nextn_predict_layers", 0);
+    if (hp->nextn > 0 && hp->L > hp->nextn) hp->L -= hp->nextn;   /* blk.48=MTP: non fa parte del forward */
     hp->eps = (float)HP_F("attention.layer_norm_rms_epsilon", 1e-6);
     hp->rope_base = (float)HP_F("rope.freq_base", 1e7);
 #undef HP_U
@@ -123,6 +124,14 @@ static void q4n_layer_free(Q4nLayerRefs* r) {
     memset(r, 0, sizeof *r);
 }
 
+static int q4n_t_quantized(int t) { return t == 2 || t == 8 || t == 10 || t == 12 || t == 16; }
+
+static int q4n_tensor_is_quant(const LlmEngineMoeGguf* g, int il, const char* suf) {
+    char b[200]; snprintf(b, sizeof b, "blk.%d.%s", il, suf);
+    int i = llm_gguf_find_tensor(g, b);
+    return (i >= 0) ? q4n_t_quantized(g->ti[i].type) : 0;
+}
+
 static int q4n_layer_load_ex(const LlmEngineMoeGguf* g, int il, bool is_linear, bool is_ple,
                              int skip_big, Q4nLayerRefs* r, char* err, size_t errn) {
     if (!g || !r) return -1;
@@ -130,12 +139,12 @@ static int q4n_layer_load_ex(const LlmEngineMoeGguf* g, int il, bool is_linear, 
     memset(r, 0, sizeof *r);
     r->is_linear = is_linear; r->is_ple = is_ple;
     r->hc_attn_norm = q4n_f32(g, il, "hc_attn_norm.weight", true, &ok);
-    r->hc_attn_down = skip_big ? NULL : q4n_f32(g, il, "hc_attn_down.weight", true, &ok);
-    r->hc_attn_up = skip_big ? NULL : q4n_f32(g, il, "hc_attn_up.weight", true, &ok);
+    r->hc_attn_down = (skip_big && q4n_tensor_is_quant(g, il, "hc_attn_down.weight")) ? NULL : q4n_f32(g, il, "hc_attn_down.weight", true, &ok);
+    r->hc_attn_up = (skip_big && q4n_tensor_is_quant(g, il, "hc_attn_up.weight")) ? NULL : q4n_f32(g, il, "hc_attn_up.weight", true, &ok);
     r->hc_attn_inject = q4n_f32(g, il, "hc_attn_inject.weight", true, &ok);
     r->hc_ffn_norm = q4n_f32(g, il, "hc_ffn_norm.weight", true, &ok);
-    r->hc_ffn_down = skip_big ? NULL : q4n_f32(g, il, "hc_ffn_down.weight", true, &ok);
-    r->hc_ffn_up = skip_big ? NULL : q4n_f32(g, il, "hc_ffn_up.weight", true, &ok);
+    r->hc_ffn_down = (skip_big && q4n_tensor_is_quant(g, il, "hc_ffn_down.weight")) ? NULL : q4n_f32(g, il, "hc_ffn_down.weight", true, &ok);
+    r->hc_ffn_up = (skip_big && q4n_tensor_is_quant(g, il, "hc_ffn_up.weight")) ? NULL : q4n_f32(g, il, "hc_ffn_up.weight", true, &ok);
     r->hc_ffn_inject = q4n_f32(g, il, "hc_ffn_inject.weight", true, &ok);
     if (is_linear) {
         r->attn_qkv = skip_big ? NULL : q4n_f32(g, il, "attn_qkv.weight", true, &ok);

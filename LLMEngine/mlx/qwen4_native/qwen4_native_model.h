@@ -172,12 +172,17 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
         int is_ple = llm_gguf_find_tensor(&m->gguf, pkn) >= 0;
         int is_linear = (il == 0);
         if (m->layer_linear) is_linear = m->layer_linear[il];
+        {   /* formato-agnostico: la presenza di attn_qkv marca la layer GDN */
+            char qk[64]; snprintf(qk, sizeof qk, "blk.%d.attn_qkv.weight", il);
+            is_linear = (llm_gguf_find_tensor(&m->gguf, qk) >= 0);
+        }
         Q4nLayerRefs refs;
         if (m->gpu_ok) {
             if (!m->lrefs_ok[il]) {
                 char err[256] = {0};
                 if (q4n_layer_load_ex(&m->gguf, il, is_linear, is_ple, 1, &m->lrefs[il], err, sizeof err) != 0) continue;
                 m->lrefs_ok[il] = 1;
+        
             }
             refs = m->lrefs[il];
         } else {
@@ -187,7 +192,7 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
         if (is_ple && m->ple_meta.n_heads > 0) {
             if (qwen4_native_ple_layer(&aR, &m->gguf, il, &refs, &m->ple_meta, &m->ple_st, token,
                                        E, hc, h->ple_ng, h->ple_eos, h->ple_conv, h->eps,
-                                       q4n_default_mv, s) != 0) return -1;
+                                       q4n_default_mv, s) != 0) { fprintf(stderr,"[fwd] ple fail L%d\n", il); return -1; }
         }
         Q4nHcW wa; wa.norm = refs.hc_attn_norm; wa.rank = h->rank;
         { char b3[96];
@@ -195,14 +200,18 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
               snprintf(b3,sizeof b3,"blk.%d.hc_attn_down.weight", il);   wa.down = q4n_mat_gguf(&m->gguf, b3);
               snprintf(b3,sizeof b3,"blk.%d.hc_attn_up.weight", il);     wa.up = q4n_mat_gguf(&m->gguf, b3);
               wa.inject = (Q4nMat){refs.hc_attn_inject,-1,0};   /* piccolo: CPU */
+              if (!q4n_mat_gpu_ok(&wa.down) || !q4n_mat_gpu_ok(&wa.up)) {
+                  wa.down = (Q4nMat){refs.hc_attn_down,-1,0}; wa.up = (Q4nMat){refs.hc_attn_up,-1,0};
+              }
           } else {
               wa.down = (Q4nMat){refs.hc_attn_down,-1,0}; wa.up = (Q4nMat){refs.hc_attn_up,-1,0};
               wa.inject = (Q4nMat){refs.hc_attn_inject,-1,0};
           } }
         mlx_array m1 = mlx_array_new(), i1 = mlx_array_new();
         if (qwen4_native_hc_mix(&m1, &i1, aR, &wa, E, hc, h->eps, q4n_mat_mv_gpu,
-                                m->gpu_ok ? &m->gpu : NULL, s) != 0) return -1;
+                                m->gpu_ok ? &m->gpu : NULL, s) != 0) { fprintf(stderr,"[fwd] hc1 fail L%d\n", il); return -1; }
         double tl1 = q4n_now(); g_q4n_prof[0] += tl1 - tl0;   /* load */
+        if (pos == 0 && il < 2) fprintf(stderr, "[ph] L%d load=%.0f\n", il, q4n_rss_now());
         mlx_array blk = mlx_array_new();
         if (!is_linear) {
             size_t stride = (size_t)h->Hkv * h->D;
@@ -291,28 +300,36 @@ static int q4n_model_forward(Q4nModel* m, int token, float* logits, mlx_stream s
 gdn_done: ;
         }
         g_q4n_prof[1] += q4n_now() - tl1;   /* hc1+attn/gdn */
+        if (pos == 0 && il < 2) fprintf(stderr, "[ph] L%d blk=%.0f\n", il, q4n_rss_now());
         double tm0 = q4n_now();
         mlx_array R1 = mlx_array_new();
-        if (llm_q4n_hc_combine(&R1, aR, blk, i1, s) != 0) return -1;
+        if (llm_q4n_hc_combine(&R1, aR, blk, i1, s) != 0) { fprintf(stderr,"[fwd] comb1 fail L%d\n", il); return -1; }
         Q4nHcW wf; wf.norm = refs.hc_ffn_norm; wf.rank = h->rank;
         { char b3[96];
           if (m->gpu_ok) {
               snprintf(b3,sizeof b3,"blk.%d.hc_ffn_down.weight", il);   wf.down = q4n_mat_gguf(&m->gguf, b3);
               snprintf(b3,sizeof b3,"blk.%d.hc_ffn_up.weight", il);     wf.up = q4n_mat_gguf(&m->gguf, b3);
               wf.inject = (Q4nMat){refs.hc_ffn_inject,-1,0};
+              if (!q4n_mat_gpu_ok(&wf.down) || !q4n_mat_gpu_ok(&wf.up)) {
+                  wf.down = (Q4nMat){refs.hc_ffn_down,-1,0}; wf.up = (Q4nMat){refs.hc_ffn_up,-1,0};
+              }
           } else {
               wf.down = (Q4nMat){refs.hc_ffn_down,-1,0}; wf.up = (Q4nMat){refs.hc_ffn_up,-1,0};
               wf.inject = (Q4nMat){refs.hc_ffn_inject,-1,0};
+              if (!q4n_mat_gpu_ok(&wf.down) || !q4n_mat_gpu_ok(&wf.up)) {
+                  wf.down = (Q4nMat){refs.hc_ffn_down,-1,0}; wf.up = (Q4nMat){refs.hc_ffn_up,-1,0};
+              }
           } }
         mlx_array m2 = mlx_array_new(), i2 = mlx_array_new();
         if (qwen4_native_hc_mix(&m2, &i2, R1, &wf, E, hc, h->eps, q4n_mat_mv_gpu,
-                                m->gpu_ok ? &m->gpu : NULL, s) != 0) return -1;
+                                m->gpu_ok ? &m->gpu : NULL, s) != 0) { fprintf(stderr,"[fwd] hc2 fail L%d\n", il); return -1; }
         g_q4n_prof[2] += q4n_now() - tm0;   /* combine1 + hc2 */
+        if (pos == 0 && il < 2) fprintf(stderr, "[ph] L%d hc2=%.0f\n", il, q4n_rss_now());
         double tm1 = q4n_now();
         mlx_array b2 = mlx_array_new();
         if (m->use_moe) {
             if (qwen4_native_moe_quant_gpu(&b2, m2, &m->gguf, il, &refs, E, h->NE, h->K, h->F,
-                                           m->gpu_ok ? &m->gpu : NULL, s) != 0) return -1;
+                                           m->gpu_ok ? &m->gpu : NULL, s) != 0) { fprintf(stderr,"[fwd] moe fail L%d\n", il); return -1; }
         } else {
             float* z = calloc((size_t)E, sizeof(float));
             int zsh[2] = {1, E};
@@ -320,12 +337,14 @@ gdn_done: ;
             free(z);
         }
         g_q4n_prof[3] += q4n_now() - tm1;   /* moe */
+        if (pos == 0 && il < 2) fprintf(stderr, "[ph] L%d moe=%.0f\n", il, q4n_rss_now());
         mlx_array R2 = mlx_array_new();
-        if (llm_q4n_hc_combine(&R2, R1, b2, i2, s) != 0) return -1;
+        if (llm_q4n_hc_combine(&R2, R1, b2, i2, s) != 0) { fprintf(stderr,"[fwd] comb2 fail L%d\n", il); return -1; }
         aR = R2;
 
         mlx_array_free(R1); mlx_array_free(m1); mlx_array_free(i1);
         mlx_array_free(m2); mlx_array_free(i2); mlx_array_free(blk); mlx_array_free(b2);
+
         if (!m->gpu_ok) q4n_layer_free(&refs);
         else if ((il & 7) == 7) q4n_gpu_reset(&m->gpu);   /* flush periodico: view ricreate troppo spesso costano */
         /* le pagine dei pesi sono file-backed: dopo il layer non servono piu' (il token
@@ -342,6 +361,9 @@ gdn_done: ;
     if (m->gpu_ok) {
         wo.down = q4n_mat_gguf(&m->gguf, "output_hc_down.weight");
         wo.up   = q4n_mat_gguf(&m->gguf, "output_hc_up.weight");
+        if (!q4n_mat_gpu_ok(&wo.down) || !q4n_mat_gpu_ok(&wo.up)) {
+            wo.down = (Q4nMat){m->out_down,-1,0}; wo.up = (Q4nMat){m->out_up,-1,0};
+        }
     } else { wo.down = (Q4nMat){m->out_down,-1,0}; wo.up = (Q4nMat){m->out_up,-1,0}; }
     mlx_array mixed = mlx_array_new(), dummy = mlx_array_new();
     if (qwen4_native_hc_mix(&mixed, &dummy, aR, &wo, E, hc, h->eps, q4n_mat_mv_gpu,
