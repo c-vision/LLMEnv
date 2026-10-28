@@ -53,6 +53,20 @@ command line. It is built on top of LLMEnv and gives you, without writing any co
 
 In short: LLMEnv is the engine, FastLLM is how you drive it.
 
+## Installing (macOS, Apple Silicon)
+
+Download the latest release from the [Releases page](https://github.com/c-vision/LLMEnv/releases) and use one of:
+
+- **Installer:** open `llmenv-<version>-macos-arm64.pkg`. It puts the libraries in `/usr/local/lib/llmenv`
+  and the headers in `/usr/local/include/llmenv`. The package is not signed with an Apple Developer ID,
+  so macOS will ask you to confirm (System Settings > Privacy & Security > Open Anyway).
+- **Archive:** unpack `llmenv-<version>-macos-arm64.tar.gz` anywhere. The libraries find each other,
+  so the folder can be moved freely.
+- **Homebrew:** `brew tap c-vision/llmenv https://github.com/c-vision/LLMEnv` and then
+  `brew install llmenv`.
+
+One library, the llama.cpp back end, needs OpenSSL 3 (`brew install openssl@3`).
+
 ## Building
 
 You need a C/C++ compiler and CMake. The GPU parts need a Mac with Apple Silicon.
