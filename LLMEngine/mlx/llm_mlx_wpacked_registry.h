@@ -5,6 +5,7 @@
 #define LLM_MLX_WPACKED_REGISTRY_H
 
 #include "llm_mlx_wpacked.h"
+#include "llm_mlx_packed_lazy.h"
 #include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,7 @@ typedef struct {
     char base[256];
     char shard[256];
     LlmMlxPackedW w;
+    LlmMlxPackedLazy lazy;   // viste mlx_array zero-copy + parametri (costruite al primo uso)
 } LlmMlxPackedEntry;
 
 typedef struct { LlmMlxPackedEntry** e; int n, cap; } LlmMlxPackedReg;
@@ -25,16 +27,16 @@ static inline void llm_mlx_packed_reg_init(LlmMlxPackedReg* r) { if (r) { memset
 
 static inline void llm_mlx_packed_reg_free(LlmMlxPackedReg* r) {
     if (!r) return;
-    for (int i = 0; i < r->n; i++) { llm_mlx_packed_close(&r->e[i]->w); free(r->e[i]); }
+    for (int i = 0; i < r->n; i++) { llm_mlx_lazy_free(&r->e[i]->lazy); llm_mlx_packed_close(&r->e[i]->w); free(r->e[i]); }
     free(r->e);
     memset(r, 0, sizeof *r);
 }
 
 /* Ritorna il descrittore per <base> (risolto sullo shard dell'index), o NULL. Cache per base. */
-static inline const LlmMlxPackedW* llm_mlx_packed_reg_get(LlmMlxPackedReg* r, const char* model_dir,
+static inline LlmMlxPackedEntry* llm_mlx_packed_reg_entry(LlmMlxPackedReg* r, const char* model_dir,
                                                           const char* base, int bits, int group) {
     if (!r || !model_dir || !base) return NULL;
-    for (int i = 0; i < r->n; i++) if (strcmp(r->e[i]->base, base) == 0) return &r->e[i]->w;
+    for (int i = 0; i < r->n; i++) if (strcmp(r->e[i]->base, base) == 0) return r->e[i];
     char ip[1200]; snprintf(ip, sizeof ip, "%s/model.safetensors.index.json", model_dir);
     FILE* f = fopen(ip, "rb"); if (!f) return NULL;
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
@@ -61,7 +63,13 @@ static inline const LlmMlxPackedW* llm_mlx_packed_reg_get(LlmMlxPackedReg* r, co
     snprintf(e->shard, sizeof e->shard, "%s", sh->valuestring);
     r->e[r->n++] = e;
     cJSON_Delete(doc);
-    return &e->w;
+    return e;
+}
+
+static inline const LlmMlxPackedW* llm_mlx_packed_reg_get(LlmMlxPackedReg* r, const char* model_dir,
+                                                          const char* base, int bits, int group) {
+    LlmMlxPackedEntry* e = llm_mlx_packed_reg_entry(r, model_dir, base, bits, group);
+    return e ? &e->w : NULL;
 }
 
 #endif

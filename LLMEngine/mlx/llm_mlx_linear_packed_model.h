@@ -24,34 +24,13 @@ static inline int llm_mlx_linear_packed_model(LlmMlxPackedCtx* c, const char* mo
     if (!c || !model_dir || !tensor_base || !out) return -1;
     if (!llm_mlx_weights_backend_packed()) return 1;
     { int qg=0,qb=0; if (llm_mlx_qp_name_get(tensor_base,&qg,&qb) && qb>0) { bits=qb; if(qg>0) group=qg; } }
-    const LlmMlxPackedW* w = llm_mlx_packed_reg_get(&c->reg, model_dir, tensor_base, bits, group);
-    if (!w) return 1;
+    LlmMlxPackedEntry* e = llm_mlx_packed_reg_entry(&c->reg, model_dir, tensor_base, bits, group);
+    if (!e) return 1;
+    const LlmMlxPackedW* w = &e->w;
     if (w->bits != 4) return 1;   /* v1: solo Q4 */
-    LlmMlxPackedLinear L; L.g = NULL; L.w = *w;   /* descrittore gia' mappato dal registry */
-    L.g = llm_gemvq4_create();
-    if (!L.g) return -1;
-    if (llm_gemvq4_load_weights_wonly_nocopy(L.g, (const uint8_t*)w->w, w->scales, w->biases,
-                                             w->cols, w->rows, (uint32_t)w->group) != 0) {
-        llm_gemvq4_destroy(L.g); return -1;
-    }
-    llm_gemvq4_set_scale_bf16(L.g, w->scale_bf16);
-    /* prefill: x 3D [B,S,in] -> 2D [B*S,in]; l'uscita viene riportata a [B,S,out]. */
-    const int nd = mlx_array_ndim(x);
-    mlx_array xr = mlx_array_new(), orr = mlx_array_new();
-    llm_gemvq4_set_scale_bf16(L.g, w->scale_bf16);
-    int rc = -1;
-    if (nd == 2) rc = llm_mlx_linear_packed_run(&L, x, out, s);
-    else if (nd == 3) {
-        const int* xs = mlx_array_shape(x);
-        int sh2[2] = { xs[0]*xs[1], xs[2] };
-        if (mlx_reshape(&xr, x, sh2, 2, s) == 0 && llm_mlx_linear_packed_run(&L, xr, &orr, s) == 0) {
-            int osh[3] = { xs[0], xs[1], (int)w->rows };
-            rc = mlx_reshape(out, orr, osh, 3, s);
-        }
-    }
-    mlx_array_free(xr); mlx_array_free(orr);
-    llm_gemvq4_destroy(L.g);
-    return rc == 0 ? 0 : -1;
+    if (llm_mlx_lazy_build(&e->lazy, w) != 0) return 1;
+    /* nodo lazy del grafo: nessun eval, nessuna attesa (il gemv e' un mlx_fast_metal_kernel su viste zero-copy) */
+    return llm_mlx_lazy_linear(&e->lazy, w, x, out, s) == 0 ? 0 : -1;
 }
 
 int llm_mlx_qp_name_get(const char* name, int* group, int* bits);
