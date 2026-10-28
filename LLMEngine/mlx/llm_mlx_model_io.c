@@ -114,45 +114,6 @@ static void llm_engine_opt_auto(const char* name, const char* value) {
  * zero-copy. Rilasciare l'entry del map fa scendere il footprint Metal del modello; il forward
  * (attention q/k/v/o, GDN qkv/z/out, router) usa il descrittore mmap. Default: no-op. */
 
-/* PACKED: se TUTTI i layer hanno esperti packed leggibili, libera al load gli array MoE
- * (routed+shared). Se anche un solo layer non è packed, non tocca nulla: il forward resta MLX. */
-static void llm_mlx_packed_release_moe(LlmMlxModel* m) {
-    if (!llm_mlx_weights_backend_packed() || !m) return;
-    if (m->cfg.quant_bits != 4) return;
-    if (!m->cfg.model_type[0] || strstr(m->cfg.model_type, "qwen4") == NULL) return;
-    for (int il = 0; il < m->cfg.n_layers; il++) {
-        char base[256], path[1600];
-        snprintf(base, sizeof base, "%s.%d.mlp.switch_mlp.gate_proj", m->cfg.layer_prefix, il);
-        snprintf(path, sizeof path, "%s/model.safetensors", m->model_dir);
-        { char ip[1200]; snprintf(ip, sizeof ip, "%s/model.safetensors.index.json", m->model_dir);
-          FILE* f = fopen(ip, "rb");
-          if (f) { fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
-            char* j=(char*)malloc((size_t)n+1);
-            if (j && fread(j,1,(size_t)n,f)==(size_t)n) { j[n]=0; char key[700]; snprintf(key,sizeof key,"%s.weight",base);
-              char* p=strstr(j,key); if (p) { char* q=strstr(p,".safetensors"); if (q) { char* b=q; while (b>j && b[-1]!='"') --b;
-                size_t len=(size_t)(q+12-b); if (len<sizeof path) { memcpy(path,b,len); path[len]=0; } } } }
-            free(j); }
-          fclose(f); }
-        LlmMlxPackedW3 w3;
-        if (llm_mlx_packed_open3d(path, base, 4, m->cfg.quant_group_size, &w3) != 0) return;
-        llm_mlx_packed_close3d(&w3);
-    }
-    static const char* suf[] = {
-        ".mlp.switch_mlp.gate_proj", ".mlp.switch_mlp.up_proj", ".mlp.switch_mlp.down_proj",
-        ".mlp.shared_expert.gate_proj", ".mlp.shared_expert.up_proj", ".mlp.shared_expert.down_proj",
-        ".mlp.shared_expert_gate"
-    };
-    static const char* aux[] = {".weight",".scales",".biases"};
-    for (int il = 0; il < m->cfg.n_layers; il++)
-        for (size_t b = 0; b < sizeof suf / sizeof suf[0]; b++)
-            for (int a = 0; a < 3; a++) {
-                char nm[300]; snprintf(nm, sizeof nm, "%s.%d%s%s", m->cfg.layer_prefix, il, suf[b], aux[a]);
-                mlx_array e = mlx_array_new();
-                for (int si = 0; si < m->weights.count; si++) (void)mlx_map_string_to_array_insert(m->weights.shards[si], nm, e);
-                mlx_array_free(e);
-            }
-}
-
 static void llm_mlx_packed_release_wired(LlmMlxModel* m) {
     if (!llm_mlx_weights_backend_packed() || !m) return;
     /* Solo architetture con i call site cablati (qwen4_exp): per le altre NON si tocca nulla. */
@@ -1078,7 +1039,6 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
     }
 
     llm_mlx_packed_release_wired(m);
-    llm_mlx_packed_release_moe(m);
     return m;
 }
 

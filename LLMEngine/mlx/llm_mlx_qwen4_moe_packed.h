@@ -170,7 +170,6 @@ static int qwen4_exp_moe_packed_try(mlx_array* out, LlmMlxModel* m, int layer_id
         else rc=1;
       }
       free(acc); free(gk); free(uk); free(yk); free(xh);
-      if (rc == 0) q4mp_release_layer(m, layer_idx);
       return rc;
     }
 }
