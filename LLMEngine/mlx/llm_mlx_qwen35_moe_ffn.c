@@ -544,10 +544,16 @@ bool qwen4_exp_moe_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array 
     ok = mlx_array_set(&normed2, h) == 0;
 
     mlx_array gate_w = mlx_array_new(), gate_s = mlx_array_new(), gate_b = mlx_array_new();
-    tname(m->cfg.layer_prefix, layer_idx, "mlp.gate", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get_triple(&m->weights, namebuf, &gate_w, &gate_s, &gate_b);
     mlx_array gates = mlx_array_new();
-    if (ok) { ok = quantized_linear_cfg(&gates, normed2, gate_w, gate_s, gate_b, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "router matmul"); }
+    tname(m->cfg.layer_prefix, layer_idx, "mlp.gate", namebuf, sizeof(namebuf));
+    /* PACKED (sperimentale): router sui pesi zero-copy; fallback esplicito a MLX. */
+    { int prc = llm_mlx_linear_packed_model(&m->packed, m->model_dir, namebuf,
+                    m->cfg.quant_bits, m->cfg.quant_group_size, normed2, &gates, m->stream);
+      if (prc == 0) { /* packed ok */ }
+      else {
+          ok = ok && multishard_get_triple(&m->weights, namebuf, &gate_w, &gate_s, &gate_b);
+          if (ok) { ok = quantized_linear_cfg(&gates, normed2, gate_w, gate_s, gate_b, gsz, bts, m->cfg.quant_mode, m->stream); CHK(ok, "router matmul"); }
+      } }
     { int li = llm_mlx_model_lora_get(m, layer_idx, "mlp.gate"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&gates, normed2, m->lora_A[li], m->lora_B[li], m->lora_scale[li], m->stream); }
     mlx_array gates_sm = mlx_array_new();
     if (ok && m->cfg.bfloat16_input && mlx_array_dtype(gates) != g_act16) ok = mlx_astype(&gates, gates, g_act16, m->stream) == 0;
