@@ -19,7 +19,7 @@ BANNER = (
     "> [!info] Rapid-MLX — tre identità distinte (remoto / copia ufficiale / fork) · agg. 2026-09-17\n"
     "> - **Remoto ufficiale**: https://github.com/raullenchai/Rapid-MLX (tag **v0.14.2**)\n"
     "> - **Copia locale ufficiale**: `/Users/gaetano/ai/Rapid-MLX-official` (v0.14.2) + venv "
-    "`/Users/gaetano/ai/env-rapid-official` (`rapid-mlx==0.14.2`); usata da `tools/bench4_compare.sh`\n"
+    "`/Users/gaetano/ai/env-rapid-official` (`rapid-mlx==0.14.2`); usata da `LLMEngine/tools/bench4_compare.sh`\n"
     "> - **Fork personale**: `/Users/gaetano/Documents/Projects/Rapid-MLX-NextGen` "
     "(branch `dev`, HEAD `fa7f291d`, ~0.13.1; editable in `env312`, `--version` stale 0.10.3)\n"
     "> Canonico: `Knowledge/Rapid-MLX-Repo-Remoto-Copia-Fork-Percorsi.md`\n"
@@ -53,7 +53,7 @@ def insert_banner(text):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default="/Users/gaetano/Documents/AiWiki/01-Projects/GMBasic")
+    ap.add_argument("--root", default="/Users/gaetano/Documents/AiWiki/01-Projects/LLMEnv")
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args()
 
