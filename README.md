@@ -1,45 +1,86 @@
 # LLMEnv
 
-**Soluzione C** con **progetti CMake autonomi** (uno per responsabilità, **grafo aciclico**), consumati
-come **librerie statiche** da **host** come FastLLM. C# resta **adapter via P/Invoke**.
+LLMEnv is a set of C libraries for running large language models (LLMs) on your own machine.
+It reads model files, turns text into tokens and back, runs the model on the GPU, and generates
+text. It is built mainly for Apple Silicon Macs.
 
-> **Ambito = `mlx-lm`** (una *libreria* di inferenza): tokenizer + codec/quant + modelli/runner +
-> sampling. **NON** server HTTP, **NON** agenti, **NON** runtime BASIC — quelli restano nei consumatori.
+It is a library, not an application: there is no chat window and no web server. You link it into
+your own program and call it. If you just want to use the engine, start with [FastLLM](#fastllm).
 
-## Layer (basso → alto)
+## What it can do
+
+- **Run models from several formats.** MLX models (safetensors), GGUF models, and large
+  mixture-of-experts models whose parts can be loaded from disk only when needed.
+- **Use quantized models.** Quantization shrinks a model so it fits in memory. LLMEnv reads the
+  common schemes: 2, 4 and 8 bit, AWQ, GPTQ, bitsandbytes, MXFP4 and MXFP8.
+- **Keep memory use low.** In its "packed" mode the engine reads weights straight from the model
+  files on disk instead of copying them into memory, so a 104 GB model can run with about
+  40 GB of memory in use for the weights.
+- **Stay fast.** On an Apple Silicon Mac, a 4-bit Qwen model of this kind generates about 34
+  tokens per second, and a 2-bit GGUF model about 52 tokens per second.
+- **Reuse earlier work.** Prompts that share a beginning can reuse the computation already done
+  (a "prefix cache"), which makes long conversations start faster.
+
+## What is inside
+
+| Folder | What it does |
+|---|---|
+| `LLMToken` | Splits text into tokens and joins them back. Reads `tokenizer.json`, tiktoken and WordPiece files. |
+| `LLMCodec` | Reads model files (GGUF, safetensors) and decodes the different quantization formats. |
+| `LLMDesc` | Describes how a model is laid out, so one engine can handle many model families. |
+| `LLMMetal` | Small programs that run on the Apple GPU: matrix products, attention cache, quantized math. |
+| `LLMJinja` | Fills in chat templates, the text patterns that turn a conversation into a prompt. |
+| `LLMEngine` | The engine itself, with one common interface and several back ends (see below). |
+
+The engine back ends:
+
+- **MLX** runs MLX-format models on Apple's MLX framework.
+- **llama.cpp** runs GGUF models through llama.cpp.
+- **ds4** is a dedicated fast path for large GGUF mixture-of-experts models.
+- **MoE** runs mixture-of-experts models, loading experts from disk on demand.
+
+Your program talks to the common interface (`LLMEngine/include/llmengine.h`) and does not need to
+know which back end is underneath.
+
+## FastLLM
+
+[FastLLM](https://github.com/c-vision/FastLLM) is the tool for using the LLMEngine engine from the
+command line. It is built on top of LLMEnv and gives you, without writing any code:
+
+- a **command-line interface**, in the style of Ollama, to download, list and run models;
+- a **local server** that speaks the OpenAI and Anthropic APIs, so existing apps can talk to it;
+- **downloads and caching** of models from Hugging Face.
+
+In short: LLMEnv is the engine, FastLLM is how you drive it.
+
+## Building
+
+You need a C/C++ compiler and CMake. The GPU parts need a Mac with Apple Silicon.
+
+Each folder builds on its own:
 
 ```
-LLMToken(1)   LLMCodec(2)   LLMDesc(3)   LLMMetal(4)
-        └──────── LLMEngine(5, ABI) ────────┘
-                     ├── LLMEngineMLX  (mlx/)
-                     ├── LLMEngineLlama (llama/)
-                     └── LLMEngineMoE  (moe/)
-                 LLMModelIO(6)  ← 1,2,3
+cmake -S LLMToken -B build/token
+cmake --build build/token
 ```
 
-| # | progetto | responsabilità | dip. |
-|---|---|---|---|
-| 1 | **LLMToken** | lettore tokenizer.json/tiktoken/WordPiece; encode/decode + export | cJSON, PCRE2, sds |
-| 2 | **LLMCodec** | formati GGUF/safetensors + codec quant (plugin). Non legge tokenizer. | solo formato |
-| 3 | **LLMDesc** | role-map `.llmarch` + descrizione modello | — |
-| 4 | **LLMMetal** | kernel Metal (GEMV/KV/MPP/OQ) | Metal |
-| 5 | **LLMEngine** (ABI) | interfaccia common runner: load/prefill/decode/KV/sampling | 2,3,4 |
-| 5a/b/c | **LLMEngineMLX / Llama / MoE** | i runner | 5 |
-| 6 | **LLMModelIO** | conversione/quant (MLX↔GGUF) | 1,2,3 |
+To build everything together, including the engine back ends (which also need MLX and llama.cpp):
 
-## Confini (vincolanti)
+```
+cmake -S . -B build -DLLMENV_BUILD_ENGINE=ON
+cmake --build build
+```
 
-- Nomi del motore in `llm`/`LLM`; role-map `.llmarch`; env del motore `LLM_*`.
-- `LLMEngine`/`LLMCodec` **non dipendono** dai consumatori. Dipendenza a senso unico:
-  **FastLLM → LLMEnv**.
+## Settings
 
-## Stato
+Engine behaviour is controlled through named options that you set from your program, not through
+environment variables. For example, `weights_backend=packed` turns on the low-memory mode
+described above.
 
-Layer rinominati ed esternalizzati: `LLMCodec` (`llmcodec`), `LLMDesc` (`llmdesc`), `LLMToken`
-(`llmtoken`), `LLMMetal` (`llmmetal`), `LLMEngine` (`llmengine`/`llmengine_mlx`/`llmengine_moe`/
-`llmengine_llama`/`llmengine_plugin`), `LLMModelIO` (`llmmodelio`).
+## Contributing
 
-Ogni progetto compila **standalone** (`cmake -S LLMxxx -B build`). Il superbuild root aggancia i layer
-sempre costruibili e, con `-DLLMENV_BUILD_ENGINE=ON`, anche i runner (richiedono MLX/llama.cpp).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions need a signed [CLA](CLA.md).
 
-Piano e prove: `AiWiki/01-Projects/LLMEnv/` (`Piani/`, `Knowledge/`, `Todo/(open) - Decisioni-Aperte-LLMEnv.md`).
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
