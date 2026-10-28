@@ -48,6 +48,11 @@ static LlmMlxPackedEntry* q4hc_entry(LlmMlxModel* m, int layer_idx, const char* 
     return e;
 }
 
+/* Combine precedente in sospeso: la HC successiva ne ricostruisce l'uscita (residual + sub*inj) dentro il proprio kernel invece di aspettare il
+ * nodo di combine, che resta fuori dal percorso critico. Identita' = stesso handle (ctx) + sequenza (layer, tipo) attesa. */
+typedef struct { int valid, next_layer, next_kind; void* out_ctx; mlx_array sub, res, inj; } Q4hcPend;
+static Q4hcPend g_q4hc_pend;
+
 /* Percorso fuso (3 nodi lazy). 0 = fatto; 1 = non gestito (nessun effetto). */
 static int q4hc_try_fused(LlmMlxModel* m, int layer_idx, const char* hc, mlx_array hyper_input, mlx_array hc_norm_w,
                           mlx_array* out_mixed, mlx_array* out_residual, mlx_array* out_injection) {
@@ -58,11 +63,21 @@ static int q4hc_try_fused(LlmMlxModel* m, int layer_idx, const char* hc, mlx_arr
     LlmMlxPackedEntry *ed = q4hc_entry(m, layer_idx, hc, "input_mix_weight_down"), *eu = q4hc_entry(m, layer_idx, hc, "input_mix_weight_up"),
                       *ei = q4hc_entry(m, layer_idx, hc, "block_inject_weight");
     if (!ed || !eu || !ei) return 1;
+    const int kind = (strcmp(hc, "mlp_hyper_connection") == 0) ? 1 : 0;
+    mlx_array pb = mlx_array_new(), ps = mlx_array_new(), pi = mlx_array_new();
+    int pend = 0;
+    pthread_mutex_lock(&q4hc_mu);
+    if (g_q4hc_pend.valid && g_q4hc_pend.next_layer == layer_idx && g_q4hc_pend.next_kind == kind && g_q4hc_pend.out_ctx == hyper_input.ctx) {
+        pend = (mlx_array_set(&pb, g_q4hc_pend.res) == 0 && mlx_array_set(&ps, g_q4hc_pend.sub) == 0 && mlx_array_set(&pi, g_q4hc_pend.inj) == 0);
+    }
+    if (g_q4hc_pend.valid) { mlx_array_free(g_q4hc_pend.sub); mlx_array_free(g_q4hc_pend.res); mlx_array_free(g_q4hc_pend.inj); g_q4hc_pend.valid = 0; }   // consumata o scaduta
+    pthread_mutex_unlock(&q4hc_mu);
     mlx_array hw32 = mlx_array_new(), flat = mlx_array_new(), mixed = mlx_array_new(), inj = mlx_array_new();
     int rc = 1;
     int sh2[2] = { nt, W };
     if (q4hc_w32(m, layer_idx, hc, hc_norm_w, &hw32) != 0 || mlx_reshape(&flat, hyper_input, sh2, 2, m->stream) != 0) goto out;
-    if (llm_hc_mix_fused(&mixed, &inj, flat, nt, hcn, h, hw32, m->cfg.rms_norm_eps, &ed->lazy, &ed->w, &eu->lazy, &eu->w, &ei->lazy, &ei->w, m->stream) != 0) goto out;
+    if (llm_hc_mix_fused(&mixed, &inj, pend ? pb : flat, pend ? ps : flat, pend ? pi : flat, pend, nt, hcn, h, hw32, m->cfg.rms_norm_eps,
+                         &ed->lazy, &ed->w, &eu->lazy, &eu->w, &ei->lazy, &ei->w, m->stream) != 0) goto out;
     if (nd == 3) { int osh[3] = { (int)mlx_array_dim(hyper_input, 0), (int)mlx_array_dim(hyper_input, 1), h }; if (mlx_reshape(out_mixed, mixed, osh, 3, m->stream) != 0) goto out; }
     else if (mlx_array_set(out_mixed, mixed) != 0) goto out;
     if (out_residual && mlx_array_set(out_residual, hyper_input) != 0) goto out;
@@ -70,11 +85,12 @@ static int q4hc_try_fused(LlmMlxModel* m, int layer_idx, const char* hc, mlx_arr
     rc = 0;
 out:
     mlx_array_free(hw32); mlx_array_free(flat); mlx_array_free(mixed); mlx_array_free(inj);
+    mlx_array_free(pb); mlx_array_free(ps); mlx_array_free(pi);
     return rc;
 }
 
 /* residual + sub (x) injection in un kernel. 0 = fatto; 1 = non gestito. */
-static int llm_mlx_hc_combine_packed(mlx_array* out, mlx_array sub, mlx_array residual, mlx_array injection, LlmMlxModel* m) {
+static int llm_mlx_hc_combine_packed(mlx_array* out, mlx_array sub, mlx_array residual, mlx_array injection, LlmMlxModel* m, int layer_idx, int after_ffn) {
     if (!llm_mlx_weights_backend_packed() || m->cfg.bfloat16_input || m->cfg.hc_count != 4) return 1;
     if (mlx_array_dtype(sub) != MLX_FLOAT32 || mlx_array_dtype(residual) != MLX_FLOAT32 || mlx_array_dtype(injection) != MLX_FLOAT32) return 1;
     const int hcn = m->cfg.hc_count, h = m->cfg.hidden_size, W = hcn * h;
@@ -88,6 +104,15 @@ static int llm_mlx_hc_combine_packed(mlx_array* out, mlx_array sub, mlx_array re
         const int nd = mlx_array_ndim(residual); int sh[8];
         for (int d = 0; d < nd && d < 8; d++) sh[d] = (int)mlx_array_dim(residual, d);
         rc = mlx_reshape(out, tmp, sh, nd, m->stream);
+        if (rc == 0) {   // in sospeso per la HC successiva (dopo attn: mlp dello stesso layer; dopo ffn: attn del layer+1)
+            pthread_mutex_lock(&q4hc_mu);
+            if (g_q4hc_pend.valid) { mlx_array_free(g_q4hc_pend.sub); mlx_array_free(g_q4hc_pend.res); mlx_array_free(g_q4hc_pend.inj); g_q4hc_pend.valid = 0; }
+            g_q4hc_pend.sub = mlx_array_new(); g_q4hc_pend.res = mlx_array_new(); g_q4hc_pend.inj = mlx_array_new();
+            if (mlx_array_set(&g_q4hc_pend.sub, sub) == 0 && mlx_array_set(&g_q4hc_pend.res, residual) == 0 && mlx_array_set(&g_q4hc_pend.inj, injection) == 0) {
+                g_q4hc_pend.next_layer = after_ffn ? layer_idx + 1 : layer_idx; g_q4hc_pend.next_kind = after_ffn ? 0 : 1; g_q4hc_pend.out_ctx = out->ctx; g_q4hc_pend.valid = 1;
+            } else { mlx_array_free(g_q4hc_pend.sub); mlx_array_free(g_q4hc_pend.res); mlx_array_free(g_q4hc_pend.inj); }
+            pthread_mutex_unlock(&q4hc_mu);
+        }
     }
     mlx_array_free(tmp);
     return rc == 0 ? 0 : 1;

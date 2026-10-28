@@ -763,7 +763,7 @@ bool qwen4_exp_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offse
         CHK(ok, "sub-layer (GDN/QSA)");
     }
 
-    if (ok) { ok = (llm_mlx_hc_combine_packed(out_h, sub_out, residual, injection, m) == 0) || llm_mlx_hc_combine(out_h, sub_out, residual, injection, m->cfg.hc_count, m->cfg.hidden_size, s);
+    if (ok) { ok = (llm_mlx_hc_combine_packed(out_h, sub_out, residual, injection, m, layer_idx, 0) == 0) || llm_mlx_hc_combine(out_h, sub_out, residual, injection, m->cfg.hc_count, m->cfg.hidden_size, s);
               CHK(ok, "attn_hyper_connection combine"); }
 
     /* F3: dump dell'output ATTENTION (fine sub-blocco, prima del ffn) per-layer. */
@@ -840,7 +840,7 @@ bool qwen4_exp_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arr
     mlx_array moe_out = mlx_array_new();
     if (ok) { ok = qwen4_exp_moe_block(m, layer_idx, n_tokens, mixed, &moe_out); CHK(ok, "moe block"); }
 
-    if (ok) { ok = (llm_mlx_hc_combine_packed(out, moe_out, residual, injection, m) == 0) || llm_mlx_hc_combine(out, moe_out, residual, injection, m->cfg.hc_count, m->cfg.hidden_size, s);
+    if (ok) { ok = (llm_mlx_hc_combine_packed(out, moe_out, residual, injection, m, layer_idx, 1) == 0) || llm_mlx_hc_combine(out, moe_out, residual, injection, m->cfg.hc_count, m->cfg.hidden_size, s);
               CHK(ok, "mlp_hyper_connection combine"); }
 
     /* F3 (parità qwen4_exp): dump per-layer dell'hidden di output del layer (ultimo token).
