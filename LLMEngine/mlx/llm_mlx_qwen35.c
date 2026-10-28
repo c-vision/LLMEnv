@@ -608,8 +608,12 @@ bool qwen4_full_qsa_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
     mlx_array kw=mlx_array_new(), ksc=mlx_array_new(), kb=mlx_array_new();
     mlx_array vw=mlx_array_new(), vsc=mlx_array_new(), vb=mlx_array_new();
     mlx_array ow=mlx_array_new(), osc=mlx_array_new(), ob=mlx_array_new();
+    mlx_array q_pk = mlx_array_new(); int q_packed = 0;
     tname(m->cfg.layer_prefix, layer_idx, "self_attn.q_proj", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get_triple(&m->weights, namebuf, &qw, &qsc, &qb);
+    if (llm_mlx_linear_packed_model(&m->packed, m->model_dir, namebuf, m->cfg.quant_bits,
+                                    m->cfg.quant_group_size, x, &q_pk, s) == 0) q_packed = 1;
+    else mlx_array_free(q_pk);
+    if (!q_packed) ok = ok && multishard_get_triple(&m->weights, namebuf, &qw, &qsc, &qb);
     tname(m->cfg.layer_prefix, layer_idx, "self_attn.k_proj", namebuf, sizeof(namebuf));
     ok = ok && multishard_get_triple(&m->weights, namebuf, &kw, &ksc, &kb);
     tname(m->cfg.layer_prefix, layer_idx, "self_attn.v_proj", namebuf, sizeof(namebuf));
@@ -625,8 +629,9 @@ bool qwen4_full_qsa_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
     CHK(ok, "q/k_norm lookup");
 
     mlx_array q_lin=mlx_array_new(), k_lin=mlx_array_new(), v_lin=mlx_array_new();
-    if (ok) { ok = quantized_linear_cfg(&q_lin, x, qw, qsc, qb, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "q_proj matmul"); }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&q_lin, x, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
+    if (ok && !q_packed) { ok = quantized_linear_cfg(&q_lin, x, qw, qsc, qb, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "q_proj matmul"); }
+    if (q_packed) { mlx_array_free(q_lin); q_lin = q_pk; }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "q_proj"); if (li >= 0 && ok && !q_packed) ok = llm_mlx_lora_apply_mlx(&q_lin, x, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (ok) { ok = quantized_linear_cfg(&k_lin, x, kw, ksc, kb, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "k_proj matmul"); }
     { int li = llm_mlx_model_lora_get(m, layer_idx, "k_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&k_lin, x, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (ok) { ok = quantized_linear_cfg(&v_lin, x, vw, vsc, vb, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "v_proj matmul"); }
