@@ -96,6 +96,42 @@ created: 2026-10-04
   swa · mla`. Model-free, deterministico.
 - **`oracoli/`** — sonde **model-free** dell'engine (non tracciate). *V. sotto.*
 
+### Tool MLX importati da GMBasic (2026-10-28)
+
+> [!NOTE] Origine: `GMBasicMonoRepo/migration/tools-unclassified/` (backup in
+> `/tmp/llmengine-tools-moved-2026-10-28/`). Non hanno dipendenze da GMBasic: vivono qui
+> perché misurano/verificano **MLX/LLMEngine**. Gli oracoli indipendenti restano Python
+> (preferibile riscriverli in C quando il calcolo è puro); i probe/bench misurano l'engine,
+> non GMBasic.
+
+**`LLMEngine/tools/`** (40 Python): bench/prefill/decode `bench_mlxlm.py`, `bench_rapidmlx.py`,
+`bench_table.py`, `core_bench.py`, `ctx_table.py`, `mlx_prefill_ref.py`, `mlx_decode_ref.py`,
+`mlx_inplace_append_bench.py`, `ab_ctx_mlxlm.py`, `gmb-ctx-mlxlm.py`, `llm_eval_ds4.py`;
+probe/kernel/KV `mlx_inplace_probe.py`, `mlx_kernel_inplace_probe.py`, `mlx_kvq_attn_probe.py`,
+`mlx_quant_dequant_ref.py`, `mlx_shared_buffer_probe.py`, `kv_append_probe.py`,
+`kv_evict_lab.py`, `kv_quant_lab.py`, `kvseg_refactor.py`, `df2_xctrace_agg.py`,
+`ref_mlx_graph_diff.py`; MoE/quant/ref `moe_mxfp4_fastbranch_probe.py`,
+`moe_mxfp4_floor_probe.py`, `moe_mxfp4_gather_probe.py`, `q4_build_ngram_combined.py`,
+`q4_build_ple_manifest.py`, `q4_ple_ref.py`, `q4_ref_decode_official.py`,
+`q4_ref_layers_official.py`, `q4_ref_lazy.py`, `q4_ref_nople.py`, `q4_ref_plevalid.py`,
+`qwen4exp_ngram_ref.py`, `mixtral_parity_layers.py`, `spike_mlx_bert_sparse.py`,
+`gmb_mlx_dtype_provenance.py`, `mlx_functions_doc.py`, `evaluate_consistency_auroc.py`,
+`run_auroc_eval.py`.
+
+**`LLMEngine/ds4/tools/reference/`** (33 Python): `gen_dsv41_*.py` — oracoli/reference DS4
+(Python ammesso; C preferibile quando il calcolo è puro).
+
+**Regola**: un tool MLX nuovo nasce in `LLMEngine/tools/` (o `ds4/tools/reference/`), non in
+GMBasic; aggiornare **entrambe** le copie di questo catalogo (vault + `LLMEnv/tools/README.md`).
+**`LLMEngine/tools/`** (12 script): `ab_all_ctx_mlxlm.sh`, `ab_engine_mlxlm.sh`,
+`ab_engine_rapid.sh`, `ab_models_under30g_rapid.sh`, `ab_models_under30g.sh`,
+`ab_order_control.sh`, `ab_rapid_sweep.sh`, `attn_decode_bench.sh`, `bench3_compare.sh`,
+`bench4_compare.sh`, `bench4_paired.sh`, `bench4_stable.sh`.
+
+**`LLMEngine/mlx/ds41-native/tools/`** (28 script): `dsv4_test.sh` + `dsv41_*_test.sh`
+(test/parità DS4.1; restano accanto al modulo perché accoppiati al build del modulo).
+
+
 ### `FastLLM/tools/` — tool del **SERVER/CLI FastLLM**
 - **`ds4_ctx_bench.py`** — bench **DS4** (nostro engine via `fastllm`): **prefill t/s e decode tok/s
   separati** per frontiere di contesto (metodo A/B).
