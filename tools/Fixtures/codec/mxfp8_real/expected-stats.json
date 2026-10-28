@@ -1,5 +1,5 @@
 {
- "dir": "samples/Fixtures/codec/mxfp8_real",
+ "dir": "tools/Fixtures/codec/mxfp8_real",
  "source_file": "weight2d.bin",
  "bytes": 10240,
  "sha256": "bd7cea5132fb322cdf071e91c92c672c13dc23899f0eadc818be1748afadae32",

@@ -1,5 +1,5 @@
 {
- "dir": "samples/Fixtures/codec/gptq_real",
+ "dir": "tools/Fixtures/codec/gptq_real",
  "expected": {
   "numel": 16384,
   "min": -0.0921783447265625,

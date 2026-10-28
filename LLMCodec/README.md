@@ -20,4 +20,4 @@ cmake --build /tmp/b-codec -j
 ctest --test-dir /tmp/b-codec --output-on-failure
 ```
 
-Le `.llmarch` usate dai test sono in `ABI/`, le fixture reali in `samples/Fixtures/codec/`.
+Le `.llmarch` usate dai test sono in `ABI/`, le fixture reali in `tools/Fixtures/codec/`.

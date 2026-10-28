@@ -1,5 +1,5 @@
 {
- "dir": "samples/Fixtures/codec/mxfp4",
+ "dir": "tools/Fixtures/codec/mxfp4",
  "source_file": "source.bin",
  "bytes": 4096,
  "sha256": "6417defe43b1a7038f51a6f5fe4b78701c520693985e7c879819c80f3ad1ff9f",

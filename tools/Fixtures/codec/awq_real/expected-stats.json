@@ -1,5 +1,5 @@
 {
- "dir": "samples/Fixtures/codec/awq_real",
+ "dir": "tools/Fixtures/codec/awq_real",
  "expected": {
   "numel": 16384,
   "min": -0.09331512451171875,

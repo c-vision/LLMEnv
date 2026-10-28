@@ -1,4 +1,4 @@
-/* Regressione su FIXTURE REALI (samples/Fixtures/codec/): confronto col golden dell'implementatore
+/* Regressione su FIXTURE REALI (tools/Fixtures/codec/): confronto col golden dell'implementatore
  * ufficiale (MLX per mxfp4; engine per dsv41 fp8). */
 #include "llmcodec.h"
 #include <stdio.h>
@@ -7,7 +7,7 @@
 #include <string.h>
 #include <math.h>
 #ifndef LLMCODEC_FIX_DIR
-#define LLMCODEC_FIX_DIR "../../samples/Fixtures/codec"
+#define LLMCODEC_FIX_DIR "../../tools/Fixtures/codec"
 #endif
 static uint8_t* slurp(const char* p, long* n){ FILE* f=fopen(p,"rb"); if(!f) return NULL; fseek(f,0,SEEK_END); *n=ftell(f); fseek(f,0,SEEK_SET); uint8_t* b=malloc(*n); if(fread(b,1,*n,f)!=(size_t)*n){} fclose(f); return b; }
 int main(void){

@@ -7,7 +7,7 @@
  * (BasicTokenizer HF + WordPiece greedy + Encode/EncodePair + troncamento che
  * preserva [CLS]/[SEP]), con i dati Unicode autosufficienti in
  * llmtoken_wp_unicode_data.inc. Comportamento verificato id-per-id contro
- * l'oracolo HF versionato samples/Fixtures/tokenizer/tokenizer_golden.json
+ * l'oracolo HF versionato tools/Fixtures/tokenizer/tokenizer_golden.json
  * (test: tests/llmtoken_wordpiece_selfcheck.c).
  *
  * Nestesso uso: vocab path (file testo una riga per token, indice = id, come

@@ -1,7 +1,7 @@
 /* ============================================================================
  * llmtoken_wordpiece_selfcheck.c
  * Conformance del tokenizer BERT WordPiece C (llmtoken_wordpiece.c)
- * contro l'ORACOLO ESTERNO versionato samples/Fixtures/tokenizer/tokenizer_golden.json
+ * contro l'ORACOLO ESTERNO versionato tools/Fixtures/tokenizer/tokenizer_golden.json
  * (generato da tools/gen_tokenizer_golden.py con la libreria HF `tokenizers`).
  *
  * Specchia tests/AI.Tests/BertWordPieceTokenizerGoldenTests.cs (il C#): confronta
@@ -10,7 +10,7 @@
  * cosi' parita' = comportamento, non un'altra lettura della spec.
  *
  * Uso: llmtoken_wordpiece_selfcheck [dir_fixture]
- *   dir_fixture default: <repo>/samples/Fixtures/tokenizer (derivata da argv/CWD).
+ *   dir_fixture default: <repo>/tools/Fixtures/tokenizer (derivata da argv/CWD).
  * Exit 0 = conforme, 1 = qualche divergenza (stampa atteso/ottenuto).
  * ============================================================================ */
 #include <stdio.h>
@@ -330,7 +330,7 @@ static void check_degenerate(void) {
 static char* dir_fixture(void) {
     static char dir[4096];
     if (main_argc > 1) { strncpy(dir, main_argv[1], sizeof(dir) - 1); dir[sizeof(dir) - 1] = 0; return dir; }
-    snprintf(dir, sizeof(dir), "samples/Fixtures/tokenizer");
+    snprintf(dir, sizeof(dir), "tools/Fixtures/tokenizer");
     return dir;
 }
 int main(int argc, char** argv) {

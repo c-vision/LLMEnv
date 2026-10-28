@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """gen_tokenizer_golden.py — oracolo d'oro per BertWordPieceTokenizer (fase 1).
 
-Genera `samples/Fixtures/tokenizer/tokenizer_golden.json` + i due `vocab.txt` minimi,
+Genera `tools/Fixtures/tokenizer/tokenizer_golden.json` + i due `vocab.txt` minimi,
 usando come ORACOLO la libreria HF `tokenizers` (WordPiece + BertNormalizer(lowercase,
 strip_accents) + BertPreTokenizer + TemplateProcessing [CLS]/[SEP]) — il software di
 riferimento del modello, NON una nostra implementazione (todo Tokenizer-WordPiece §3:

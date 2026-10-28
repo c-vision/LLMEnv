@@ -102,7 +102,7 @@ if(LLMCODEC_TESTS)
 
     add_executable(llmcodec_real_fixtures_selfcheck tests/test_real_fixtures.c)
     target_link_libraries(llmcodec_real_fixtures_selfcheck PRIVATE llmcodec)
-    target_compile_definitions(llmcodec_real_fixtures_selfcheck PRIVATE LLMCODEC_FIX_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../samples/Fixtures/codec")
+    target_compile_definitions(llmcodec_real_fixtures_selfcheck PRIVATE LLMCODEC_FIX_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../tools/Fixtures/codec")
     add_test(NAME llmcodec_real_fixtures_selfcheck COMMAND llmcodec_real_fixtures_selfcheck)
 
     # TASSONOMIA D'ERRORE GGUF: ogni corruzione porta il SUO codice (asset assorbito da lane_gguf).

@@ -82,5 +82,5 @@ add_executable(llmtoken_wordpiece_selfcheck llmtoken_wordpiece_selfcheck.c)
 target_link_libraries(llmtoken_wordpiece_selfcheck PRIVATE llmtoken)
 if(BUILD_TESTING)
     add_test(NAME llmtoken_wordpiece_selfcheck COMMAND llmtoken_wordpiece_selfcheck
-        ${CMAKE_CURRENT_SOURCE_DIR}/../samples/Fixtures/tokenizer)
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tools/Fixtures/tokenizer)
 endif()

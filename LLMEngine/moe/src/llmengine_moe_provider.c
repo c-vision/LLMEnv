@@ -12,7 +12,7 @@
 #define LLMENGINE_MOE_PROVIDER_INIT_CAP 4u
 
 /* M18: la persistenza `.stats` scrive accanto al container → OPT-IN (env LLMENGINE_MOE_STATS=1), per NON
- * sporcare le fixture (`samples/Fixtures/...`, che per AGENTS §11 non vanno mai modificate). */
+ * sporcare le fixture (`tools/Fixtures/...`, che per AGENTS §11 non vanno mai modificate). */
 static int moe_stats_enabled(void) {
     const char* e = llm_ai_mlx_opt_env("LLMENGINE_MOE_STATS");
     return e != NULL && *e && strcmp(e, "0") != 0;
