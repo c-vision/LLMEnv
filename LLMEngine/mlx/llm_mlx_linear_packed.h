@@ -10,6 +10,8 @@
 #include "mlx/c/mlx.h"
 #include "llm_mlx_wpacked.h"
 #include "llm_gemvq4_bridge.h"
+#include <stdlib.h>
+#include <string.h>
 
 typedef struct { LlmGemvQ4Ctx* g; LlmMlxPackedW w; } LlmMlxPackedLinear;
 
