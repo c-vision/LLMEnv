@@ -31,7 +31,7 @@ static int qwen4_hc_packed_try(LlmMlxModel* m, int layer_idx, const char* hc,
     if (!llm_mlx_weights_backend_packed() || m->cfg.quant_bits != 4) return 1;
     if (!m->cfg.model_type[0] || !strstr(m->cfg.model_type, "qwen4")) return 1;
     const int nd = mlx_array_ndim(hyper_input);
-    if (nd != 2 && nd != 3) return 1;
+    if (nd != 2) return 1;   /* v1: solo decode; il prefill resta su MLX (array non rilasciati) */
     const int hc_count = m->cfg.hc_count, hidden = m->cfg.hidden_size;
     const int* hs = mlx_array_shape(hyper_input);
     if (!hs || hs[nd-1] != hc_count * hidden) return 1;
@@ -74,7 +74,8 @@ static int qwen4_hc_packed_try(LlmMlxModel* m, int layer_idx, const char* hc,
 
     if (out_residual && out_injection) {
         mlx_array inj = mlx_array_new();
-        if (q4hc_linear(m, layer_idx, hc, "block_inject_weight", normed, &inj) == 0) {
+        if (q4hc_linear(m, layer_idx, hc, "block_inject_weight", normed, &inj) != 0) { mlx_array_free(inj); goto fail_sig; }
+        {
             mlx_array isc = mlx_array_new(), isig = mlx_array_new(), two = mlx_array_new_float32(2.0f);
             int rc = mlx_divide(&isc, inj, hcf, m->stream);
             if (rc == 0) rc = mlx_sigmoid(&isig, isc, m->stream);

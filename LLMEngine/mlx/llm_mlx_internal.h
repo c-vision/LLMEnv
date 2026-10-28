@@ -9,7 +9,9 @@
 #define LLM_MLX_INTERNAL_H
 
 #include "mlx/c/mlx.h"
-#include "llmengine.h"             /* ABI comune: engine esterni DS4/DS4.1 (deleg) */
+#include "llmengine.h"
+extern void* g_mlx_release_dummy;
+extern char g_qmm_tag[96];  /* diagnostic: ctx del dummy di release */             /* ABI comune: engine esterni DS4/DS4.1 (deleg) */
 #include "llm_mlx_granite_cfg.h"
 #include "llm_mlx_mamba_cfg.h"
 #include "llm_mlx_hybrid_cfg.h"

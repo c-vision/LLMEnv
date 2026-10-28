@@ -1494,7 +1494,26 @@ int llm_mlx_qmatmul_auto(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc,
                                 (mlx_optional_int){bits, true}, mode, s);
 }
 
+char g_qmm_tag[96] = "?";
+
 bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases, int group_size, int bits, const char* mode, mlx_stream stream) {
+    if (w.ctx != NULL && mlx_array_dtype(w) != MLX_UINT32) {
+        const int* ws = mlx_array_ndim(w) >= 2 ? mlx_array_shape(w) : NULL;
+        const int* xs = mlx_array_ndim(x) >= 2 ? mlx_array_shape(x) : NULL;
+        fprintf(stderr, "[bad-weight] tag=%s dtype=%d ndimw=%d w=[%d,%d] x=[%d,%d] caller=%p\n",
+                g_qmm_tag, (int)mlx_array_dtype(w), mlx_array_ndim(w), ws?ws[0]:-1, (ws&&mlx_array_ndim(w)>1)?ws[1]:-1,
+                xs?xs[0]:-1, (xs&&mlx_array_ndim(x)>1)?xs[1]:-1,
+                __builtin_return_address(0));
+        { void* bt[12]; int nb = backtrace(bt, 12); backtrace_symbols_fd(bt, nb, 2); }
+    }
+    if (g_mlx_release_dummy && w.ctx == g_mlx_release_dummy) {
+        const int* ws = mlx_array_ndim(w) >= 2 ? mlx_array_shape(w) : NULL;
+        const int* xs = mlx_array_ndim(x) >= 2 ? mlx_array_shape(x) : NULL;
+        fprintf(stderr, "[dummy-weight] qmm con tensore rilasciato: w=[%d,%d] x=[%d,%d] ndimw=%d ndimx=%d\n",
+                ws?ws[0]:-1, (ws&&mlx_array_ndim(w)>1)?ws[1]:-1,
+                xs?xs[0]:-1, (xs&&mlx_array_ndim(x)>1)?xs[1]:-1,
+                mlx_array_ndim(w), mlx_array_ndim(x));
+    }
     /* Override per-modulo dal config (registrato al load): vince sui valori globali di cfg. */
     { int qg = 0, qb = 0; int rr = (mlx_array_ndim(w) >= 2) ? (int)mlx_array_shape(w)[0] : 0;
       int pp = (mlx_array_ndim(w) >= 2) ? (int)mlx_array_shape(w)[mlx_array_ndim(w) - 1] : 0;

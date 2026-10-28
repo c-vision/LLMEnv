@@ -121,6 +121,8 @@ static void llm_mlx_join_layer(const char* prefix, int il, const char* tail, cha
     else snprintf(out, cap, "%s.%d.%s", prefix, il, tail);
 }
 
+void* g_mlx_release_dummy = NULL;
+
 static int llm_mlx_cmp_str(const void* a, const void* b) {
     return strcmp(*(const char* const*)a, *(const char* const*)b);
 }
@@ -156,16 +158,13 @@ static void llm_mlx_packed_release_wired(LlmMlxModel* m) {
         "mlp.gate", "mlp.switch_mlp.gate_proj", "mlp.switch_mlp.up_proj", "mlp.switch_mlp.down_proj",
         "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj",
         "mlp.shared_expert_gate",
-        "attn_hyper_connection.input_mix_weight_down", "attn_hyper_connection.input_mix_weight_up",
-        "attn_hyper_connection.block_inject_weight",
-        "mlp_hyper_connection.input_mix_weight_down", "mlp_hyper_connection.input_mix_weight_up",
-        "mlp_hyper_connection.block_inject_weight"
     };
     static const char* aux[] = {".weight", ".scales", ".biases"};
     /* mlx-c non permette entry vuote: si sostituisce con un array dummy valido. Il forward
      * packed non legge queste entry (lette dai descrittori); il fallback e' escluso dalla
      * verifica preliminare qui sopra. */
     mlx_array dummy = mlx_array_new_float32(0.0f);
+    g_mlx_release_dummy = dummy.ctx;   /* NON liberato: serve al diagnostic */
     size_t nrel = 0;
     for (int il = 0; il < m->cfg.n_layers; il++)
         for (size_t b = 0; b < sizeof base_suffix / sizeof base_suffix[0]; b++)
@@ -177,7 +176,6 @@ static void llm_mlx_packed_release_wired(LlmMlxModel* m) {
                     (void)mlx_map_string_to_array_insert(m->weights.shards[si], nm, dummy);
                 nrel++;
             }
-    mlx_array_free(dummy);
     mlx_clear_cache();
     { size_t act = 0; (void)mlx_get_active_memory(&act);
       fprintf(stderr, "[packed-release] %zu entry sostituite; active=%.2fGB\n", nrel, (double)act / 1073741824.0);

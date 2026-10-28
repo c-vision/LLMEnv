@@ -32,7 +32,20 @@ static inline int llm_mlx_linear_packed_model(LlmMlxPackedCtx* c, const char* mo
                                              w->cols, w->rows, (uint32_t)w->group) != 0) {
         llm_gemvq4_destroy(L.g); return -1;
     }
-    int rc = llm_mlx_linear_packed_run(&L, x, out, s);
+    /* prefill: x 3D [B,S,in] -> 2D [B*S,in]; l'uscita viene riportata a [B,S,out]. */
+    const int nd = mlx_array_ndim(x);
+    mlx_array xr = mlx_array_new(), orr = mlx_array_new();
+    int rc = -1;
+    if (nd == 2) rc = llm_mlx_linear_packed_run(&L, x, out, s);
+    else if (nd == 3) {
+        const int* xs = mlx_array_shape(x);
+        int sh2[2] = { xs[0]*xs[1], xs[2] };
+        if (mlx_reshape(&xr, x, sh2, 2, s) == 0 && llm_mlx_linear_packed_run(&L, xr, &orr, s) == 0) {
+            int osh[3] = { xs[0], xs[1], (int)w->rows };
+            rc = mlx_reshape(out, orr, osh, 3, s);
+        }
+    }
+    mlx_array_free(xr); mlx_array_free(orr);
     llm_gemvq4_destroy(L.g);
     return rc == 0 ? 0 : -1;
 }
