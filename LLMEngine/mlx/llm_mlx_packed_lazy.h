@@ -9,6 +9,7 @@
 
 #include "mlx/c/mlx.h"
 #include "llm_mlx_wpacked.h"
+#include "llm_mlx_q4_msl.h"
 #include <pthread.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -56,21 +57,16 @@ static const char llm_mlx_lazy_gemv_src[] =
 "uint tg = threadgroup_position_in_grid.x; uint t = threadgroup_position_in_grid.y;\n"
 "uint sg = simdgroup_index_in_threadgroup; uint lane = thread_index_in_simdgroup;\n"
 "uint H = P[0], M = P[1], gs = P[2]; ulong lw = P[3], ls = P[4], lb = P[5]; uint bf = P[6];\n"
-"uint row = tg * 8 + sg;\n"
-"if (row >= M) return;\n"
-"const device uchar* rp = W + lw + (ulong)row * (H / 2);\n"
-"const device uchar* rs = S + ls + (ulong)row * (H / gs) * 2;\n"
-"const device uchar* rb = B + lb + (ulong)row * (H / gs) * 2;\n"
-"float acc = 0.0f;\n"
-"for (uint i = 0; i < H / 32; i++) {\n"
-"  uint h = i * 32 + lane; uchar b = rp[h >> 1]; uint nib = (h & 1u) ? (b >> 4) : (b & 0xF); uint g = h / gs;\n"
-"  ushort us = (ushort)rs[2*g] | ((ushort)rs[2*g+1] << 8); ushort ub = (ushort)rb[2*g] | ((ushort)rb[2*g+1] << 8);\n"
-"  float sc = bf ? as_type<float>(((uint)us) << 16) : (float)as_type<half>(us);\n"
-"  float bi = bf ? as_type<float>(((uint)ub) << 16) : (float)as_type<half>(ub);\n"
-"  acc += ((float)nib * sc + bi) * X[(ulong)t * H + h];\n"
-"}\n"
-"float sum = simd_sum(acc);\n"
-"if (lane == 0) OUT[(ulong)t * M + row] = sum;\n";
+"uint r0 = (tg * 8 + sg) * 4;\n"
+"if (r0 >= M) return;\n"
+"uint nr = min(4u, M - r0);\n"
+"uint r1 = min(r0 + 1u, M - 1u), r2 = min(r0 + 2u, M - 1u), r3 = min(r0 + 3u, M - 1u);\n"
+"ulong rw = (ulong)(H / 2), sr = (ulong)(H / gs) * 2;\n"
+"const device uchar* wp = W + lw; const device uchar* sp = S + ls; const device uchar* bp = B + lb;\n"
+"float o[4];\n"
+"q4_dotn(o, nr, wp + r0 * rw, wp + r1 * rw, wp + r2 * rw, wp + r3 * rw, sp + r0 * sr, sp + r1 * sr, sp + r2 * sr, sp + r3 * sr,\n"
+"        bp + r0 * sr, bp + r1 * sr, bp + r2 * sr, bp + r3 * sr, (uint)(lw & 3), X + (ulong)t * H, H, gs, bf, lane);\n"
+"if (lane == 0) for (uint i = 0; i < nr; i++) OUT[(ulong)t * M + r0 + i] = o[i];\n";
 
 static mlx_fast_metal_kernel g_llm_mlx_lazy_gemv;
 static int g_llm_mlx_lazy_gemv_ready;
@@ -81,7 +77,7 @@ static inline mlx_fast_metal_kernel llm_mlx_lazy_kernel(const char* name, const 
     mlx_vector_string vi = mlx_vector_string_new(), vo = mlx_vector_string_new();
     for (int i = 0; i < nin; i++) mlx_vector_string_append_value(vi, ins[i]);
     for (int i = 0; i < nout; i++) mlx_vector_string_append_value(vo, outs[i]);
-    mlx_fast_metal_kernel k = mlx_fast_metal_kernel_new(name, vi, vo, src, "", true, false);
+    mlx_fast_metal_kernel k = mlx_fast_metal_kernel_new(name, vi, vo, src, llm_q4_msl_helpers, true, false);
     mlx_vector_string_free(vi); mlx_vector_string_free(vo);
     return k;
 }
@@ -112,7 +108,7 @@ static inline int llm_mlx_lazy_linear(const LlmMlxPackedLazy* z, const LlmMlxPac
         mlx_fast_metal_kernel_config cfg = mlx_fast_metal_kernel_config_new();
         int osh[2] = { nt, (int)w->rows };
         mlx_fast_metal_kernel_config_add_output_arg(cfg, osh, 2, MLX_FLOAT32);
-        mlx_fast_metal_kernel_config_set_grid(cfg, (((int)w->rows + 7) / 8) * 256, nt, 1);
+        mlx_fast_metal_kernel_config_set_grid(cfg, (((int)w->rows + 31) / 32) * 256, nt, 1);
         mlx_fast_metal_kernel_config_set_thread_group(cfg, 256, 1, 1);
         mlx_vector_array outs = mlx_vector_array_new();
         int ar = mlx_fast_metal_kernel_apply(&outs, k, ins, cfg, s);

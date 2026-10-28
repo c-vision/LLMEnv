@@ -12,6 +12,7 @@
 #include "llm_mlx_weights_backend.h"
 #include "llm_mlx_wpacked.h"
 #include "llm_mlx_packed_lazy.h"
+#include "llm_mlx_q4_msl.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -163,25 +164,6 @@ static Q4mpLayer* q4mp_layer(LlmMlxModel* m, int layer_idx) {
 }
 
 /* ── Kernel ───────────────────────────────────────────────────────────────────────────────────────────── */
-static const char q4mp_hdr[] =
-"inline float q4_ld_sb(const device uchar* p, uint idx, uint bf) {\n"
-"    const ushort u = (ushort)p[2u * idx] | ((ushort)p[2u * idx + 1u] << 8);\n"
-"    return bf ? as_type<float>(((uint)u) << 16) : (float)as_type<half>(u);\n"
-"}\n"
-"inline float q4_rowdot(const device uchar* Wq, const device uchar* Sc, const device uchar* Bi, const device float* x,\n"
-"                       uint H, uint gs, uint bf, uint row, uint lane) {\n"
-"    const device uchar* rp = Wq + (ulong)row * (H / 2);\n"
-"    const uint ng = H / gs;\n"
-"    const device uchar* rs = Sc + (ulong)row * ng * 2;\n"
-"    const device uchar* rb = Bi + (ulong)row * ng * 2;\n"
-"    float acc = 0.0f;\n"
-"    for (uint i = 0; i < H / 32; i++) {\n"
-"        uint h = i * 32 + lane; uchar b = rp[h >> 1]; uint nib = (h & 1u) ? (b >> 4) : (b & 0xF); uint g = h / gs;\n"
-"        acc += ((float)nib * q4_ld_sb(rs, g, bf) + q4_ld_sb(rb, g, bf)) * x[h];\n"
-"    }\n"
-"    return simd_sum(acc);\n"
-"}\n";
-
 static const char q4mp_src_gates[] =
 "uint tg = threadgroup_position_in_grid.x; uint t = threadgroup_position_in_grid.y;\n"
 "uint sg = simdgroup_index_in_threadgroup; uint lane = thread_index_in_simdgroup;\n"
@@ -232,18 +214,19 @@ static const char q4mp_src_mid[] =
 "bool sh = slot >= K; int e = sh ? 0 : SEL[t * 16 + slot];\n"
 "const device float* x = X + (ulong)t * E;\n"
 "uint base = (tgx * 16 + sg) * 2;\n"
-"for (uint i = 0; i < 2; i++) {\n"
-"    uint row = base + i; if (row >= F) break;\n"
-"    float g, u;\n"
-"    if (sh) {\n"
-"        g = q4_rowdot(WSG + P[3*8+2], SSG + P[3*8+3], BSG + P[3*8+4], x, E, P[3*8+0], P[3*8+1], row, lane);\n"
-"        u = q4_rowdot(WSU + P[4*8+2], SSU + P[4*8+3], BSU + P[4*8+4], x, E, P[4*8+0], P[4*8+1], row, lane);\n"
-"    } else {\n"
-"        g = q4_rowdot(WG + P[2] + (ulong)e * (uint)P[5], SG + P[3] + (ulong)e * (uint)P[6], BG + P[4] + (ulong)e * (uint)P[6], x, E, P[0], P[1], row, lane);\n"
-"        u = q4_rowdot(WU + P[8+2] + (ulong)e * (uint)P[8+5], SU + P[8+3] + (ulong)e * (uint)P[8+6], BU + P[8+4] + (ulong)e * (uint)P[8+6], x, E, P[8+0], P[8+1], row, lane);\n"
-"    }\n"
-"    if (lane == 0) ACT[((ulong)t * (K + 1) + slot) * F + row] = g / (1.0f + exp(-g)) * u;\n"
-"}\n";
+"if (base >= F) return;\n"
+"uint nr = min(2u, F - base); uint r1 = min(base + 1u, F - 1u);\n"
+"uint gi = sh ? 3u : 0u, ui = sh ? 4u : 1u;\n"
+"ulong gow = (ulong)P[gi*8+2] + (ulong)e * (uint)P[gi*8+5], gos = (ulong)P[gi*8+3] + (ulong)e * (uint)P[gi*8+6], gob = (ulong)P[gi*8+4] + (ulong)e * (uint)P[gi*8+6];\n"
+"ulong uow = (ulong)P[ui*8+2] + (ulong)e * (uint)P[ui*8+5], uos = (ulong)P[ui*8+3] + (ulong)e * (uint)P[ui*8+6], uob = (ulong)P[ui*8+4] + (ulong)e * (uint)P[ui*8+6];\n"
+"uint gg = P[gi*8+0], gbf = P[gi*8+1], ug = P[ui*8+0], ubf = P[ui*8+1];\n"
+"const device uchar* gW = (sh ? WSG : WG) + gow; const device uchar* gS = (sh ? SSG : SG) + gos; const device uchar* gB = (sh ? BSG : BG) + gob;\n"
+"const device uchar* uW = (sh ? WSU : WU) + uow; const device uchar* uS = (sh ? SSU : SU) + uos; const device uchar* uB = (sh ? BSU : BU) + uob;\n"
+"ulong rw = (ulong)(E / 2), gsr = (ulong)(E / gg) * 2, usr = (ulong)(E / ug) * 2;\n"
+"float og[4], ou[4];\n"
+"q4_dotn(og, nr, gW + base * rw, gW + r1 * rw, gW, gW, gS + base * gsr, gS + r1 * gsr, gS, gS, gB + base * gsr, gB + r1 * gsr, gB, gB, (uint)(gow & 3), x, E, gg, gbf, lane);\n"
+"q4_dotn(ou, nr, uW + base * rw, uW + r1 * rw, uW, uW, uS + base * usr, uS + r1 * usr, uS, uS, uB + base * usr, uB + r1 * usr, uB, uB, (uint)(uow & 3), x, E, ug, ubf, lane);\n"
+"if (lane == 0) for (uint i = 0; i < nr; i++) ACT[((ulong)t * (K + 1) + slot) * F + base + i] = og[i] / (1.0f + exp(-og[i])) * ou[i];\n";
 
 static const char q4mp_src_down[] =
 "uint tgx = threadgroup_position_in_grid.x, slot = threadgroup_position_in_grid.y, t = threadgroup_position_in_grid.z;\n"
@@ -251,14 +234,18 @@ static const char q4mp_src_down[] =
 "uint E = P[64], F = P[65], K = P[67];\n"
 "bool sh = slot >= K; int e = sh ? 0 : SEL[t * 16 + slot];\n"
 "const device float* a = ACT + ((ulong)t * (K + 1) + slot) * F;\n"
-"uint base = (tgx * 16 + sg) * 2;\n"
-"for (uint i = 0; i < 2; i++) {\n"
-"    uint row = base + i; if (row >= E) break;\n"
-"    float d;\n"
-"    if (sh) d = q4_rowdot(WSD + P[5*8+2], SSD + P[5*8+3], BSD + P[5*8+4], a, F, P[5*8+0], P[5*8+1], row, lane);\n"
-"    else d = q4_rowdot(WD + P[16+2] + (ulong)e * (uint)P[16+5], SD + P[16+3] + (ulong)e * (uint)P[16+6], BD + P[16+4] + (ulong)e * (uint)P[16+6], a, F, P[16+0], P[16+1], row, lane);\n"
-"    if (lane == 0) DOWN[((ulong)t * (K + 1) + slot) * E + row] = d;\n"
-"}\n";
+"uint base = (tgx * 16 + sg) * 4;\n"
+"if (base >= E) return;\n"
+"uint nr = min(4u, E - base); uint r1 = min(base + 1u, E - 1u), r2 = min(base + 2u, E - 1u), r3 = min(base + 3u, E - 1u);\n"
+"uint di = sh ? 5u : 2u;\n"
+"ulong dow = (ulong)P[di*8+2] + (ulong)e * (uint)P[di*8+5], dos = (ulong)P[di*8+3] + (ulong)e * (uint)P[di*8+6], dob = (ulong)P[di*8+4] + (ulong)e * (uint)P[di*8+6];\n"
+"uint dg = P[di*8+0], dbf = P[di*8+1];\n"
+"const device uchar* dW = (sh ? WSD : WD) + dow; const device uchar* dS = (sh ? SSD : SD) + dos; const device uchar* dB = (sh ? BSD : BD) + dob;\n"
+"ulong rw = (ulong)(F / 2), sr = (ulong)(F / dg) * 2;\n"
+"float od[4];\n"
+"q4_dotn(od, nr, dW + base * rw, dW + r1 * rw, dW + r2 * rw, dW + r3 * rw, dS + base * sr, dS + r1 * sr, dS + r2 * sr, dS + r3 * sr,\n"
+"        dB + base * sr, dB + r1 * sr, dB + r2 * sr, dB + r3 * sr, (uint)(dow & 3), a, F, dg, dbf, lane);\n"
+"if (lane == 0) for (uint i = 0; i < nr; i++) DOWN[((ulong)t * (K + 1) + slot) * E + base + i] = od[i];\n";
 
 static const char q4mp_src_comb[] =
 "uint d = thread_position_in_grid.x; uint t = thread_position_in_grid.y;\n"
@@ -283,7 +270,7 @@ static void q4mp_kernels_init(void) {
         mlx_vector_string vi = mlx_vector_string_new(), vo = mlx_vector_string_new();
         for (int i = 0; i < nin[k]; i++) mlx_vector_string_append_value(vi, ins[k][i]);
         for (int i = 0; i < nout[k]; i++) mlx_vector_string_append_value(vo, outs[k][i]);
-        q4mp_k[k] = mlx_fast_metal_kernel_new(names[k], vi, vo, srcs[k], q4mp_hdr, true, false);
+        q4mp_k[k] = mlx_fast_metal_kernel_new(names[k], vi, vo, srcs[k], llm_q4_msl_helpers, true, false);
         mlx_vector_string_free(vi); mlx_vector_string_free(vo);
     }
     q4mp_kready = 1;
@@ -346,7 +333,7 @@ static int qwen4_exp_moe_packed_try_locked(mlx_array* out, LlmMlxModel* m, int l
     /* 4) down -> [nt][K+1][E] */
     { mlx_array in[9] = { act, l->v[2][0], l->v[2][1], l->v[2][2], l->v[5][0], l->v[5][1], l->v[5][2], sel, l->P };
       int shm[1][3] = { { nt, K + 1, E } }; int nm[1] = { 3 }; mlx_dtype dm[1] = { MLX_FLOAT32 };
-      if (q4mp_apply(3, in, 9, shm, nm, dm, 1, ((E + 31) / 32) * 512, K + 1, nt, 512, &down, s) != 0) goto done; }
+      if (q4mp_apply(3, in, 9, shm, nm, dm, 1, ((E + 63) / 64) * 512, K + 1, nt, 512, &down, s) != 0) goto done; }
     /* 5) combine pesata -> [nt][E] */
     { mlx_array in[3] = { down, wts, l->P };
       shp[0][0] = nt; shp[0][1] = E; ndm[0] = 2; dts[0] = MLX_FLOAT32;
