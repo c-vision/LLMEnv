@@ -14,10 +14,8 @@ your own program and call it. If you just want to use the engine, start with [Fa
 - **Use quantized models.** Quantization shrinks a model so it fits in memory. LLMEnv reads the
   common schemes: 2, 4 and 8 bit, AWQ, GPTQ, bitsandbytes, MXFP4 and MXFP8.
 - **Keep memory use low.** In its "packed" mode the engine reads weights straight from the model
-  files on disk instead of copying them into memory, so a 104 GB model can run with about
-  40 GB of memory in use for the weights.
-- **Stay fast.** On an Apple Silicon Mac, a 4-bit Qwen model of this kind generates about 34
-  tokens per second, and a 2-bit GGUF model about 52 tokens per second.
+  files on disk instead of copying them into memory, so large models can run
+  with far less memory than their file size.
 - **Reuse earlier work.** Prompts that share a beginning can reuse the computation already done
   (a "prefix cache"), which makes long conversations start faster.
 
