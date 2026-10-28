@@ -6,21 +6,16 @@
 
 #include "llm_mlx_internal.h"
 #include "llm_mlx_weights_backend.h"
-#include "llm_mlx_qwen4_moe_packed.h"   /* q4mp_shard_of/q4mp_eval */
+#include "llm_mlx_linear_packed_model.h"
 
 static int q4hc_linear(LlmMlxModel* m, int layer_idx, const char* hc, const char* leaf,
                        mlx_array x, mlx_array* out) {
-    const int g = m->cfg.quant_group_size;
-    char base[256], path[1600];
+    char base[256];
     { size_t n=strlen(m->cfg.layer_prefix);
       if (n && m->cfg.layer_prefix[n-1]=='.') snprintf(base,sizeof base,"%s%d.%s.%s", m->cfg.layer_prefix, layer_idx, hc, leaf);
       else snprintf(base,sizeof base,"%s.%d.%s.%s", m->cfg.layer_prefix, layer_idx, hc, leaf); }
-    q4mp_shard_of(m, base, path, sizeof path);
-    LlmMlxPackedLinear L;
-    if (llm_mlx_linear_packed_open(path, base, 4, g, &L) != 0) { fprintf(stderr, "[hc-packed] open FALLITO %s (path=%s)\n", base, path); return 1; }
-    int rc = llm_mlx_linear_packed_run(&L, x, out, m->stream);
-    llm_mlx_linear_packed_close(&L);
-    return rc == 0 ? 0 : 1;
+    /* registry + nodo lazy (nessun eval, nessuna riapertura del file a ogni chiamata) */
+    return llm_mlx_linear_packed_model(&m->packed, m->model_dir, base, 4, m->cfg.quant_group_size, x, out, m->stream) == 0 ? 0 : 1;
 }
 
 /* out_injection opzionale: passa NULL per saltarla (come ctx==NULL nel percorso MLX). */
@@ -31,7 +26,7 @@ static int qwen4_hc_packed_try(LlmMlxModel* m, int layer_idx, const char* hc,
     if (!llm_mlx_weights_backend_packed() || m->cfg.quant_bits != 4) return 1;
     if (!m->cfg.model_type[0] || !strstr(m->cfg.model_type, "qwen4")) return 1;
     const int nd = mlx_array_ndim(hyper_input);
-    if (nd != 2) return 1;   /* v1: solo decode; il prefill resta su MLX (array non rilasciati) */
+    if (nd != 2 && nd != 3) return 1;
     const int hc_count = m->cfg.hc_count, hidden = m->cfg.hidden_size;
     const int* hs = mlx_array_shape(hyper_input);
     if (!hs || hs[nd-1] != hc_count * hidden) return 1;
