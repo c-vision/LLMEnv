@@ -44,4 +44,8 @@ int llm_gemvq4_load_weights_3d_nocopy(LlmGemvQ4Ctx* ctx, const uint8_t* Wq, cons
                                       uint32_t H, uint32_t M, uint32_t group_size, uint32_t E, size_t w_stride, size_t s_stride);
 int llm_gemvq4_run_expert(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out, uint32_t expert);
 
+/* Batch di gemv in un solo command buffer. expert < 0 = lineare 2D del contesto. */
+typedef struct { LlmGemvQ4Ctx* ctx; int expert; const uint16_t* x; uint16_t* out; } LlmGemvQ4Job;
+int llm_gemvq4_run_batch(const LlmGemvQ4Job* jobs, int n);
+
 #endif /* LLM_GEMVQ4_BRIDGE_H */

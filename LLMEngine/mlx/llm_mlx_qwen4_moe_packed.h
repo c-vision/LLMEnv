@@ -89,18 +89,6 @@ static Q4mpEnt* q4mp_ent3(const LlmMlxModel* m, const char* base, int group) {
     e->st3 = 1; return e;
 }
 
-/* GEMV di UN esperto sul contesto cached. 0 = ok. */
-static int q4mp_gemv_e(Q4mpEnt* e, int expert, const float* x, int n_in, float* y, int n_out) {
-    if (!e || e->st3 != 1 || expert < 0 || (uint32_t)expert >= e->w3.experts || (int)e->w3.cols != n_in || (int)e->w3.rows != n_out) return -1;
-    uint16_t xh[8192], yh[8192];
-    if (n_in > 8192 || n_out > 8192) return -1;
-    for (int i = 0; i < n_in; i++) { _Float16 h = (_Float16)x[i]; memcpy(&xh[i], &h, 2); }
-    if (llm_gemvq4_run_expert(e->g3, xh, yh, (uint32_t)expert) != 0) return -1;
-    for (int o = 0; o < n_out; o++) { _Float16 h; memcpy(&h, &yh[o], 2); y[o] = (float)h; }
-    return 0;
-}
-
-/* GEMV di una lineare 2D Q4 cached (shared expert). 0 = ok. */
 static Q4mpEnt* q4mp_entl(const LlmMlxModel* m, const char* base, int group) {
     Q4mpEnt* e = q4mp_ent(m, base); if (!e || e->stl < 0) return NULL;
     if (e->stl == 1) return e;
@@ -108,16 +96,6 @@ static Q4mpEnt* q4mp_entl(const LlmMlxModel* m, const char* base, int group) {
     if (llm_mlx_linear_packed_open(e->path, base, 4, group, &e->lin) != 0) return NULL;
     e->stl = 1; return e;
 }
-static int q4mp_gemv_l(Q4mpEnt* e, const float* x, int n_in, float* y, int n_out) {
-    if (!e || e->stl != 1 || (int)e->lin.w.cols != n_in || (int)e->lin.w.rows != n_out) return -1;
-    uint16_t xh[8192], yh[8192];
-    if (n_in > 8192 || n_out > 8192) return -1;
-    for (int i = 0; i < n_in; i++) { _Float16 h = (_Float16)x[i]; memcpy(&xh[i], &h, 2); }
-    if (llm_gemvq4_run(e->lin.g, xh, yh) != 0) return -1;
-    for (int o = 0; o < n_out; o++) { _Float16 h; memcpy(&h, &yh[o], 2); y[o] = (float)h; }
-    return 0;
-}
-
 /* Router e shared_expert_gate sono Q8/gs64 (override per-modulo nel config): il kernel packed e' solo Q4. Li dequantizzo UNA
  * volta in f32 dal map MLX (tensori piccoli, non rilasciati) e li applico con BLAS: nessun dispatch/eval MLX per token. */
 static const float* q4mp_dense(LlmMlxModel* m, const char* base, int* rows, int* cols) {
@@ -199,6 +177,9 @@ static int qwen4_exp_moe_packed_try_locked(mlx_array* out, LlmMlxModel* m, int l
     if (!Eg || !Eu || !Ed || !Sg || !Su || !Sd || !RW || !GW) return 1;
     const int F = (int)Eg->w3.rows, E = (int)Eg->w3.cols, NE = (int)Eg->w3.experts, K = m->cfg.top_k;
     if (F <= 0 || E <= 0 || NE <= 0 || K <= 0 || K > 16 || rrows != NE || rcols != E || grows != 1 || gcols != E) return 1;
+    if ((int)Eu->w3.rows != F || (int)Eu->w3.cols != E || (int)Ed->w3.rows != E || (int)Ed->w3.cols != F || (int)Eu->w3.experts != NE || (int)Ed->w3.experts != NE ||
+        (int)Sg->lin.w.rows != F || (int)Sg->lin.w.cols != E || (int)Su->lin.w.rows != F || (int)Su->lin.w.cols != E ||
+        (int)Sd->lin.w.rows != E || (int)Sd->lin.w.cols != F) return 1;
 
     mlx_array xflat = mlx_array_new(), x32 = mlx_array_new();
     { int sh2[2] = {nrow0, xs[nd0-1]};
@@ -211,12 +192,12 @@ static int qwen4_exp_moe_packed_try_locked(mlx_array* out, LlmMlxModel* m, int l
     const float* xd = mlx_array_data_float32(xflat);
     float* gates = (float*)malloc((size_t)NE * 4 * (size_t)nrow0);
     float* sgate = (float*)malloc(sizeof(float) * (size_t)nrow0);
-    float *gk = (float*)malloc((size_t)F*4), *uk = (float*)malloc((size_t)F*4), *yk = (float*)malloc((size_t)E*4);
-    float *hg = (float*)malloc((size_t)F*4), *hu = (float*)malloc((size_t)F*4), *yd = (float*)malloc((size_t)E*4);
+    uint16_t *xh16 = (uint16_t*)malloc((size_t)E*2), *oG = (uint16_t*)malloc((size_t)(K+1)*F*2), *oU = (uint16_t*)malloc((size_t)(K+1)*F*2);
+    uint16_t *oA = (uint16_t*)malloc((size_t)(K+1)*F*2), *oD = (uint16_t*)malloc((size_t)(K+1)*E*2);
     double* acc = (double*)calloc((size_t)E, sizeof(double));
     float* obuf = (float*)malloc((size_t)E*4*(size_t)nrow0);
     char* used = (char*)malloc((size_t)NE);
-    int rc = (xd && gates && sgate && gk && uk && yk && hg && hu && yd && acc && obuf && used) ? 0 : 1;
+    int rc = (xd && gates && sgate && xh16 && oG && oU && oA && oD && acc && obuf && used) ? 0 : 1;
     if (!rc) {   /* router e gate dello shared expert su tutte le righe: gates[nrow][NE] = X[nrow][E] . RW^T */
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, nrow0, NE, E, 1.0f, xd, E, RW, E, 0.0f, gates, NE);
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, nrow0, 1, E, 1.0f, xd, E, GW, E, 0.0f, sgate, 1);
@@ -237,21 +218,35 @@ static int qwen4_exp_moe_packed_try_locked(mlx_array* out, LlmMlxModel* m, int l
         }
         if (rc) break;
         if (wsum > 0) for (int k = 0; k < K; k++) wts[k] /= wsum;
-        memset(acc, 0, (size_t)E*sizeof(double));
-        for (int k = 0; k < K && !rc; k++) {
-            if (q4mp_gemv_e(Eg, sel[k], xr, E, gk, F) != 0 || q4mp_gemv_e(Eu, sel[k], xr, E, uk, F) != 0) { rc = 1; break; }
-            for (int f = 0; f < F; f++) gk[f] = q4mp_silu(gk[f]) * uk[f];
-            if (q4mp_gemv_e(Ed, sel[k], gk, F, yk, E) != 0) { rc = 1; break; }
-            for (int d = 0; d < E; d++) acc[d] += wts[k] * (double)yk[d];
+        /* 2 command buffer per riga e layer (prima ~33): [gate+up dei K esperti + shared] poi [down dei K + shared]. */
+        if (E > 8192 || F > 8192) { rc = 1; break; }
+        for (int i = 0; i < E; i++) { _Float16 h = (_Float16)xr[i]; memcpy(&xh16[i], &h, 2); }
+        LlmGemvQ4Job jb[34]; int nj = 0;
+        for (int k = 0; k < K; k++) {
+            jb[nj++] = (LlmGemvQ4Job){ Eg->g3, sel[k], xh16, oG + (size_t)k*F };
+            jb[nj++] = (LlmGemvQ4Job){ Eu->g3, sel[k], xh16, oU + (size_t)k*F };
         }
-        if (rc) break;
-        /* shared expert */
-        if (q4mp_gemv_l(Sg, xr, E, hg, F) != 0 || q4mp_gemv_l(Su, xr, E, hu, F) != 0) { rc = 1; break; }
-        for (int f = 0; f < F; f++) hg[f] = q4mp_silu(hg[f]) * hu[f];
-        if (q4mp_gemv_l(Sd, hg, F, yd, E) != 0) { rc = 1; break; }
+        jb[nj++] = (LlmGemvQ4Job){ Sg->lin.g, -1, xh16, oG + (size_t)K*F };
+        jb[nj++] = (LlmGemvQ4Job){ Su->lin.g, -1, xh16, oU + (size_t)K*F };
+        if (llm_gemvq4_run_batch(jb, nj) != 0) { rc = 1; break; }
+        for (int k = 0; k <= K; k++)
+            for (int f = 0; f < F; f++) {
+                _Float16 a, b; memcpy(&a, &oG[(size_t)k*F + f], 2); memcpy(&b, &oU[(size_t)k*F + f], 2);
+                _Float16 h = (_Float16)(q4mp_silu((float)a) * (float)b); memcpy(&oA[(size_t)k*F + f], &h, 2);
+            }
+        nj = 0;
+        for (int k = 0; k < K; k++) jb[nj++] = (LlmGemvQ4Job){ Ed->g3, sel[k], oA + (size_t)k*F, oD + (size_t)k*E };
+        jb[nj++] = (LlmGemvQ4Job){ Sd->lin.g, -1, oA + (size_t)K*F, oD + (size_t)K*E };
+        if (llm_gemvq4_run_batch(jb, nj) != 0) { rc = 1; break; }
+        memset(acc, 0, (size_t)E*sizeof(double));
+        for (int k = 0; k < K; k++)
+            for (int d = 0; d < E; d++) { _Float16 h; memcpy(&h, &oD[(size_t)k*E + d], 2); acc[d] += wts[k] * (double)(float)h; }
         const float sw = sgate[r];
         const float sv = sw >= 0 ? 1.f/(1.f+expf(-sw)) : expf(sw)/(1.f+expf(sw));
-        for (int d = 0; d < E; d++) obuf[(size_t)r*E + d] = (float)(acc[d] + (double)sv * (double)yd[d]);
+        for (int d = 0; d < E; d++) {
+            _Float16 h; memcpy(&h, &oD[(size_t)K*E + d], 2);
+            obuf[(size_t)r*E + d] = (float)(acc[d] + (double)sv * (double)(float)h);
+        }
     }
     if (!rc) {
         int sh[2] = {nrow0, E};
@@ -259,7 +254,7 @@ static int qwen4_exp_moe_packed_try_locked(mlx_array* out, LlmMlxModel* m, int l
         if (nd0 == 3) { int osh[3] = {xs[0], xs[1], E}; rc = mlx_reshape(out, flatout, osh, 3, m->stream); mlx_array_free(flatout); }
         else { *out = flatout; }
     }
-    free(obuf); free(acc); free(gk); free(uk); free(yk); free(hg); free(hu); free(yd); free(gates); free(sgate); free(used);
+    free(obuf); free(acc); free(xh16); free(oG); free(oU); free(oA); free(oD); free(gates); free(sgate); free(used);
     mlx_array_free(xflat);
     return rc;
 }

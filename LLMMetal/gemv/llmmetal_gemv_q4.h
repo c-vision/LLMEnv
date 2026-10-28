@@ -292,4 +292,49 @@ static int llmmetal_gemv_q4_run_expert(LlmMetalGemvQ4Ctx* ctx, const uint16_t* x
     return llmmetal_gemv_q4_run_bufs(ctx, x, out, wb, sb, bb, lw, ls, lb);
 }
 
+/* Batch: N gemv (anche su contesti/tensori diversi) in UN solo command buffer. expert < 0 = lineare 2D (viste del contesto).
+ * x/out sono buffer transitori per job, quindi lo stesso contesto puo' comparire piu' volte (esperti diversi). */
+typedef struct { LlmMetalGemvQ4Ctx* ctx; int64_t expert; const uint16_t* x; uint16_t* out; } LlmMetalGemvQ4Job;
+
+static int llmmetal_gemv_q4_run_batch(const LlmMetalGemvQ4Job* jobs, int n) {
+    if (n <= 0) return 0;
+    LlmMetalGemvQ4Ctx* c0 = jobs[0].ctx;
+    id<MTLCommandBuffer> cb = [c0->queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:c0->pso];
+    NSMutableArray* keep = [NSMutableArray arrayWithCapacity:(NSUInteger)n * 5];
+    NSMutableArray* outs = [NSMutableArray arrayWithCapacity:(NSUInteger)n];
+    for (int i = 0; i < n; i++) {
+        LlmMetalGemvQ4Ctx* c = jobs[i].ctx;
+        id<MTLBuffer> wb, sb, bb; size_t lw, ls, lb;
+        if (jobs[i].expert >= 0) {
+            if ((uint64_t)jobs[i].expert >= c->n_experts) { [enc endEncoding]; return -1; }
+            const size_t e = (size_t)jobs[i].expert;
+            const size_t wbytes = (size_t)c->M * (c->H / 2), sbytes = (size_t)c->M * (c->H / c->group_size) * 2;
+            wb = llmmetal_gq4_view(c->device, c->p_w + e * c->w_stride, wbytes, &lw);
+            sb = llmmetal_gq4_view(c->device, c->p_s + e * c->s_stride, sbytes, &ls);
+            bb = llmmetal_gq4_view(c->device, c->p_b + e * c->s_stride, sbytes, &lb);
+            if (!wb || !sb || !bb) { [enc endEncoding]; return -1; }
+        } else { wb = c->w_buf; sb = c->scale_buf; bb = c->bias_buf; lw = c->lead_w; ls = c->lead_s; lb = c->lead_b; }
+        id<MTLBuffer> xb = [c->device newBufferWithBytes:jobs[i].x length:(size_t)c->H * 2 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> ob = [c->device newBufferWithLength:(size_t)c->M * 2 options:MTLResourceStorageModeShared];
+        if (!xb || !ob) { [enc endEncoding]; return -1; }
+        [keep addObject:wb]; [keep addObject:sb]; [keep addObject:bb]; [keep addObject:xb]; [outs addObject:ob];
+        struct { uint32_t H, M, group_size, rows_per_tg, lead_w, lead_s, lead_b, scale_bf16; } params = {
+            c->H, c->M, c->group_size, LLMMETAL_GEMV_ROWS_PER_TG, (uint32_t)lw, (uint32_t)ls, (uint32_t)lb, c->scale_bf16 };
+        [enc setBuffer:xb offset:0 atIndex:0]; [enc setBuffer:wb offset:0 atIndex:1];
+        [enc setBuffer:sb offset:0 atIndex:2]; [enc setBuffer:bb offset:0 atIndex:3];
+        [enc setBuffer:ob offset:0 atIndex:4];
+        [enc setBytes:&params length:sizeof(params) atIndex:5];
+        [enc setThreadgroupMemoryLength:(c->H * sizeof(uint16_t)) atIndex:0];
+        const uint32_t n_tg = (c->M + LLMMETAL_GEMV_ROWS_PER_TG - 1) / LLMMETAL_GEMV_ROWS_PER_TG;
+        [enc dispatchThreadgroups:MTLSizeMake(n_tg,1,1) threadsPerThreadgroup:MTLSizeMake(LLMMETAL_GEMV_ROWS_PER_TG*32,1,1)];
+    }
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    for (int i = 0; i < n; i++) memcpy(jobs[i].out, ((id<MTLBuffer>)outs[(NSUInteger)i]).contents, (size_t)jobs[i].ctx->M * 2);
+    return 0;
+}
+
 #endif /* LLMMETAL_METAL_GEMV_Q4_H */

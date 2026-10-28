@@ -61,3 +61,14 @@ int llm_gemvq4_run_expert(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out, u
     if (!ctx) return -1;
     return llmmetal_gemv_q4_run_expert(&ctx->inner, x, out, expert);
 }
+
+int llm_gemvq4_run_batch(const LlmGemvQ4Job* jobs, int n) {
+    if (n <= 0) return 0;
+    if (n > 64 || !jobs) return -1;
+    LlmMetalGemvQ4Job mj[64];
+    for (int i = 0; i < n; i++) {
+        if (!jobs[i].ctx) return -1;
+        mj[i].ctx = &jobs[i].ctx->inner; mj[i].expert = jobs[i].expert; mj[i].x = jobs[i].x; mj[i].out = jobs[i].out;
+    }
+    return llmmetal_gemv_q4_run_batch(mj, n);
+}
