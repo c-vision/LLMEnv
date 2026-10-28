@@ -17,10 +17,13 @@ typedef struct {
     const uint16_t* scales;   /* [rows][cols/group] F16 */
     const uint16_t* biases;   /* [rows][cols/group] F16 (NULL se assenti) */
     uint32_t rows, cols;
+    int scale_bf16;           /* scales/biases in BF16 nel file (il kernel Q4 li legge come half di default) */
     int bits, group;
     size_t w_bytes, s_bytes, b_bytes;
     void*  map;               /* mmap base (proprietario) */
     size_t map_bytes;
+    void*  map_s; size_t map_s_bytes;   /* mmap dello shard di scales (NULL = stesso file dei pesi) */
+    void*  map_b; size_t map_b_bytes;   /* idem per i biases */
 } LlmMlxPackedW;
 
 /* 0 = ok; <0 errore (file/header/tensori mancanti o incoerenti). */
@@ -32,9 +35,12 @@ void llm_mlx_packed_close(LlmMlxPackedW* w);
 typedef struct {
     const uint32_t* w; const uint16_t* scales; const uint16_t* biases;
     uint32_t experts, rows, cols;
+    int scale_bf16;
     int bits, group;
     size_t w_stride, s_stride;   /* byte per esperto */
     void* map; size_t map_bytes;
+    void* map_s; size_t map_s_bytes;
+    void* map_b; size_t map_b_bytes;
 } LlmMlxPackedW3;
 
 int  llm_mlx_packed_open3d(const char* safetensors_path, const char* base, int bits, int group, LlmMlxPackedW3* out);

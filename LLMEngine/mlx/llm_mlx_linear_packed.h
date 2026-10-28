@@ -27,6 +27,7 @@ static inline int llm_mlx_linear_packed_open(const char* st_path, const char* ba
                                              L->w.cols, L->w.rows, (uint32_t)L->w.group) != 0) {
         llm_gemvq4_destroy(L->g); L->g = NULL; llm_mlx_packed_close(&L->w); return -1;
     }
+    llm_gemvq4_set_scale_bf16(L->g, L->w.scale_bf16);
     return 0;
 }
 

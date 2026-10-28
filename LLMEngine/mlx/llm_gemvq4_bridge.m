@@ -46,3 +46,7 @@ int llm_gemvq4_run(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out) {
     if (!ctx) return -1;
     return llmmetal_gemv_q4_run(&ctx->inner, x, out);
 }
+
+void llm_gemvq4_set_scale_bf16(LlmGemvQ4Ctx* ctx, int bf16) {
+    if (ctx) ctx->inner.scale_bf16 = bf16 ? 1u : 0u;
+}

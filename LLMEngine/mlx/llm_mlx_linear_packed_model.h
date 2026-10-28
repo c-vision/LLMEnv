@@ -32,6 +32,7 @@ static inline int llm_mlx_linear_packed_model(LlmMlxPackedCtx* c, const char* mo
                                              w->cols, w->rows, (uint32_t)w->group) != 0) {
         llm_gemvq4_destroy(L.g); return -1;
     }
+    llm_gemvq4_set_scale_bf16(L.g, w->scale_bf16);
     /* prefill: x 3D [B,S,in] -> 2D [B*S,in]; l'uscita viene riportata a [B,S,out]. */
     const int nd = mlx_array_ndim(x);
     mlx_array xr = mlx_array_new(), orr = mlx_array_new();

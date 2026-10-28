@@ -34,6 +34,8 @@ int llm_gemvq4_load_weights(LlmGemvQ4Ctx* ctx, const uint8_t* Wq,
                              uint32_t H, uint32_t M, uint32_t group_size);
 
 /* Un passo di decode: x [H] half, out [M] half. Ritorna 0 su successo. */
+/* 1 = scales/biases BF16 (checkpoint MLX in bf16); 0 = half (default). Da chiamare dopo il load, prima di run. */
+void llm_gemvq4_set_scale_bf16(LlmGemvQ4Ctx* ctx, int bf16);
 int llm_gemvq4_run(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out);
 
 #endif /* LLM_GEMVQ4_BRIDGE_H */
