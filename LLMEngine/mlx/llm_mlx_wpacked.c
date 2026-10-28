@@ -63,3 +63,39 @@ void llm_mlx_packed_close(LlmMlxPackedW* w) {
     munmap(w->map, w->map_bytes);
     memset(w, 0, sizeof *w);
 }
+
+/* ---- vista 3D (esperti): [E, rows, cols] ---- */
+int llm_mlx_packed_open3d(const char* path, const char* base, int bits, int group, LlmMlxPackedW3* out) {
+    if (!path || !base || !out) return -1;
+    memset(out, 0, sizeof *out);
+    LlmCodecStTensorInfo* ti = NULL; int n = 0; uint64_t base_off = 0;
+    if (llmcodec_safetensors_read(path, &ti, &n, &base_off) != 0) return -1;
+    char nm[1024]; uint64_t wo=0,wl=0,so=0,sl=0,bo=0,bl=0; const char* dtw=NULL; const char* dts=NULL; const char* dtb=NULL;
+    snprintf(nm,sizeof nm,"%s.weight",base); int ok = (find_off(ti,n,nm,&wo,&wl,&dtw)==0);
+    if (ok) { snprintf(nm,sizeof nm,"%s.scales",base); ok = (find_off(ti,n,nm,&so,&sl,&dts)==0); }
+    int has_b=0; if (ok) { snprintf(nm,sizeof nm,"%s.biases",base); has_b=(find_off(ti,n,nm,&bo,&bl,&dtb)==0); }
+    uint64_t E=0, rows=0, wcols=0, scols=0;
+    if (ok) {
+        snprintf(nm,sizeof nm,"%s.weight",base);
+        for (int i=0;i<n;i++) if (strcmp(ti[i].name,nm)==0) { E=ti[i].shape[0]; rows=ti[i].shape[1]; wcols=ti[i].shape[2]; }
+        snprintf(nm,sizeof nm,"%s.scales",base);
+        for (int i=0;i<n;i++) if (strcmp(ti[i].name,nm)==0) scols=ti[i].shape[2];
+    }
+    llmcodec_safetensors_info_free(ti);
+    if (!ok || E==0 || rows==0 || wcols==0) return -1;
+    uint64_t cols = wcols*32ull/(uint64_t)bits;
+    if (scols != cols/(uint64_t)group) return -1;
+    int fd = open(path, O_RDONLY); if (fd<0) return -1;
+    struct stat st; if (fstat(fd,&st)!=0){close(fd);return -1;}
+    void* map = mmap(NULL,(size_t)st.st_size,PROT_READ,MAP_PRIVATE,fd,0); close(fd);
+    if (map==MAP_FAILED) return -1;
+    out->w=(const uint32_t*)((const uint8_t*)map+base_off+wo);
+    out->scales=(const uint16_t*)((const uint8_t*)map+base_off+so);
+    out->biases=has_b?(const uint16_t*)((const uint8_t*)map+base_off+bo):NULL;
+    out->experts=(uint32_t)E; out->rows=(uint32_t)rows; out->cols=(uint32_t)cols;
+    out->bits=bits; out->group=group;
+    out->w_stride=(size_t)rows*wcols*4u; out->s_stride=(size_t)rows*scols*2u;
+    out->map=map; out->map_bytes=(size_t)st.st_size;
+    return 0;
+}
+void llm_mlx_packed_close3d(LlmMlxPackedW3* w) { if (!w||!w->map) return; munmap(w->map,w->map_bytes); memset(w,0,sizeof *w); }
