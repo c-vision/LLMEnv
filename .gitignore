@@ -33,3 +33,6 @@ backups/tools/
 # dipendenze di build (non parte del sorgente pubblicato)
 /libs/mlx-deps
 /libs/mlx-c-src
+
+# backup locali di codice ritirato: NON tracciati (la storia git conserva le versioni)
+/backups/
