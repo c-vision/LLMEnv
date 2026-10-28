@@ -90,8 +90,12 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
                                     m->cfg.quant_group_size, h_rot, &qkv_pk, s) == 0) qkv_packed = 1;
     else mlx_array_free(qkv_pk);
     if (!qkv_packed) ok = ok && multishard_get_triple(&m->weights, namebuf, &qkv_w, &qkv_sc, &qkv_b);
+    mlx_array z_pk = mlx_array_new(); int z_packed = 0;
     tname(m->cfg.layer_prefix, layer_idx, "linear_attn.in_proj_z", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get_triple(&m->weights, namebuf, &z_w, &z_sc, &z_b);
+    if (llm_mlx_linear_packed_model(&m->packed, m->model_dir, namebuf, m->cfg.quant_bits,
+                                    m->cfg.quant_group_size, h_rot, &z_pk, s) == 0) z_packed = 1;
+    else mlx_array_free(z_pk);
+    if (!z_packed) ok = ok && multishard_get_triple(&m->weights, namebuf, &z_w, &z_sc, &z_b);
     tname(m->cfg.layer_prefix, layer_idx, "linear_attn.in_proj_a", namebuf, sizeof(namebuf));
     ok = ok && multishard_get_triple(&m->weights, namebuf, &a_w, &a_sc, &a_b);
     tname(m->cfg.layer_prefix, layer_idx, "linear_attn.in_proj_b", namebuf, sizeof(namebuf));
@@ -113,7 +117,7 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
      * oMLX: "qkv e' Q4 mentre z/a/b possono essere Q5, ed e' proprio il caso per cui la
      * Stage A condivisa e' pensata" (Qa non dipende dai bit del peso). */
     bool a8_shared_gdn = false;
-    if (ok && !qkv_packed && m->bonsai_had == NULL) {   /* Ternary-Bonsai: usa h NON ruotato */
+    if (ok && !qkv_packed && !z_packed && m->bonsai_had == NULL) {   /* Ternary-Bonsai: usa h NON ruotato */
         mlx_array s_qa, s_sa, s_ra; s_qa.ctx = NULL; s_sa.ctx = NULL; s_ra.ctx = NULL;
         if (llm_mlx_oq_a8_stage_try(h, qkv_w, qkv_sc, qkv_b, gsz, bts, m->cfg.quant_mode, s, &s_qa, &s_sa, &s_ra)) {
             bool k1 = llm_mlx_oq_a8_qmm_stage_try(&qkv, s_qa, s_sa, s_ra, h, qkv_w, qkv_sc, qkv_b, gsz, bts, m->cfg.quant_mode, s);
@@ -132,7 +136,7 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
         fprintf(stderr, "[m1dbg] layer=%d ok=%d a8_shared=%d compile=%d q35=%d lora=%d\n", layer_idx, (int)ok,
                 (int)a8_shared_gdn, (int)llm_mlx_compile_enabled(), (int)llm_mlx_compile_qwen35_enabled(),
                 (int)(llm_mlx_model_lora_get(m, layer_idx, "in_proj_qkv") >= 0));
-    if (ok && !qkv_packed && !a8_shared_gdn && n_tokens == 1 && llm_mlx_compile_qwen35_enabled() &&
+    if (ok && !qkv_packed && !z_packed && !a8_shared_gdn && n_tokens == 1 && llm_mlx_compile_qwen35_enabled() &&
         m->bonsai_had == NULL &&   /* Ternary-Bonsai: la closure M1 non ruota l'input */
         llm_mlx_compile_enabled() &&
         llm_mlx_model_lora_get(m, layer_idx, "in_proj_qkv") < 0 &&
@@ -159,7 +163,8 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
         } }
     { int li = llm_mlx_model_lora_get(m, layer_idx, "in_proj_qkv"); if (li >= 0 && ok && !qkv_packed) ok = llm_mlx_lora_apply_mlx(&qkv, h, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (qkv_packed) { mlx_array_free(qkv); qkv = qkv_pk; }
-    if (ok && !a8_shared_gdn && !gdn_ip_compiled) { ok = quantized_linear_cfg(&z, h_rot, z_w, z_sc, z_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "in_proj_z"); }
+    if (ok && !z_packed && !a8_shared_gdn && !gdn_ip_compiled) { ok = quantized_linear_cfg(&z, h_rot, z_w, z_sc, z_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "in_proj_z"); }
+    if (z_packed) { mlx_array_free(z); z = z_pk; }
     { int li = llm_mlx_model_lora_get(m, layer_idx, "in_proj_z"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&z, h, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     if (ok && !a8_shared_gdn && !gdn_ip_compiled) { ok = quantized_linear_cfg(&av, h, a_w, a_sc, a_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "in_proj_a"); }
     { int li = llm_mlx_model_lora_get(m, layer_idx, "in_proj_a"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&av, h, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
