@@ -599,11 +599,15 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
         mlx_array_free(vf);
     }
     mlx_array out_w=mlx_array_new(), out_sc=mlx_array_new(), out_b=mlx_array_new();
+    mlx_array out_pk = mlx_array_new(); int out_packed = 0;
     tname(m->cfg.layer_prefix, layer_idx, "linear_attn.out_proj", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get_triple(&m->weights, namebuf, &out_w, &out_sc, &out_b);
+    if (llm_mlx_linear_packed_model(&m->packed, m->model_dir, namebuf, m->cfg.quant_bits,
+                                    m->cfg.quant_group_size, gated_flat, &out_pk, s) == 0) out_packed = 1;
+    else mlx_array_free(out_pk);
+    if (!out_packed) ok = ok && multishard_get_triple(&m->weights, namebuf, &out_w, &out_sc, &out_b);
     CHK(ok, "out_proj lookup");
     mlx_array r=mlx_array_new();
-    if (ok) { ok = quantized_linear_cfg(&r, gated_flat, out_w, out_sc, out_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "out_proj");
+    if (ok && !out_packed) { ok = quantized_linear_cfg(&r, gated_flat, out_w, out_sc, out_b, gsz, bts, m->cfg.quant_mode, s); CHK(ok, "out_proj");
         if (ok && layer_idx == 0 && getenv("LLM_BONSAI_DBG")) {
             mlx_array vf = mlx_array_new();
             if (mlx_astype(&vf, r, MLX_FLOAT32, s) == 0 && mlx_array_eval(vf) == 0) {
@@ -612,7 +616,8 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
             }
             mlx_array_free(vf);
         } }
-    { int li = llm_mlx_model_lora_get(m, layer_idx, "out_proj"); if (li >= 0 && ok) ok = llm_mlx_lora_apply_mlx(&r, gated_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
+    if (out_packed) { mlx_array_free(r); r = out_pk; }
+    { int li = llm_mlx_model_lora_get(m, layer_idx, "out_proj"); if (li >= 0 && ok && !out_packed) ok = llm_mlx_lora_apply_mlx(&r, gated_flat, m->lora_A[li], m->lora_B[li], m->lora_scale[li], s); }
     /* residual: h = x + r (il layer lineare ritorna la somma, come DecoderLayer.__call__). */
     mlx_array h_out=mlx_array_new();
     if (ok) { ok = mlx_add(&h_out, x, r, s) == 0; CHK(ok, "residual add (gdn)"); }
