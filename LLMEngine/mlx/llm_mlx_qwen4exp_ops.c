@@ -6,6 +6,7 @@
 #include "llmengine_mlx.h"
 #include "llm_engine_opts.h"   /* opt_env: registro */
 #include "llm_mlx_internal.h"
+#include "llm_mlx_qwen4_hc_packed.h"
 #include <cJSON.h>
 
 #include <stdio.h>
@@ -694,18 +695,22 @@ bool qwen4_exp_attention_dispatch(LlmMlxModel* m, int layer_idx, int cache_offse
     mlx_array inj_w = mlx_array_new(), inj_sc = mlx_array_new(), inj_b = mlx_array_new();
     tname(m->cfg.layer_prefix, layer_idx, "attn_hyper_connection.hc_norm.weight", namebuf, sizeof(namebuf));
     ok = ok && multishard_get(&m->weights, namebuf, &hc_norm_w);
-    tname(m->cfg.layer_prefix, layer_idx, "attn_hyper_connection.input_mix_weight_down", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get_triple(&m->weights, namebuf, &down_w, &down_sc, &down_b);
-    tname(m->cfg.layer_prefix, layer_idx, "attn_hyper_connection.input_mix_weight_up", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get_triple(&m->weights, namebuf, &up_w, &up_sc, &up_b);
-    tname(m->cfg.layer_prefix, layer_idx, "attn_hyper_connection.block_inject_weight", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get_triple(&m->weights, namebuf, &inj_w, &inj_sc, &inj_b);
-    CHK(ok, "attn_hyper_connection weights lookup");
-
     mlx_array mixed = mlx_array_new(), residual = mlx_array_new(), injection = mlx_array_new();
-    if (ok) { ok = qwen4_exp_gated_residual_q(m, x_ple, hc_norm_w, down_w, down_sc, down_b, up_w, up_sc, up_b,
-                                              inj_w, inj_sc, inj_b, &mixed, &residual, &injection);
-              CHK(ok, "attn_hyper_connection mix"); }
+    if (ok && n_tokens == 1 &&
+        qwen4_hc_packed_try(m, layer_idx, "attn_hyper_connection", x_ple, hc_norm_w, &mixed, &residual, &injection) == 0) {
+        /* packed: pesi letti dai descrittori, nessun array caricato */
+    } else if (ok) {
+        tname(m->cfg.layer_prefix, layer_idx, "attn_hyper_connection.input_mix_weight_down", namebuf, sizeof(namebuf));
+        ok = multishard_get_triple(&m->weights, namebuf, &down_w, &down_sc, &down_b);
+        tname(m->cfg.layer_prefix, layer_idx, "attn_hyper_connection.input_mix_weight_up", namebuf, sizeof(namebuf));
+        ok = ok && multishard_get_triple(&m->weights, namebuf, &up_w, &up_sc, &up_b);
+        tname(m->cfg.layer_prefix, layer_idx, "attn_hyper_connection.block_inject_weight", namebuf, sizeof(namebuf));
+        ok = ok && multishard_get_triple(&m->weights, namebuf, &inj_w, &inj_sc, &inj_b);
+        CHK(ok, "attn_hyper_connection weights lookup");
+        if (ok) { ok = qwen4_exp_gated_residual_q(m, x_ple, hc_norm_w, down_w, down_sc, down_b, up_w, up_sc, up_b,
+                                                  inj_w, inj_sc, inj_b, &mixed, &residual, &injection);
+                  CHK(ok, "attn_hyper_connection mix"); }
+    }
 
     mlx_array sub_out = mlx_array_new();
     if (ok) {
@@ -774,18 +779,22 @@ bool qwen4_exp_ffn_dispatch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arr
     mlx_array inj_w = mlx_array_new(), inj_sc = mlx_array_new(), inj_b = mlx_array_new();
     tname(m->cfg.layer_prefix, layer_idx, "mlp_hyper_connection.hc_norm.weight", namebuf, sizeof(namebuf));
     ok = ok && multishard_get(&m->weights, namebuf, &hc_norm_w);
-    tname(m->cfg.layer_prefix, layer_idx, "mlp_hyper_connection.input_mix_weight_down", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get_triple(&m->weights, namebuf, &down_w, &down_sc, &down_b);
-    tname(m->cfg.layer_prefix, layer_idx, "mlp_hyper_connection.input_mix_weight_up", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get_triple(&m->weights, namebuf, &up_w, &up_sc, &up_b);
-    tname(m->cfg.layer_prefix, layer_idx, "mlp_hyper_connection.block_inject_weight", namebuf, sizeof(namebuf));
-    ok = ok && multishard_get_triple(&m->weights, namebuf, &inj_w, &inj_sc, &inj_b);
-    CHK(ok, "mlp_hyper_connection weights lookup");
-
     mlx_array mixed = mlx_array_new(), residual = mlx_array_new(), injection = mlx_array_new();
-    if (ok) { ok = qwen4_exp_gated_residual_q(m, h, hc_norm_w, down_w, down_sc, down_b, up_w, up_sc, up_b,
-                                              inj_w, inj_sc, inj_b, &mixed, &residual, &injection);
-              CHK(ok, "mlp_hyper_connection mix"); }
+    if (ok && n_tokens == 1 &&
+        qwen4_hc_packed_try(m, layer_idx, "mlp_hyper_connection", h, hc_norm_w, &mixed, &residual, &injection) == 0) {
+        /* packed */
+    } else if (ok) {
+        tname(m->cfg.layer_prefix, layer_idx, "mlp_hyper_connection.input_mix_weight_down", namebuf, sizeof(namebuf));
+        ok = multishard_get_triple(&m->weights, namebuf, &down_w, &down_sc, &down_b);
+        tname(m->cfg.layer_prefix, layer_idx, "mlp_hyper_connection.input_mix_weight_up", namebuf, sizeof(namebuf));
+        ok = ok && multishard_get_triple(&m->weights, namebuf, &up_w, &up_sc, &up_b);
+        tname(m->cfg.layer_prefix, layer_idx, "mlp_hyper_connection.block_inject_weight", namebuf, sizeof(namebuf));
+        ok = ok && multishard_get_triple(&m->weights, namebuf, &inj_w, &inj_sc, &inj_b);
+        CHK(ok, "mlp_hyper_connection weights lookup");
+        if (ok) { ok = qwen4_exp_gated_residual_q(m, h, hc_norm_w, down_w, down_sc, down_b, up_w, up_sc, up_b,
+                                                  inj_w, inj_sc, inj_b, &mixed, &residual, &injection);
+                  CHK(ok, "mlp_hyper_connection mix"); }
+    }
 
     mlx_array moe_out = mlx_array_new();
     if (ok) { ok = qwen4_exp_moe_block(m, layer_idx, n_tokens, mixed, &moe_out); CHK(ok, "moe block"); }
