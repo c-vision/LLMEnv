@@ -8,6 +8,7 @@
 #include "llm_mlx_ops.h"
 #include "llm_mlx_gdn_gate_kernel.h"
 #include "llm_mlx_gdn_kernel.h"
+#include "llm_mlx_gdn_decode_fused.h"
 #include "llm_mlx_swiglu_kernel.h"
 
 #include <stdio.h>
@@ -656,8 +657,92 @@ bool gdn_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_
     return ok;
 }
 
+/* DECODE (S=1) a kernel fuso — vedi llm_mlx_gdn_decode_fused.h. 0 = eseguito (out_h/k_cache/v_cache aggiornati);
+ * 1 = non gestito (nessuna modifica: il chiamante prosegue col percorso a op MLX). Prerequisiti: backend packed, attivazioni f32,
+ * Dk=Dv=128, kernel conv 4, B=1, nessun LoRA sulle proiezioni, qkv/z/out_proj Q4 packed. */
+static int qwen4_gdn_decode_fused(LlmMlxModel* m, int layer_idx, mlx_array x, mlx_array* k_cache, mlx_array* v_cache,
+                                  bool has_cache, mlx_array* out_h) {
+    if (!llm_mlx_weights_backend_packed() || m->cfg.bfloat16_input || llm_env_isset("LLM_GDN_KERNEL_OFF")) return 1;
+    const int Hk = m->cfg.linear_num_key_heads, Hv = m->cfg.linear_num_value_heads;
+    const int Dk = m->cfg.linear_key_head_dim, Dv = m->cfg.linear_value_head_dim;
+    const int kk = m->cfg.linear_conv_kernel_dim;
+    const int key_dim = Hk * Dk, value_dim = Hv * Dv, conv_dim = 2 * key_dim + value_dim;
+    if (Dk != 128 || Dv != 128 || kk != 4 || Hk <= 0 || Hv % Hk != 0 || Hv > 128) return 1;
+    if (mlx_array_ndim(x) != 3 || mlx_array_dim(x, 0) != 1 || mlx_array_dim(x, 1) != 1) return 1;
+    static const char* const lora_names[] = { "in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj" };
+    for (int i = 0; i < 5; i++) if (llm_mlx_model_lora_get(m, layer_idx, lora_names[i]) >= 0) return 1;
+    mlx_stream s = m->stream;
+    char namebuf[256];
+    int rc = 1;
+    mlx_array qkv = mlx_array_new(), z = mlx_array_new(), av = mlx_array_new(), bv = mlx_array_new();
+    mlx_array a_w = mlx_array_new(), a_sc = mlx_array_new(), a_b = mlx_array_new(), b_w = mlx_array_new(), b_sc = mlx_array_new(), b_b = mlx_array_new();
+    mlx_array conv_w = mlx_array_new(), cs = mlx_array_new(), st = mlx_array_new(), ea = mlx_array_new(), dtb = mlx_array_new(), nw = mlx_array_new();
+    mlx_array y = mlx_array_new(), st_o = mlx_array_new(), cs_o = mlx_array_new(), y3 = mlx_array_new(), r = mlx_array_new();
+    mlx_array tmp = mlx_array_new();
+    const int gsz = m->cfg.quant_group_size, bts = m->cfg.quant_bits;
+
+    tname(m->cfg.layer_prefix, layer_idx, "linear_attn.in_proj_qkv", namebuf, sizeof(namebuf));
+    if (llm_mlx_linear_packed_model(&m->packed, m->model_dir, namebuf, bts, gsz, x, &qkv, s) != 0) goto out;
+    tname(m->cfg.layer_prefix, layer_idx, "linear_attn.in_proj_z", namebuf, sizeof(namebuf));
+    if (llm_mlx_linear_packed_model(&m->packed, m->model_dir, namebuf, bts, gsz, x, &z, s) != 0) goto out;
+    tname(m->cfg.layer_prefix, layer_idx, "linear_attn.in_proj_a", namebuf, sizeof(namebuf));
+    if (!multishard_get_triple(&m->weights, namebuf, &a_w, &a_sc, &a_b)) goto out;
+    tname(m->cfg.layer_prefix, layer_idx, "linear_attn.in_proj_b", namebuf, sizeof(namebuf));
+    if (!multishard_get_triple(&m->weights, namebuf, &b_w, &b_sc, &b_b)) goto out;
+    if (!quantized_linear_cfg(&av, x, a_w, a_sc, a_b, gsz, bts, m->cfg.quant_mode, s)) goto out;
+    if (!quantized_linear_cfg(&bv, x, b_w, b_sc, b_b, gsz, bts, m->cfg.quant_mode, s)) goto out;
+
+    { mlx_array* cw = llm_mlx_gdn_conv_cached(m, layer_idx);
+      if (cw) { if (mlx_array_set(&tmp, *cw) != 0) goto out; }
+      else { tname(m->cfg.layer_prefix, layer_idx, "linear_attn.conv1d.weight", namebuf, sizeof(namebuf)); if (!multishard_get(&m->weights, namebuf, &tmp)) goto out; }
+      if (mlx_astype(&conv_w, tmp, MLX_FLOAT32, s) != 0) goto out; }
+    { mlx_array* ae = llm_mlx_gdn_alog_exp(m, layer_idx);
+      mlx_array t2 = mlx_array_new();
+      if (ae) { if (mlx_array_set(&t2, *ae) != 0) { mlx_array_free(t2); goto out; } }
+      else { mlx_array al = mlx_array_new(); tname(m->cfg.layer_prefix, layer_idx, "linear_attn.A_log", namebuf, sizeof(namebuf));
+             int ok = multishard_get(&m->weights, namebuf, &al) && mlx_exp(&t2, al, s) == 0; mlx_array_free(al); if (!ok) { mlx_array_free(t2); goto out; } }
+      int ok2 = mlx_astype(&ea, t2, MLX_FLOAT32, s) == 0; mlx_array_free(t2); if (!ok2) goto out; }
+    { mlx_array* dtp = llm_mlx_gdn_dt_bias(m, layer_idx);
+      mlx_array t2 = mlx_array_new();
+      if (dtp) { if (mlx_array_set(&t2, *dtp) != 0) { mlx_array_free(t2); goto out; } }
+      else { tname(m->cfg.layer_prefix, layer_idx, "linear_attn.dt_bias", namebuf, sizeof(namebuf)); if (!multishard_get(&m->weights, namebuf, &t2)) { mlx_array_free(t2); goto out; } }
+      int ok2 = mlx_astype(&dtb, t2, MLX_FLOAT32, s) == 0; mlx_array_free(t2); if (!ok2) goto out; }
+    tname(m->cfg.layer_prefix, layer_idx, "linear_attn.norm.weight", namebuf, sizeof(namebuf));
+    { mlx_array t2 = mlx_array_new(); int ok = multishard_get(&m->weights, namebuf, &t2) && mlx_astype(&nw, t2, MLX_FLOAT32, s) == 0; mlx_array_free(t2); if (!ok) goto out; }
+
+    if (has_cache && v_cache && v_cache->ctx && mlx_array_ndim(*v_cache) > 0 && k_cache && k_cache->ctx && mlx_array_ndim(*k_cache) > 0) {
+        if (mlx_astype(&cs, *v_cache, MLX_FLOAT32, s) != 0 || mlx_astype(&st, *k_cache, MLX_FLOAT32, s) != 0) goto out;
+    } else {
+        int cshape[3] = { 1, 3, conv_dim }, sshape[4] = { 1, Hv, Dv, Dk };
+        if (mlx_zeros(&cs, cshape, 3, MLX_FLOAT32, s) != 0 || mlx_zeros(&st, sshape, 4, MLX_FLOAT32, s) != 0) goto out;
+    }
+    { mlx_array qkv32 = mlx_array_new(), z32 = mlx_array_new(), a32 = mlx_array_new(), b32 = mlx_array_new();
+      int ok = mlx_astype(&qkv32, qkv, MLX_FLOAT32, s) == 0 && mlx_astype(&z32, z, MLX_FLOAT32, s) == 0 &&
+               mlx_astype(&a32, av, MLX_FLOAT32, s) == 0 && mlx_astype(&b32, bv, MLX_FLOAT32, s) == 0 &&
+               llm_mlx_gdn_decode_fused(&y, &st_o, &cs_o, qkv32, z32, a32, b32, cs, conv_w, ea, dtb, st, nw,
+                                        Hk, Hv, key_dim, value_dim, conv_dim, m->cfg.q4_gate_silu ? 1 : 0, m->cfg.rms_norm_eps, s) == 0;
+      mlx_array_free(qkv32); mlx_array_free(z32); mlx_array_free(a32); mlx_array_free(b32);
+      if (!ok) goto out; }
+    { int sh3[3] = { 1, 1, value_dim };
+      if (mlx_reshape(&y3, y, sh3, 3, s) != 0) goto out;
+      tname(m->cfg.layer_prefix, layer_idx, "linear_attn.out_proj", namebuf, sizeof(namebuf));
+      if (llm_mlx_linear_packed_model(&m->packed, m->model_dir, namebuf, bts, gsz, y3, &r, s) != 0) goto out; }
+    if (mlx_array_set(out_h, r) != 0 || mlx_array_set(k_cache, st_o) != 0 || mlx_array_set(v_cache, cs_o) != 0) { rc = -1; goto out; }
+    rc = 0;
+out:
+    mlx_array_free(qkv); mlx_array_free(z); mlx_array_free(av); mlx_array_free(bv);
+    mlx_array_free(a_w); mlx_array_free(a_sc); mlx_array_free(a_b); mlx_array_free(b_w); mlx_array_free(b_sc); mlx_array_free(b_b);
+    mlx_array_free(conv_w); mlx_array_free(cs); mlx_array_free(st); mlx_array_free(ea); mlx_array_free(dtb); mlx_array_free(nw);
+    mlx_array_free(y); mlx_array_free(st_o); mlx_array_free(cs_o); mlx_array_free(y3); mlx_array_free(r); mlx_array_free(tmp);
+    return rc;
+}
+
 bool qwen4_linear_gdn_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n_tokens, mlx_array x,
                                 mlx_array* k_cache, mlx_array* v_cache, bool has_cache, mlx_array* out_h) {
+    if (n_tokens == 1) {   // decode: kernel GDN fuso (un nodo invece di ~45 op MLX), fallback al percorso a op
+        const int fr = qwen4_gdn_decode_fused(m, layer_idx, x, k_cache, v_cache, has_cache, out_h);
+        if (fr == 0) return true;
+    }
     (void)cache_offset;
     /* §13.5: k_cache[layer] = stato ricorrente GDN S [B,Hv,Dv,Dk]; v_cache[layer] =
      * conv_state [B,kk-1,conv_dim]; has_cache[layer] = true se lo stato esiste gia'
