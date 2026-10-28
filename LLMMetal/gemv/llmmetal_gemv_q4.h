@@ -96,6 +96,121 @@ static const char llmmetal_gemv_q4_src[] =
 "    float sum = simd_sum(acc);\n"
 "    if (lane == 0) out[row] = (half)sum;\n"
 "}\n"
+"\n"
+"struct Q4MParams { uint H; uint M; uint group_size; uint rows_per_tg; uint scale_bf16; uint w_stride; uint s_stride; uint x_stride; };\n"
+"kernel void gemv_q4_affine_multi(\n"
+"    const device half*  x       [[buffer(0)]],\n"
+"    const device uchar* Wq      [[buffer(1)]],\n"
+"    const device uchar* scales  [[buffer(2)]],\n"
+"    const device uchar* biases  [[buffer(3)]],\n"
+"    device half*        out     [[buffer(4)]],\n"
+"    const device int*   sel     [[buffer(5)]],\n"
+"    constant Q4MParams& p       [[buffer(6)]],\n"
+"    threadgroup half*   x_shared [[threadgroup(0)]],\n"
+"    uint3 tgid   [[threadgroup_position_in_grid]],\n"
+"    uint3 ltid3  [[thread_position_in_threadgroup]],\n"
+"    uint  lane   [[thread_index_in_simdgroup]],\n"
+"    uint  simd_id [[simdgroup_index_in_threadgroup]])\n"
+"{\n"
+"    const int e = sel[tgid.y];\n"
+"    x = x + (size_t)tgid.y * p.x_stride;\n"
+"    Wq     = (const device uchar*)Wq + (size_t)e * p.w_stride;\n"
+"    scales = scales + (size_t)e * p.s_stride;\n"
+"    biases = biases + (size_t)e * p.s_stride;\n"
+"    out    = out + (size_t)tgid.y * p.M;\n"
+"    const uint ltid = ltid3.x;\n"
+"    const uint tg_threads = p.rows_per_tg * 32;\n"
+"    for (uint i = ltid; i < p.H; i += tg_threads) x_shared[i] = x[i];\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    const uint row = tgid.x * p.rows_per_tg + simd_id;\n"
+"    if (row >= p.M) return;\n"
+"    const uint per_lane = p.H / 32;\n"
+"    const device uchar* row_packed = Wq + (size_t)row * (p.H / 2);\n"
+"    const uint n_groups = p.H / p.group_size;\n"
+"    const device uchar* row_scales = scales + (size_t)row * n_groups * 2;\n"
+"    const device uchar* row_biases = biases + (size_t)row * n_groups * 2;\n"
+"    float acc = 0.0f;\n"
+"    for (uint i = 0; i < per_lane; i++) {\n"
+"        uint h = i * 32 + lane;\n"
+"        uint byte_idx = h >> 1;\n"
+"        uchar b = row_packed[byte_idx];\n"
+"        uint nib = (h & 1u) ? (b >> 4) : (b & 0xF);\n"
+"        uint g = h / p.group_size;\n"
+"        float w = (float)nib * q4_ld_sb(row_scales, g, p.scale_bf16) + q4_ld_sb(row_biases, g, p.scale_bf16);\n"
+"        acc += w * (float)x_shared[h];\n"
+"    }\n"
+"    float sum = simd_sum(acc);\n"
+"    if (lane == 0) out[row] = (half)sum;\n"
+"}\n"
+"struct Q4MoeParams { uint H; uint M; uint group_size; uint rows_per_tg; uint scale_bf16; uint w_stride; uint s_stride; uint x_stride; uint n_shared; uint n_routed; };\n"
+"inline float q4_rowdot(const device uchar* Wq, const device uchar* scales, const device uchar* biases,\n"
+"                       const threadgroup float* xs, uint H, uint group_size, uint bf, uint row, uint lane) {\n"
+"    const uint per_lane = H / 32;\n"
+"    const device uchar* rp = Wq + (size_t)row * (H / 2);\n"
+"    const uint ng = H / group_size;\n"
+"    const device uchar* rs = scales + (size_t)row * ng * 2;\n"
+"    const device uchar* rb = biases + (size_t)row * ng * 2;\n"
+"    float acc = 0.0f;\n"
+"    for (uint i = 0; i < per_lane; i++) {\n"
+"        uint h = i * 32 + lane; uint bi = h >> 1; uchar b = rp[bi];\n"
+"        uint nib = (h & 1u) ? (b >> 4) : (b & 0xF); uint g = h / group_size;\n"
+"        float w = (float)nib * q4_ld_sb(rs, g, bf) + q4_ld_sb(rb, g, bf);\n"
+"        acc += w * xs[h];\n"
+"    }\n"
+"    return simd_sum(acc);\n"
+"}\n"
+"kernel void moe_mid(\n"
+"    const device float* x, const device uchar* Wg, const device uchar* Sg, const device uchar* Bg,\n"
+"    const device uchar* Wu, const device uchar* Su, const device uchar* Bu,\n"
+"    const device uchar* Wsg, const device uchar* Ssg, const device uchar* Bsg,\n"
+"    const device uchar* Wsu, const device uchar* Ssu, const device uchar* Bsu,\n"
+"    device float* act, const device int* sel, constant Q4MoeParams& p,\n"
+"    threadgroup float* xs [[threadgroup(0)]], uint3 tgid [[threadgroup_position_in_grid]],\n"
+"    uint3 ltid3 [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],\n"
+"    uint simd_id [[simdgroup_index_in_threadgroup]])\n"
+"{\n"
+"    const bool sh = (p.n_shared > 0u) && (tgid.y >= p.n_routed);   /* slot >= K = shared expert */\n"
+"    const int e = sh ? 0 : sel[tgid.y];\n"
+"    x = x + (size_t)tgid.y * p.x_stride;\n"
+"    if (sh) { Wg = Wsg; Sg = Ssg; Bg = Bsg; Wu = Wsu; Su = Ssu; Bu = Bsu; }\n"
+"    else { Wg += (size_t)e * p.w_stride; Sg += (size_t)e * p.s_stride; Bg += (size_t)e * p.s_stride;\n"
+"           Wu += (size_t)e * p.w_stride; Su += (size_t)e * p.s_stride; Bu += (size_t)e * p.s_stride; }\n"
+"    const uint ltid = ltid3.x, tt = p.rows_per_tg * 32;\n"
+"    for (uint i = ltid; i < p.H; i += tt) xs[i] = x[i];\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    const uint base = (tgid.x * p.rows_per_tg + simd_id) * 2u;   /* NR=2: row0 come ds4 */\n"
+"    for (uint i = 0; i < 2u; i++) {\n"
+"        const uint row = base + i;\n"
+"        if (row >= p.M) break;\n"
+"        float g = q4_rowdot(Wg,Sg,Bg,xs,p.H,p.group_size,p.scale_bf16,row,lane);\n"
+"        float u = q4_rowdot(Wu,Su,Bu,xs,p.H,p.group_size,p.scale_bf16,row,lane);\n"
+"        if (lane == 0) { float sg = 1.f/(1.f+exp(-g)); act[(size_t)tgid.y * p.M + row] = g*sg*u; }\n"
+"    }\n"
+"}\n"
+"kernel void moe_down(\n"
+"    const device float* act, const device uchar* Wd, const device uchar* Sd, const device uchar* Bd,\n"
+"    const device uchar* Wsd, const device uchar* Ssd, const device uchar* Bsd,\n"
+"    device float* out, const device int* sel, constant Q4MoeParams& p,\n"
+"    threadgroup float* xs [[threadgroup(0)]], uint3 tgid [[threadgroup_position_in_grid]],\n"
+"    uint3 ltid3 [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],\n"
+"    uint simd_id [[simdgroup_index_in_threadgroup]])\n"
+"{\n"
+"    const bool sh = (p.n_shared > 0u) && (tgid.y >= p.n_routed);   /* slot >= K = shared expert */\n"
+"    const int e = sh ? 0 : sel[tgid.y];\n"
+"    act = act + (size_t)tgid.y * p.x_stride;\n"
+"    if (sh) { Wd = Wsd; Sd = Ssd; Bd = Bsd; }\n"
+"    else { Wd += (size_t)e * p.w_stride; Sd += (size_t)e * p.s_stride; Bd += (size_t)e * p.s_stride; }\n"
+"    const uint ltid = ltid3.x, tt = p.rows_per_tg * 32;\n"
+"    for (uint i = ltid; i < p.H; i += tt) xs[i] = act[i];\n"
+"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+"    const uint base2 = (tgid.x * p.rows_per_tg + simd_id) * 2u;\n"
+"    for (uint i = 0; i < 2u; i++) {\n"
+"        const uint row = base2 + i;\n"
+"        if (row >= p.M) break;\n"
+"        float d = q4_rowdot(Wd,Sd,Bd,xs,p.H,p.group_size,p.scale_bf16,row,lane);\n"
+"        if (lane == 0) out[(size_t)tgid.y * p.M + row] = d;\n"
+"    }\n"
+"}\n"
 ;
 
 typedef struct {
@@ -108,6 +223,10 @@ typedef struct {
      * misurava soprattutto newBufferWithBytes+memcpy, non il kernel — non rappresentativo del
      * decode reale, dove i pesi sono fissi e solo x cambia ad ogni step. */
     id<MTLBuffer> w_buf, scale_buf, bias_buf, out_buf, x_buf;
+    id<MTLComputePipelineState> pso_multi;   /* esperto-major: K esperti in UN dispatch */
+    id<MTLComputePipelineState> pso_mid, pso_down;  /* fusi come ds4: mid(silu) e down(accumulo) */
+    id<MTLBuffer> mk_w, mk_s, mk_b, mk_x, mk_out, mk_sel;   /* riusati a ogni token: nessuna alloc per dispatch */
+    size_t mk_lw, mk_ls, mk_lb; uint32_t mk_cap_x, mk_cap_out;
     size_t lead_w, lead_s, lead_b;   /* offset del tensore dentro la view page-aligned (nocopy) */
     uint32_t H, M, group_size;
     uint32_t scale_bf16;   /* 1 = scales/biases BF16 (default 0 = half) */
@@ -115,6 +234,8 @@ typedef struct {
     uint32_t n_experts;
     const uint8_t *p_w, *p_s, *p_b;   /* vista 3D: puntatori base ai tensori interi (mmap) */
 } LlmMetalGemvQ4Ctx;
+
+static id<MTLBuffer> llmmetal_gq4_view(id<MTLDevice> dev, const uint8_t* p, size_t len, size_t* lead);
 
 /* Zero-copy: le view Metal puntano DIRETTAMENTE al mmap delle safetensors (page-aligned);
  * il lead del tensore viene applicato come offset al momento del dispatch. */
@@ -178,6 +299,25 @@ static int llmmetal_gemv_q4_load_weights_wonly_nocopy(LlmMetalGemvQ4Ctx* ctx, co
  * costava ~ms per gemv (migliaia di create per token nel percorso packed MoE). */
 static id<MTLDevice> g_gq4_device = nil; static id<MTLCommandQueue> g_gq4_queue = nil;
 static id<MTLLibrary> g_gq4_library = nil; static id<MTLComputePipelineState> g_gq4_pso = nil;
+static id<MTLComputePipelineState> g_gq4_pso_multi = nil;
+static id<MTLComputePipelineState> g_gq4_pso_mid = nil, g_gq4_pso_down = nil;
+static id<MTLResidencySet> g_gq4_rset = nil;   /* le viste 3D (centinaia di MB) restano residenti: evita la validazione a ogni commit */
+static void llmmetal_gq4_make_resident(id<MTLDevice> dev, id<MTLCommandQueue> q, NSArray* bufs) {
+    if (@available(macOS 15.0, *)) {
+        @synchronized([NSProcessInfo processInfo]) {
+            if (!g_gq4_rset) {
+                MTLResidencySetDescriptor* d = [MTLResidencySetDescriptor new];
+                d.initialCapacity = 1024;
+                NSError* err = nil;
+                g_gq4_rset = [dev newResidencySetWithDescriptor:d error:&err];
+                if (!g_gq4_rset) { fprintf(stderr, "gemv_q4: residency set non disponibile: %s\n", err.localizedDescription.UTF8String); return; }
+                [q addResidencySet:g_gq4_rset];
+            }
+            for (id<MTLBuffer> b in bufs) [g_gq4_rset addAllocation:b];
+            [g_gq4_rset commit];
+        }
+    }
+}
 
 /* Vista 3D [E][M][H]: zero-copy su pesi, scales e biases dell'INTERO tensore; l'esperto si sceglie a run-time
  * con gli offset lead_* (nessuna copia e nessun nuovo contesto per esperto). */
@@ -191,14 +331,25 @@ static int llmmetal_gemv_q4_load_weights_3d_nocopy(LlmMetalGemvQ4Ctx* ctx, const
     ctx->p_w = Wq; ctx->p_s = (const uint8_t*)scales; ctx->p_b = (const uint8_t*)biases;
     ctx->out_buf = [ctx->device newBufferWithLength:(NSUInteger)M * sizeof(uint16_t) options:MTLResourceStorageModeShared];
     ctx->x_buf = [ctx->device newBufferWithLength:(NSUInteger)H * sizeof(uint16_t) options:MTLResourceStorageModeShared];
-    return (ctx->out_buf && ctx->x_buf) ? 0 : -1;
+    /* Buffer del percorso esperto-major: allocati UNA volta (prima erano per-dispatch -> leak/thrash). */
+    const size_t wbytes = (size_t)E * w_stride, sbytes = (size_t)E * s_stride;
+    ctx->mk_w = llmmetal_gq4_view(ctx->device, ctx->p_w, wbytes, &ctx->mk_lw);
+    ctx->mk_s = llmmetal_gq4_view(ctx->device, ctx->p_s, sbytes, &ctx->mk_ls);
+    ctx->mk_b = llmmetal_gq4_view(ctx->device, ctx->p_b, sbytes, &ctx->mk_lb);
+    ctx->mk_cap_x = H + 16u * (H > M ? H : M);
+    ctx->mk_cap_out = 16u * M;
+    ctx->mk_x = [ctx->device newBufferWithLength:(NSUInteger)ctx->mk_cap_x * 4 options:MTLResourceStorageModeShared];
+    ctx->mk_out = [ctx->device newBufferWithLength:(NSUInteger)ctx->mk_cap_out * 4 options:MTLResourceStorageModeShared];
+    ctx->mk_sel = [ctx->device newBufferWithLength:64 * sizeof(int32_t) options:MTLResourceStorageModeShared];
+    if (ctx->mk_w && ctx->mk_s && ctx->mk_b) llmmetal_gq4_make_resident(ctx->device, ctx->queue, @[ctx->mk_w, ctx->mk_s, ctx->mk_b]);
+    return (ctx->out_buf && ctx->x_buf && ctx->mk_w && ctx->mk_s && ctx->mk_b && ctx->mk_x && ctx->mk_out && ctx->mk_sel) ? 0 : -1;
 }
 
 static int llmmetal_gemv_q4_init(LlmMetalGemvQ4Ctx* ctx) {
     ctx->device = nil; ctx->queue = nil; ctx->library = nil; ctx->pso = nil;
     ctx->w_buf = nil; ctx->scale_buf = nil; ctx->bias_buf = nil; ctx->out_buf = nil; ctx->x_buf = nil;
     @synchronized([NSProcessInfo processInfo]) {
-        if (g_gq4_pso) { ctx->device = g_gq4_device; ctx->queue = g_gq4_queue; ctx->library = g_gq4_library; ctx->pso = g_gq4_pso; return 0; }
+        if (g_gq4_pso) { ctx->device = g_gq4_device; ctx->queue = g_gq4_queue; ctx->library = g_gq4_library; ctx->pso = g_gq4_pso; ctx->pso_multi = g_gq4_pso_multi; ctx->pso_mid = g_gq4_pso_mid; ctx->pso_down = g_gq4_pso_down; return 0; }
     }
     ctx->device = MTLCreateSystemDefaultDevice();
     if (!ctx->device) { fprintf(stderr, "llmmetal_gemv_q4_init: nessun device Metal\n"); return -1; }
@@ -210,7 +361,15 @@ static int llmmetal_gemv_q4_init(LlmMetalGemvQ4Ctx* ctx) {
     id<MTLFunction> f = [ctx->library newFunctionWithName:@"gemv_q4_affine"];
     ctx->pso = [ctx->device newComputePipelineStateWithFunction:f error:&err];
     if (!ctx->pso) { fprintf(stderr, "llmmetal_gemv_q4_init: pso err: %s\n", err.localizedDescription.UTF8String); return -1; }
-    @synchronized([NSProcessInfo processInfo]) { g_gq4_device = ctx->device; g_gq4_queue = ctx->queue; g_gq4_library = ctx->library; g_gq4_pso = ctx->pso; }
+    id<MTLFunction> fm = [ctx->library newFunctionWithName:@"gemv_q4_affine_multi"];
+    ctx->pso_multi = fm ? [ctx->device newComputePipelineStateWithFunction:fm error:&err] : nil;
+    if (!ctx->pso_multi) fprintf(stderr, "llmmetal_gemv_q4_init: pso_multi non disponibile\n");
+    id<MTLFunction> fmid = [ctx->library newFunctionWithName:@"moe_mid"];
+    id<MTLFunction> fdown = [ctx->library newFunctionWithName:@"moe_down"];
+    ctx->pso_mid = fmid ? [ctx->device newComputePipelineStateWithFunction:fmid error:&err] : nil;
+    ctx->pso_down = fdown ? [ctx->device newComputePipelineStateWithFunction:fdown error:&err] : nil;
+    if (!ctx->pso_mid || !ctx->pso_down) fprintf(stderr, "llmmetal_gemv_q4_init: pso moe non disponibile\n");
+    @synchronized([NSProcessInfo processInfo]) { g_gq4_device = ctx->device; g_gq4_queue = ctx->queue; g_gq4_library = ctx->library; g_gq4_pso = ctx->pso; g_gq4_pso_multi = ctx->pso_multi; g_gq4_pso_mid = ctx->pso_mid; g_gq4_pso_down = ctx->pso_down; }
     return 0;
 }
 
@@ -290,6 +449,182 @@ static int llmmetal_gemv_q4_run_expert(LlmMetalGemvQ4Ctx* ctx, const uint16_t* x
     id<MTLBuffer> bb = llmmetal_gq4_view(ctx->device, ctx->p_b + (size_t)e * ctx->s_stride, sbytes, &lb);
     if (!wb || !sb || !bb) return -1;
     return llmmetal_gemv_q4_run_bufs(ctx, x, out, wb, sb, bb, lw, ls, lb);
+}
+
+/* Esperto-major come ds4: UN solo dispatch per tutti i K esperti selezionati.
+ * out_all ha K*M half (esperto k -> out_all[k*M]). experts[] sono gli indici nel tensore 3D. */
+static int llmmetal_gemv_q4_run_experts(LlmMetalGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out_all,
+                                        const int32_t* experts, int K, uint32_t x_stride) {
+    if (!ctx || !ctx->pso_multi || K <= 0 || K > 16 || !ctx->mk_w) return -1;
+    const size_t xneed = (size_t)ctx->H + (size_t)x_stride * (size_t)(K - 1);
+    const size_t oneed = (size_t)ctx->M * (size_t)K;
+    if (xneed > ctx->mk_cap_x || oneed > ctx->mk_cap_out) return -1;
+    memcpy(ctx->mk_x.contents, x, xneed * 2);
+    memcpy(ctx->mk_sel.contents, experts, (size_t)K * sizeof(int32_t));
+    id<MTLBuffer> xb = ctx->mk_x, ob = ctx->mk_out, sbuf = ctx->mk_sel;
+    id<MTLBuffer> wb = ctx->mk_w, sb = ctx->mk_s, bb = ctx->mk_b;
+    const size_t lw = ctx->mk_lw, ls = ctx->mk_ls, lb = ctx->mk_lb;
+    struct { uint32_t H, M, group_size, rows_per_tg, scale_bf16; uint32_t w_stride, s_stride; uint32_t x_stride; } params = {
+        ctx->H, ctx->M, ctx->group_size, LLMMETAL_GEMV_ROWS_PER_TG, ctx->scale_bf16,
+        (uint32_t)ctx->w_stride, (uint32_t)ctx->s_stride, x_stride };
+    id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:ctx->pso_multi];
+    [enc setBuffer:xb offset:0 atIndex:0];
+    [enc setBuffer:wb offset:lw atIndex:1];
+    [enc setBuffer:sb offset:ls atIndex:2];
+    [enc setBuffer:bb offset:lb atIndex:3];
+    [enc setBuffer:ob offset:0 atIndex:4];
+    [enc setBuffer:sbuf offset:0 atIndex:5];
+    [enc setBytes:&params length:sizeof(params) atIndex:6];
+    [enc setThreadgroupMemoryLength:(ctx->H * sizeof(uint16_t)) atIndex:0];
+    const uint32_t n_tg = (ctx->M + LLMMETAL_GEMV_ROWS_PER_TG - 1) / LLMMETAL_GEMV_ROWS_PER_TG;
+    [enc dispatchThreadgroups:MTLSizeMake(n_tg, (NSUInteger)K, 1) threadsPerThreadgroup:MTLSizeMake(LLMMETAL_GEMV_ROWS_PER_TG*32,1,1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    memcpy(out_all, ob.contents, (size_t)ctx->M * 2 * (size_t)K);
+    return 0;
+}
+
+/* ds4: mid e down nello STESSO command buffer (un solo commit per layer); i dispatch
+ * dentro un encoder sono eseguiti in ordine, quindi down vede il mid gia' scritto. */
+static int llmmetal_gemv_q4_run_moe(LlmMetalGemvQ4Ctx* cg, LlmMetalGemvQ4Ctx* cu, LlmMetalGemvQ4Ctx* sg, LlmMetalGemvQ4Ctx* su,
+                                    LlmMetalGemvQ4Ctx* cd, LlmMetalGemvQ4Ctx* sd,
+                                    const uint16_t* x, float* act, float* out_all,
+                                    const int32_t* experts, int K, uint32_t x_stride) {
+    if (!cg || !cu || !cd || !cg->pso_mid || !cd->pso_down || K <= 0 || K > 15) return -1;
+    const int NS = (sg && su && sd) ? 1 : 0;
+    { float* xd=(float*)cg->mk_x.contents; for (uint32_t i=0;i<cg->H;i++){ _Float16 h; memcpy(&h,&x[i],2); xd[i]=(float)h; } }
+    memcpy(cg->mk_sel.contents, experts, (size_t)K * sizeof(int32_t));
+    memcpy(cd->mk_sel.contents, experts, (size_t)K * sizeof(int32_t));   /* il down legge il PROPRIO buffer sel */
+    id<MTLCommandBuffer> cb = [cg->queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    struct { uint32_t H, M, group_size, rows_per_tg, scale_bf16; uint32_t w_stride, s_stride, x_stride; uint32_t n_shared, n_routed; } pm = {
+        cg->H, cg->M, cg->group_size, LLMMETAL_GEMV_ROWS_PER_TG, cg->scale_bf16,
+        (uint32_t)cg->w_stride, (uint32_t)cg->s_stride, 0, (uint32_t)NS, (uint32_t)K };
+    [enc setComputePipelineState:cg->pso_mid];
+    [enc setBuffer:cg->mk_x offset:0 atIndex:0];
+    [enc setBuffer:cg->mk_w offset:cg->mk_lw atIndex:1];
+    [enc setBuffer:cg->mk_s offset:cg->mk_ls atIndex:2];
+    [enc setBuffer:cg->mk_b offset:cg->mk_lb atIndex:3];
+    [enc setBuffer:cu->mk_w offset:cu->mk_lw atIndex:4];
+    [enc setBuffer:cu->mk_s offset:cu->mk_ls atIndex:5];
+    [enc setBuffer:cu->mk_b offset:cu->mk_lb atIndex:6];
+    [enc setBuffer:(sg ? sg->w_buf : cg->mk_w) offset:(sg ? sg->lead_w : cg->mk_lw) atIndex:7];
+    [enc setBuffer:(sg ? sg->scale_buf : cg->mk_s) offset:(sg ? sg->lead_s : cg->mk_ls) atIndex:8];
+    [enc setBuffer:(sg ? sg->bias_buf : cg->mk_b) offset:(sg ? sg->lead_b : cg->mk_lb) atIndex:9];
+    [enc setBuffer:(su ? su->w_buf : cg->mk_w) offset:(su ? su->lead_w : cg->mk_lw) atIndex:10];
+    [enc setBuffer:(su ? su->scale_buf : cg->mk_s) offset:(su ? su->lead_s : cg->mk_ls) atIndex:11];
+    [enc setBuffer:(su ? su->bias_buf : cg->mk_b) offset:(su ? su->lead_b : cg->mk_lb) atIndex:12];
+    [enc setBuffer:cg->mk_out offset:0 atIndex:13];
+    [enc setBuffer:cg->mk_sel offset:0 atIndex:14];
+    [enc setBytes:&pm length:sizeof(pm) atIndex:15];
+    [enc setThreadgroupMemoryLength:(cg->H * sizeof(float)) atIndex:0];
+    { const uint32_t n_tg = (cg->M + 2*LLMMETAL_GEMV_ROWS_PER_TG - 1) / (2*LLMMETAL_GEMV_ROWS_PER_TG);
+      [enc dispatchThreadgroups:MTLSizeMake(n_tg, (NSUInteger)(K + NS), 1) threadsPerThreadgroup:MTLSizeMake(LLMMETAL_GEMV_ROWS_PER_TG*32,1,1)]; }
+    /* down: legge cg->mk_out; serve una BARRIERA di memoria fra i due dispatch (Metal non
+     * garantisce l'ordine fra dispatch consecutivi dello stesso encoder). */
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+    struct { uint32_t H, M, group_size, rows_per_tg, scale_bf16; uint32_t w_stride, s_stride, x_stride; uint32_t n_shared, n_routed; } pd = {
+        cd->H, cd->M, cd->group_size, LLMMETAL_GEMV_ROWS_PER_TG, cd->scale_bf16,
+        (uint32_t)cd->w_stride, (uint32_t)cd->s_stride, x_stride, (uint32_t)NS, (uint32_t)K };
+    [enc setComputePipelineState:cd->pso_down];
+    [enc setBuffer:cg->mk_out offset:0 atIndex:0];
+    [enc setBuffer:cd->mk_w offset:cd->mk_lw atIndex:1];
+    [enc setBuffer:cd->mk_s offset:cd->mk_ls atIndex:2];
+    [enc setBuffer:cd->mk_b offset:cd->mk_lb atIndex:3];
+    [enc setBuffer:(sd ? sd->w_buf : cd->mk_w) offset:(sd ? sd->lead_w : cd->mk_lw) atIndex:4];
+    [enc setBuffer:(sd ? sd->scale_buf : cd->mk_s) offset:(sd ? sd->lead_s : cd->mk_ls) atIndex:5];
+    [enc setBuffer:(sd ? sd->bias_buf : cd->mk_b) offset:(sd ? sd->lead_b : cd->mk_lb) atIndex:6];
+    [enc setBuffer:cd->mk_out offset:0 atIndex:7];
+    [enc setBuffer:cd->mk_sel offset:0 atIndex:8];
+    [enc setBytes:&pd length:sizeof(pd) atIndex:9];
+    [enc setThreadgroupMemoryLength:(cd->H * sizeof(float)) atIndex:0];
+    { const uint32_t n_tg = (cd->M + 2*LLMMETAL_GEMV_ROWS_PER_TG - 1) / (2*LLMMETAL_GEMV_ROWS_PER_TG);
+      [enc dispatchThreadgroups:MTLSizeMake(n_tg, (NSUInteger)(K + NS), 1) threadsPerThreadgroup:MTLSizeMake(LLMMETAL_GEMV_ROWS_PER_TG*32,1,1)]; }
+    [enc endEncoding];
+    [cb commit]; [cb waitUntilCompleted];
+    if (cb.error) { fprintf(stderr, "[moe] cb error: %s\n", cb.error.localizedDescription.UTF8String); return -1; }
+    memcpy(act, cg->mk_out.contents, sizeof(float) * (size_t)cg->M * (size_t)(K + NS));
+    memcpy(out_all, cd->mk_out.contents, sizeof(float) * (size_t)cd->M * (size_t)(K + NS));
+    return 0;
+}
+
+/* FUSIONE stile ds4: mid (gate+up+silu) e down (accumulo pesato) in DUE dispatch per layer.
+ * act_out ha K*F half; out_all ha K*M half. wts sono i pesi del router (f32). */
+static int llmmetal_gemv_q4_run_moe_mid(LlmMetalGemvQ4Ctx* cg, LlmMetalGemvQ4Ctx* cu,
+                                        LlmMetalGemvQ4Ctx* sg, LlmMetalGemvQ4Ctx* su,
+                                        const uint16_t* x, float* act_out,
+                                        const int32_t* experts, int K) {
+    if (!cg || !cu || !cg->pso_mid || K <= 0 || K > 15) return -1;
+    const int NS = sg && su ? 1 : 0;
+    { float* xd=(float*)cg->mk_x.contents; for (uint32_t i=0;i<cg->H;i++){ _Float16 h; memcpy(&h,&x[i],2); xd[i]=(float)h; } }
+    memcpy(cg->mk_sel.contents, experts, (size_t)K * sizeof(int32_t));
+    struct { uint32_t H, M, group_size, rows_per_tg, scale_bf16; uint32_t w_stride, s_stride, x_stride; uint32_t n_shared, n_routed; } p = {
+        cg->H, cg->M, cg->group_size, LLMMETAL_GEMV_ROWS_PER_TG, cg->scale_bf16,
+        (uint32_t)cg->w_stride, (uint32_t)cg->s_stride, 0, (uint32_t)NS, (uint32_t)K };
+    id<MTLCommandBuffer> cb = [cg->queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:cg->pso_mid];
+    [enc setBuffer:cg->mk_x offset:0 atIndex:0];
+    [enc setBuffer:cg->mk_w offset:cg->mk_lw atIndex:1];
+    [enc setBuffer:cg->mk_s offset:cg->mk_ls atIndex:2];
+    [enc setBuffer:cg->mk_b offset:cg->mk_lb atIndex:3];
+    [enc setBuffer:cu->mk_w offset:cu->mk_lw atIndex:4];
+    [enc setBuffer:cu->mk_s offset:cu->mk_ls atIndex:5];
+    [enc setBuffer:cu->mk_b offset:cu->mk_lb atIndex:6];
+    [enc setBuffer:(sg ? sg->w_buf : cg->mk_w) offset:(sg ? sg->lead_w : cg->mk_lw) atIndex:7];
+    [enc setBuffer:(sg ? sg->scale_buf : cg->mk_s) offset:(sg ? sg->lead_s : cg->mk_ls) atIndex:8];
+    [enc setBuffer:(sg ? sg->bias_buf : cg->mk_b) offset:(sg ? sg->lead_b : cg->mk_lb) atIndex:9];
+    [enc setBuffer:(su ? su->w_buf : cg->mk_w) offset:(su ? su->lead_w : cg->mk_lw) atIndex:10];
+    [enc setBuffer:(su ? su->scale_buf : cg->mk_s) offset:(su ? su->lead_s : cg->mk_ls) atIndex:11];
+    [enc setBuffer:(su ? su->bias_buf : cg->mk_b) offset:(su ? su->lead_b : cg->mk_lb) atIndex:12];
+    [enc setBuffer:cg->mk_out offset:0 atIndex:13];
+    [enc setBuffer:cg->mk_sel offset:0 atIndex:14];
+    [enc setBytes:&p length:sizeof(p) atIndex:15];
+    [enc setThreadgroupMemoryLength:(cg->H * sizeof(float)) atIndex:0];
+    const uint32_t n_tg = (cg->M + 2*LLMMETAL_GEMV_ROWS_PER_TG - 1) / (2*LLMMETAL_GEMV_ROWS_PER_TG);
+    [enc dispatchThreadgroups:MTLSizeMake(n_tg, (NSUInteger)(K + NS), 1) threadsPerThreadgroup:MTLSizeMake(LLMMETAL_GEMV_ROWS_PER_TG*32,1,1)];
+    [enc endEncoding];
+    [cb commit]; [cb waitUntilCompleted];
+    if (cb.error) { fprintf(stderr, "[moe-mid] cb error: %s\n", cb.error.localizedDescription.UTF8String); return -1; }
+    memcpy(act_out, cg->mk_out.contents, sizeof(float) * (size_t)cg->M * (size_t)(K + NS));
+    return 0;
+}
+
+static int llmmetal_gemv_q4_run_moe_down(LlmMetalGemvQ4Ctx* cd, LlmMetalGemvQ4Ctx* sd,
+                                         const float* act,
+                                         float* out_all, const int32_t* experts, int K, uint32_t x_stride) {
+    if (!cd || !cd->pso_down || K <= 0 || K > 15) return -1;
+    const int NS = sd ? 1 : 0;
+    const size_t xneed = (size_t)cd->H + (size_t)x_stride * (size_t)(K + NS - 1);   /* K routed + eventuale slot shared */
+    if (xneed > cd->mk_cap_x) return -1;
+    memcpy(cd->mk_x.contents, act, xneed * sizeof(float));
+    memcpy(cd->mk_sel.contents, experts, (size_t)K * sizeof(int32_t));
+    struct { uint32_t H, M, group_size, rows_per_tg, scale_bf16; uint32_t w_stride, s_stride, x_stride; uint32_t n_shared, n_routed; } p = {
+        cd->H, cd->M, cd->group_size, LLMMETAL_GEMV_ROWS_PER_TG, cd->scale_bf16,
+        (uint32_t)cd->w_stride, (uint32_t)cd->s_stride, x_stride, (uint32_t)NS, (uint32_t)K };
+    id<MTLCommandBuffer> cb = [cd->queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:cd->pso_down];
+    [enc setBuffer:cd->mk_x offset:0 atIndex:0];
+    [enc setBuffer:cd->mk_w offset:cd->mk_lw atIndex:1];
+    [enc setBuffer:cd->mk_s offset:cd->mk_ls atIndex:2];
+    [enc setBuffer:cd->mk_b offset:cd->mk_lb atIndex:3];
+    [enc setBuffer:(sd ? sd->w_buf : cd->mk_w) offset:(sd ? sd->lead_w : cd->mk_lw) atIndex:4];
+    [enc setBuffer:(sd ? sd->scale_buf : cd->mk_s) offset:(sd ? sd->lead_s : cd->mk_ls) atIndex:5];
+    [enc setBuffer:(sd ? sd->bias_buf : cd->mk_b) offset:(sd ? sd->lead_b : cd->mk_lb) atIndex:6];
+    [enc setBuffer:cd->mk_out offset:0 atIndex:7];
+    [enc setBuffer:cd->mk_sel offset:0 atIndex:8];
+    [enc setBytes:&p length:sizeof(p) atIndex:9];
+    [enc setThreadgroupMemoryLength:(cd->H * sizeof(float)) atIndex:0];
+    const uint32_t n_tg = (cd->M + 2*LLMMETAL_GEMV_ROWS_PER_TG - 1) / (2*LLMMETAL_GEMV_ROWS_PER_TG);
+    [enc dispatchThreadgroups:MTLSizeMake(n_tg, (NSUInteger)(K + NS), 1) threadsPerThreadgroup:MTLSizeMake(LLMMETAL_GEMV_ROWS_PER_TG*32,1,1)];
+    [enc endEncoding];
+    [cb commit]; [cb waitUntilCompleted];
+    memcpy(out_all, cd->mk_out.contents, sizeof(float) * (size_t)cd->M * (size_t)(K + NS));
+    return 0;
 }
 
 /* Batch: N gemv (anche su contesti/tensori diversi) in UN solo command buffer. expert < 0 = lineare 2D (viste del contesto).

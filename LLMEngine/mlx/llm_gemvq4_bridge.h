@@ -47,5 +47,15 @@ int llm_gemvq4_run_expert(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out, u
 /* Batch di gemv in un solo command buffer. expert < 0 = lineare 2D del contesto. */
 typedef struct { LlmGemvQ4Ctx* ctx; int expert; const uint16_t* x; uint16_t* out; } LlmGemvQ4Job;
 int llm_gemvq4_run_batch(const LlmGemvQ4Job* jobs, int n);
+/* Esperto-major (come ds4): K esperti selezionati in UN solo dispatch. out_all = K*rows. */
+/* FUSI stile ds4: mid = gate+up+silu, down = proiezione*peso router. Due dispatch per layer. */
+int llm_gemvq4_run_moe_mid(LlmGemvQ4Ctx* cg, LlmGemvQ4Ctx* cu, LlmGemvQ4Ctx* sg, LlmGemvQ4Ctx* su,
+                           const uint16_t* x, float* act, const int32_t* experts, int K);
+int llm_gemvq4_run_moe(LlmGemvQ4Ctx* cg, LlmGemvQ4Ctx* cu, LlmGemvQ4Ctx* sg, LlmGemvQ4Ctx* su,
+                       LlmGemvQ4Ctx* cd, LlmGemvQ4Ctx* sd, const uint16_t* x, float* act, float* out,
+                       const int32_t* experts, int K, uint32_t x_stride);
+int llm_gemvq4_run_moe_down(LlmGemvQ4Ctx* cd, LlmGemvQ4Ctx* sd, const float* act,
+                            float* out, const int32_t* experts, int K, uint32_t x_stride);
+int llm_gemvq4_run_experts(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out_all, const int32_t* experts, int K, uint32_t x_stride);
 
 #endif /* LLM_GEMVQ4_BRIDGE_H */

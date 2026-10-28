@@ -8,6 +8,7 @@
 #include "llm_mlx_weights_backend.h"
 #include "llm_mlx_wpacked.h"
 #include "llm_mlx_linear_packed.h"
+int llm_mlx_qp_name_get(const char* name, int* group, int* bits);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,11 +78,13 @@ static Q4mpEnt* q4mp_ent3(const LlmMlxModel* m, const char* base, int group) {
     Q4mpEnt* e = q4mp_ent(m, base); if (!e || e->st3 < 0) return NULL;
     if (e->st3 == 1) return e;
     e->st3 = -1;
-    if (llm_mlx_packed_open3d(e->path, base, 4, group, &e->w3) != 0) return NULL;
+    { int qg=0,qb=0; if (llm_mlx_qp_name_get(base,&qg,&qb) && qb>0) {
+        if (llm_mlx_packed_open3d(e->path, base, qb, qg>0?qg:0, &e->w3) != 0) return NULL; }
+      else if (llm_mlx_packed_open3d(e->path, base, 4, 0, &e->w3) != 0) return NULL; }
     e->g3 = llm_gemvq4_create();
     if (!e->g3 || !e->w3.biases ||
         llm_gemvq4_load_weights_3d_nocopy(e->g3, (const uint8_t*)e->w3.w, e->w3.scales, e->w3.biases, e->w3.cols, e->w3.rows,
-                                          (uint32_t)group, e->w3.experts, e->w3.w_stride, e->w3.s_stride) != 0) {
+                                          (uint32_t)e->w3.group, e->w3.experts, e->w3.w_stride, e->w3.s_stride) != 0) {
         if (e->g3) { llm_gemvq4_destroy(e->g3); e->g3 = NULL; }
         llm_mlx_packed_close3d(&e->w3); return NULL;
     }
@@ -93,7 +96,11 @@ static Q4mpEnt* q4mp_entl(const LlmMlxModel* m, const char* base, int group) {
     Q4mpEnt* e = q4mp_ent(m, base); if (!e || e->stl < 0) return NULL;
     if (e->stl == 1) return e;
     e->stl = -1;
-    if (llm_mlx_linear_packed_open(e->path, base, 4, group, &e->lin) != 0) return NULL;
+    { int qg=0,qb=0; int r = 0;
+      if (llm_mlx_qp_name_get(base,&qg,&qb) && qb>0) r = llm_mlx_linear_packed_open(e->path, base, qb, qg>0?qg:0, &e->lin);
+      else r = llm_mlx_linear_packed_open(e->path, base, 4, 0, &e->lin);
+      if (r != 0) return NULL; }
+    if (e->lin.g) llm_gemvq4_set_scale_bf16(e->lin.g, e->lin.w.scale_bf16);
     e->stl = 1; return e;
 }
 /* Router e shared_expert_gate sono Q8/gs64 (override per-modulo nel config): il kernel packed e' solo Q4. Li dequantizzo UNA
@@ -193,7 +200,7 @@ static int qwen4_exp_moe_packed_try_locked(mlx_array* out, LlmMlxModel* m, int l
     float* gates = (float*)malloc((size_t)NE * 4 * (size_t)nrow0);
     float* sgate = (float*)malloc(sizeof(float) * (size_t)nrow0);
     uint16_t *xh16 = (uint16_t*)malloc((size_t)E*2), *oG = (uint16_t*)malloc((size_t)(K+1)*F*2), *oU = (uint16_t*)malloc((size_t)(K+1)*F*2);
-    uint16_t *oA = (uint16_t*)malloc((size_t)(K+1)*F*2), *oD = (uint16_t*)malloc((size_t)(K+1)*E*2);
+    float *oA = (float*)malloc(sizeof(float)*(size_t)(K+1)*F), *oD = (float*)malloc(sizeof(float)*(size_t)(K+1)*E);
     double* acc = (double*)calloc((size_t)E, sizeof(double));
     float* obuf = (float*)malloc((size_t)E*4*(size_t)nrow0);
     char* used = (char*)malloc((size_t)NE);
@@ -202,7 +209,41 @@ static int qwen4_exp_moe_packed_try_locked(mlx_array* out, LlmMlxModel* m, int l
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, nrow0, NE, E, 1.0f, xd, E, RW, E, 0.0f, gates, NE);
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, nrow0, 1, E, 1.0f, xd, E, GW, E, 0.0f, sgate, 1);
     }
-    for (int r = 0; r < nrow0 && !rc; r++) {
+    /* DECODE (1 riga): esperto-major come ds4 — gate, up e down in UN dispatch ciascuno (K threadgroup
+     * in parallelo), niente loop CPU per esperto e niente 30 dispatch seriali. */
+    if (!rc && nrow0 == 1) {
+        const float* gr = gates;
+        double mx = -1e300; for (int i = 0; i < NE; i++) if (gr[i] > mx) mx = gr[i];
+        double sum = 0; for (int i = 0; i < NE; i++) sum += exp((double)gr[i] - mx);
+        double inv = sum > 0 ? 1.0/sum : 0.0;
+        memset(used, 0, (size_t)NE);
+        int sel[16]; double wts[16]; double wsum = 0;
+        for (int k = 0; k < K; k++) {
+            int bi = -1; double bp = -1;
+            for (int e = 0; e < NE; e++) { if (used[e]) continue; double pr = exp((double)gr[e] - mx) * inv; if (pr > bp) { bp = pr; bi = e; } }
+            if (bi < 0) { rc = 1; break; }
+            used[bi] = 1; sel[k] = bi; wts[k] = bp; wsum += bp;
+        }
+        if (!rc && wsum > 0) for (int k = 0; k < K; k++) wts[k] /= wsum;
+        int32_t sel32[16]; for (int k = 0; k < K; k++) sel32[k] = sel[k];
+        for (int i = 0; i < E; i++) { _Float16 h = (_Float16)xd[i]; memcpy(&xh16[i], &h, 2); }
+        /* FUSO come ds4: lo SHARED e' lo slot n_slots dello stesso kernel (mid e down), quindi
+         * per layer restano DUE dispatch (prima erano 4: routed mid/down + shared mid/down). */
+        float wtsf[17]; for (int k = 0; k < K; k++) wtsf[k] = (float)wts[k];
+        wtsf[K] = 1.f/(1.f+expf(-sgate[0]));   /* gate dello shared expert (sigmoid) */
+        sel32[K] = 0;
+        if (!rc) { rc = llm_gemvq4_run_moe_mid(Eg->g3, Eu->g3, Sg->lin.g, Su->lin.g, xh16, oA, sel32, K);
+                   if (rc) fprintf(stderr, "[moe-fused] mid rc=%d\n", rc); }
+        if (!rc) { rc = llm_gemvq4_run_moe_down(Ed->g3, Sd->lin.g, oA, oD, sel32, K, (uint32_t)F);
+                   if (rc) fprintf(stderr, "[moe-fused] down rc=%d\n", rc); }
+        if (!rc) {
+            memset(acc, 0, (size_t)E*sizeof(double));
+            for (int k = 0; k <= K; k++)   /* combine con peso (shared = slot K), come ds4 */
+                for (int d = 0; d < E; d++) acc[d] += (double)wtsf[k] * (double)oD[(size_t)k*E + d];
+            for (int d = 0; d < E; d++) obuf[d] = (float)acc[d];
+        }
+    }
+    for (int r = 0; r < nrow0 && !rc && nrow0 > 1; r++) {
         const float* gr = gates + (size_t)r*NE;
         const float* xr = xd + (size_t)r*E;
         double mx = -1e300; for (int i = 0; i < NE; i++) if (gr[i] > mx) mx = gr[i];
@@ -218,35 +259,18 @@ static int qwen4_exp_moe_packed_try_locked(mlx_array* out, LlmMlxModel* m, int l
         }
         if (rc) break;
         if (wsum > 0) for (int k = 0; k < K; k++) wts[k] /= wsum;
-        /* 2 command buffer per riga e layer (prima ~33): [gate+up dei K esperti + shared] poi [down dei K + shared]. */
-        if (E > 8192 || F > 8192) { rc = 1; break; }
+        /* prefill: stessi kernel fusi del decode, una riga per volta (2 dispatch per riga). */
+        int32_t sel32[16]; for (int k = 0; k < K; k++) sel32[k] = sel[k];
+        float wtsf[17]; for (int k = 0; k < K; k++) wtsf[k] = (float)wts[k];
+        wtsf[K] = 1.f/(1.f+expf(-sgate[r])); sel32[K] = 0;
         for (int i = 0; i < E; i++) { _Float16 h = (_Float16)xr[i]; memcpy(&xh16[i], &h, 2); }
-        LlmGemvQ4Job jb[34]; int nj = 0;
-        for (int k = 0; k < K; k++) {
-            jb[nj++] = (LlmGemvQ4Job){ Eg->g3, sel[k], xh16, oG + (size_t)k*F };
-            jb[nj++] = (LlmGemvQ4Job){ Eu->g3, sel[k], xh16, oU + (size_t)k*F };
-        }
-        jb[nj++] = (LlmGemvQ4Job){ Sg->lin.g, -1, xh16, oG + (size_t)K*F };
-        jb[nj++] = (LlmGemvQ4Job){ Su->lin.g, -1, xh16, oU + (size_t)K*F };
-        if (llm_gemvq4_run_batch(jb, nj) != 0) { rc = 1; break; }
-        for (int k = 0; k <= K; k++)
-            for (int f = 0; f < F; f++) {
-                _Float16 a, b; memcpy(&a, &oG[(size_t)k*F + f], 2); memcpy(&b, &oU[(size_t)k*F + f], 2);
-                _Float16 h = (_Float16)(q4mp_silu((float)a) * (float)b); memcpy(&oA[(size_t)k*F + f], &h, 2);
-            }
-        nj = 0;
-        for (int k = 0; k < K; k++) jb[nj++] = (LlmGemvQ4Job){ Ed->g3, sel[k], oA + (size_t)k*F, oD + (size_t)k*E };
-        jb[nj++] = (LlmGemvQ4Job){ Sd->lin.g, -1, oA + (size_t)K*F, oD + (size_t)K*E };
-        if (llm_gemvq4_run_batch(jb, nj) != 0) { rc = 1; break; }
+        if (!rc) { rc = llm_gemvq4_run_moe(Eg->g3, Eu->g3, Sg->lin.g, Su->lin.g, Ed->g3, Sd->lin.g,
+                                           xh16, oA, oD, sel32, K, (uint32_t)F);
+                   if (rc) fprintf(stderr,"[moe-row] r=%d rc=%d\n", r, rc); }
         memset(acc, 0, (size_t)E*sizeof(double));
-        for (int k = 0; k < K; k++)
-            for (int d = 0; d < E; d++) { _Float16 h; memcpy(&h, &oD[(size_t)k*E + d], 2); acc[d] += wts[k] * (double)(float)h; }
-        const float sw = sgate[r];
-        const float sv = sw >= 0 ? 1.f/(1.f+expf(-sw)) : expf(sw)/(1.f+expf(sw));
-        for (int d = 0; d < E; d++) {
-            _Float16 h; memcpy(&h, &oD[(size_t)K*E + d], 2);
-            obuf[(size_t)r*E + d] = (float)(acc[d] + (double)sv * (double)(float)h);
-        }
+        for (int k = 0; k <= K; k++)   /* combine con peso (shared = slot K) */
+            for (int d = 0; d < E; d++) acc[d] += (double)wtsf[k] * (double)oD[(size_t)k*E + d];
+        for (int d = 0; d < E; d++) obuf[(size_t)r*E + d] = (float)acc[d];
     }
     if (!rc) {
         int sh[2] = {nrow0, E};

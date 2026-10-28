@@ -56,7 +56,7 @@ static inline const LlmMlxPackedW* llm_mlx_packed_reg_get(LlmMlxPackedReg* r, co
     char path[1600]; snprintf(path, sizeof path, "%s/%s", model_dir, sh->valuestring);
     LlmMlxPackedEntry* e = (LlmMlxPackedEntry*)calloc(1, sizeof *e);
     if (!e) { cJSON_Delete(doc); return NULL; }
-    if (llm_mlx_packed_open(path, base, bits, group, &e->w) != 0) { free(e); cJSON_Delete(doc); return NULL; }
+    if (llm_mlx_packed_open(path, base, bits, 0, &e->w) != 0)   /* gruppo: dal file */ { free(e); cJSON_Delete(doc); return NULL; }
     snprintf(e->base, sizeof e->base, "%s", base);
     snprintf(e->shard, sizeof e->shard, "%s", sh->valuestring);
     r->e[r->n++] = e;

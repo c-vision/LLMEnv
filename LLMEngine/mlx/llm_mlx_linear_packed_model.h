@@ -10,6 +10,7 @@
 #include "llm_mlx_weights_backend.h"
 #include "llm_mlx_wpacked_registry.h"
 #include "llm_mlx_linear_packed.h"
+int llm_mlx_qp_name_get(const char* name, int* group, int* bits);
 
 typedef struct { LlmMlxPackedReg reg; } LlmMlxPackedCtx;
 
@@ -22,6 +23,7 @@ static inline int llm_mlx_linear_packed_model(LlmMlxPackedCtx* c, const char* mo
                                               mlx_array x, mlx_array* out, mlx_stream s) {
     if (!c || !model_dir || !tensor_base || !out) return -1;
     if (!llm_mlx_weights_backend_packed()) return 1;
+    { int qg=0,qb=0; if (llm_mlx_qp_name_get(tensor_base,&qg,&qb) && qb>0) { bits=qb; if(qg>0) group=qg; } }
     const LlmMlxPackedW* w = llm_mlx_packed_reg_get(&c->reg, model_dir, tensor_base, bits, group);
     if (!w) return 1;
     if (w->bits != 4) return 1;   /* v1: solo Q4 */
@@ -36,6 +38,7 @@ static inline int llm_mlx_linear_packed_model(LlmMlxPackedCtx* c, const char* mo
     /* prefill: x 3D [B,S,in] -> 2D [B*S,in]; l'uscita viene riportata a [B,S,out]. */
     const int nd = mlx_array_ndim(x);
     mlx_array xr = mlx_array_new(), orr = mlx_array_new();
+    llm_gemvq4_set_scale_bf16(L.g, w->scale_bf16);
     int rc = -1;
     if (nd == 2) rc = llm_mlx_linear_packed_run(&L, x, out, s);
     else if (nd == 3) {
@@ -51,4 +54,5 @@ static inline int llm_mlx_linear_packed_model(LlmMlxPackedCtx* c, const char* mo
     return rc == 0 ? 0 : -1;
 }
 
+int llm_mlx_qp_name_get(const char* name, int* group, int* bits);
 #endif

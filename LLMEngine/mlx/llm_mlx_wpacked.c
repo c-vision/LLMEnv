@@ -77,7 +77,7 @@ static int locate(const char* hint_path, const char* name, Loc* L) {
 static void loc_release(Loc* L) { if (L && L->owns_map && L->map) { munmap(L->map, L->map_bytes); L->map = NULL; } }
 
 int llm_mlx_packed_open(const char* path, const char* base, int bits, int group, LlmMlxPackedW* out) {
-    if (!path || !base || !out || bits <= 0 || group <= 0) return -1;
+    if (!path || !base || !out || bits <= 0) return -1;   /* group<=0 = derivalo dal file */
     memset(out, 0, sizeof *out);
     char nm[1024];
     Loc W, S, B; memset(&W, 0, sizeof W); memset(&S, 0, sizeof S); memset(&B, 0, sizeof B);
@@ -91,7 +91,8 @@ int llm_mlx_packed_open(const char* path, const char* base, int bits, int group,
     uint64_t rows = W.ndim >= 2 ? W.shape[0] : 0, wcols = W.ndim >= 2 ? W.shape[1] : 0;
     uint64_t scols = S.ndim >= 2 ? S.shape[1] : 0;
     uint64_t cols = wcols * 32ull / (uint64_t)bits;
-    if (rows == 0 || wcols == 0 || scols != cols / (uint64_t)group) { loc_release(&W); loc_release(&S); if (has_b) loc_release(&B); return -1; }
+    if (rows == 0 || wcols == 0 || scols == 0 || cols % scols != 0) { loc_release(&W); loc_release(&S); if (has_b) loc_release(&B); return -1; }
+    group = (int)(cols / scols);   /* il gruppo varia per tensore: derivato dal file */
     out->w = (const uint32_t*)W.ptr;
     out->scales = (const uint16_t*)S.ptr;
     out->biases = has_b ? (const uint16_t*)B.ptr : NULL;
@@ -127,7 +128,7 @@ int llm_mlx_packed_open3d(const char* path, const char* base, int bits, int grou
     uint64_t E = W.ndim >= 3 ? W.shape[0] : 0, rows = W.ndim >= 3 ? W.shape[1] : 0, wcols = W.ndim >= 3 ? W.shape[2] : 0;
     uint64_t scols = S.ndim >= 3 ? S.shape[2] : 0;
     uint64_t cols = wcols * 32ull / (uint64_t)bits;
-    if (E == 0 || rows == 0 || wcols == 0 || scols != cols / (uint64_t)group) {
+    if (E == 0 || rows == 0 || wcols == 0 || scols == 0 || cols % scols != 0) {
         fprintf(stderr, "[wpacked3d] %s: forma non valida (E=%llu rows=%llu wcols=%llu scols=%llu group=%d)\n", base,
                 (unsigned long long)E, (unsigned long long)rows, (unsigned long long)wcols, (unsigned long long)scols, group);
         loc_release(&W); loc_release(&S); if (has_b) loc_release(&B);
@@ -137,7 +138,8 @@ int llm_mlx_packed_open3d(const char* path, const char* base, int bits, int grou
     out->scales = (const uint16_t*)S.ptr;
     out->biases = has_b ? (const uint16_t*)B.ptr : NULL;
     out->experts = (uint32_t)E; out->rows = (uint32_t)rows; out->cols = (uint32_t)cols;
-    out->bits = bits; out->group = group; out->scale_bf16 = S.bf16;
+    out->bits = bits; out->group = (int)(cols / scols);   /* gruppo per-tensore dal file */
+    out->scale_bf16 = S.bf16;
     out->w_stride = (size_t)rows * wcols * 4u; out->s_stride = (size_t)rows * scols * 2u;
     out->map = W.map; out->map_bytes = W.map_bytes;
     out->map_s = S.map; out->map_s_bytes = S.map_bytes;

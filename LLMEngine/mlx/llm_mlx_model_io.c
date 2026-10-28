@@ -153,8 +153,6 @@ static void llm_mlx_packed_release_wired(LlmMlxModel* m) {
         }
     }
     static const char* base_suffix[] = {
-        "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
-        "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.out_proj",
         /* mlp.gate e mlp.shared_expert_gate: Q8/gs64, non packabili col kernel Q4 -> restano nel map MLX */
         "mlp.switch_mlp.gate_proj", "mlp.switch_mlp.up_proj", "mlp.switch_mlp.down_proj",
         "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj",

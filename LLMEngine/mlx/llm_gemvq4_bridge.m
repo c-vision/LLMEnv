@@ -62,6 +62,29 @@ int llm_gemvq4_run_expert(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out, u
     return llmmetal_gemv_q4_run_expert(&ctx->inner, x, out, expert);
 }
 
+int llm_gemvq4_run_moe_mid(LlmGemvQ4Ctx* cg, LlmGemvQ4Ctx* cu, LlmGemvQ4Ctx* sg, LlmGemvQ4Ctx* su,
+                           const uint16_t* x, float* act, const int32_t* experts, int K) {
+    if (!cg || !cu) return -1;
+    return llmmetal_gemv_q4_run_moe_mid(&cg->inner, &cu->inner, sg ? &sg->inner : NULL, su ? &su->inner : NULL,
+                                        x, act, experts, K);
+}
+int llm_gemvq4_run_moe(LlmGemvQ4Ctx* cg, LlmGemvQ4Ctx* cu, LlmGemvQ4Ctx* sg, LlmGemvQ4Ctx* su,
+                       LlmGemvQ4Ctx* cd, LlmGemvQ4Ctx* sd, const uint16_t* x, float* act, float* out,
+                       const int32_t* experts, int K, uint32_t x_stride) {
+    if (!cg || !cu || !cd) return -1;
+    return llmmetal_gemv_q4_run_moe(&cg->inner, &cu->inner, sg?&sg->inner:NULL, su?&su->inner:NULL,
+                                    &cd->inner, sd?&sd->inner:NULL, x, act, out, experts, K, x_stride);
+}
+int llm_gemvq4_run_moe_down(LlmGemvQ4Ctx* cd, LlmGemvQ4Ctx* sd, const float* act,
+                            float* out, const int32_t* experts, int K, uint32_t x_stride) {
+    if (!cd) return -1;
+    return llmmetal_gemv_q4_run_moe_down(&cd->inner, sd ? &sd->inner : NULL, act, out, experts, K, x_stride);
+}
+int llm_gemvq4_run_experts(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out_all, const int32_t* experts, int K, uint32_t x_stride) {
+    if (!ctx || !experts || K <= 0) return -1;
+    return llmmetal_gemv_q4_run_experts(&ctx->inner, x, out_all, experts, K, x_stride);
+}
+
 int llm_gemvq4_run_batch(const LlmGemvQ4Job* jobs, int n) {
     if (n <= 0) return 0;
     if (n > 64 || !jobs) return -1;
