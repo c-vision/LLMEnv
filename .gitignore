@@ -36,3 +36,11 @@ backups/tools/
 
 # backup locali di codice ritirato: NON tracciati (la storia git conserva le versioni)
 /backups/
+
+# Non fanno parte della libreria: Python (progetto Python-free), dati prodotti da script Python,
+# benchmark di terze parti, tabelle di lavoro interne
+*.py
+*.ipynb
+*.npz
+/tools/BenchChronos/
+/tools/llm_env_audit.tsv

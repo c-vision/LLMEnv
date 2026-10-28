@@ -1,9 +1,0 @@
-.DS_Store
-*.xcuserstate
-xcuserdata/
-DerivedData/
-build/
-.swiftpm/
-dist/
-__pycache__/
-*.pyc

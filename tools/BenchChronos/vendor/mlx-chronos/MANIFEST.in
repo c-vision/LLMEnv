@@ -1,2 +1,0 @@
-# The native app is built separately, not redistributed inside the CLI sdist.
-prune apps
