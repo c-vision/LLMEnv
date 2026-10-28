@@ -13,7 +13,7 @@ e oracoli di parità. **Rimossa dal motore** perché non serve in produzione:
 ## Contenuto
 - `src/` — `LLMEngine/mlx/qwen4_native/*` (16 header: gguf, layer, trunk, gdn/attn/indexer/router/hc/ple/moe kernel, modello)
 - `tests/` — `LLMEngine/mlx/tests/llm_qwen4_native_*.c` (17)
-- `oracoli/` — `LLMEngine/tools/oracoli/qwen4_native_*.c` (15 sorgenti; i binari compilati NON sono inclusi)
+- `parity_oracles/` — erano `LLMEngine/tools/oracoli/qwen4_native_*.c` (15 sorgenti; NON erano tracciati da git perche' `.gitignore` ignora le cartelle `oracoli/`; qui rinominata per versionarli; binari esclusi)
 
 Ultimo stato: commit `26db008` (WIP di un'altra AI, 2026-10-28: rilevamento dei layer GDN da `attn_qkv`, fallback CPU di `hc down/up`, PLE/MoE quant).
 Storia completa in git: `git log -- LLMEngine/mlx/qwen4_native` (35 commit dal 2026-10-03).
@@ -22,6 +22,6 @@ Storia completa in git: `git log -- LLMEngine/mlx/qwen4_native` (35 commit dal 2
 ```bash
 cp -R backups/qwen4_native/src/*   LLMEngine/mlx/qwen4_native/     # (creare la cartella)
 cp backups/qwen4_native/tests/*    LLMEngine/mlx/tests/
-cp backups/qwen4_native/oracoli/*  LLMEngine/tools/oracoli/
+cp backups/qwen4_native/parity_oracles/*  LLMEngine/tools/oracoli/
 ```
 Compilazione (manuale, linkando la libreria del motore): `clang -O2 -I libs/mlx-deps/mlx-c-src -I LLMEngine/mlx -I LLMCodec/include <file>.c -L LLMEngine/mlx/build-gmbasic -lllm_ai_mlx -lllmcodec_ggml -framework Accelerate`.
