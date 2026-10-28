@@ -121,6 +121,12 @@ probe/kernel/KV `mlx_inplace_probe.py`, `mlx_kernel_inplace_probe.py`, `mlx_kvq_
 **`LLMEngine/ds4/tools/reference/`** (33 Python): `gen_dsv41_*.py` — oracoli/reference DS4
 (Python ammesso; C preferibile quando il calcolo è puro).
 
+**Altri generatori/oracoli Python** (spostati 2026-10-28): `gmb_nll_probe.py`,
+`gmb_kimi_tiktoken_probe.py`, `gen_synthetic_mixtral.py`, `gen_tiny_llama_fixture.py`,
+`gen_tokenizer_golden.py`, `gen_wordpiece_unicode_data.py`. Restano **oracoli indipendenti**
+(ammessi in Python); quando il calcolo è puro vanno preferiti C. Il generatore WordPiece
+produce tabelle per il runtime GMBasic ma dipende da `unicodedata`: non è un tool dell'engine.
+
 **Regola**: un tool MLX nuovo nasce in `LLMEngine/tools/` (o `ds4/tools/reference/`), non in
 GMBasic; aggiornare **entrambe** le copie di questo catalogo (vault + `LLMEnv/tools/README.md`).
 **`LLMEngine/tools/`** (12 script): `ab_all_ctx_mlxlm.sh`, `ab_engine_mlxlm.sh`,
