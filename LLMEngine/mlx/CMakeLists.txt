@@ -404,6 +404,7 @@ add_library(llm_ai_mlx SHARED
     llm_mlx_jamba.c
     llm_mlx_load_config.c
     llm_mlx_imatrix.c
+    llm_mlx_wpacked.c
     llm_mlx_model_lifecycle.c
     llm_kvmetal_bridge.m
     llm_gemvq4_bridge.m
