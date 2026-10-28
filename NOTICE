@@ -20,6 +20,8 @@ THIRD-PARTY ATTRIBUTIONS (Apache-2.0, Section 4)
 This product includes or derives from software developed by third parties:
 
   * ds4                - MIT License - Copyright (c) 2026 The ds4.c authors
+                         by Salvatore Sanfilippo (antirez), https://github.com/antirez/ds4
+                         (also includes his rax and linenoise, Copyright (c) Salvatore Sanfilippo)
   * ggml               - MIT License - Copyright (c) 2023-2026 The ggml authors
   * DeepSeek           - MIT License - Copyright (c) 2023 DeepSeek
   * MLX / mlx-lm       - MIT License - Copyright (c) 2023 Apple Inc.

@@ -34,7 +34,9 @@ The engine back ends:
 
 - **MLX** runs MLX-format models on Apple's MLX framework.
 - **llama.cpp** runs GGUF models through llama.cpp.
-- **ds4** is a dedicated fast path for large GGUF mixture-of-experts models.
+- **ds4** is a dedicated fast path for large GGUF mixture-of-experts models. It is based on
+  [ds4](https://github.com/antirez/ds4) by Salvatore Sanfilippo (antirez), see
+  [Acknowledgements](#acknowledgements).
 - **MoE** runs mixture-of-experts models, loading experts from disk on demand.
 
 Your program talks to the common interface (`LLMEngine/include/llmengine.h`) and does not need to
@@ -78,6 +80,14 @@ described above.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions need a signed [CLA](CLA.md).
+
+## Acknowledgements
+
+The ds4 engine in `LLMEngine/ds4` is a copy of [ds4](https://github.com/antirez/ds4), created by
+Salvatore Sanfilippo (antirez) and released under the MIT license, with small changes of our own
+(kept as separate patches and a bridge layer). Many thanks to him and to the ds4 contributors. It
+also builds on the work of the [ggml](https://github.com/ggml-org/ggml) authors, Apple's
+[MLX](https://github.com/ml-explore/mlx) and DeepSeek. Full notices are in [NOTICE](NOTICE).
 
 ## License
 
