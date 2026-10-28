@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
+#include <stdlib.h>
 
 static float frand(void) { return (float)((rand() % 2001) - 1000) / 1000.0f; }
 
@@ -37,11 +39,17 @@ int main(int argc, char** argv) {
     uint16_t* xh = malloc((size_t)pw.cols * 2); uint16_t* yh = malloc((size_t)pw.rows * 2);
     for (uint32_t c = 0; c < pw.cols; c++) { _Float16 h = (_Float16)x[c]; memcpy(&xh[c], &h, 2); memset(x+c, 0, 0); }
     LlmGemvQ4Ctx* g = llm_gemvq4_create();
-    if (!g || llm_gemvq4_load_weights(g, (const uint8_t*)pw.w, pw.scales, pw.biases, pw.cols, pw.rows, (uint32_t)group) != 0) { printf("load FAIL\n"); return 1; }
+    if (!g || llm_gemvq4_load_weights_wonly_nocopy(g, (const uint8_t*)pw.w, pw.scales, pw.biases, pw.cols, pw.rows, (uint32_t)group) != 0) { printf("load nocopy FAIL\n"); return 1; }
     if (llm_gemvq4_run(g, xh, yh) != 0) { printf("run FAIL\n"); return 1; }
     double maxe = 0, maxr = 0;
     for (uint32_t r = 0; r < pw.rows; r++) { _Float16 h; memcpy(&h, &yh[r], 2); double e = fabs((double)h - (double)ref[r]); if (e > maxe) maxe = e; if (fabs(ref[r]) > maxr) maxr = fabs(ref[r]); }
     printf("max_abs_err=%.6g max_ref=%.6g rel=%.3g\n", maxe, maxr, maxe/(maxr>0?maxr:1.0));
+    { struct timespec t0,t1; timespec_get(&t0,TIME_UTC);
+      const int IT = 200; for (int it = 0; it < IT; it++) llm_gemvq4_run(g, xh, yh);
+      timespec_get(&t1,TIME_UTC);
+      double dt = (t1.tv_sec-t0.tv_sec)+1e-9*(t1.tv_nsec-t0.tv_nsec);
+      double bytes = (double)pw.rows * (double)(pw.cols/2) * (double)IT;
+      printf("gemv nocopy: %.3f ms/run  %.1f GB/s (%.1f MB pesi)\n", dt*1000/IT, bytes/dt/1e9, bytes/IT/1e6); }
     printf("first3 ref=%.6f %.6f %.6f\n", ref[0], ref[1], ref[2]);
     { _Float16 h0,h1,h2; memcpy(&h0,&yh[0],2); memcpy(&h1,&yh[1],2); memcpy(&h2,&yh[2],2);
       printf("first3 gemv=%.6f %.6f %.6f\n", (double)h0, (double)h1, (double)h2); }

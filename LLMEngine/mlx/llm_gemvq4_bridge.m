@@ -28,6 +28,20 @@ int llm_gemvq4_load_weights(LlmGemvQ4Ctx* ctx, const uint8_t* Wq,
     return llmmetal_gemv_q4_load_weights(&ctx->inner, Wq, scales, biases, H, M, group_size);
 }
 
+int llm_gemvq4_load_weights_nocopy(LlmGemvQ4Ctx* ctx, const uint8_t* Wq,
+                                   const uint16_t* scales, const uint16_t* biases,
+                                   uint32_t H, uint32_t M, uint32_t group_size) {
+    if (!ctx) return -1;
+    return llmmetal_gemv_q4_load_weights_nocopy(&ctx->inner, Wq, scales, biases, H, M, group_size);
+}
+
+int llm_gemvq4_load_weights_wonly_nocopy(LlmGemvQ4Ctx* ctx, const uint8_t* Wq,
+                                        const uint16_t* scales, const uint16_t* biases,
+                                        uint32_t H, uint32_t M, uint32_t group_size) {
+    if (!ctx) return -1;
+    return llmmetal_gemv_q4_load_weights_wonly_nocopy(&ctx->inner, Wq, scales, biases, H, M, group_size);
+}
+
 int llm_gemvq4_run(LlmGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out) {
     if (!ctx) return -1;
     return llmmetal_gemv_q4_run(&ctx->inner, x, out);

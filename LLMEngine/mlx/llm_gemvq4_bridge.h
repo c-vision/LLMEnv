@@ -22,6 +22,13 @@ void llm_gemvq4_destroy(LlmGemvQ4Ctx* ctx);
 
 /* Carica i pesi quantizzati UNA VOLTA (Wq: [M,H/2] uint8; scales/biases: [M,H/group_size]
  * half). Ritorna 0 su successo. */
+/* Zero-copy: view Metal sui puntatori (mmap), nessuna copia dei pesi. */
+int llm_gemvq4_load_weights_wonly_nocopy(LlmGemvQ4Ctx* ctx, const uint8_t* Wq,
+                                        const uint16_t* scales, const uint16_t* biases,
+                                        uint32_t H, uint32_t M, uint32_t group_size);
+int llm_gemvq4_load_weights_nocopy(LlmGemvQ4Ctx* ctx, const uint8_t* Wq,
+                                   const uint16_t* scales, const uint16_t* biases,
+                                   uint32_t H, uint32_t M, uint32_t group_size);
 int llm_gemvq4_load_weights(LlmGemvQ4Ctx* ctx, const uint8_t* Wq,
                              const uint16_t* scales, const uint16_t* biases,
                              uint32_t H, uint32_t M, uint32_t group_size);

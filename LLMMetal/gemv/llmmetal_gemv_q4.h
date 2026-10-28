@@ -35,7 +35,7 @@ static const char llmmetal_gemv_q4_src[] =
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
 "\n"
-"struct Q4Params { uint H; uint M; uint group_size; uint rows_per_tg; };\n"
+"struct Q4Params { uint H; uint M; uint group_size; uint rows_per_tg; uint lead_w; uint lead_s; uint lead_b; };\n"
 "\n"
 "kernel void gemv_q4_affine(\n"
 "    const device half*  x       [[buffer(0)]],\n"
@@ -50,6 +50,9 @@ static const char llmmetal_gemv_q4_src[] =
 "    uint  lane   [[thread_index_in_simdgroup]],\n"
 "    uint  simd_id [[simdgroup_index_in_threadgroup]])\n"
 "{\n"
+"    Wq = (const device uchar*)Wq + p.lead_w;\n"
+"    scales = (const device half*)((const device uchar*)scales + p.lead_s);\n"
+"    biases = (const device half*)((const device uchar*)biases + p.lead_b);\n"
 "    const uint ltid = ltid3.x;\n"
 "    const uint tg_threads = p.rows_per_tg * 32;\n"
 "    for (uint i = ltid; i < p.H; i += tg_threads) x_shared[i] = x[i];\n"
@@ -102,8 +105,67 @@ typedef struct {
      * misurava soprattutto newBufferWithBytes+memcpy, non il kernel — non rappresentativo del
      * decode reale, dove i pesi sono fissi e solo x cambia ad ogni step. */
     id<MTLBuffer> w_buf, scale_buf, bias_buf, out_buf, x_buf;
+    size_t lead_w, lead_s, lead_b;   /* offset del tensore dentro la view page-aligned (nocopy) */
     uint32_t H, M, group_size;
 } LlmMetalGemvQ4Ctx;
+
+/* Zero-copy: le view Metal puntano DIRETTAMENTE al mmap delle safetensors (page-aligned);
+ * il lead del tensore viene applicato come offset al momento del dispatch. */
+static int llmmetal_gemv_q4_load_weights_nocopy(LlmMetalGemvQ4Ctx* ctx, const uint8_t* Wq,
+                                                const uint16_t* scales, const uint16_t* biases,
+                                                uint32_t H, uint32_t M, uint32_t group_size) {
+    if (!ctx || !Wq || !scales || H % 64 != 0) return -1;
+    ctx->H = H; ctx->M = M; ctx->group_size = group_size;
+    const size_t page = (size_t)getpagesize();
+    const size_t wbytes = (size_t)M * (H / 2);
+    const size_t ngrp = H / group_size;
+    const size_t sbytes = (size_t)M * ngrp * sizeof(uint16_t);
+    const uint8_t* wp = Wq; const uint8_t* sp = (const uint8_t*)scales; const uint8_t* bp = (const uint8_t*)biases;
+    uintptr_t wb = (uintptr_t)wp & ~(uintptr_t)(page - 1); ctx->lead_w = (size_t)((uintptr_t)wp - wb);
+    uintptr_t sb = (uintptr_t)sp & ~(uintptr_t)(page - 1); ctx->lead_s = (size_t)((uintptr_t)sp - sb);
+    uintptr_t bb = bp ? ((uintptr_t)bp & ~(uintptr_t)(page - 1)) : 0; ctx->lead_b = bp ? (size_t)((uintptr_t)bp - bb) : 0;
+    size_t wl = ((ctx->lead_w + wbytes + page - 1) / page) * page;
+    size_t sl = ((ctx->lead_s + sbytes + page - 1) / page) * page;
+    size_t bl = bp ? ((ctx->lead_b + sbytes + page - 1) / page) * page : 0;
+    ctx->w_buf = [ctx->device newBufferWithBytesNoCopy:(void*)wb length:wl options:MTLResourceStorageModeShared deallocator:nil];
+    ctx->scale_buf = [ctx->device newBufferWithBytesNoCopy:(void*)sb length:sl options:MTLResourceStorageModeShared deallocator:nil];
+    ctx->bias_buf = bp ? [ctx->device newBufferWithBytesNoCopy:(void*)bb length:bl options:MTLResourceStorageModeShared deallocator:nil] : nil;
+    ctx->out_buf = [ctx->device newBufferWithLength:(NSUInteger)M * sizeof(uint16_t) options:MTLResourceStorageModeShared];
+    ctx->x_buf = [ctx->device newBufferWithLength:(NSUInteger)H * sizeof(uint16_t) options:MTLResourceStorageModeShared];
+    if (ctx->w_buf && ctx->scale_buf) {
+        const uint8_t* wc = (const uint8_t*)[ctx->w_buf contents] + ctx->lead_w;
+        const uint8_t* sc = (const uint8_t*)[ctx->scale_buf contents] + ctx->lead_s;
+        int badw = memcmp(wc, Wq, 8) != 0, bads = memcmp(sc, scales, 8) != 0;
+        if (badw || bads) fprintf(stderr, "[nocopy] mismatch w=%d s=%d lead_w=%zu lead_s=%zu\n", badw, bads, ctx->lead_w, ctx->lead_s);
+    }
+    if (!ctx->w_buf || !ctx->scale_buf || !ctx->out_buf || !ctx->x_buf) {
+        fprintf(stderr, "llmmetal_gemv_q4_load_weights_nocopy: view fallita (lead w=%zu s=%zu)\n", ctx->lead_w, ctx->lead_s);
+        return -1;
+    }
+    return 0;
+}
+
+/* Zero-copy SOLO sui pesi (i grandi); scales/biases sono piccoli e vengono copiati: evita i
+ * problemi di allineamento dei tipi half su view file-backed. */
+static int llmmetal_gemv_q4_load_weights_wonly_nocopy(LlmMetalGemvQ4Ctx* ctx, const uint8_t* Wq,
+                                                      const uint16_t* scales, const uint16_t* biases,
+                                                      uint32_t H, uint32_t M, uint32_t group_size) {
+    if (!ctx || !Wq || !scales || H % 64 != 0) return -1;
+    ctx->H = H; ctx->M = M; ctx->group_size = group_size;
+    const size_t page = (size_t)getpagesize();
+    const size_t wbytes = (size_t)M * (H / 2);
+    const size_t ngrp = H / group_size;
+    const size_t sbytes = (size_t)M * ngrp * sizeof(uint16_t);
+    uintptr_t wb = (uintptr_t)Wq & ~(uintptr_t)(page - 1); ctx->lead_w = (size_t)((uintptr_t)Wq - wb);
+    size_t wl = ((ctx->lead_w + wbytes + page - 1) / page) * page;
+    ctx->w_buf = [ctx->device newBufferWithBytesNoCopy:(void*)wb length:wl options:MTLResourceStorageModeShared deallocator:nil];
+    ctx->scale_buf = [ctx->device newBufferWithBytes:scales length:sbytes options:MTLResourceStorageModeShared];
+    ctx->bias_buf = biases ? [ctx->device newBufferWithBytes:biases length:sbytes options:MTLResourceStorageModeShared] : nil;
+    ctx->lead_s = 0; ctx->lead_b = 0;
+    ctx->out_buf = [ctx->device newBufferWithLength:(NSUInteger)M * sizeof(uint16_t) options:MTLResourceStorageModeShared];
+    ctx->x_buf = [ctx->device newBufferWithLength:(NSUInteger)H * sizeof(uint16_t) options:MTLResourceStorageModeShared];
+    return (ctx->w_buf && ctx->scale_buf && ctx->out_buf && ctx->x_buf) ? 0 : -1;
+}
 
 static int llmmetal_gemv_q4_init(LlmMetalGemvQ4Ctx* ctx) {
     ctx->device = nil; ctx->queue = nil; ctx->library = nil; ctx->pso = nil;
@@ -149,7 +211,9 @@ static int llmmetal_gemv_q4_load_weights(LlmMetalGemvQ4Ctx* ctx, const uint8_t* 
  * il kernel sui pesi gia' residenti, legge out. Nessuna riallocazione/copia dei pesi. */
 static int llmmetal_gemv_q4_run(LlmMetalGemvQ4Ctx* ctx, const uint16_t* x, uint16_t* out) {
     memcpy(ctx->x_buf.contents, x, (size_t)ctx->H*sizeof(uint16_t));
-    struct { uint32_t H, M, group_size, rows_per_tg; } params = { ctx->H, ctx->M, ctx->group_size, LLMMETAL_GEMV_ROWS_PER_TG };
+    struct { uint32_t H, M, group_size, rows_per_tg, lead_w, lead_s, lead_b; } params = {
+        ctx->H, ctx->M, ctx->group_size, LLMMETAL_GEMV_ROWS_PER_TG,
+        (uint32_t)ctx->lead_w, (uint32_t)ctx->lead_s, (uint32_t)ctx->lead_b };
 
     id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
