@@ -214,6 +214,7 @@ void llm_mlx_model_destroy(LlmMlxModel* m) {
         free(m->ffn_quant);
         m->ffn_quant = NULL;
     }
+    llm_mlx_packed_ctx_free(&m->packed);
     multishard_free_all(&m->weights);
     if (m->attn_quant) {
         for (int l = 0; l < m->attn_quant_n; l++) {
