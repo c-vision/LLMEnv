@@ -3,6 +3,7 @@
  * compatibile con quello di MLX; altrimenti il test stampa i primi valori per correggerlo. */
 #include "llm_mlx_wpacked.h"
 #include "llm_gemvq4_bridge.h"
+#include "llm_mlx_linear_packed.h"
 #include "mlx/c/mlx.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +51,26 @@ int main(int argc, char** argv) {
       double dt = (t1.tv_sec-t0.tv_sec)+1e-9*(t1.tv_nsec-t0.tv_nsec);
       double bytes = (double)pw.rows * (double)(pw.cols/2) * (double)IT;
       printf("gemv nocopy: %.3f ms/run  %.1f GB/s (%.1f MB pesi)\n", dt*1000/IT, bytes/dt/1e9, bytes/IT/1e6); }
+    {   /* M2b: proiezione packed via API di integrazione */
+        LlmMlxPackedLinear L;
+        if (llm_mlx_linear_packed_open(argv[1], argv[2], bits, group, &L) == 0) {
+            int xsh[2] = {1, (int)pw.cols};
+            mlx_array xa = mlx_array_new_data(x, xsh, 2, MLX_FLOAT32);
+            mlx_array out = mlx_array_new();
+            int rc = llm_mlx_linear_packed_run(&L, xa, &out, s);
+            double me = 0, mr = 0;
+            if (rc == 0) {
+                mlx_vector_array ev = mlx_vector_array_new(); mlx_vector_array_append_value(ev, out);
+                mlx_eval(ev); mlx_vector_array_free(ev);
+                const float* o = mlx_array_data_float32(out);
+                for (uint32_t r = 0; r < pw.rows; r++) { double e = fabs((double)o[r]-(double)ref[r]);
+                    if (e > me) me = e; if (fabs((double)ref[r]) > mr) mr = fabs((double)ref[r]); }
+                mlx_array_free(out);
+            }
+            printf("M2b linear_packed: rc=%d rel=%.3g\n", rc, me/(mr>0?mr:1.0));
+            llm_mlx_linear_packed_close(&L);
+        } else printf("M2b open FAIL\n");
+    }
     printf("first3 ref=%.6f %.6f %.6f\n", ref[0], ref[1], ref[2]);
     { _Float16 h0,h1,h2; memcpy(&h0,&yh[0],2); memcpy(&h1,&yh[1],2); memcpy(&h2,&yh[2],2);
       printf("first3 gemv=%.6f %.6f %.6f\n", (double)h0, (double)h1, (double)h2); }
