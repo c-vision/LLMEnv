@@ -19,3 +19,5 @@ Real tensors in several quantization formats, with the values they must decode t
 
 A reference ("golden") file produced by the Hugging Face tokenizer and two small vocabularies. The
 LLMToken check `llmtoken_wordpiece_selfcheck` compares our WordPiece tokenizer with it.
+
+`tokenizer/gguf_spm/` holds a tiny SentencePiece GGUF and the token ids llama.cpp produces for it; see its README.

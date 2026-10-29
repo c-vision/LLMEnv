@@ -115,6 +115,132 @@ static char* llm_mlx_gguf_tokenizer_json_bpe(const LlmEngineMoeGguf* g, size_t* 
     return b.p;
 }
 
+
+/* ── SentencePiece (Llama 1/2, Mistral, Gemma 1-3) e Gemma 4 dai KV `tokenizer.ggml.*` ───────────────────────
+ * `tokenizer.ggml.model` == "llama": vocabolario + PUNTEGGI (nessun elenco di merge). Come fa Hugging Face quando converte
+ * un modello SentencePiece (SpmConverter): per ogni pezzo si cercano le scomposizioni (sinistra,destra) con ENTRAMBE le
+ * metà nel vocabolario; i merge si ordinano per punteggio del pezzo, poi lunghezza (in caratteri) di sinistra e di destra,
+ * tutto decrescente, a parita' nell'ordine di scoperta (id del pezzo, poi id di sinistra e destra). Il JSON risultante e'
+ * il formato metaspace che LLMToken gia' esegue (normalizer Prepend+Replace del marcatore, byte_fallback).
+ * `tokenizer.ggml.model` == "gemma4": BPE con elenco di merge nel file (marcatore, byte_fallback, split sugli spazi). */
+typedef struct { const char* p; size_t n; long id; } SpmEnt;
+typedef struct { long l, r, seq; float score; int lc, rc; } SpmMerge;
+
+static size_t spm_hash(const char* p, size_t n) { size_t h = 1469598103934665603ull; for (size_t i = 0; i < n; i++) { h ^= (unsigned char)p[i]; h *= 1099511628211ull; } return h; }
+static long spm_find(const SpmEnt* tab, size_t mask, const char* p, size_t n) {
+    for (size_t h = spm_hash(p, n) & mask; tab[h].p != NULL; h = (h + 1) & mask)
+        if (tab[h].n == n && memcmp(tab[h].p, p, n) == 0) return tab[h].id;
+    return -1;
+}
+static int spm_chars(const char* p, size_t n) { int c = 0; for (size_t i = 0; i < n; i++) if (((unsigned char)p[i] & 0xC0) != 0x80) c++; return c; }
+static int spm_merge_cmp(const void* a, const void* b) {
+    const SpmMerge* x = (const SpmMerge*)a; const SpmMerge* y = (const SpmMerge*)b;
+    if (x->score != y->score) return x->score > y->score ? -1 : 1;
+    if (x->lc != y->lc) return x->lc > y->lc ? -1 : 1;
+    if (x->rc != y->rc) return x->rc > y->rc ? -1 : 1;
+    return x->seq < y->seq ? -1 : (x->seq > y->seq ? 1 : 0);
+}
+
+static char* llm_mlx_gguf_tokenizer_json_spm(const LlmEngineMoeGguf* g, size_t* out_len, int is_gemma4) {
+    const char** toks = NULL; size_t* tlens = NULL;
+    long nt = llm_gguf_kv_array_str(g, "tokenizer.ggml.tokens", &toks, &tlens);
+    if (nt <= 0) return NULL;
+    int32_t* tt = NULL; long ntt = llm_gguf_kv_array_i32(g, "tokenizer.ggml.token_type", &tt);
+    LlmDsv4TokBuf b; memset(&b, 0, sizeof b);
+    char* result = NULL;
+    SpmEnt* tab = NULL; SpmMerge* mg = NULL; const char** mrg = NULL; size_t* mlens = NULL; float* sc = NULL;
+    long nmerge = 0;
+    int byte_fb = 0;
+    for (long i = 0; i < nt && i < ntt; i++) if (tt[i] == 6) { byte_fb = 1; break; }
+
+    if (!is_gemma4) {
+        long ns = llm_gguf_kv_array_f32(g, "tokenizer.ggml.scores", &sc);
+        if (ns < nt) goto done;   /* senza punteggi non si ricavano i merge */
+        size_t cap = 1; while (cap < (size_t)nt * 2) cap <<= 1;
+        tab = (SpmEnt*)calloc(cap, sizeof *tab); if (!tab) goto done;
+        for (long i = 0; i < nt; i++) {   /* a parita' di testo vince il primo id (come un dict che non sovrascrive) */
+            size_t h = spm_hash(toks[i], tlens[i]) & (cap - 1); int dup = 0;
+            for (; tab[h].p != NULL; h = (h + 1) & (cap - 1)) if (tab[h].n == tlens[i] && memcmp(tab[h].p, toks[i], tlens[i]) == 0) { dup = 1; break; }
+            if (!dup) { tab[h].p = toks[i]; tab[h].n = tlens[i]; tab[h].id = i; }
+        }
+        size_t mcap = (size_t)nt * 2; mg = (SpmMerge*)malloc(mcap * sizeof *mg); if (!mg) goto done;
+        for (long i = 0; i < nt; i++) {
+            const char* p = toks[i]; size_t n = tlens[i];
+            size_t first = (size_t)nmerge;
+            for (size_t k = 1; k < n; k++) {
+                if (((unsigned char)p[k] & 0xC0) == 0x80) continue;   /* solo confini di carattere */
+                long li = spm_find(tab, cap - 1, p, k), ri = spm_find(tab, cap - 1, p + k, n - k);
+                if (li < 0 || ri < 0) continue;
+                if ((size_t)nmerge >= mcap) { mcap *= 2; SpmMerge* nm = (SpmMerge*)realloc(mg, mcap * sizeof *mg); if (!nm) goto done; mg = nm; }
+                mg[nmerge].l = li; mg[nmerge].r = ri; mg[nmerge].score = sc[i];
+                mg[nmerge].lc = spm_chars(p, k); mg[nmerge].rc = spm_chars(p + k, n - k); mg[nmerge].seq = 0;
+                nmerge++;
+            }
+            for (size_t a = first + 1; a < (size_t)nmerge; a++) {   /* locali per (id sinistra, id destra) */
+                SpmMerge t = mg[a]; size_t c = a;
+                while (c > first && (mg[c - 1].l > t.l || (mg[c - 1].l == t.l && mg[c - 1].r > t.r))) { mg[c] = mg[c - 1]; c--; }
+                mg[c] = t;
+            }
+        }
+        for (long i = 0; i < nmerge; i++) mg[i].seq = i;
+        qsort(mg, (size_t)nmerge, sizeof *mg, spm_merge_cmp);
+    } else {
+        nmerge = llm_gguf_kv_array_str(g, "tokenizer.ggml.merges", &mrg, &mlens);
+        if (nmerge < 0) nmerge = 0;
+    }
+
+    LLM_D4PUT(&b, "{\"model\":{\"type\":\"BPE\",\"vocab\":{");
+    for (long i = 0; i < nt; i++) {
+        if (i) llm_dsv4_tok_c(&b, ',');
+        llm_dsv4_tok_jsonstr(&b, toks[i], tlens[i]);
+        char num[24]; int k = snprintf(num, sizeof num, ":%ld", i); llm_dsv4_tok_put(&b, num, (size_t)k);
+    }
+    LLM_D4PUT(&b, "},\"merges\":[");
+    for (long i = 0; i < nmerge; i++) {
+        if (i) llm_dsv4_tok_c(&b, ',');
+        if (is_gemma4) { llm_dsv4_tok_jsonstr(&b, mrg[i], mlens[i]); continue; }
+        size_t ln = tlens[mg[i].l], rn = tlens[mg[i].r];
+        char* pair = (char*)malloc(ln + rn + 1); if (!pair) goto done;
+        memcpy(pair, toks[mg[i].l], ln); pair[ln] = ' '; memcpy(pair + ln + 1, toks[mg[i].r], rn);
+        llm_dsv4_tok_jsonstr(&b, pair, ln + rn + 1);
+        free(pair);
+    }
+    LLM_D4PUT(&b, "]");
+    if (byte_fb) LLM_D4PUT(&b, ",\"byte_fallback\":true");
+    { const LlmGgufVal* vu = llm_gguf_find_val(g, "tokenizer.ggml.unknown_token_id");
+      long uid = (vu != NULL && vu->type != GGARR) ? (long)vu->u : 0;
+      if (uid >= 0 && uid < nt && ntt > uid && tt[uid] == 2) {
+          LLM_D4PUT(&b, ",\"fuse_unk\":true,\"unk_token\":"); llm_dsv4_tok_jsonstr(&b, toks[uid], tlens[uid]);
+      } }
+    LLM_D4PUT(&b, "},");
+    {   /* speciali (unknown/control/user_defined) come added_tokens: match letterale prima del BPE */
+        LLM_D4PUT(&b, "\"added_tokens\":["); int first = 1;
+        for (long i = 0; i < nt && i < ntt; i++) {
+            int ty = (int)tt[i];
+            if ((ty != 2 && ty != 3 && ty != 4) || tlens[i] == 0) continue;
+            if (!first) llm_dsv4_tok_c(&b, ','); first = 0;
+            LLM_D4PUT(&b, "{\"id\":");
+            char num[24]; int k = snprintf(num, sizeof num, "%ld", i); llm_dsv4_tok_put(&b, num, (size_t)k);
+            LLM_D4PUT(&b, ",\"content\":"); llm_dsv4_tok_jsonstr(&b, toks[i], tlens[i]);
+            LLM_D4PUT(&b, ",\"special\":true}");
+        }
+        LLM_D4PUT(&b, "],");
+    }
+    {   /* normalizer: prefisso spazio (default vero per "llama", falso per gemma4) + spazio -> marcatore */
+        const LlmGgufVal* vp = llm_gguf_find_val(g, "tokenizer.ggml.add_space_prefix");
+        int prefix = vp != NULL && vp->type != GGARR ? (vp->u != 0) : !is_gemma4;
+        if (prefix) LLM_D4PUT(&b, "\"normalizer\":{\"type\":\"Sequence\",\"normalizers\":[{\"type\":\"Prepend\",\"prepend\":\"\xe2\x96\x81\"},{\"type\":\"Replace\",\"pattern\":{\"String\":\" \"},\"content\":\"\xe2\x96\x81\"}]}");
+        else LLM_D4PUT(&b, "\"normalizer\":{\"type\":\"Replace\",\"pattern\":{\"String\":\" \"},\"content\":\"\xe2\x96\x81\"}");
+    }
+    if (is_gemma4) LLM_D4PUT(&b, ",\"pre_tokenizer\":{\"type\":\"Split\",\"pattern\":{\"String\":\" \"},\"behavior\":\"MergedWithPrevious\",\"invert\":false}");
+    LLM_D4PUT(&b, "}");
+    if (out_len) *out_len = b.len;
+    result = b.p; b.p = NULL;
+done:
+    free(b.p); free(tab); free(mg); free(sc); free(tt); free(toks); free(tlens); free(mrg); free(mlens);
+    return result;
+}
+
 /* JSON del tokenizer DS4 (BPE + pre-tokenizer JoyAI) costruita dal GGUF. Ritorna una stringa
  * malloc'ata (libera con llm_ai_mlx_free_str) e ne scrive la lunghezza in *out_len; NULL su
  * errore. Il C# la passa a llmtoken_load_json (byte + len, non stringa: la vocab
@@ -136,7 +262,13 @@ char* llm_ai_mlx_gguf_tokenizer_json(const char* path, size_t* out_len) {
     if (v != NULL && v->type == GGSTR && v->s != NULL && v->slen > 0) {
         char at[64]; int n = (int)v->slen; if (n > 63) n = 63;
         memcpy(at, v->s, (size_t)n); at[n] = 0;
+        /* Il tipo di tokenizer decide per primo: SentencePiece ("llama": Llama 1/2, Mistral, Gemma 1-3) e "gemma4" non sono BPE byte-level,
+         * anche se l architettura (llama, gemma...) e' nella ARCH_TABLE. */
+        const LlmGgufVal* vm = llm_gguf_find_val(&g, "tokenizer.ggml.model");
+        const int spm = vm != NULL && vm->type == GGSTR && vm->s != NULL && vm->slen == 5 && memcmp(vm->s, "llama", 5) == 0;
+        const int gem4 = vm != NULL && vm->type == GGSTR && vm->s != NULL && vm->slen == 6 && memcmp(vm->s, "gemma4", 6) == 0;
         if (strcmp(at, "deepseek4") == 0) json = llm_dsv4_tokenizer_json_from_gguf(&g, out_len);
+        else if (spm || gem4) json = llm_mlx_gguf_tokenizer_json_spm(&g, out_len, gem4);
         else if (strcmp(at, "deepseek_v41") != 0 && (find_arch_ops(at) != NULL || gguf_tok_is_gpt2(&g)))
             json = llm_mlx_gguf_tokenizer_json_bpe(&g, out_len);   /* BPE byte-level generico (anche archi senza entry in ARCH_TABLE, es. qwen4exp) */
     }

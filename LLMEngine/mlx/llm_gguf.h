@@ -195,6 +195,23 @@ static inline long llm_gguf_kv_array_i32(const LlmEngineMoeGguf* g, const char* 
     return -1;
 }
 
+/* KV array di float32 (GGF32), per nome (p.es. tokenizer.ggml.scores). Alloca out (da liberare). n. elementi (>=0) o -1. */
+static inline long llm_gguf_kv_array_f32(const LlmEngineMoeGguf* g, const char* key, float** out) {
+    if (!g->_kvown) return -1;
+    for (int i = 0; i < g->nkv; i++) {
+        if (strcmp(g->keys[i], key) != 0) continue;
+        const LlmCodecGgufMetaKVOwned* kv = &g->_kvown[i];
+        if (kv->type != GGARR || kv->arr_type != GGF32 || kv->arr_raw == NULL) return -1;
+        long n = (long)kv->arr_count;
+        float* a = (float*)malloc(sizeof(float) * (size_t)n);
+        if (!a && n) return -1;
+        memcpy(a, kv->arr_raw, sizeof(float) * (size_t)n);
+        *out = a;
+        return n;
+    }
+    return -1;
+}
+
 static inline const LlmGgufVal* llm_gguf_find_val(const LlmEngineMoeGguf* g, const char* key) {
     for (int i = 0; i < g->nkv; i++) if (strcmp(g->keys[i], key) == 0) return &g->vals[i];
     return NULL;
