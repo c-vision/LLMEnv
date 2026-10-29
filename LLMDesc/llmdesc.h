@@ -53,13 +53,10 @@ typedef struct {
     } geometry;
 } LlmDesc;
 int llmdesc_load(const char* path, LlmDesc* out);
-/* Costruisce (se assente) il `.gmbarch` PER-MODEL da `config.json`: deriva la `geometry` numerica e
- * la fonde col template d'arch (ABI/<arch>.gmbarch) -> scrive <model_dir>/arch/<arch>.gmbarch.
- * Ritorna 1 se scritto, 0 se gia' presente/inutile, -1 su errore. `out_path` (opz.) = path scritto. */
-int llmdesc_autobuild(const char* model_dir, char* out_path, size_t out_cap);
 /* Risolve la descrizione per un modello: legge `architectures`/`model_type` dal config.json, cerca
- * `<arch>.llmarch` in LLMDESC_ARCH_DIR (o `<hf_dir>/arch/`, o `<cwd>/arch/`, o accanto all'eseguibile),
- * la carica. Ritorna 0 e scrive `out`; `out_path` (opz.) riceve il percorso trovato. */
+ * `<arch>.gmbarch` nella cartella ABI/ di LLMEnv (llmdesc_abi_dir), la carica; la geometria numerica, se il
+ * descrittore non ne ha, si ricava in memoria da config.json (figli diretti di `text_config` se presente). Non si scrive
+ * nessun file per modello. Ritorna 0 e scrive `out`; `out_path` (opz.) riceve il percorso trovato. */
 int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out_path_cap);
 /* Applica le regole `roles` (prima che combacia). Ritorna il ruolo o "OTHER". */
 const char* llmdesc_role(const LlmDesc* a, const char* tensor_name);
@@ -76,7 +73,9 @@ const char* llmdesc_struct_type(const LlmDesc* a, const char* key);
 const char* llmdesc_struct_prim(const LlmDesc* a, const char* key);
 /* Trova la struttura `key` (o NULL). */
 const LlmDescStruct* llmdesc_struct(const LlmDesc* a, const char* key);
-/* Cartella ABI/ canonica (risale dal cwd). Ritorna 1 e scrive il path in `out` se trovata. */
+/* Cartella ABI/ canonica di LLMEnv: UNICA sede dei descrittori `.gmbarch` (GMBasic e gli altri consumatori usano questa).
+ * Ordine: $LLMDESC_ABI_DIR; poi risalendo dalla cwd e dalla directory di questa libreria si cerca `ABI`, `LLMEnv/ABI`, `../LLMEnv/ABI`.
+ * Ritorna 1 e scrive il path in `out` se trovata. */
 int llmdesc_abi_dir(char* out, size_t cap);
 /* Strutture DICHIARATE che il CONVERTER non sa ancora mappare (attention/mla|gqa e moe sono ok).
  * Scrive un report in out e ritorna il numero di strutture NON supportate (0 = tutte mappabili). */

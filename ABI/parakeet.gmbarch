@@ -1,0 +1,188 @@
+{
+  "_comment": ".gmbarch — parakeet-tdt (ASR NVIDIA). Encoder CONFORMER + decoder TDT. Dominio ASR (narrazione), NON LLM.",
+  "arch": "parakeet",
+  "source": {
+    "format": "gguf"
+  },
+  "roles": [
+    {
+      "match": "preprocessor.featurizer.window",
+      "role": "AUDIO_WINDOW"
+    },
+    {
+      "match": "preprocessor.featurizer.fb",
+      "role": "AUDIO_MEL_FB"
+    },
+    {
+      "match": "pre_encode.conv",
+      "role": "AUDIO_PREENC_CONV"
+    },
+    {
+      "match": "pre_encode.out",
+      "role": "AUDIO_PREENC_OUT"
+    },
+    {
+      "match": "norm_feed_forward1",
+      "role": "NORM"
+    },
+    {
+      "match": "norm_feed_forward2",
+      "role": "NORM"
+    },
+    {
+      "match": "norm_self_att",
+      "role": "NORM"
+    },
+    {
+      "match": "norm_conv",
+      "role": "NORM"
+    },
+    {
+      "match": "feed_forward1.linear1",
+      "role": "FFN_UP"
+    },
+    {
+      "match": "feed_forward1.linear2",
+      "role": "FFN_DOWN"
+    },
+    {
+      "match": "feed_forward2.linear1",
+      "role": "FFN_UP"
+    },
+    {
+      "match": "feed_forward2.linear2",
+      "role": "FFN_DOWN"
+    },
+    {
+      "match": "self_attn.linear_q",
+      "role": "ATTN_Q"
+    },
+    {
+      "match": "self_attn.linear_k",
+      "role": "ATTN_KV"
+    },
+    {
+      "match": "self_attn.linear_v",
+      "role": "ATTN_V"
+    },
+    {
+      "match": "self_attn.linear_out",
+      "role": "ATTN_OUT"
+    },
+    {
+      "match": "self_attn.linear_pos",
+      "role": "ATTN_POS"
+    },
+    {
+      "match": "pos_bias_u",
+      "role": "ATTN_POS_BIAS"
+    },
+    {
+      "match": "pos_bias_v",
+      "role": "ATTN_POS_BIAS"
+    },
+    {
+      "match": "conv.pointwise_conv1",
+      "role": "CONV_PW1"
+    },
+    {
+      "match": "conv.depthwise_conv",
+      "role": "CONV_DW"
+    },
+    {
+      "match": "conv.pointwise_conv2",
+      "role": "CONV_PW2"
+    },
+    {
+      "match": "conv.batch_norm",
+      "role": "CONV_BN",
+      "gguf": "output_norm.weight"
+    },
+    {
+      "match": "embed",
+      "role": "EMBEDDING"
+    },
+    {
+      "match": "decoder",
+      "role": "TDT_DECODER"
+    },
+    {
+      "match": "joint",
+      "role": "TDT_JOINT"
+    }
+  ],
+  "quant": {
+    "NORM": "f32",
+    "AUDIO_MEL_FB": "f32",
+    "AUDIO_WINDOW": "f32"
+  },
+  "codecs": {
+    "mlx_affine": "mlx_affine",
+    "plain": "plain",
+    "fp8_block": "fp8_block",
+    "fp4_expert": "fp4_expert"
+  },
+  "weight_source": {
+    "mlx_affine": {
+      "dtype": "U32",
+      "codec": "mlx_affine",
+      "scale_suffix": ".scales",
+      "bias_suffix": ".biases"
+    },
+    "plain_f16": {
+      "dtype": "F16",
+      "codec": "plain",
+      "fmt": 1
+    },
+    "plain_bf16": {
+      "dtype": "BF16",
+      "codec": "plain",
+      "fmt": 2
+    },
+    "plain_f32": {
+      "dtype": "F32",
+      "codec": "plain",
+      "fmt": 0
+    }
+  },
+  "structures": {
+    "layer": {
+      "type": "transformer_layer",
+      "steps": [
+        {
+          "op": "attention",
+          "prim": ""
+        },
+        {
+          "op": "ffn",
+          "prim": ""
+        }
+      ]
+    },
+    "norm": {
+      "type": "rmsnorm"
+    },
+    "attention": {
+      "type": "gqa"
+    },
+    "conformer": {
+      "type": "conv_augmented",
+      "present": true
+    },
+    "asr_tdt": {
+      "type": "tdt",
+      "present": true
+    }
+  },
+  "quant_params": {
+    "group": 32,
+    "bits": 4
+  },
+  "convert_target": {
+    "default": {
+      "codec": "mlx_affine",
+      "p0": 32,
+      "p1": 4
+    }
+  }
+}

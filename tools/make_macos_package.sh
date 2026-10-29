@@ -53,6 +53,10 @@ if otool -l "$STAGE"/lib/llmenv/*.dylib | awk '/LC_RPATH/{r=1} r&&/ path /{print
     echo "ERRORE: rpath assoluti residui" >&2; exit 1
 fi
 
+# descrittori dei modelli (.gmbarch): il motore li cerca in ABI/ accanto alle librerie (llmdesc_abi_dir risale dalla dylib)
+mkdir -p "$STAGE/lib/llmenv/ABI"
+cp -f ABI/*.gmbarch "$STAGE/lib/llmenv/ABI/"
+
 # header pubblici
 cp -f LLMEngine/include/*.h LLMToken/llmtoken.h LLMCodec/include/*.h LLMDesc/llmdesc.h LLMJinja/llmjinja.h "$STAGE/include/llmenv/"
 cp -f LICENSE NOTICE README.md "$STAGE/share/doc/llmenv/"

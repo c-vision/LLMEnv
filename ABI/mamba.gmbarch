@@ -1,0 +1,183 @@
+{
+  "_comment": ".gmbarch — Mamba (State Space Model, NON Transformer). Stato ricorrente, non KV-cache.",
+  "arch": "mamba",
+  "source": {
+    "format": "safetensors",
+    "config": "config.json"
+  },
+  "config_map": {
+    "n_layers": "num_hidden_layers",
+    "hidden": "hidden_size",
+    "inter": "intermediate_size",
+    "state_size": "state_size",
+    "conv_kernel": "conv_kernel",
+    "vocab": "vocab_size"
+  },
+  "roles": [
+    {
+      "match": "input_layernorm",
+      "role": "NORM",
+      "gguf": "blk.%d.attn_norm.weight"
+    },
+    {
+      "match": "post_attention_layernorm",
+      "role": "NORM",
+      "gguf": "blk.%d.ffn_norm.weight"
+    },
+    {
+      "match": "post_feedforward_layernorm",
+      "role": "NORM",
+      "gguf": "blk.%d.ffn_norm.weight"
+    },
+    {
+      "match": "pre_feedforward_layernorm",
+      "role": "NORM",
+      "gguf": "blk.%d.attn_norm.weight"
+    },
+    {
+      "match": "attn_norm",
+      "role": "NORM",
+      "gguf": "blk.%d.attn_norm.weight"
+    },
+    {
+      "match": "ffn_norm",
+      "role": "NORM",
+      "gguf": "blk.%d.ffn_norm.weight"
+    },
+    {
+      "match": "kv_a_layernorm",
+      "role": "NORM",
+      "gguf": "blk.%d.attn_kv_a_norm.weight"
+    },
+    {
+      "match": "q_a_layernorm",
+      "role": "NORM",
+      "gguf": "blk.%d.attn_q_a_norm.weight"
+    },
+    {
+      "match": "embeddings",
+      "role": "EMBEDDING"
+    },
+    {
+      "match": "norm_f",
+      "role": "FINAL_NORM"
+    },
+    {
+      "match": "lm_head",
+      "role": "OUTPUT",
+      "gguf": "output.weight"
+    },
+    {
+      "match": "mixer.A_log",
+      "role": "SSM_A"
+    },
+    {
+      "match": "mixer.D",
+      "role": "SSM_D"
+    },
+    {
+      "match": "mixer.in_proj",
+      "role": "SSM_IN"
+    },
+    {
+      "match": "mixer.x_proj",
+      "role": "SSM_X"
+    },
+    {
+      "match": "mixer.dt_proj",
+      "role": "SSM_DT"
+    },
+    {
+      "match": "mixer.conv1d",
+      "role": "SSM_CONV"
+    },
+    {
+      "match": "mixer.out_proj",
+      "role": "SSM_OUT"
+    },
+    {
+      "match": "norm",
+      "role": "NORM",
+      "gguf": "output_norm.weight"
+    }
+  ],
+  "quant": {
+    "NORM": "f32",
+    "SSM_A": "f32",
+    "SSM_D": "f32",
+    "EMBEDDING": "f16"
+  },
+  "structures": {
+    "layer": {
+      "type": "transformer_layer",
+      "steps": [
+        {
+          "op": "attention",
+          "prim": ""
+        },
+        {
+          "op": "ffn",
+          "prim": ""
+        }
+      ]
+    },
+    "norm": {
+      "type": "rmsnorm",
+      "prim": "rmsnorm"
+    },
+    "ssm": {
+      "type": "mamba",
+      "state_size": "cfg:state_size",
+      "conv_kernel": "cfg:conv_kernel"
+    }
+  },
+  "runtime": {
+    "_comment": "SSM: STATO RICORRENTE (state_size x d_inner) + stato convoluzione (conv_kernel) — NON e' una KV-cache.",
+    "state": {
+      "kind": "ssm",
+      "state_size": "cfg:state_size",
+      "conv_kernel": "cfg:conv_kernel"
+    },
+    "kv": null
+  },
+  "codecs": {
+    "mlx_affine": "mlx_affine",
+    "plain": "plain",
+    "fp8_block": "fp8_block",
+    "fp4_expert": "fp4_expert"
+  },
+  "quant_params": {
+    "group": 32,
+    "bits": 4
+  },
+  "weight_source": {
+    "mlx_affine": {
+      "dtype": "U32",
+      "codec": "mlx_affine",
+      "scale_suffix": ".scales",
+      "bias_suffix": ".biases"
+    },
+    "plain_f16": {
+      "dtype": "F16",
+      "codec": "plain",
+      "fmt": 1
+    },
+    "plain_bf16": {
+      "dtype": "BF16",
+      "codec": "plain",
+      "fmt": 2
+    },
+    "plain_f32": {
+      "dtype": "F32",
+      "codec": "plain",
+      "fmt": 0
+    }
+  },
+  "convert_target": {
+    "default": {
+      "codec": "mlx_affine",
+      "p0": 32,
+      "p1": 4
+    }
+  }
+}

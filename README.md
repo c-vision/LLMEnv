@@ -25,7 +25,8 @@ your own program and call it. If you just want to use the engine, start with [Fa
 |---|---|
 | `LLMToken` | Splits text into tokens and joins them back. Reads `tokenizer.json`, tiktoken and WordPiece files. |
 | `LLMCodec` | Reads model files (GGUF, safetensors) and decodes the different quantization formats. |
-| `LLMDesc` | Describes how a model is laid out, so one engine can handle many model families. |
+| `LLMDesc` | Describes how a model is laid out, so one engine can handle many model families. The descriptions are the files in `ABI/`. |
+| `ABI` | The model descriptions (`<architecture>.gmbarch`): the single source, read by the engine and by other projects. |
 | `LLMMetal` | Small programs that run on the Apple GPU: matrix products, attention cache, quantized math. |
 | `LLMJinja` | Fills in chat templates, the text patterns that turn a conversation into a prompt. |
 | `LLMEngine` | The engine itself, with one common interface and several back ends (see below). |

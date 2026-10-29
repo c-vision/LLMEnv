@@ -1,0 +1,350 @@
+{
+  "arch": "ds4",
+  "description": "antirez/DeepSeek-V4-Flash (DS4 / DwarfStar) — modello GGUF singolo. NON il DeepSeek V4 ufficiale: architettura propria (mHC 4-stream, CSA/HCA compressa, compressor+indexer, hash-routing MoE). Engine: MLX embedded (whole-model -> composizione).",
+  "source": {
+    "format": "gguf",
+    "config": "",
+    "index": ""
+  },
+  "config_map": {
+    "n_layers": "block_count",
+    "hidden": "embedding_length",
+    "n_heads": "attention.head_count",
+    "n_kv": "attention.head_count_kv",
+    "head_dim": "attention.key_length",
+    "vocab": "vocab_size",
+    "rope_theta": "rope.freq_base"
+  },
+  "roles": [
+    {
+      "match": "token_embd",
+      "role": "EMBEDDING",
+      "gguf": "token_embd.weight"
+    },
+    {
+      "match": "output_norm",
+      "role": "NORM",
+      "gguf": "output_norm.weight"
+    },
+    {
+      "match": "output_hc_",
+      "role": "HC",
+      "gguf": ""
+    },
+    {
+      "match": "output",
+      "role": "OUTPUT",
+      "gguf": "output.weight"
+    },
+    {
+      "match": "hc_attn_",
+      "role": "HC",
+      "gguf": ""
+    },
+    {
+      "match": "attn_norm",
+      "role": "NORM",
+      "gguf": "blk.%d.attn_norm.weight"
+    },
+    {
+      "match": "attn_q_a_norm",
+      "role": "NORM",
+      "gguf": "blk.%d.attn_q_a_norm.weight"
+    },
+    {
+      "match": "attn_q_a",
+      "role": "ATTN_Q",
+      "gguf": "blk.%d.attn_q_a.weight"
+    },
+    {
+      "match": "attn_q_b",
+      "role": "ATTN_Q",
+      "gguf": "blk.%d.attn_q_b.weight"
+    },
+    {
+      "match": "attn_kv_a_norm",
+      "role": "NORM",
+      "gguf": "blk.%d.attn_kv_a_norm.weight"
+    },
+    {
+      "match": "attn_kv",
+      "role": "ATTN_KV",
+      "gguf": "blk.%d.attn_kv.weight"
+    },
+    {
+      "match": "attn_sinks",
+      "role": "ATTN_SINK",
+      "gguf": "blk.%d.attn_sinks.weight"
+    },
+    {
+      "match": "attn_output_a",
+      "role": "ATTN_WO",
+      "gguf": "blk.%d.attn_output_a.weight"
+    },
+    {
+      "match": "attn_output_b",
+      "role": "ATTN_WO",
+      "gguf": "blk.%d.attn_output_b.weight"
+    },
+    {
+      "match": "attn_compressor_norm",
+      "role": "COMPRESSOR",
+      "gguf": "blk.%d.attn_compressor_norm.weight"
+    },
+    {
+      "match": "attn_compressor_ape",
+      "role": "COMPRESSOR",
+      "gguf": "blk.%d.attn_compressor_ape.weight"
+    },
+    {
+      "match": "attn_compressor_kv",
+      "role": "COMPRESSOR",
+      "gguf": "blk.%d.attn_compressor_kv.weight"
+    },
+    {
+      "match": "attn_compressor_gate",
+      "role": "COMPRESSOR",
+      "gguf": "blk.%d.attn_compressor_gate.weight"
+    },
+    {
+      "match": "indexer.attn_q_b",
+      "role": "INDEXER",
+      "gguf": "blk.%d.indexer.attn_q_b.weight"
+    },
+    {
+      "match": "indexer.proj",
+      "role": "INDEXER",
+      "gguf": "blk.%d.indexer.proj.weight"
+    },
+    {
+      "match": "indexer_compressor_norm",
+      "role": "INDEXER",
+      "gguf": "blk.%d.indexer_compressor_norm.weight"
+    },
+    {
+      "match": "indexer_compressor_ape",
+      "role": "INDEXER",
+      "gguf": "blk.%d.indexer_compressor_ape.weight"
+    },
+    {
+      "match": "indexer_compressor_kv",
+      "role": "INDEXER",
+      "gguf": "blk.%d.indexer_compressor_kv.weight"
+    },
+    {
+      "match": "indexer_compressor_gate",
+      "role": "INDEXER",
+      "gguf": "blk.%d.indexer_compressor_gate.weight"
+    },
+    {
+      "match": "hc_ffn_",
+      "role": "HC",
+      "gguf": ""
+    },
+    {
+      "match": "ffn_norm",
+      "role": "NORM",
+      "gguf": "blk.%d.ffn_norm.weight"
+    },
+    {
+      "match": "ffn_gate_tid2eid",
+      "role": "ROUTER",
+      "gguf": "blk.%d.ffn_gate_tid2eid.weight"
+    },
+    {
+      "match": "ffn_gate_inp",
+      "role": "ROUTER",
+      "gguf": "blk.%d.ffn_gate_inp.weight"
+    },
+    {
+      "match": "exp_probs_b",
+      "role": "ROUTER",
+      "gguf": "blk.%d.exp_probs_b.bias"
+    },
+    {
+      "match": "ffn_gate_exps",
+      "role": "ROUTED_EXPERT",
+      "gguf": "blk.%d.ffn_gate_exps.weight"
+    },
+    {
+      "match": "ffn_up_exps",
+      "role": "ROUTED_EXPERT",
+      "gguf": "blk.%d.ffn_up_exps.weight"
+    },
+    {
+      "match": "ffn_down_exps",
+      "role": "ROUTED_EXPERT",
+      "gguf": "blk.%d.ffn_down_exps.weight"
+    },
+    {
+      "match": "ffn_gate_shexp",
+      "role": "SHARED_EXPERT",
+      "gguf": "blk.%d.ffn_gate_shexp.weight"
+    },
+    {
+      "match": "ffn_up_shexp",
+      "role": "SHARED_EXPERT",
+      "gguf": "blk.%d.ffn_up_shexp.weight"
+    },
+    {
+      "match": "ffn_down_shexp",
+      "role": "SHARED_EXPERT",
+      "gguf": "blk.%d.ffn_down_shexp.weight"
+    }
+  ],
+  "quant": {
+    "NORM": "f32",
+    "HC": "f16",
+    "COMPRESSOR": "f16",
+    "INDEXER": "f16",
+    "ROUTER": "f32",
+    "EMBEDDING": "f16",
+    "OUTPUT": "q8_0",
+    "ATTN_Q": "q8_0",
+    "ATTN_KV": "q8_0",
+    "ATTN_WO": "q8_0",
+    "ATTN_SINK": "f32",
+    "SHARED_EXPERT": "q8_0",
+    "ROUTED_EXPERT": "iq2_xxs"
+  },
+  "structures": {
+    "norm": {
+      "type": "rmsnorm",
+      "prim": "rmsnorm"
+    },
+    "mhc": {
+      "type": "hyper_connection",
+      "steps": [
+        {
+          "op": "mix",
+          "prim": ""
+        },
+        {
+          "op": "sinkhorn",
+          "prim": ""
+        }
+      ]
+    },
+    "attention": {
+      "type": "csa_hca",
+      "steps": [
+        {
+          "op": "q_lora",
+          "prim": ""
+        },
+        {
+          "op": "kv_lora",
+          "prim": ""
+        },
+        {
+          "op": "compressor",
+          "prim": ""
+        },
+        {
+          "op": "indexer",
+          "prim": ""
+        },
+        {
+          "op": "rope_tail",
+          "prim": ""
+        },
+        {
+          "op": "sdpa_mixed",
+          "prim": ""
+        },
+        {
+          "op": "sink",
+          "prim": ""
+        }
+      ]
+    },
+    "moe": {
+      "type": "hash_topk",
+      "steps": [
+        {
+          "op": "hash_router",
+          "prim": ""
+        },
+        {
+          "op": "router_topk",
+          "prim": ""
+        },
+        {
+          "op": "experts",
+          "prim": ""
+        },
+        {
+          "op": "shared",
+          "prim": ""
+        }
+      ]
+    },
+    "head": {
+      "type": "mhc_head",
+      "steps": [
+        {
+          "op": "collapse",
+          "prim": ""
+        },
+        {
+          "op": "rmsnorm",
+          "prim": ""
+        },
+        {
+          "op": "lm_head",
+          "prim": ""
+        }
+      ]
+    },
+    "layer": {
+      "type": "transformer_layer",
+      "steps": [
+        {
+          "op": "mhc_pre_attn",
+          "prim": ""
+        },
+        {
+          "op": "attention",
+          "prim": ""
+        },
+        {
+          "op": "mhc_post_attn",
+          "prim": ""
+        },
+        {
+          "op": "mhc_pre_ffn",
+          "prim": ""
+        },
+        {
+          "op": "moe",
+          "prim": ""
+        },
+        {
+          "op": "mhc_post_ffn",
+          "prim": ""
+        }
+      ]
+    }
+  },
+  "quant_params": {
+    "group": 32,
+    "bits": 4
+  },
+  "codecs": {
+    "ggml": "ggml",
+    "plain": "plain",
+    "f16": "f16"
+  },
+  "weight_source": {
+    "plain_f16": {
+      "dtype": "F16",
+      "codec": "plain",
+      "fmt": 1
+    },
+    "plain_f32": {
+      "dtype": "F32",
+      "codec": "plain",
+      "fmt": 0
+    }
+  }
+}

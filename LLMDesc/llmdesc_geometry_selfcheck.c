@@ -1,10 +1,9 @@
-/* llmdesc_geometry_selfcheck.c — i `.gmbarch` generati nelle cartelle dei modelli (<radice>/<modello>/arch/NOME.gmbarch) devono
- * descrivere lo stesso modello di config.json. Due controlli per ogni modello trovato:
- *   1. il file GIA' generato si carica, ha il nome dell'architettura e la geometria coincide con config.json;
- *   2. la geometria RIGENERATA da llmdesc_autobuild in una cartella temporanea coincide con config.json
- *      (prova il generatore, indipendentemente dai file vecchi).
- * L'oracolo e' config.json; se contiene `text_config` (modelli annidati: Qwen3.5/Qwen4, Gemma 4...) valgono i valori annidati.
- * Uso: llmdesc_geometry_selfcheck [radice dei modelli]   (default: $HOME/ai/Models). Nessun modello trovato -> exit 77 (SKIP).
+/* llmdesc_geometry_selfcheck.c — per ogni modello locale (<radice>/<modello>/config.json) il descrittore risolto da llmdesc_resolve
+ * deve avere una geometria uguale a quella di config.json. Il descrittore viene dalla cartella ABI/ di LLMEnv (unica sede);
+ * la geometria si ricava in memoria: non esistono piu' file per modello. L'oracolo e' config.json: valgono i figli diretti di
+ * `text_config` se esiste (modelli annidati), altrimenti della radice.
+ * Uso: llmdesc_geometry_selfcheck [radice dei modelli] [cartella ABI]   (default: $HOME/ai/Models, ABI trovata da llmdesc_abi_dir).
+ * Nessun modello trovato -> exit 77 (SKIP).
  * Compilazione: clang -I LLMDesc LLMDesc/llmdesc_geometry_selfcheck.c LLMDesc/llmdesc.c -o /tmp/llmdesc_geometry_selfcheck */
 #include "llmdesc.h"
 #include <dirent.h>
@@ -85,69 +84,35 @@ int main(int argc, char** argv) {
     char root[1024];
     if (argc > 1) snprintf(root, sizeof root, "%s", argv[1]);
     else { const char* h = getenv("HOME"); snprintf(root, sizeof root, "%s/ai/Models", h ? h : "."); }
+    if (argc > 2 && argv[2][0]) setenv("LLMDESC_ABI_DIR", argv[2], 1);
+    char abi[2048] = "";
+    if (!llmdesc_abi_dir(abi, sizeof abi)) { printf("FAIL: cartella ABI/ non trovata (LLMDESC_ABI_DIR o argv[2])\n"); return 1; }
     DIR* rd = opendir(root);
     if (!rd) { printf("SKIP: cartella dei modelli assente: %s\n", root); return 77; }
-    int models = 0, files = 0, stale = 0, regen_bad = 0;
+    int models = 0, from_abi = 0, generic = 0, bad = 0;
     struct dirent* e;
     while ((e = readdir(rd)) != NULL) {
         if (e->d_name[0] == '.') continue;
-        char mdir[2048], cpath[2300], adir[2300];
+        char mdir[2048], cpath[2300];
         snprintf(mdir, sizeof mdir, "%s/%s", root, e->d_name);
         snprintf(cpath, sizeof cpath, "%s/config.json", mdir);
-        snprintf(adir, sizeof adir, "%s/arch", mdir);
         char* cfg = slurp_file(cpath);
         if (!cfg) continue;
-        int counted = 0;
-        /* 1. file generati */
-        DIR* ad = opendir(adir);
-        struct dirent* a;
-        while (ad && (a = readdir(ad)) != NULL) {
-            size_t l = strlen(a->d_name);
-            if (l <= 8 || strcmp(a->d_name + l - 8, ".gmbarch") != 0) continue;
-            char fp[2500]; snprintf(fp, sizeof fp, "%s/%s", adir, a->d_name);
-            LlmDesc d; memset(&d, 0, sizeof d);
-            int bad = 0;
-            if (llmdesc_load(fp, &d) != 0 || !d.geometry.present) { printf("  %s/%s: non si carica o senza geometry\n", e->d_name, a->d_name); bad = 1; }
-            else {
-                char stem[128]; snprintf(stem, sizeof stem, "%.*s", (int)(l - 8), a->d_name);
-                if (strcmp(d.arch, stem) != 0) { printf("  %s/%s: arch '%s' != nome file\n", e->d_name, a->d_name, d.arch); bad++; }
-                int mm = compare("generato", cfg, &d);
-                if (mm) printf("  %s/%s: OBSOLETO o errato (%d campi)\n", e->d_name, a->d_name, mm);
-                bad += mm;
-            }
-            files++; if (bad) stale++;
-            counted = 1;
-        }
-        if (ad) closedir(ad);
-        /* 2. rigenerazione in cartella temporanea */
-        if (counted) {
-            char tmpl[] = "/tmp/llmdesc_geom_XXXXXX";
-            if (mkdtemp(tmpl)) {
-                char tc[2400]; snprintf(tc, sizeof tc, "%s/config.json", tmpl);
-                FILE* f = fopen(tc, "wb");
-                if (f) {
-                    fwrite(cfg, 1, strlen(cfg), f); fclose(f);
-                    char outp[2600] = "";
-                    LlmDesc d; memset(&d, 0, sizeof d);
-                    if (llmdesc_autobuild(tmpl, outp, sizeof outp) != 1 || llmdesc_load(outp, &d) != 0 || !d.geometry.present) {
-                        printf("  %s: rigenerazione fallita\n", e->d_name); regen_bad++;
-                    } else {
-                        int mm = compare("rigenerato", cfg, &d);
-                        if (mm) { printf("  %s: il generatore produce una geometria diversa da config.json (%d campi)\n", e->d_name, mm); regen_bad++; }
-                    }
-                    remove(outp);
-                    char ad2[2500]; snprintf(ad2, sizeof ad2, "%s/arch", tmpl); rmdir(ad2); remove(tc);
-                }
-                rmdir(tmpl);
-            }
-            models++;
+        LlmDesc d; memset(&d, 0, sizeof d);
+        char dp[2600] = "";
+        if (llmdesc_resolve(mdir, &d, dp, sizeof dp) != 0) { printf("  %s: nessun descrittore risolto\n", e->d_name); bad++; free(cfg); models++; continue; }
+        models++;
+        if (dp[0] && strncmp(dp, abi, strlen(abi)) == 0) from_abi++; else generic++;
+        if (!d.geometry.present) { printf("  %s: geometria assente\n", e->d_name); bad++; }
+        else {
+            int mm = compare(e->d_name, cfg, &d);
+            if (mm) { printf("  %s: la geometria differisce da config.json (%d campi)\n", e->d_name, mm); bad++; }
         }
         free(cfg);
     }
     closedir(rd);
-    if (models == 0) { printf("SKIP: nessun .gmbarch generato sotto %s\n", root); return 77; }
-    printf("[geometry] modelli=%d file=%d obsoleti/errati=%d rigenerazioni errate=%d\n", models, files, stale, regen_bad);
-    int ok = (stale == 0 && regen_bad == 0);
-    printf(ok ? "PASS\n" : "FAIL\n");
-    return ok ? 0 : 1;
+    if (models == 0) { printf("SKIP: nessun modello sotto %s\n", root); return 77; }
+    printf("[geometry] ABI=%s modelli=%d con descrittore ABI=%d generici=%d errori=%d\n", abi, models, from_abi, generic, bad);
+    printf(bad ? "FAIL\n" : "PASS\n");
+    return bad ? 1 : 0;
 }

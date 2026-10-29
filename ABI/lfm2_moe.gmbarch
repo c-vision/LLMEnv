@@ -1,0 +1,64 @@
+{
+  "_comment": ".gmbarch — LFM2-MoE (Liquid): ibrido ShortConv/gated-attention (come lfm2) + FFN MoE (primi num_dense_layers densi, poi router softmax + expert_bias di SELEZIONE). Nomi tensori reali da LiquidAI/LFM2-8B-A1B.",
+  "arch": "lfm2_moe",
+  "source": {
+    "format": "safetensors",
+    "config": "config.json"
+  },
+  "roles": [
+    { "match": "embed_tokens", "role": "EMBEDDING", "gguf": "token_embd.weight" },
+    { "match": "lm_head", "role": "OUTPUT", "gguf": "output.weight" },
+    { "match": "conv.conv", "role": "SSM_CONV" },
+    { "match": "conv.in_proj", "role": "SSM_IN" },
+    { "match": "conv.out_proj", "role": "SSM_OUT" },
+    { "match": "self_attn.q_proj", "role": "ATTN_Q", "gguf": "blk.%d.attn_q.weight" },
+    { "match": "self_attn.k_proj", "role": "ATTN_KV", "gguf": "blk.%d.attn_k.weight" },
+    { "match": "self_attn.v_proj", "role": "ATTN_V", "gguf": "blk.%d.attn_v.weight" },
+    { "match": "self_attn.out_proj", "role": "ATTN_OUT", "gguf": "blk.%d.attn_output.weight" },
+    { "match": "self_attn.q_layernorm", "role": "NORM", "gguf": "blk.%d.attn_q_norm.weight" },
+    { "match": "self_attn.k_layernorm", "role": "NORM", "gguf": "blk.%d.attn_k_norm.weight" },
+    { "match": "operator_norm", "role": "NORM", "gguf": "blk.%d.attn_norm.weight" },
+    { "match": "ffn_norm", "role": "NORM", "gguf": "blk.%d.ffn_norm.weight" },
+    { "match": "feed_forward.gate.weight", "role": "ROUTER", "gguf": "blk.%d.ffn_gate_inp.weight" },
+    { "match": "feed_forward.experts", "role": "ROUTED_EXPERT", "gguf": "blk.%d.ffn_%s_exps.weight" },
+    { "match": "feed_forward", "role": "FFN" }
+  ],
+  "quant": {
+    "NORM": "f32",
+    "EMBEDDING": "f16"
+  },
+  "structures": {
+    "layer": {
+      "type": "transformer_layer",
+      "steps": [
+        { "op": "attention", "prim": "" },
+        { "op": "ffn", "prim": "" }
+      ]
+    },
+    "norm": { "type": "rmsnorm" },
+    "attention": { "type": "gqa" },
+    "ssm": { "type": "conv" }
+  },
+  "runtime": {
+    "state": { "kind": "hybrid" }
+  },
+  "codecs": {
+    "mlx_affine": "mlx_affine",
+    "plain": "plain",
+    "fp8_block": "fp8_block",
+    "fp4_expert": "fp4_expert"
+  },
+  "quant_params": {
+    "group": 32,
+    "bits": 4
+  },
+  "weight_source": {
+    "mlx_affine": { "dtype": "U32", "codec": "mlx_affine", "scale_suffix": ".scales", "bias_suffix": ".biases" },
+    "plain_f16": { "dtype": "F16", "codec": "plain", "fmt": 1 },
+    "plain_bf16": { "dtype": "BF16", "codec": "plain", "fmt": 2 },
+    "plain_f32": { "dtype": "F32", "codec": "plain", "fmt": 0 }
+  },
+  "convert_target": {
+    "default": { "codec": "mlx_affine", "p0": 32, "p1": 4 }
+  }
+}

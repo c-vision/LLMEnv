@@ -1,0 +1,107 @@
+{
+  "_comment": ".gmbarch — RWKV7 (fla-hub/rwkv7-*): time-mixing ricorrente (WKV7 + LoRA) + channel-mixing. Stato ricorrente, NON KV-cache.",
+  "arch": "rwkv7",
+  "source": {
+    "format": "safetensors",
+    "config": "config.json"
+  },
+  "config_map": {
+    "n_layers": "num_hidden_layers",
+    "hidden": "hidden_size",
+    "inter": "intermediate_size",
+    "head_dim": "head_dim",
+    "a_low_rank_dim": "a_low_rank_dim",
+    "v_low_rank_dim": "v_low_rank_dim",
+    "gate_low_rank_dim": "gate_low_rank_dim",
+    "decay_low_rank_dim": "decay_low_rank_dim",
+    "vocab": "vocab_size"
+  },
+  "roles": [
+    { "match": "embeddings", "role": "EMBEDDING" },
+    { "match": "lm_head", "role": "OUTPUT", "gguf": "output.weight" },
+    { "match": "norm", "role": "FINAL_NORM", "gguf": "output_norm.weight" },
+    { "match": "pre_norm", "role": "NORM" },
+    { "match": "attn_norm", "role": "NORM", "gguf": "blk.%d.attn_norm.weight" },
+    { "match": "ffn_norm", "role": "NORM", "gguf": "blk.%d.ffn_norm.weight" },
+    { "match": "attn.g_norm", "role": "NORM" },
+    { "match": "attn.r_proj", "role": "RWKV_R" },
+    { "match": "attn.k_proj", "role": "RWKV_K" },
+    { "match": "attn.v_proj", "role": "RWKV_V" },
+    { "match": "attn.o_proj", "role": "RWKV_O" },
+    { "match": "attn.w_lora", "role": "RWKV_DECAY_LORA" },
+    { "match": "attn.a_lora", "role": "RWKV_A_LORA" },
+    { "match": "attn.v_lora", "role": "RWKV_V_LORA" },
+    { "match": "attn.g_lora", "role": "RWKV_GATE_LORA" },
+    { "match": "attn.k_k", "role": "RWKV_KK" },
+    { "match": "attn.k_a", "role": "RWKV_KA" },
+    { "match": "attn.r_k", "role": "RWKV_RK" },
+    { "match": "attn.x_r", "role": "RWKV_XSHIFT" },
+    { "match": "attn.x_w", "role": "RWKV_XSHIFT" },
+    { "match": "attn.x_k", "role": "RWKV_XSHIFT" },
+    { "match": "attn.x_v", "role": "RWKV_XSHIFT" },
+    { "match": "attn.x_a", "role": "RWKV_XSHIFT" },
+    { "match": "attn.x_g", "role": "RWKV_XSHIFT" },
+    { "match": "ffn.x_k", "role": "RWKV_XSHIFT" },
+    { "match": "ffn.key", "role": "RWKV_CH_KEY" },
+    { "match": "ffn.value", "role": "RWKV_CH_VALUE" }
+  ],
+  "quant": {
+    "NORM": "f32",
+    "RWKV_XSHIFT": "f32",
+    "RWKV_KK": "f32",
+    "RWKV_KA": "f32",
+    "RWKV_RK": "f32",
+    "EMBEDDING": "f16"
+  },
+  "structures": {
+    "layer": {
+      "type": "recurrent_layer",
+      "steps": [
+        { "op": "attention", "prim": "rwkv7_time_mix" },
+        { "op": "ffn", "prim": "rwkv7_channel_mix" }
+      ]
+    },
+    "norm": {
+      "type": "layernorm",
+      "prim": "layernorm"
+    },
+    "rwkv": {
+      "type": "rwkv7",
+      "head_dim": "cfg:head_dim",
+      "num_heads": "hidden/cfg:head_dim"
+    }
+  },
+  "runtime": {
+    "_comment": "Stato RICORRENTE per-layer: WKV state [heads,head_dim,head_dim] (k_cache) + token-shift del time-mixing (v_cache) e del channel-mixing (aux_cache). NON e' una KV-cache.",
+    "state": {
+      "kind": "rwkv7",
+      "wkv_dim": "cfg:head_dim",
+      "heads": "hidden/cfg:head_dim"
+    },
+    "kv": null
+  },
+  "codecs": {
+    "mlx_affine": "mlx_affine",
+    "plain": "plain",
+    "fp8_block": "fp8_block",
+    "fp4_expert": "fp4_expert"
+  },
+  "quant_params": {
+    "group": 32,
+    "bits": 4
+  },
+  "weight_source": {
+    "mlx_affine": {
+      "dtype": "U32",
+      "codec": "mlx_affine",
+      "scale_suffix": ".scales",
+      "bias_suffix": ".biases"
+    },
+    "plain_f16": { "dtype": "F16", "codec": "plain", "fmt": 1 },
+    "plain_bf16": { "dtype": "BF16", "codec": "plain", "fmt": 2 },
+    "plain_f32": { "dtype": "F32", "codec": "plain", "fmt": 0 }
+  },
+  "convert_target": {
+    "default": { "codec": "mlx_affine", "p0": 32, "p1": 4 }
+  }
+}
