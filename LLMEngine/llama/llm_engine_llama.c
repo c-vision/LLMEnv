@@ -6,6 +6,7 @@
 #include "llmengine_llama.h"
 #include "llmengine_llama_ocr.h"
 #include <stdint.h>
+#include <stdlib.h>
 
 static LlmEngineLlmModel lc_load(const char* path) { return (LlmEngineLlmModel)(intptr_t)llm_ai_load_model(path, 0); }
 static LlmEngineLlmModel lc_load_opts(const char* path, int n_gpu_layers) { return (LlmEngineLlmModel)(intptr_t)llm_ai_load_model(path, n_gpu_layers); }
@@ -60,3 +61,59 @@ static const LlmEngineLlmEngine LLMENGINE_LLAMA_LLAMACPP_ENGINE = {
 };
 
 const LlmEngineLlmEngine* llmengine_llm_engine_llamacpp(void) { return &LLMENGINE_LLAMA_LLAMACPP_ENGINE; }
+
+/* ── Variante a ID di token (`llamacpp_ids`) ──────────────────────────────────────────────────────────────
+ * Stessa libreria llama.cpp, ma esposta come motore a id (CAP_IDS): il chiamante porta tokenizer e chat template (FastLLM li
+ * costruisce dai metadati del GGUF) e la sessione decodifica/genera id. Serve per eseguire qualunque GGUF che llama.cpp sa
+ * caricare con lo stesso flusso (streaming, stop, ragionamento) degli altri motori. */
+/* Gli handle nativi partono da 0 e l ABI comune tratta NULL come errore: qui si codificano come handle+1. */
+static int g_ids_ctx = 8192;   /* contesto delle sessioni create dopo kv_set_max */
+void llm_ai_shutdown(void);   /* definita in llmengine_llama.c */
+static LlmEngineLlmModel lci_load(const char* path) {
+    int h = llm_ai_load_model(path, 99);   /* tutti gli strati su GPU */
+    /* All uscita libera sessioni e modelli PRIMA che ggml distrugga il device Metal (altrimenti GGML_ASSERT sui residency set).
+     * Va registrato DOPO il load: gli atexit girano in ordine inverso e il device Metal nasce (e registra il suo distruttore)
+     * durante il load, quindi un atexit registrato prima verrebbe eseguito dopo. */
+    { static int reg = 0; if (!reg) { reg = 1; atexit(llm_ai_shutdown); } }
+    return h < 0 ? NULL : (LlmEngineLlmModel)(intptr_t)(h + 1);
+}
+static void lci_free(LlmEngineLlmModel m) { llm_ai_unload_model((int)(intptr_t)m - 1); }
+static LlmEngineLlmSession lci_sess(LlmEngineLlmModel m) {
+    int s = llm_ai_create_session((int)(intptr_t)m - 1, g_ids_ctx, 0, 0);
+    return s < 0 ? NULL : (LlmEngineLlmSession)(intptr_t)(s + 1);
+}
+static void lci_dsess(LlmEngineLlmSession s) { llm_ai_destroy_session((int)(intptr_t)s - 1); }
+static int lci_kv_set_max(LlmEngineLlmModel m, int n) {   /* contesto delle prossime sessioni; tetto 32768 (il KV di llama.cpp e' preallocato) */
+    (void)m; g_ids_ctx = n <= 0 ? 8192 : (n > 32768 ? 32768 : n); return 0;
+}
+static int lci_set_sampling(LlmEngineLlmSession s, const LlmEngineLlmSampling* sp) {
+    if (sp == NULL) return -1;
+    return llm_ai_session_set_sampling((int)(intptr_t)s - 1, sp->temperature, sp->top_p, sp->top_k, sp->seed);
+}
+static int lci_append_ids(LlmEngineLlmSession s, const int32_t* ids, int n) {
+    return llm_ai_session_append_ids((int)(intptr_t)s - 1, ids, n);
+}
+static int lci_generate_ids(LlmEngineLlmSession s, int max_new, int32_t eos, int32_t* out) {
+    return llm_ai_session_generate_ids((int)(intptr_t)s - 1, max_new, eos, out);
+}
+static int lci_kv_clear(LlmEngineLlmSession s) { return llm_ai_session_cache_clear((int)(intptr_t)s - 1); }
+static int lci_kv_stats(LlmEngineLlmSession s, int* used, int* cap) {
+    int n_ctx = 0, n_tok = 0;
+    if (llm_ai_session_cache_stats((int)(intptr_t)s - 1, &n_ctx, &n_tok, NULL, NULL, NULL) != 0) return -1;
+    if (used) *used = n_tok;
+    if (cap) *cap = n_ctx;
+    return 0;
+}
+
+static const LlmEngineLlmEngine LLMENGINE_LLAMA_IDS_ENGINE = {
+    .name = "llamacpp_ids",
+    .caps = LLMMODELIO_CAP_IDS | LLMMODELIO_CAP_KV | LLMMODELIO_CAP_KV_MAX,
+    .load_model = lci_load, .free_model = lci_free,
+    .create_session = lci_sess, .destroy_session = lci_dsess,
+    .append_ids = lci_append_ids, .generate_ids = lci_generate_ids,
+    .set_sampling = lci_set_sampling,
+    .kv_clear = lci_kv_clear, .kv_stats = lci_kv_stats, .kv_set_max = lci_kv_set_max,
+    .free_str = lc_free_str,
+};
+
+const LlmEngineLlmEngine* llmengine_llm_engine_llamacpp_ids(void) { return &LLMENGINE_LLAMA_IDS_ENGINE; }

@@ -38,6 +38,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 #include <math.h>
 
@@ -786,6 +787,86 @@ char* llm_ai_session_generate(int session_handle, int max_tokens) {
 
     pthread_mutex_unlock(&session->session_mutex);
     return result;
+}
+
+/* ── API a livello di ID di token (usata dall'adattatore `llamacpp_ids`) ─────────────────────────────────
+ * llama.cpp lavora a testo/chat, ma il suo contesto e' a token: queste due funzioni decodificano id gia'
+ * calcolati dal chiamante (tokenizer e template NON sono quelli di llama.cpp) e generano id. Cosi' un consumatore a id
+ * (FastLLM) usa qualunque GGUF che llama.cpp sa eseguire, con le stesse regole di streaming/stop degli altri motori.
+ * Il KV della sessione e' quello della chat: i due stili non vanno mescolati sulla stessa sessione. */
+
+/* Decodifica `n` id nel KV della sessione (a blocchi: llama_decode accetta al piu' n_batch token). 0 = ok, -1 = errore. */
+int llm_ai_session_append_ids(int session_handle, const int32_t* ids, int n) {
+    LlamaChatSession* session = NULL;
+    if (ids == NULL || n < 0) return -1;
+    pthread_mutex_lock(&g_registry_mutex);
+    session = find_session_locked(session_handle);
+    pthread_mutex_unlock(&g_registry_mutex);
+    if (session == NULL) return -1;
+    pthread_mutex_lock(&session->session_mutex);
+    int rc = 0;
+    if ((int)session->tokens_len + n > (int)llama_n_ctx(session->ctx)) rc = -1;   /* contesto pieno */
+    const int chunk = 512;
+    for (int off = 0; rc == 0 && off < n; off += chunk) {
+        int len = n - off < chunk ? n - off : chunk;
+        llama_token* tk = (llama_token*)malloc((size_t)len * sizeof(llama_token));
+        if (tk == NULL) { rc = -1; break; }
+        for (int i = 0; i < len; i++) tk[i] = (llama_token)ids[off + i];
+        llama_batch batch = llama_batch_get_one(tk, len);
+        if (llama_decode(session->ctx, batch) != 0) rc = -1;
+        else session_append_tokens(session, tk, (size_t)len);
+        free(tk);
+    }
+    if (rc == 0) session->decoded_anything = true;
+    pthread_mutex_unlock(&session->session_mutex);
+    return rc;
+}
+
+/* Genera fino a `max_new` id continuando dal KV corrente; si ferma sull'eos dato o su un token di fine generazione del
+ * vocabolario (che viene scritto in `out` ma NON decodificato). Ritorna il numero di id scritti. */
+int llm_ai_session_generate_ids(int session_handle, int max_new, int32_t eos, int32_t* out) {
+    LlamaChatSession* session = NULL;
+    LlamaModel* model = NULL;
+    if (out == NULL || max_new <= 0) return -1;
+    pthread_mutex_lock(&g_registry_mutex);
+    session = find_session_locked(session_handle);
+    if (session != NULL) model = find_model_locked(session->model_handle);
+    pthread_mutex_unlock(&g_registry_mutex);
+    if (session == NULL || model == NULL) return -1;
+    pthread_mutex_lock(&session->session_mutex);
+
+    /* Catena di campionamento come in generate_text, ma il seme cambia a ogni chiamata (qui si chiama un token per volta:
+     * con un seme fisso ogni chiamata ripeterebbe la stessa estrazione). */
+    llama_sampler* sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    unsigned seed = session->sampling_seed != 0 ? (unsigned)(session->sampling_seed + (int64_t)session->tokens_len)
+                                                : (unsigned)(time(NULL) ^ ((unsigned)session->tokens_len * 2654435761u));
+    if (session->sampling_set && session->sampling_temperature <= 0.0f) {
+        llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
+    } else {
+        float temp = session->sampling_set ? session->sampling_temperature : 0.8f;
+        if (session->sampling_set && session->sampling_top_k > 0)
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_k(session->sampling_top_k));
+        if (session->sampling_set && session->sampling_top_p > 0.0f && session->sampling_top_p < 1.0f)
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(session->sampling_top_p, 1));
+        llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05f, 1));
+        llama_sampler_chain_add(sampler, llama_sampler_init_temp(temp));
+        llama_sampler_chain_add(sampler, llama_sampler_init_dist(seed));
+    }
+
+    int k = 0;
+    const int n_ctx = (int)llama_n_ctx(session->ctx);
+    for (; k < max_new; k++) {
+        if ((int)session->tokens_len >= n_ctx) break;   /* contesto esaurito */
+        llama_token t = llama_sampler_sample(sampler, session->ctx, -1);
+        out[k] = (int32_t)t;
+        if ((eos >= 0 && (int32_t)t == eos) || llama_vocab_is_eog(model->vocab, t)) { k++; break; }
+        llama_batch batch = llama_batch_get_one(&t, 1);
+        if (llama_decode(session->ctx, batch) != 0) break;
+        session_append_tokens(session, &t, 1);
+    }
+    llama_sampler_free(sampler);
+    pthread_mutex_unlock(&session->session_mutex);
+    return k;
 }
 
 void llm_ai_free_string(char* s) {
