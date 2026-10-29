@@ -26,6 +26,15 @@ add_library(llmcodec STATIC
     src/llmcodec_ggml_quants.c src/llmcodec_ggml_iq_grids.c src/llmcodec_make_qp.c
 )
 
+# Suffisso dei plugin per piattaforma: `.dylib` su macOS, `.so` su Linux (glibc/ld).
+# Il loader (LLMCodec/src/llmcodec.c) prova {.dylib, .so, ""}: entrambi funzionano, ma il nome
+# nativo evita sorprese con strumenti che filtrano per estensione (bundle, sha, ldd).
+if(APPLE)
+    set(_codec_suffix ".dylib")
+else()
+    set(_codec_suffix ".so")
+endif()
+
 # PLUGIN CODEC (dylib): le IMPLEMENTAZIONI vivono QUI, mai nel core.
 add_library(llmcodec_ggml SHARED
     src/llmcodec_ggml_quants.c src/llmcodec_ggml_iq_grids.c src/llmcodec_make_qp.c
@@ -50,7 +59,7 @@ foreach(pl llmcodec_ggml llmcodec_mlx_affine llmcodec_fp8 llmcodec_plain llmcode
     target_include_directories(${pl} PRIVATE include src)
     target_link_libraries(${pl} PRIVATE m)
     set_target_properties(${pl} PROPERTIES
-        PREFIX "lib" OUTPUT_NAME "${pl}" SUFFIX ".dylib"
+        PREFIX "lib" OUTPUT_NAME "${pl}" SUFFIX "${_codec_suffix}"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
         BUILD_RPATH "${CMAKE_BINARY_DIR}" INSTALL_RPATH "@loader_path")
 endforeach()

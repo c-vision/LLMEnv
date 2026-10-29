@@ -223,7 +223,17 @@ static inline GgufStore* llmengine_moe_gguf_store_open(const char* path, const L
      * F_NOCACHE: i pread non passano dal UBC; la cache LRU dello store resta la sola cache.
      * Il mmap (RESIDENT/fallback) usa il fd principale, NON toccato. */
     s->rfd = open(path, O_RDONLY);
-    if (s->rfd >= 0) { if (fcntl(s->rfd, F_NOCACHE, 1) != 0) { /* hint best-effort */ } }
+    if (s->rfd >= 0) {
+#ifdef F_NOCACHE
+        /* macOS: i pread non passano dal UBC (unified buffer cache). */
+        if (fcntl(s->rfd, F_NOCACHE, 1) != 0) { /* hint best-effort */ }
+#else
+        /* Linux non ha F_NOCACHE: equivalente best-effort con l'hint POSIX (niente read-ahead
+         * sulle letture sparse degli esperti). F_NOCACHE è Apple-only: senza questo #ifdef la
+         * build Linux si fermava con "'F_NOCACHE' undeclared". */
+        (void)posix_fadvise(s->rfd, 0, 0, POSIX_FADV_RANDOM);
+#endif
+    }
 
     for (uint32_t l = 0; l < n_layers; ++l) {
         char b[160];

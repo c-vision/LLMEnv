@@ -1,4 +1,10 @@
 /* llmdesc.c — parser .llmarch (descrizione d'architettura). JSON minimale (riusa lo stile jv). */
+/* Dl_info/dladdr su Linux sono estensioni GNU di glibc: senza _GNU_SOURCE la struct non esiste
+ * ("unknown type name 'Dl_info'") e la build Linux si ferma. Va definito PRIMA di ogni include
+ * di sistema; su macOS (dove Dl_info è in <dlfcn.h> senza macro) è innocuo. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include "llmdesc.h"
 #include <stdio.h>
 #include <stdlib.h>
