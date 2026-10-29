@@ -41,7 +41,7 @@ static int ds4n_append(LlmEngineLlmSession sess, const int32_t* ids, int n) {
         s->toks = t; s->cap = nc;
     }
     memcpy(s->toks + s->n, ids, (size_t)n * sizeof(int32_t)); s->n += n;
-    return ds4_bridge_sync(s->b, s->toks, s->n) == 0 ? n : -1;
+    return ds4_bridge_sync(s->b, s->toks, s->n) == 0 ? 0 : -1;   /* ABI: 0 = ok, come gli altri motori */
 }
 static int ds4n_generate(LlmEngineLlmSession sess, int max_new, int32_t eos, int32_t* out) {
     ds4n_sess* s = (ds4n_sess*)sess;

@@ -64,6 +64,12 @@ int llm_ai_mlx_gguf_supported(const char* path) {
     return ok;
 }
 
+/* `tokenizer.ggml.model` == "gpt2": BPE byte-level, costruibile dai KV del GGUF a prescindere dall architettura. */
+static int gguf_tok_is_gpt2(const LlmEngineMoeGguf* g) {
+    const LlmGgufVal* v = llm_gguf_find_val(g, "tokenizer.ggml.model");
+    return v != NULL && v->type == GGSTR && v->s != NULL && v->slen == 4 && memcmp(v->s, "gpt2", 4) == 0;
+}
+
 /* JSON del tokenizer BPE byte-level (GPT-2/Llama-3/Qwen) dai KV `tokenizer.ggml.*` del GGUF.
  * Stessa struttura del builder DS4 (buffer + escape), ma pattern di split GPT-2/Llama-3. */
 static char* llm_mlx_gguf_tokenizer_json_bpe(const LlmEngineMoeGguf* g, size_t* out_len) {
@@ -131,8 +137,8 @@ char* llm_ai_mlx_gguf_tokenizer_json(const char* path, size_t* out_len) {
         char at[64]; int n = (int)v->slen; if (n > 63) n = 63;
         memcpy(at, v->s, (size_t)n); at[n] = 0;
         if (strcmp(at, "deepseek4") == 0) json = llm_dsv4_tokenizer_json_from_gguf(&g, out_len);
-        else if (strcmp(at, "deepseek_v41") != 0 && find_arch_ops(at) != NULL)
-            json = llm_mlx_gguf_tokenizer_json_bpe(&g, out_len);   /* BPE byte-level generico */
+        else if (strcmp(at, "deepseek_v41") != 0 && (find_arch_ops(at) != NULL || gguf_tok_is_gpt2(&g)))
+            json = llm_mlx_gguf_tokenizer_json_bpe(&g, out_len);   /* BPE byte-level generico (anche archi senza entry in ARCH_TABLE, es. qwen4exp) */
     }
     llm_gguf_close_file(&g, map, maplen);
     return json;
