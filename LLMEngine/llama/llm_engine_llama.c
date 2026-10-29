@@ -100,7 +100,14 @@ static LlmEngineLlmSession lci_sess(LlmEngineLlmModel m) {
     uint64_t budget = avail > 0 ? avail / 10 * 6 : ram / 4;
     if (ram > 0 && budget > ram / 3) budget = ram / 3;
     (void)mbytes;
-    const long long fit = (kv_tok > 0 && ram > 0) ? (long long)(budget / kv_tok) : 0;   /* 0 = ignoto */
+    /* contesto massimo la cui KV entra nel budget (KV monotona in n_ctx: ricerca binaria); 0 = ignoto */
+    long long fit = 0;
+    if (llm_ai_model_kv_bytes(mh, 2048) > 0) {
+        long long lo = 2048, hi = 16777216;
+        if (llm_ai_model_kv_bytes(mh, hi) <= budget) lo = hi;
+        else while (hi - lo > 1024) { long long mid = lo + (hi - lo) / 2; if (llm_ai_model_kv_bytes(mh, mid) <= budget) lo = mid; else hi = mid; }
+        fit = lo;
+    }
     long long want = g_ids_ctx > 0 ? g_ids_ctx : (n_train > 0 ? n_train : 8192);
     long long eff = want;
     if (fit > 0 && eff > fit) eff = fit;
@@ -114,7 +121,7 @@ static LlmEngineLlmSession lci_sess(LlmEngineLlmModel m) {
     if (s < 0) return NULL;
     fprintf(stderr, "[llamacpp] contesto %lld token (%s%lld; addestramento %d; KV ~%.2f GiB)%s%s\n", eff,
             g_ids_ctx > 0 ? "richiesto " : "automatico, ", want, n_train,
-            (double)(kv_tok * (size_t)eff) / 1073741824.0,
+            (double)llm_ai_model_kv_bytes(mh, eff) / 1073741824.0,
             eff < want ? " -- ridotto per la memoria disponibile" : "",
             (n_train > 0 && eff > n_train) ? " -- oltre il contesto di addestramento: la qualita' puo' degradare" : "");
     return (LlmEngineLlmSession)(intptr_t)(s + 1);

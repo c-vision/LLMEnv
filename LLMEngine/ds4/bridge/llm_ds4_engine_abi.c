@@ -51,7 +51,11 @@ static int ds4n_ensure(ds4n_sess* s) {
     for (;;) {
         s->b = ds4_bridge_open(s->path, ctx, 0, 0);
         if (s->b) break;
-        if (s->want > 0 || ctx <= DS4N_MIN_CTX) return -1;   /* richiesta esplicita o minimo raggiunto */
+        if (s->want > 0 || ctx <= DS4N_MIN_CTX) {   /* richiesta esplicita o minimo raggiunto */
+            fprintf(stderr, "[ds4] impossibile aprire il motore con %d token di contesto (memoria insufficiente?): %s\n", ctx,
+                    s->want > 0 ? "riduci --context, oppure omettilo per la scelta automatica" : "nemmeno il minimo entra");
+            return -1;
+        }
         ctx /= 2; if (ctx < DS4N_MIN_CTX) ctx = DS4N_MIN_CTX;
     }
     s->ctx = ctx; s->n = 0;

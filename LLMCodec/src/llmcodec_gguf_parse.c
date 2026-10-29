@@ -118,7 +118,8 @@ LlmCodecGgufStatus llmcodec_gguf_parse_mem_status(const uint8_t* buf, size_t siz
     if (!c.ok) return c.st;
     if (magic != 0x46554747u) return LLMCODEC_GGUF_STATUS_NOT_GGUF;
     if (ver < 2 || ver > 4) return LLMCODEC_GGUF_STATUS_VERSION;
-    int wide = (ver >= 3);
+    /* GGUF v1: conteggi a 32 bit; dalla v2 sono a 64 bit (la v3 aggiunge solo il big-endian). Qui v1 e' gia' rifiutata sopra. */
+    int wide = (ver >= 2);
     uint64_t n_ts = cur_u(&c, wide ? 8 : 4);
     uint64_t n_kv = cur_u(&c, wide ? 8 : 4);
     if (!c.ok) return c.st;

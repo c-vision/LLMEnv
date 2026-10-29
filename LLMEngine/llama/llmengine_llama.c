@@ -812,6 +812,41 @@ int llm_ai_model_ctx_info(int model_handle, int* n_ctx_train, size_t* kv_bytes_p
     return 0;
 }
 
+/* Byte di KV-cache (F16) che llama.cpp assegna per un contesto di `n_ctx` token, calcolati dai metadati del modello:
+ * lunghezza di chiavi e valori per testa (`<arch>.attention.key_length/value_length`, altrimenti embedding/teste),
+ * teste KV, strati, e per i modelli con finestra locale (SWA) il costo ridotto degli strati locali: min(n_ctx, finestra + 512).
+ * Frazione di strati locali nota per Gemma 2 (1/2), Gemma 3 (5/6), Gemma 3n (4/5), Cohere2 (3/4); per le altre architetture con
+ * finestra si assume nessuno strato locale (stima per eccesso: mai sotto il costo reale). 0 = ignoto / handle non valido. */
+size_t llm_ai_model_kv_bytes(int model_handle, long long n_ctx) {
+    pthread_mutex_lock(&g_registry_mutex);
+    LlamaModel* m = find_model_locked(model_handle);
+    if (m == NULL) { pthread_mutex_unlock(&g_registry_mutex); return 0; }
+    const llama_model* mdl = m->model;
+    const long long nl = llama_model_n_layer(mdl), nkv = llama_model_n_head_kv(mdl), nh = llama_model_n_head(mdl), ne = llama_model_n_embd(mdl);
+    const long long swa = llama_model_n_swa(mdl);
+    char arch[64] = "", key[160], val[32];
+    (void)llama_model_meta_val_str(mdl, "general.architecture", arch, sizeof arch);
+    long long klen = 0, vlen = 0;
+    snprintf(key, sizeof key, "%s.attention.key_length", arch);
+    if (llama_model_meta_val_str(mdl, key, val, sizeof val) > 0) klen = atoll(val);
+    snprintf(key, sizeof key, "%s.attention.value_length", arch);
+    if (llama_model_meta_val_str(mdl, key, val, sizeof val) > 0) vlen = atoll(val);
+    pthread_mutex_unlock(&g_registry_mutex);
+    if (nl <= 0 || nkv <= 0 || nh <= 0) return 0;
+    if (klen <= 0) klen = ne / nh;
+    if (vlen <= 0) vlen = klen;
+    double frac = 0.0;
+    if (swa > 0) {
+        if (strcmp(arch, "gemma2") == 0) frac = 0.5;
+        else if (strcmp(arch, "gemma3") == 0) frac = 5.0 / 6.0;
+        else if (strcmp(arch, "gemma3n") == 0) frac = 0.8;
+        else if (strcmp(arch, "cohere2") == 0) frac = 0.75;
+    }
+    const double per_layer_token = (double)nkv * (double)(klen + vlen) * 2.0;   /* F16 */
+    const double local_ctx = swa > 0 ? (double)(swa + 512 < n_ctx ? swa + 512 : n_ctx) : (double)n_ctx;
+    return (size_t)((double)nl * per_layer_token * ((1.0 - frac) * (double)n_ctx + frac * local_ctx));
+}
+
 int llm_ai_session_append_ids(int session_handle, const int32_t* ids, int n) {
     LlamaChatSession* session = NULL;
     if (ids == NULL || n < 0) return -1;
@@ -875,7 +910,11 @@ int llm_ai_session_generate_ids(int session_handle, int max_new, int32_t eos, in
         if ((int)session->tokens_len >= n_ctx) break;   /* contesto esaurito */
         llama_token t = llama_sampler_sample(sampler, session->ctx, -1);
         out[k] = (int32_t)t;
-        if ((eos >= 0 && (int32_t)t == eos) || llama_vocab_is_eog(model->vocab, t)) { k++; break; }
+        if (eos >= 0 && (int32_t)t == eos) { k++; break; }
+        if (llama_vocab_is_eog(model->vocab, t)) {   /* altro token di fine (p.es. <end_of_turn> di Gemma): lo si segnala con l eos richiesto, che il chiamante riconosce */
+            if (eos >= 0) out[k] = eos;
+            k++; break;
+        }
         llama_batch batch = llama_batch_get_one(&t, 1);
         if (llama_decode(session->ctx, batch) != 0) break;
         session_append_tokens(session, &t, 1);

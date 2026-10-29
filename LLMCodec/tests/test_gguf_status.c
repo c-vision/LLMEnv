@@ -124,6 +124,23 @@ static void test_valid_ok(void) {
     printf("  ok   file valido => OK\n");
 }
 
+/* GGUF v2 (p.es. i file di TheBloke del 2023): conteggi a 64 bit come la v3. Il lettore li leggeva a 32 bit e rifiutava il file. */
+static void test_v2_ok(void) {
+    Buf x;
+    LlmCodecGgufFileInfo info;
+    buf_init(&x);
+    buf_u(&x, 0x46554747u, 4); buf_u(&x, 2, 4); buf_u(&x, 1, 8); buf_u(&x, 0, 8);
+    buf_tensor(&x, "w", 32, 0, 0);
+    pad_and_data(&x, 32, 128);
+    LlmCodecGgufStatus st = llmcodec_gguf_parse_mem_status(x.b, x.n, NULL, NULL, &info);
+    CHECK(st == LLMCODEC_GGUF_STATUS_OK, "GGUF v2 rifiutato: %s", llmcodec_gguf_status_str(st));
+    CHECK(info.version == 2 && info.n_tensors == 1 && info.n_kv == 0, "v2: conteggi %u/%llu/%llu",
+          info.version, (unsigned long long)info.n_tensors, (unsigned long long)info.n_kv);
+    llmcodec_gguf_free_info(&info);
+    buf_free(&x);
+    printf("  ok   GGUF v2 (conteggi a 64 bit) => OK\n");
+}
+
 static void test_status_str(void) {
     int i;
     for (i = 0; i <= 25; i++) CHECK(llmcodec_gguf_status_str((LlmCodecGgufStatus)i) != NULL,
@@ -138,6 +155,7 @@ int main(void) {
     test_status_str();
     test_codes();
     test_valid_ok();
+    test_v2_ok();
     printf("\n%d verifiche, %d fallite\n", checks, fails);
     return fails ? 1 : 0;
 }
