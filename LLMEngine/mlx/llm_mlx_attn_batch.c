@@ -901,7 +901,9 @@ bool embed_tokens_batch(LlmMlxModel* m, mlx_array embed_w, mlx_array embed_s, ml
     llm_mlx_mode_set(e_mode, sizeof(e_mode), m->cfg.quant_mode);
     if (quantized) {
         int qg = 0, qb = 0;
-        if (m->embed_q_group > 0) { e_group = m->embed_q_group; e_bits = m->embed_q_bits; }
+        if (m->embed_q_group > 0) { e_group = m->embed_q_group; e_bits = m->embed_q_bits;
+            /* l override per-modulo vale anche per la modalita': scale non-uint8 = affine, anche se il modello e' mxfp globalmente */
+            if (mlx_array_dtype(embed_s) != MLX_UINT8) llm_mlx_mode_set(e_mode, sizeof(e_mode), "affine"); }
         else if (llm_mlx_qp_lookup(embed_w.ctx, (int)mlx_array_shape(embed_w)[0], (int)mlx_array_shape(embed_w)[mlx_array_ndim(embed_w)-1], &qg, &qb)) { e_group = qg; e_bits = qb; }
         else llm_mlx_quant_derive(embed_w, embed_s, e_group, e_bits, e_mode, &e_group, &e_bits, e_mode, sizeof(e_mode));
     }

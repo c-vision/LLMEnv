@@ -61,6 +61,9 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         return false;
     }
     llm_mlx_mode_set(cfg->model_type, sizeof(cfg->model_type), model_type->valuestring);
+    /* Default 1.0 per TUTTE le architetture: moe_v2 moltiplica i pesi dei top-k per questo fattore quando != 1.0; a 0
+     * (config senza la chiave, p.es. qwen3_moe/mixtral/qwen2_moe) azzerava l uscita routed e il modello generava spazzatura. */
+    cfg->routed_scaling_factor = 1.0f;
     /* Ternary-Bonsai 2 27B (PrismML): il pack si dichiara `prism_hadamard_qwen35` ma la base e'
      * qwen3_5. Normalizzo QUI, prima di ogni ramo model_type-dipendente (layer_types, rope, MoE,
      * chunk, ...): cosi' la config viene letta esattamente come un qwen3_5. La presenza del

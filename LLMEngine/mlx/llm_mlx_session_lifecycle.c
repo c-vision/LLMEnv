@@ -33,7 +33,9 @@ static bool embed_token(LlmMlxModel* m, mlx_array embed_w, mlx_array embed_s, ml
     char e_mode[16];
     llm_mlx_mode_set(e_mode, sizeof(e_mode), m->cfg.quant_mode);
     if (quantized) {
-        if (m->embed_q_group > 0) { e_group = m->embed_q_group; e_bits = m->embed_q_bits; }
+        if (m->embed_q_group > 0) { e_group = m->embed_q_group; e_bits = m->embed_q_bits;
+            /* l override per-modulo vale anche per la modalita': scale non-uint8 = affine, anche se il modello e' mxfp globalmente */
+            if (mlx_array_dtype(embed_s) != MLX_UINT8) llm_mlx_mode_set(e_mode, sizeof(e_mode), "affine"); }
         else llm_mlx_quant_derive(embed_w, embed_s, e_group, e_bits, e_mode, &e_group, &e_bits, e_mode, sizeof(e_mode));
     }
     const int idx_shape[1] = {1};
