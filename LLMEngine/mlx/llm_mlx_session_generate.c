@@ -499,8 +499,14 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
          * lascerebbe un aux stantio/NULL (array vuoto CMLX / risultato errato, cfr. il
          * side-channel di forward_tokens_batch_multi_cap). Finche' il rollback non include
          * l'aux, il percorso self-speculative si disattiva per questi modelli. */
-        const bool hybrid_recurrent = (m->cfg.model_type != NULL &&
-                                       strcmp(m->cfg.model_type, "kimi_linear") == 0);
+        /* Stesso vincolo per ogni architettura con stato ricorrente/convoluzionale fuori da K/V: LFM2 (conv corta),
+         * Mamba, Falcon-H1, Jamba, Granite-hybrid, OLMo-hybrid, RWKV. Senza questa esclusione il rollback riporta
+         * K/V ma non lo stato: il testo degenera (LFM2-8B generava solo virgolette). */
+        static const char* const k_rec_types[] = { "kimi_linear", "lfm2", "lfm2_moe", "mamba", "mamba2", "falcon_mamba",
+            "falcon_h1", "jamba", "granitemoehybrid", "olmo_hybrid", "rwkv7" };
+        bool hybrid_recurrent = false;
+        for (size_t ri = 0; m->cfg.model_type != NULL && ri < sizeof k_rec_types / sizeof k_rec_types[0]; ri++)
+            if (strcmp(m->cfg.model_type, k_rec_types[ri]) == 0) { hybrid_recurrent = true; break; }
         if (ord >= 2 && !hybrid_recurrent) {
             llm_mlx_sampling_t smn = llm_mlx_session_sampling(s);
             if (!smn.active || smn.temperature <= 0.0f) {
