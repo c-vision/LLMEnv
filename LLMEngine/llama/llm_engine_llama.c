@@ -7,6 +7,10 @@
 #include "llmengine_llama_ocr.h"
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <mach/mach.h>
 
 static LlmEngineLlmModel lc_load(const char* path) { return (LlmEngineLlmModel)(intptr_t)llm_ai_load_model(path, 0); }
 static LlmEngineLlmModel lc_load_opts(const char* path, int n_gpu_layers) { return (LlmEngineLlmModel)(intptr_t)llm_ai_load_model(path, n_gpu_layers); }
@@ -67,7 +71,7 @@ const LlmEngineLlmEngine* llmengine_llm_engine_llamacpp(void) { return &LLMENGIN
  * costruisce dai metadati del GGUF) e la sessione decodifica/genera id. Serve per eseguire qualunque GGUF che llama.cpp sa
  * caricare con lo stesso flusso (streaming, stop, ragionamento) degli altri motori. */
 /* Gli handle nativi partono da 0 e l ABI comune tratta NULL come errore: qui si codificano come handle+1. */
-static int g_ids_ctx = 8192;   /* contesto delle sessioni create dopo kv_set_max */
+static int g_ids_ctx = 0;   /* contesto richiesto con kv_set_max: 0 = automatico (contesto di addestramento, entro la memoria) */
 void llm_ai_shutdown(void);   /* definita in llmengine_llama.c */
 static LlmEngineLlmModel lci_load(const char* path) {
     int h = llm_ai_load_model(path, 99);   /* tutti gli strati su GPU */
@@ -78,13 +82,46 @@ static LlmEngineLlmModel lci_load(const char* path) {
     return h < 0 ? NULL : (LlmEngineLlmModel)(intptr_t)(h + 1);
 }
 static void lci_free(LlmEngineLlmModel m) { llm_ai_unload_model((int)(intptr_t)m - 1); }
+/* Contesto della sessione. llama.cpp preassegna l intera KV-cache alla creazione, quindi la scelta dipende dalla memoria:
+ *  - richiesta esplicita (> 0): rispettata, ridotta solo se la KV non entra nel budget (meta' della RAM meno i pesi);
+ *  - automatico (0): il contesto di addestramento del modello, sempre entro il budget, minimo 2048.
+ * Se llama.cpp rifiuta l allocazione si dimezza fino a 2048. Una riga su stderr dice cosa e' stato scelto e perche'. */
 static LlmEngineLlmSession lci_sess(LlmEngineLlmModel m) {
-    int s = llm_ai_create_session((int)(intptr_t)m - 1, g_ids_ctx, 0, 0);
-    return s < 0 ? NULL : (LlmEngineLlmSession)(intptr_t)(s + 1);
+    const int mh = (int)(intptr_t)m - 1;
+    int n_train = 0; size_t kv_tok = 0, mbytes = 0;
+    (void)llm_ai_model_ctx_info(mh, &n_train, &kv_tok, &mbytes);
+    /* Budget per la KV: il 60% della memoria libera o recuperabile ORA (i pesi sono gia' caricati), al massimo un terzo della RAM. */
+    uint64_t ram = 0; size_t rl = sizeof ram;
+    if (sysctlbyname("hw.memsize", &ram, &rl, NULL, 0) != 0) ram = 0;
+    uint64_t avail = 0;
+    { vm_statistics64_data_t vs; mach_msg_type_number_t vc = HOST_VM_INFO64_COUNT;
+      if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vs, &vc) == KERN_SUCCESS)
+          avail = ((uint64_t)vs.free_count + vs.inactive_count + vs.speculative_count) * (uint64_t)vm_page_size; }
+    uint64_t budget = avail > 0 ? avail / 10 * 6 : ram / 4;
+    if (ram > 0 && budget > ram / 3) budget = ram / 3;
+    (void)mbytes;
+    const long long fit = (kv_tok > 0 && ram > 0) ? (long long)(budget / kv_tok) : 0;   /* 0 = ignoto */
+    long long want = g_ids_ctx > 0 ? g_ids_ctx : (n_train > 0 ? n_train : 8192);
+    long long eff = want;
+    if (fit > 0 && eff > fit) eff = fit;
+    if (eff < 2048) eff = 2048;
+    int s = -1;
+    for (;;) {
+        s = llm_ai_create_session(mh, (int)eff, 0, 0);
+        if (s >= 0 || eff <= 2048) break;
+        eff /= 2; if (eff < 2048) eff = 2048;
+    }
+    if (s < 0) return NULL;
+    fprintf(stderr, "[llamacpp] contesto %lld token (%s%lld; addestramento %d; KV ~%.2f GiB)%s%s\n", eff,
+            g_ids_ctx > 0 ? "richiesto " : "automatico, ", want, n_train,
+            (double)(kv_tok * (size_t)eff) / 1073741824.0,
+            eff < want ? " -- ridotto per la memoria disponibile" : "",
+            (n_train > 0 && eff > n_train) ? " -- oltre il contesto di addestramento: la qualita' puo' degradare" : "");
+    return (LlmEngineLlmSession)(intptr_t)(s + 1);
 }
 static void lci_dsess(LlmEngineLlmSession s) { llm_ai_destroy_session((int)(intptr_t)s - 1); }
-static int lci_kv_set_max(LlmEngineLlmModel m, int n) {   /* contesto delle prossime sessioni; tetto 32768 (il KV di llama.cpp e' preallocato) */
-    (void)m; g_ids_ctx = n <= 0 ? 8192 : (n > 32768 ? 32768 : n); return 0;
+static int lci_kv_set_max(LlmEngineLlmModel m, int n) {   /* contesto delle prossime sessioni; 0 = automatico */
+    (void)m; g_ids_ctx = n < 0 ? 0 : n; return 0;
 }
 static int lci_set_sampling(LlmEngineLlmSession s, const LlmEngineLlmSampling* sp) {
     if (sp == NULL) return -1;

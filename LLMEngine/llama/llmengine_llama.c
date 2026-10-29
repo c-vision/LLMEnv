@@ -796,6 +796,22 @@ char* llm_ai_session_generate(int session_handle, int max_tokens) {
  * Il KV della sessione e' quello della chat: i due stili non vanno mescolati sulla stessa sessione. */
 
 /* Decodifica `n` id nel KV della sessione (a blocchi: llama_decode accetta al piu' n_batch token). 0 = ok, -1 = errore. */
+/* Dati per scegliere la lunghezza del contesto di un modello: contesto di addestramento, byte di KV-cache per token (stima
+ * F16 su tutti gli strati: la cache e' preallocata da llama.cpp per intero alla creazione del contesto) e dimensione dei
+ * pesi. 0 = ok, -1 = handle non valido. I valori 0 vanno letti come "ignoto". */
+int llm_ai_model_ctx_info(int model_handle, int* n_ctx_train, size_t* kv_bytes_per_token, size_t* model_bytes) {
+    pthread_mutex_lock(&g_registry_mutex);
+    LlamaModel* m = find_model_locked(model_handle);
+    if (m == NULL) { pthread_mutex_unlock(&g_registry_mutex); return -1; }
+    const int64_t nl = llama_model_n_layer(m->model), nkv = llama_model_n_head_kv(m->model);
+    const int64_t nh = llama_model_n_head(m->model), ne = llama_model_n_embd(m->model);
+    if (n_ctx_train) *n_ctx_train = llama_model_n_ctx_train(m->model);
+    if (kv_bytes_per_token) *kv_bytes_per_token = (nh > 0 && nl > 0 && nkv > 0) ? (size_t)(2 * 2 * nl * nkv * (ne / nh)) : 0;
+    if (model_bytes) *model_bytes = (size_t)llama_model_size(m->model);
+    pthread_mutex_unlock(&g_registry_mutex);
+    return 0;
+}
+
 int llm_ai_session_append_ids(int session_handle, const int32_t* ids, int n) {
     LlamaChatSession* session = NULL;
     if (ids == NULL || n < 0) return -1;

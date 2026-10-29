@@ -85,6 +85,8 @@ char* llm_ai_session_generate(int session_handle, int max_tokens);
 
 /* API a livello di ID di token (tokenizer e template del chiamante): decodifica `n` id nel KV; 0 = ok, -1 = errore. */
 int llm_ai_session_append_ids(int session_handle, const int32_t* ids, int n);
+/* Contesto di addestramento, byte di KV per token (stima) e byte dei pesi del modello; 0 = ignoto. */
+int llm_ai_model_ctx_info(int model_handle, int* n_ctx_train, size_t* kv_bytes_per_token, size_t* model_bytes);
 /* Genera fino a `max_new` id (si ferma su `eos` o su un token di fine del vocabolario, incluso in `out`). Ritorna il conteggio. */
 int llm_ai_session_generate_ids(int session_handle, int max_new, int32_t eos, int32_t* out);
 
