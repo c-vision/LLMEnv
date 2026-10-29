@@ -52,6 +52,9 @@ typedef struct LlmCodec {
 /* Risolve un plugin codec per nome (dlopen + cache): $LLMCODEC_PLUGIN_DIR, <repo>/Resources/plugins/,
  * accanto all'eseguibile. NULL = non trovato (gap VISIBILE, mai un fallback silenzioso). */
 const LlmCodec* llmcodec_resolve(const char* name);
+
+/* Directory aggiuntive dove cercare i plugin (es. la cache librerie dell'app). */
+void llmcodec_add_plugin_dir(const char* dir);
 /* Simbolo esportato dal plugin `name` (dopo averlo caricato). NULL se assente. Per il bridge. */
 void* llmcodec_symbol(const char* name, const char* symbol);
 
