@@ -40,6 +40,44 @@ static long jnum(const char* j, const char* key, long def) {
 static double jflt2(const char* j, const char* key, double def) {
     const char* v = jv(j, key); if (!v) return def; char* e; double r = strtod(v, &e); return (e==v) ? def : r;
 }
+/* Come jv, ma solo tra i FIGLI DIRETTI dell'oggetto che inizia a `obj` (puntatore a '{'): non guarda negli oggetti annidati. */
+static const char* jdirect(const char* obj, const char* key) {
+    int depth = 0; size_t kl = strlen(key);
+    for (const char* p = obj; *p; p++) {
+        if (*p == '"') {
+            const char* s = ++p;
+            while (*p && *p != '"') { if (*p == '\\' && p[1]) p++; p++; }
+            if (!*p) return NULL;
+            const char* q = p + 1;
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+            if (depth == 1 && *q == ':' && (size_t)(p - s) == kl && memcmp(s, key, kl) == 0) {
+                q++;
+                while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+                return q;
+            }
+            continue;
+        }
+        if (*p == '{' || *p == '[') depth++;
+        else if (*p == '}' || *p == ']') { if (--depth == 0) return NULL; }
+    }
+    return NULL;
+}
+/* Valore di config.json: figli diretti di `text_config` (modelli annidati) -> figli diretti della radice -> prima occorrenza ovunque.
+ * Senza la ricerca per livello, in Qwen4 `text_config.mtp.num_hidden_layers` (1) nascondeva `text_config.num_hidden_layers` (48). */
+static const char* cfg_v(const char* cj, const char* key) {
+    const char* tc = strstr(cj, "\"text_config\"");
+    if (tc) { const char* b = strchr(tc, '{'); if (b) { const char* v = jdirect(b, key); if (v) return v; } }
+    const char* r = strchr(cj, '{');
+    if (r) { const char* v = jdirect(r, key); if (v) return v; }
+    return jv(cj, key);
+}
+static long cnum(const char* cj, const char* key, long def) {
+    const char* v = cfg_v(cj, key); if (!v) return def; char* e; long r = strtol(v, &e, 10); return (e == v) ? def : r;
+}
+static double cflt(const char* cj, const char* key, double def) {
+    const char* v = cfg_v(cj, key); if (!v) return def; char* e; double r = strtod(v, &e); return (e == v) ? def : r;
+}
+
 int llmdesc_load(const char* path, LlmDesc* out) {
     if (!path||!out) return -1;
     memset(out,0,sizeof *out);
@@ -372,15 +410,15 @@ int llmdesc_autobuild(const char* model_dir, char* out_path, size_t out_cap) {
     char arch[96] = ""; jcopy_str(jv(cj, "model_type"), arch, sizeof arch);
     if (!arch[0]) { const char* a = jv(cj, "architectures"); if (a && *a == '[') jcopy_str(a, arch, sizeof arch); }
     if (!arch[0]) { free(cj); return -1; }
-    long hidden = jnum(cj,"hidden_size",0), layers = jnum(cj,"num_hidden_layers",0);
-    long heads  = jnum(cj,"num_attention_heads",0), kvh = jnum(cj,"num_key_value_heads",heads);
-    long hd = jnum(cj,"head_dim", (heads>0 && hidden>0) ? hidden/heads : 0);
-    long nexp = jnum(cj,"num_experts", jnum(cj,"num_local_experts",0));
-    long topk = jnum(cj,"num_experts_per_tok", nexp>0 ? 1 : 0);
-    long inter = jnum(cj,"moe_intermediate_size", jnum(cj,"intermediate_size",0));
-    long vocab = jnum(cj,"vocab_size",0), ctx = jnum(cj,"max_position_embeddings",0);
-    double eps = jflt2(cj,"rms_norm_eps", jflt2(cj,"layer_norm_eps", 1e-5));
-    double rtheta = jflt2(cj,"rope_theta", 10000.0);
+    long hidden = cnum(cj,"hidden_size",0), layers = cnum(cj,"num_hidden_layers",0);
+    long heads  = cnum(cj,"num_attention_heads",0), kvh = cnum(cj,"num_key_value_heads",heads);
+    long hd = cnum(cj,"head_dim", (heads>0 && hidden>0) ? hidden/heads : 0);
+    long nexp = cnum(cj,"num_experts", cnum(cj,"num_local_experts",0));
+    long topk = cnum(cj,"num_experts_per_tok", nexp>0 ? 1 : 0);
+    long inter = cnum(cj,"moe_intermediate_size", cnum(cj,"intermediate_size",0));
+    long vocab = cnum(cj,"vocab_size",0), ctx = cnum(cj,"max_position_embeddings",0);
+    double eps = cflt(cj,"rms_norm_eps", cflt(cj,"layer_norm_eps", 1e-5));
+    double rtheta = cflt(cj,"rope_theta", 10000.0);
     int flags = (nexp > 0) ? 8u /* MOE */ : 0;   /* flag geometrici: MOE; gli altri li deriva il runtime */
     free(cj);
     char adir[2200]; snprintf(adir, sizeof adir, "%s/arch", model_dir);

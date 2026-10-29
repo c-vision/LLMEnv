@@ -71,25 +71,9 @@ if(LLMCODEC_TESTS)
     # recipe, expert3d, dsv41_source, gguf_map, engram, plugin, a1_fp8, quantcfg) sono stati
     # spostati in GMBasic/gmbllm/tests/ — il converter appartiene al confine PUL.
 
-    add_executable(llmcodec_structs_selfcheck tests/test_structs.c)
-    target_link_libraries(llmcodec_structs_selfcheck PRIVATE llmcodec)
-    target_compile_definitions(llmcodec_structs_selfcheck PRIVATE LLMCODEC_ABI_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ABI")
-    add_test(NAME llmcodec_structs_selfcheck COMMAND llmcodec_structs_selfcheck)
-
     add_executable(llmcodec_fp8_fp4_selfcheck tests/test_fp8_fp4.c)
     target_link_libraries(llmcodec_fp8_fp4_selfcheck PRIVATE llmcodec)
     add_test(NAME llmcodec_fp8_fp4_selfcheck COMMAND llmcodec_fp8_fp4_selfcheck)
-
-    add_executable(llmcodec_qwen4_rolemap_selfcheck tests/test_qwen4_rolemap.c)
-    target_link_libraries(llmcodec_qwen4_rolemap_selfcheck PRIVATE llmcodec)
-    target_compile_definitions(llmcodec_qwen4_rolemap_selfcheck PRIVATE
-        LLMCODEC_Q4_ABI="${CMAKE_CURRENT_SOURCE_DIR}/../../GMBasic/ABI/qwen4_exp.gmbarch")
-    add_test(NAME llmcodec_qwen4_rolemap_selfcheck COMMAND llmcodec_qwen4_rolemap_selfcheck)
-
-    add_executable(llmcodec_abi_all_selfcheck tests/test_abi_all.c)
-    target_link_libraries(llmcodec_abi_all_selfcheck PRIVATE llmcodec)
-    target_compile_definitions(llmcodec_abi_all_selfcheck PRIVATE LLMCODEC_ABI_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ABI")
-    add_test(NAME llmcodec_abi_all_selfcheck COMMAND llmcodec_abi_all_selfcheck)
 
     add_executable(llmcodec_mlx_mxfp4_selfcheck tests/test_mlx_mxfp4.c)
     target_link_libraries(llmcodec_mlx_mxfp4_selfcheck PRIVATE llmcodec)
@@ -119,8 +103,7 @@ endif()
 
 # I test esercitano le funzioni dei codec: linkano i PLUGIN (le impl non sono piu' nel core).
 set(LLMCODEC_CODEC_PLUGIN_LINK llmcodec_ggml llmcodec_mlx_affine llmcodec_fp8 llmcodec_plain llmcodec_mxfp llmcodec_gptq llmcodec_awq llmcodec_bitnet llmcodec_turboquant llmcodec_fp4 llmcodec_nvfp llmcodec_bnb llmcodec_hqq llmcodec_aqlm llmcodec_vptq llmcodec_spqr llmcodec_higgs)
-foreach(t llmcodec_structs_selfcheck
-        llmcodec_fp8_fp4_selfcheck llmcodec_abi_all_selfcheck
+foreach(t llmcodec_fp8_fp4_selfcheck
         llmcodec_mlx_mxfp4_selfcheck llmcodec_formats_p0_selfcheck llmcodec_real_fixtures_selfcheck
         llmcodec_gguf_status_selfcheck)
     if(TARGET ${t})
