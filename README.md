@@ -26,7 +26,7 @@ your own program and call it. If you just want to use the engine, start with [Fa
 | `LLMToken` | Splits text into tokens and joins them back. Reads `tokenizer.json`, tiktoken and WordPiece files. |
 | `LLMCodec` | Reads model files (GGUF, safetensors) and decodes the different quantization formats. |
 | `LLMDesc` | Describes how a model is laid out, so one engine can handle many model families. The descriptions are the files in `ABI/`. |
-| `ABI` | The model descriptions (`<architecture>.gmbarch`): the single source, read by the engine and by other projects. |
+| `ABI` | The model descriptions (`<architecture>.gmbarch`), the single source read by the engine and by other projects. Installed next to the libraries (`lib/llmenv/ABI`), so programs can find it wherever LLMEnv is installed. |
 | `LLMMetal` | Small programs that run on the Apple GPU: matrix products, attention cache, quantized math. |
 | `LLMJinja` | Fills in chat templates, the text patterns that turn a conversation into a prompt. |
 | `LLMEngine` | The engine itself, with one common interface and several back ends (see below). |
@@ -65,6 +65,8 @@ Download the latest release from the [Releases page](https://github.com/c-vision
   so the folder can be moved freely.
 - **Homebrew:** `brew tap c-vision/llmenv https://github.com/c-vision/LLMEnv` and then
   `brew install llmenv`.
+
+All three put the model descriptions in `lib/llmenv/ABI`, next to the libraries. A program that needs them can look the folder up with `llmdesc_abi_locate()` (see [ABI](ABI/README.md)).
 
 One library, the llama.cpp back end, needs OpenSSL 3 (`brew install openssl@3`).
 

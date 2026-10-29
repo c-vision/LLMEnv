@@ -1,9 +1,9 @@
 class Llmenv < Formula
   desc "C libraries for running large language models locally on Apple Silicon"
   homepage "https://github.com/c-vision/LLMEnv"
-  url "https://github.com/c-vision/LLMEnv/releases/download/v0.1.0/llmenv-0.1.0-macos-arm64.tar.gz"
-  sha256 "719e9b2b5ef5e18e413fb2d108564b75bf5df39ad9872cf64609779139d7e524"
-  version "0.1.0"
+  url "https://github.com/c-vision/LLMEnv/releases/download/v0.2.0/llmenv-0.2.0-macos-arm64.tar.gz"
+  sha256 "71aa74396ee597e079a5548792c97e986d70bc144e58644ec322a6d47aae4a3b"
+  version "0.2.0"
   license "Apache-2.0"
 
   depends_on arch: :arm64
