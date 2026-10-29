@@ -289,7 +289,30 @@ FetchContent_Declare(
 )
 # v1.7.19 dichiara cmake_minimum_required troppo vecchio per CMake attuale.
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+# ── WINDOWS: cJSON senza __declspec(dllexport) ────────────────────────────────────────────────
+# cJSON, con ENABLE_PUBLIC_SYMBOLS=ON (default), compila con -DCJSON_EXPORT_SYMBOLS: ogni
+# funzione pubblica finisce con __declspec(dllexport), che l'oggetto traduce in direttive
+# `.drectve` con `-export:<simbolo>`. Con lld (toolchain Zig/MinGW) la presenza di direttive
+# di export rende ESPLICITA la lista degli export della DLL: la DLL finita esporta SOLO quei
+# simboli — cioè solo cJSON — e i nostri (llmtoken_*, llmcodec_*, …) spariscono. Effetto
+# verificato: llmtoken.dll esportava 78 simboli, tutti cJSON, zero llmtoken_*.
+# Su macOS il problema non esiste (visibilità default, tutto esportato).
+if(WIN32)
+    set(ENABLE_PUBLIC_SYMBOLS OFF CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_MakeAvailable(cjson)
+
+# Windows: cJSON.h, se non trova CJSON_HIDE/IMPORT/EXPORT, definisce da solo
+# CJSON_EXPORT_SYMBOLS (riga 59-60 di cJSON.h) → ogni funzione pubblica diventa
+# __declspec(dllexport) e l'oggetto emette `.drectve` con `-export:<simbolo>`.
+# Con lld (Zig/MinGW) quelle direttive rendono ESPLICITA la lista export della DLL:
+# la DLL finita esporta SOLO cJSON e i simboli delle nostre lib (llmtoken_*, …)
+# spariscono — su macOS non accade perché lì il ramo è ELF (visibilità default).
+if(WIN32 AND TARGET cjson)
+    target_compile_definitions(cjson PUBLIC CJSON_HIDE_SYMBOLS)
+endif()
+
 
 # ABI del forward differenziabile (training PUL). È Apache (infereza), ma è ESPERIMENTALE/
 # separabile: FastLLM e un engine "puro" possono compilare con -DLLM_ENABLE_TRAIN=OFF senza
