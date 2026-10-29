@@ -10,6 +10,7 @@
  * all'ingresso (env_from_vars).
  */
 #include "llmjinja_internal.h"
+#include <math.h>
 /* ================= error ================= */
 char g_err[512];
 void jerr_set(const char* fmt, ...) { va_list ap; va_start(ap, fmt); vsnprintf(g_err, sizeof g_err, fmt, ap); va_end(ap); }
@@ -212,6 +213,14 @@ seg* tokenize(const char* t, size_t* outn) {
         segs[ns].kind = 0; segs[ns].s = strndup(text.p, text.n); ns++; \
         text.n = 0; text.p[0] = 0; \
     } while (0)
+    /* Come l ambiente Jinja2 dei chat template di Hugging Face (trim_blocks=True, lstrip_blocks=True), SOLO per blocchi e commenti:
+     * lstrip: spazi/tab fra l inizio riga e il tag, se il tag e il primo elemento della riga, spariscono; trim: il primo a capo
+     * dopo il tag sparisce. Le espressioni {{ }} non sono toccate. */
+#define LSTRIP_BLOCK(pos) do { \
+        size_t k_ = (pos); while (k_ > 0 && (t[k_ - 1] == ' ' || t[k_ - 1] == '\t')) k_--; \
+        if (k_ == 0 || t[k_ - 1] == '\n') { size_t ws_ = (pos) - k_; if (ws_ <= text.n) { text.n -= ws_; text.p[text.n] = 0; } } \
+    } while (0)
+#define TRIM_NL() do { if (i < L && t[i] == '\n') i++; else if (i + 1 < L && t[i] == '\r' && t[i + 1] == '\n') i += 2; } while (0)
     while (i < L) {
         size_t o = (size_t)-1, p = (size_t)-1, cm = (size_t)-1;
         for (size_t j = i; j + 1 < L; j++) {
@@ -233,9 +242,11 @@ seg* tokenize(const char* t, size_t* outn) {
             int cm_tl = (n + 2 < L && t[n + 2] == '-');
             int cm_tr = (ce > n + 2 && t[ce - 1] == '-');
             if (cm_tl) { while (text.n && isspace((unsigned char)text.p[text.n - 1])) text.n--; text.p[text.n] = 0; }
+            else LSTRIP_BLOCK(n);
             FLUSH();
             trimNext = cm_tr;
             i = ce + 2;
+            if (!cm_tr) TRIM_NL();
             continue;
         }
         int out_ = (n == o);
@@ -250,6 +261,7 @@ seg* tokenize(const char* t, size_t* outn) {
         if (tg_tr) end--;
         char* content = strndup(t + beg, end - beg);
         if (tg_tl) { while (text.n && isspace((unsigned char)text.p[text.n - 1])) text.n--; text.p[text.n] = 0; }
+        else if (!out_) LSTRIP_BLOCK(n);
         FLUSH();
         if (ns == cap) { cap = cap ? cap * 2 : 16; segs = (seg*)realloc(segs, sizeof(seg) * cap); }
         segs[ns].kind = out_ ? 1 : 2;
@@ -258,6 +270,7 @@ seg* tokenize(const char* t, size_t* outn) {
         free(content);
         trimNext = tg_tr;
         i = closepos + 2;
+        if (!out_ && !tg_tr) TRIM_NL();
     }
     FLUSH();
     sb_free(&text);
@@ -277,6 +290,8 @@ seg* tokenize(const char* t, size_t* outn) {
     *outn = nr;
     return res;
 #undef FLUSH
+#undef LSTRIP_BLOCK
+#undef TRIM_NL
 }
 
 /* ================= AST / parser (specchio C#) ================= */
@@ -553,9 +568,10 @@ void lex_expr(const char* s, toks* tk) {
         if (strncmp(s + i, "<=", 2) == 0) { tok_add(tk, "<=", 2); i += 2; continue; }
         if (strncmp(s + i, ">=", 2) == 0) { tok_add(tk, ">=", 2); i += 2; continue; }
         if (strncmp(s + i, "->", 2) == 0) { tok_add(tk, "->", 2); i += 2; continue; }
+        if (strncmp(s + i, "//", 2) == 0) { tok_add(tk, "//", 2); i += 2; continue; }
         if (c == '<') { tok_add(tk, "<", 1); i++; continue; }
         if (c == '>') { tok_add(tk, ">", 1); i++; continue; }
-        if (strchr("|()[]:.,+-=~", c)) { tok_add(tk, s + i, 1); i++; continue; }
+        if (strchr("|()[]:.,+-=~*/%", c)) { tok_add(tk, s + i, 1); i++; continue; }
         jerr_set("token inatteso '%c'", c);
         toks_free(tk);
         return;
@@ -572,6 +588,7 @@ jval* p_not(toks* tk, env* e);
 jval* p_test(toks* tk, env* e);
 jval* p_concat(toks* tk, env* e);
 jval* p_unary(toks* tk, env* e);
+jval* p_mul(toks* tk, env* e);
 jval* p_filter(toks* tk, env* e);
 jval* p_postfix(toks* tk, env* e);
 jval* p_atom(toks* tk, env* e);
@@ -699,13 +716,48 @@ jval* p_test(toks* tk, env* e) {
     return lhs;
 }
 
+/* Livello moltiplicativo: `*`, `/` (divisione vera), `//` (divisione intera, arrotonda verso -inf) e `%` (modulo col segno del
+ * divisore, come Python/Jinja2). Solo numeri: i template di chat li usano per l'alternanza dei ruoli (`loop.index0 % 2`). */
+static int jnum(const jval* v, double* d) {
+    if (v->t == J_LONG) { *d = (double)v->u.l; return 1; }
+    if (v->t == J_DOUBLE) { *d = v->u.d; return 1; }
+    return 0;
+}
+jval* p_mul(toks* tk, env* e) {
+    jval* v = p_unary(tk, e);
+    if (!v) return NULL;
+    while (t_is(tk, "*") || t_is(tk, "/") || t_is(tk, "//") || t_is(tk, "%")) {
+        const char* op = tk->t[tk->p]; tk->p++;
+        jval* r = p_unary(tk, e);
+        if (!r) return NULL;
+        const int both_long = v->t == J_LONG && r->t == J_LONG;
+        double a, b;
+        if (!jnum(v, &a) || !jnum(r, &b)) JERR("operatore aritmetico non supportato tra questi tipi");
+        if (op[0] == '*') {
+            v = both_long ? v_long(e->A, v->u.l * r->u.l) : v_double(e->A, a * b);
+        } else if (op[0] == '/' && op[1] == '\0') {
+            if (b == 0.0) JERR("divisione per zero");
+            v = v_double(e->A, a / b);
+        } else if (op[0] == '/') {   /* // */
+            if (b == 0.0) JERR("divisione per zero");
+            if (both_long) { long long q = v->u.l / r->u.l; if ((v->u.l % r->u.l != 0) && ((v->u.l < 0) != (r->u.l < 0))) q--; v = v_long(e->A, q); }
+            else v = v_double(e->A, floor(a / b));
+        } else {                     /* % */
+            if (b == 0.0) JERR("modulo per zero");
+            if (both_long) { long long m = v->u.l % r->u.l; if (m != 0 && ((m < 0) != (r->u.l < 0))) m += r->u.l; v = v_long(e->A, m); }
+            else { double m = fmod(a, b); if (m != 0.0 && ((m < 0) != (b < 0))) m += b; v = v_double(e->A, m); }
+        }
+    }
+    return v;
+}
+
 jval* v_concat(jval* a, jval* b);
 jval* p_concat(toks* tk, env* e) {
-    jval* v = p_unary(tk, e);
+    jval* v = p_mul(tk, e);
     if (!v) return NULL;
     while (t_is(tk, "+") || t_is(tk, "-") || t_is(tk, "~")) {
         const char* op = tk->t[tk->p]; tk->p++;
-        jval* r = p_unary(tk, e);
+        jval* r = p_mul(tk, e);
         if (!r) return NULL;
         if (op[0] == '+') v = v_concat(v, r);
         else if (op[0] == '-') {
@@ -986,7 +1038,12 @@ char* llmjinja_render(const char* tmpl, const jval* vars, char* errbuf, size_t e
     if (!tmpl) { if (errbuf && errcap) snprintf(errbuf, errcap, "template nullo"); return NULL; }
     arena A; A.head = NULL;
     size_t ns = 0;
+    /* keep_trailing_newline=false (default Jinja2): si toglie UN a capo finale dal SORGENTE del template, prima di analizzarlo. */
+    char* tmpl_copy = NULL;
+    { size_t tl0 = strlen(tmpl);
+      if (tl0 && tmpl[tl0 - 1] == '\n') { tl0 -= (tl0 > 1 && tmpl[tl0 - 2] == '\r') ? 2 : 1; tmpl_copy = strndup(tmpl, tl0); if (tmpl_copy) tmpl = tmpl_copy; } }
     seg* segs = tokenize(tmpl, &ns);
+    free(tmpl_copy); tmpl_copy = NULL; tmpl = NULL;   /* i segmenti sono copie: il sorgente non serve piu' */
     if (!segs) {
         if (errbuf && errcap) snprintf(errbuf, errcap, "%s", g_err[0] ? g_err : "tokenize error");
         a_free(&A); return NULL;
@@ -1007,8 +1064,6 @@ char* llmjinja_render(const char* tmpl, const jval* vars, char* errbuf, size_t e
     }
     env_free(e);
     nlist_free(&root);
-    size_t tl = strlen(tmpl);
-    if (tl && tmpl[tl - 1] == '\n' && out.n && out.p[out.n - 1] == '\n') out.n--;
     out.p[out.n] = 0;
     char* result = strdup(out.p);
     sb_free(&out);
