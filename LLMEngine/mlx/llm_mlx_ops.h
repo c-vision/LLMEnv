@@ -1473,6 +1473,8 @@ static bool llm_mlx_gated_delta_step(mlx_array* y, mlx_array* state,
 static bool llm_mlx_cache_checkpoint(mlx_array* ckpt, mlx_array cache, mlx_stream stream)
 {
     (void)stream;
+    /* cache vuota (p.es. strati senza KV di LFM2/ibridi): il checkpoint e' a sua volta vuoto; mlx_array_set su un array vuoto e' un errore MLX */
+    if (cache.ctx == NULL) { mlx_array_free(*ckpt); *ckpt = mlx_array_new(); return true; }
     return mlx_array_set(ckpt, cache) == 0;
 }
 
@@ -1480,6 +1482,7 @@ static bool llm_mlx_cache_checkpoint(mlx_array* ckpt, mlx_array cache, mlx_strea
 static bool llm_mlx_cache_rollback(mlx_array* cache, mlx_array ckpt, mlx_stream stream)
 {
     (void)stream;
+    if (ckpt.ctx == NULL) { mlx_array_free(*cache); *cache = mlx_array_new(); return true; }
     return mlx_array_set(cache, ckpt) == 0;
 }
 
