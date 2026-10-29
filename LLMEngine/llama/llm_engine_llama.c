@@ -9,8 +9,17 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <sys/types.h>
+
+/* Memoria del sistema: macOS usa sysctl/mach, Linux /proc/meminfo.
+ * Prima erano inclusi <sys/sysctl.h> e <mach/mach.h> SENZA guardia: su Linux
+ * <sys/sysctl.h> non esiste ("fatal error: sys/sysctl.h: No such file or directory") e la build
+ * del motore llama.cpp si fermava qui. */
+#if defined(__APPLE__)
 #include <sys/sysctl.h>
 #include <mach/mach.h>
+#else
+#include <unistd.h>
+#endif
 
 static LlmEngineLlmModel lc_load(const char* path) { return (LlmEngineLlmModel)(intptr_t)llm_ai_load_model(path, 0); }
 static LlmEngineLlmModel lc_load_opts(const char* path, int n_gpu_layers) { return (LlmEngineLlmModel)(intptr_t)llm_ai_load_model(path, n_gpu_layers); }
@@ -86,17 +95,40 @@ static void lci_free(LlmEngineLlmModel m) { llm_ai_unload_model((int)(intptr_t)m
  *  - richiesta esplicita (> 0): rispettata, ridotta solo se la KV non entra nel budget (meta' della RAM meno i pesi);
  *  - automatico (0): il contesto di addestramento del modello, sempre entro il budget, minimo 2048.
  * Se llama.cpp rifiuta l allocazione si dimezza fino a 2048. Una riga su stderr dice cosa e' stato scelto e perche'. */
+/* RAM totale e memoria OTTENIBILE ora (per il budget della KV).
+ * macOS: sysctl hw.memsize + host_statistics64 (free+inactive+speculative).
+ * Linux: sysconf(_SC_PHYS_PAGES) + /proc/meminfo MemAvailable (stima del kernel, senza swap). */
+static void lc_mem_stats(uint64_t* ram, uint64_t* avail) {
+    *ram = 0; *avail = 0;
+#if defined(__APPLE__)
+    size_t rl = sizeof *ram;
+    if (sysctlbyname("hw.memsize", ram, &rl, NULL, 0) != 0) *ram = 0;
+    vm_statistics64_data_t vs; mach_msg_type_number_t vc = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vs, &vc) == KERN_SUCCESS)
+        *avail = ((uint64_t)vs.free_count + vs.inactive_count + vs.speculative_count) * (uint64_t)vm_page_size;
+#else
+    long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && psz > 0) *ram = (uint64_t)pages * (uint64_t)psz;
+    FILE* f = fopen("/proc/meminfo", "r");
+    if (f != NULL) {
+        char line[256];
+        while (fgets(line, sizeof line, f) != NULL) {
+            unsigned long long kb = 0;
+            if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1) { *avail = (uint64_t)kb * 1024u; break; }
+        }
+        fclose(f);
+    }
+    if (*avail == 0 && *ram > 0) *avail = *ram / 4;   /* fallback prudente */
+#endif
+}
+
 static LlmEngineLlmSession lci_sess(LlmEngineLlmModel m) {
     const int mh = (int)(intptr_t)m - 1;
     int n_train = 0; size_t kv_tok = 0, mbytes = 0;
     (void)llm_ai_model_ctx_info(mh, &n_train, &kv_tok, &mbytes);
     /* Budget per la KV: il 60% della memoria libera o recuperabile ORA (i pesi sono gia' caricati), al massimo un terzo della RAM. */
-    uint64_t ram = 0; size_t rl = sizeof ram;
-    if (sysctlbyname("hw.memsize", &ram, &rl, NULL, 0) != 0) ram = 0;
-    uint64_t avail = 0;
-    { vm_statistics64_data_t vs; mach_msg_type_number_t vc = HOST_VM_INFO64_COUNT;
-      if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vs, &vc) == KERN_SUCCESS)
-          avail = ((uint64_t)vs.free_count + vs.inactive_count + vs.speculative_count) * (uint64_t)vm_page_size; }
+    uint64_t ram = 0, avail = 0;
+    lc_mem_stats(&ram, &avail);
     uint64_t budget = avail > 0 ? avail / 10 * 6 : ram / 4;
     if (ram > 0 && budget > ram / 3) budget = ram / 3;
     (void)mbytes;
