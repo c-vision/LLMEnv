@@ -6,7 +6,11 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <dlfcn.h>     /* dladdr: per risolvere ABI/ dalla directory della dylib (CWD-indipendente) */
-#include <sys/stat.h>  /* mkdir: per l'auto-build del `.gmbarch` in <model>/arch/ */
+#include <sys/stat.h>
+#include <stdint.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>   /* _NSGetExecutablePath */
+#endif
 
 static char* slurp(const char* p) {
     FILE* f = fopen(p, "rb"); if (!f) return NULL;
@@ -298,6 +302,7 @@ static int llmdesc_load_pref(const char* path, LlmDesc* out, int need_roles) {
     *out = t;
     return 1;
 }
+static int g_abi_required;   /* politica ABI (definita sotto, con llmdesc_set_abi_policy) */
 static int llmdesc_resolve_core(const char* hf_dir, LlmDesc* out, char* out_path, size_t out_path_cap);
 /* Wrapper: risolve + garantisce la `geometry` (dal `.gmbarch` o derivata da config.json). GMAD eliminato. */
 int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out_path_cap) {
@@ -328,6 +333,10 @@ static int llmdesc_resolve_core(const char* hf_dir, LlmDesc* out, char* out_path
             char path[4096]; snprintf(path, sizeof path, "%s/%s.%s", abi, slug, exts[x]);
             if (llmdesc_load_pref(path, out, 0)) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
         }
+    } else if (g_abi_required) {
+        /* l'applicazione ha dichiarato la cartella ABI obbligatoria (llmdesc_set_abi_policy): niente ripiego silenzioso. */
+        if (out_path) out_path[0] = 0;
+        return -1;
     }
     /* FALLBACK GENERICO (2026-10-03): nessun `.gmbarch` per questo modello -> desc MINIMALE
      * (arch = model_type) e role map GENERICO dedotto dalla convenzione HF/GGUF (llmcodec_
@@ -364,21 +373,52 @@ static int llmdesc_resolve_core(const char* hf_dir, LlmDesc* out, char* out_path
     if (out_path) out_path[0] = 0;
     return -1;
 }
-/* Cartella ABI/ canonica: risale dal cwd cercando una dir `ABI` (dove vivono le descrizioni).
- * Ritorna 1 e scrive il path in `out` se trovata. Usata da LLM ARCH LIST e dal resolve. */
-/* Risale da `start` (dir o file) cercando <dir>/ABI | <dir>/LLMEnv/ABI | <dir>/../LLMEnv/ABI.
- * (b)/(c): l'engine vive DENTRO LLMEnv ma i consumatori (FastLLM e altri consumer) sono progetti fratelli.
- * Senza la role map .llmarch il loader GGUF generico cerca i nomi HF (lm_head/embed_tokens/norm)
- * che il GGUF non ha -> "lookup fallito". 1 se trovata (path in `out`). */
+/* ===== Cartella ABI/ ======================================================================================
+ * UNICA sede dei descrittori `.gmbarch`. Una cartella e' una ABI valida se contiene almeno un `.gmbarch` e, se c'e'
+ * `ABI_VERSION`, lo schema dichiarato non e' piu' recente di LLMDESC_ABI_SCHEMA. Il percorso NON e' fisso: dipende
+ * dal canale di installazione (pkg, tar.gz, Homebrew, albero sorgente) e dalla macchina. */
+#define PATH_MAX_ABI 4096
+static int (*g_abi_resolver)(char*, size_t) = NULL;
+static int g_abi_required = 0;
+static int g_abi_brew_tried = 0;
+static char g_abi_brew_dir[2048] = "";
+
+int llmdesc_abi_valid(const char* dir) {
+    if (dir == NULL || *dir == '\0') return 0;
+    DIR* dp = opendir(dir); if (dp == NULL) return 0;
+    int found = 0; struct dirent* e;
+    while ((e = readdir(dp)) != NULL) {
+        size_t l = strlen(e->d_name);
+        if (l > 8 && strcmp(e->d_name + l - 8, ".gmbarch") == 0) { found = 1; break; }
+    }
+    closedir(dp);
+    if (!found) return 0;
+    char p[4096]; snprintf(p, sizeof p, "%s/ABI_VERSION", dir);
+    char* v = slurp(p);
+    if (v != NULL) { int ver = atoi(v); free(v); if (ver > LLMDESC_ABI_SCHEMA) return 0; }
+    return 1;
+}
+
+static int abi_hit(const char* dir, char* out, size_t cap) {
+    if (!llmdesc_abi_valid(dir)) return 0;
+    if (out != NULL && cap > 0) {
+        /* i percorsi con ".." (es. <Projects>/GMBasic/../LLMEnv/ABI) si normalizzano; i link simbolici NO: il link `opt` di
+         * Homebrew resta valido dopo un aggiornamento, la cartella versionata a cui punta no. */
+        char rp[PATH_MAX_ABI];
+        if (strstr(dir, "/..") != NULL && realpath(dir, rp) != NULL) snprintf(out, cap, "%s", rp);
+        else snprintf(out, cap, "%s", dir);
+    }
+    return 1;
+}
+
+/* Risale da `start` (dir o file) provando <dir>/ABI | <dir>/LLMEnv/ABI | <dir>/../LLMEnv/ABI. */
 static int abi_search_up(const char* start, char* out, size_t cap) {
     char dir[2048]; snprintf(dir, sizeof dir, "%s", start ? start : "");
     for (int up = 0; up < 16 && dir[0]; ++up) {
-        char path[4096];
         static const char* tails[] = { "/ABI", "/LLMEnv/ABI", "/../LLMEnv/ABI" };
         for (int t = 0; t < 3; ++t) {
-            snprintf(path, sizeof path, "%s%s", dir, tails[t]);
-            DIR* dp = opendir(path);
-            if (dp != NULL) { closedir(dp); if (out && cap) snprintf(out, cap, "%s", path); return 1; }
+            char path[4096]; snprintf(path, sizeof path, "%s%s", dir, tails[t]);
+            if (abi_hit(path, out, cap)) return 1;
         }
         char* sl = strrchr(dir, '/');
         if (sl == NULL) break;
@@ -386,19 +426,92 @@ static int abi_search_up(const char* start, char* out, size_t cap) {
     }
     return 0;
 }
+
+/* Directory dell'eseguibile (senza il nome). 1 se risolta. */
+static int abi_exe_dir(char* out, size_t cap) {
+#ifdef __APPLE__
+    char buf[4096]; uint32_t sz = (uint32_t)sizeof buf;
+    if (_NSGetExecutablePath(buf, &sz) != 0) return 0;
+#else
+    char buf[4096]; ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+#endif
+    char* sl = strrchr(buf, '/'); if (sl == NULL) return 0; *sl = 0;
+    snprintf(out, cap, "%s", buf);
+    return 1;
+}
+
+/* `brew --prefix llmenv` (avvia un processo: l'ultima risorsa, una sola volta per processo). */
+static int abi_brew(char* out, size_t cap) {
+    if (g_abi_brew_tried) return g_abi_brew_dir[0] ? abi_hit(g_abi_brew_dir, out, cap) : 0;
+    g_abi_brew_tried = 1;
+    static const char* cmds[] = { "brew --prefix llmenv 2>/dev/null", "/opt/homebrew/bin/brew --prefix llmenv 2>/dev/null",
+                                  "/usr/local/bin/brew --prefix llmenv 2>/dev/null" };
+    for (int c = 0; c < 3; ++c) {
+        FILE* p = popen(cmds[c], "r"); if (p == NULL) continue;
+        char pre[1024] = ""; if (fgets(pre, sizeof pre, p) == NULL) pre[0] = 0;
+        pclose(p);
+        size_t l = strlen(pre); while (l > 0 && (pre[l - 1] == '\n' || pre[l - 1] == '\r')) pre[--l] = 0;
+        if (!pre[0]) continue;
+        snprintf(g_abi_brew_dir, sizeof g_abi_brew_dir, "%s/lib/llmenv/ABI", pre);
+        return abi_hit(g_abi_brew_dir, out, cap);
+    }
+    return 0;
+}
+
+int llmdesc_abi_locate(char* out, size_t cap, char* how, size_t howcap) {
+#define ABI_FOUND(h) do { if (how != NULL && howcap > 0) snprintf(how, howcap, "%s", (h)); return 1; } while (0)
+    char exe[2048] = "", lib[2048] = "", p[4096];
+    const char* env = getenv("LLMDESC_ABI_DIR");
+    if (env != NULL && *env != '\0' && abi_hit(env, out, cap)) ABI_FOUND("LLMDESC_ABI_DIR");
+    Dl_info info; if (dladdr((void*)(uintptr_t)&llmdesc_abi_locate, &info) != 0 && info.dli_fname != NULL) {
+        snprintf(lib, sizeof lib, "%s", info.dli_fname);
+        char* sl = strrchr(lib, '/'); if (sl != NULL) *sl = 0; else lib[0] = 0;
+    }
+    abi_exe_dir(exe, sizeof exe);
+    /* (1) accanto alle librerie: pkg e tar.gz portano ABI/ in lib/llmenv, vicino alle dylib. */
+    const char* bases[2] = { lib, exe };
+    for (int b = 0; b < 2; ++b) {
+        if (!bases[b][0]) continue;
+        static const char* tails[] = { "/ABI", "/llmenv/ABI", "/../lib/llmenv/ABI", "/../ABI" };
+        for (int t = 0; t < 4; ++t) {
+            snprintf(p, sizeof p, "%s%s", bases[b], tails[t]);
+            if (abi_hit(p, out, cap)) ABI_FOUND(b == 0 ? "next to the library" : "next to the executable");
+        }
+    }
+    /* (2) installazioni di sistema: pkg (/usr/local) e Homebrew (il link `opt` non cambia con la versione). */
+    static const char* fixed[] = { "/usr/local/lib/llmenv/ABI", "/opt/homebrew/opt/llmenv/lib/llmenv/ABI",
+                                   "/usr/local/opt/llmenv/lib/llmenv/ABI", "/opt/homebrew/lib/llmenv/ABI" };
+    for (int i = 0; i < 4; ++i) if (abi_hit(fixed[i], out, cap)) ABI_FOUND("system install");
+    /* (3) albero sorgente di LLMEnv: risalendo dalla cwd, dall'eseguibile e dalla libreria. */
+    char cwd[2048];
+    if (getcwd(cwd, sizeof cwd) != NULL && abi_search_up(cwd, out, cap)) ABI_FOUND("source tree (cwd)");
+    if (exe[0] && abi_search_up(exe, out, cap)) ABI_FOUND("source tree (executable)");
+    if (lib[0] && abi_search_up(lib, out, cap)) ABI_FOUND("source tree (library)");
+    /* (4) Homebrew in un prefisso non standard. */
+    if (abi_brew(out, cap)) ABI_FOUND("brew --prefix");
+#undef ABI_FOUND
+    return 0;
+}
+
+void llmdesc_set_abi_policy(int (*resolver)(char* out, size_t cap), int required) {
+    g_abi_resolver = resolver;
+    g_abi_required = required;
+}
+
 int llmdesc_abi_dir(char* out, size_t cap) {
-    /* (0) Override esplicito (installazioni fuori dall'albero sorgente). */
+    /* (0) Override esplicito. */
     const char* env = getenv("LLMDESC_ABI_DIR");
     if (env != NULL && *env != '\0') { if (out && cap) snprintf(out, cap, "%s", env); return 1; }
-    /* (1) dalla CWD risalendo. */
-    char cwd[2048];
-    if (getcwd(cwd, sizeof cwd) != NULL && abi_search_up(cwd, out, cap)) return 1;
-    /* (2) CWD-INDIPENDENTE: risali dalla directory di QUESTA dylib (es. Resources/libs/<rid>/ ->
-     *     .../ABI). Cosi' il loader funziona anche se il processo gira con una CWD fuori dal repo
-     *     (es. test/REPL lanciati da /tmp). */
-    { Dl_info info; if (dladdr((void*)(uintptr_t)&llmdesc_abi_dir, &info) != 0 && info.dli_fname != NULL
-                       && abi_search_up(info.dli_fname, out, cap)) return 1; }
-    return 0;
+    /* (1) Risolutore dell'applicazione (impostazioni salvate + localizzazione alla prima esecuzione). */
+    if (g_abi_resolver != NULL) {
+        char t[4096];
+        if (g_abi_resolver(t, sizeof t) && llmdesc_abi_valid(t)) { if (out && cap) snprintf(out, cap, "%s", t); return 1; }
+        if (g_abi_required) return 0;
+    }
+    /* (2) Localizzazione autonoma. */
+    return llmdesc_abi_locate(out, cap, NULL, 0);
 }
 
 const LlmDescStruct* llmdesc_struct(const LlmDesc* a, const char* key) {

@@ -74,9 +74,23 @@ const char* llmdesc_struct_prim(const LlmDesc* a, const char* key);
 /* Trova la struttura `key` (o NULL). */
 const LlmDescStruct* llmdesc_struct(const LlmDesc* a, const char* key);
 /* Cartella ABI/ canonica di LLMEnv: UNICA sede dei descrittori `.gmbarch` (GMBasic e gli altri consumatori usano questa).
- * Ordine: $LLMDESC_ABI_DIR; poi risalendo dalla cwd e dalla directory di questa libreria si cerca `ABI`, `LLMEnv/ABI`, `../LLMEnv/ABI`.
+ * Il percorso NON e' fisso (pkg, tar.gz, Homebrew, albero sorgente, altra macchina): si localizza a runtime.
+ * Ordine: $LLMDESC_ABI_DIR; il risolutore dell'applicazione (llmdesc_set_abi_policy), se registrato; poi llmdesc_abi_locate.
  * Ritorna 1 e scrive il path in `out` se trovata. */
 int llmdesc_abi_dir(char* out, size_t cap);
+/* Schema dei `.gmbarch` che questa libreria sa leggere; `ABI/ABI_VERSION` dichiara quello della cartella. */
+#define LLMDESC_ABI_SCHEMA 1
+/* 1 se `dir` e' una cartella ABI valida: contiene almeno un `.gmbarch` e lo schema di ABI_VERSION (se presente) e' leggibile. */
+int llmdesc_abi_valid(const char* dir);
+/* Cerca la cartella ABI (nessuno stato, nessuna scrittura). Ordine, primo valido: $LLMDESC_ABI_DIR; accanto alla libreria
+ * e all'eseguibile (pkg e tar.gz: lib/llmenv/ABI); installazioni di sistema (/usr/local/lib/llmenv, link `opt` di Homebrew);
+ * albero sorgente (ABI, LLMEnv/ABI, ../LLMEnv/ABI risalendo da cwd, eseguibile, libreria); `brew --prefix llmenv`.
+ * `how` (opz.) riceve la descrizione del metodo. Ritorna 1 e scrive il path in `out` se trovata. */
+int llmdesc_abi_locate(char* out, size_t cap, char* how, size_t howcap);
+/* Politica dell'applicazione: `resolver` (opz.) e' chiamato da llmdesc_abi_dir dopo $LLMDESC_ABI_DIR e deve scrivere il
+ * percorso in `out` (1 = trovato). `required`=1: se la cartella non si risolve, llmdesc_resolve FALLISCE (-1) invece di
+ * ripiegare sul descrittore generico. */
+void llmdesc_set_abi_policy(int (*resolver)(char* out, size_t cap), int required);
 /* Strutture DICHIARATE che il CONVERTER non sa ancora mappare (attention/mla|gqa e moe sono ok).
  * Scrive un report in out e ritorna il numero di strutture NON supportate (0 = tutte mappabili). */
 int llmdesc_unsupported(const LlmDesc* a, char* out, size_t cap);

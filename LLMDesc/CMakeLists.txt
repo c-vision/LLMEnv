@@ -18,3 +18,8 @@ target_link_libraries(llmdesc_geometry_selfcheck PRIVATE llmdesc)
 add_test(NAME llmdesc_geometry_selfcheck
          COMMAND llmdesc_geometry_selfcheck "$ENV{HOME}/ai/Models" "${CMAKE_CURRENT_SOURCE_DIR}/../ABI")
 set_tests_properties(llmdesc_geometry_selfcheck PROPERTIES SKIP_RETURN_CODE 77)
+
+# Test: validita', localizzazione e politica della cartella ABI (autonomo, nessun modello).
+add_executable(llmdesc_abi_selfcheck llmdesc_abi_selfcheck.c)
+target_link_libraries(llmdesc_abi_selfcheck PRIVATE llmdesc)
+add_test(NAME llmdesc_abi_selfcheck COMMAND llmdesc_abi_selfcheck "${CMAKE_CURRENT_SOURCE_DIR}/../ABI")

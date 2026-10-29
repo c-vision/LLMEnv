@@ -55,7 +55,7 @@ fi
 
 # descrittori dei modelli (.gmbarch): il motore li cerca in ABI/ accanto alle librerie (llmdesc_abi_dir risale dalla dylib)
 mkdir -p "$STAGE/lib/llmenv/ABI"
-cp -f ABI/*.gmbarch "$STAGE/lib/llmenv/ABI/"
+cp -f ABI/*.gmbarch ABI/ABI_VERSION "$STAGE/lib/llmenv/ABI/"
 
 # header pubblici
 cp -f LLMEngine/include/*.h LLMToken/llmtoken.h LLMCodec/include/*.h LLMDesc/llmdesc.h LLMJinja/llmjinja.h "$STAGE/include/llmenv/"

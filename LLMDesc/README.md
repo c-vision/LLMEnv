@@ -22,7 +22,7 @@ In the [`ABI`](../ABI) folder at the root of this repository, one file per archi
 single source: nothing is written per model. `llmdesc_resolve()` reads the architecture from the model's
 `config.json`, loads `ABI/<architecture>.gmbarch`, and fills in the numeric sizes (layers, heads,
 vocabulary, context, ...) **in memory** from `config.json` (for nested configs, from `text_config`).
-`llmdesc_abi_dir()` finds the folder; see the [ABI README](../ABI/README.md) for the search order.
+`llmdesc_abi_dir()` finds the folder, wherever LLMEnv is installed (`llmdesc_abi_locate()` searches, `llmdesc_set_abi_policy()` lets an application keep the path in its settings and make a missing folder an error); see the [ABI README](../ABI/README.md) for the search order.
 
 ## Files
 
