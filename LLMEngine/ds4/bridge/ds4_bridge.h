@@ -18,6 +18,22 @@ ds4_bridge* ds4_bridge_open_ex(const char* model, int ctx, int stream, int prefi
  * auto-sizing del motore, che usa la RAM raccomandata meno i pesi non-esperto). */
 ds4_bridge* ds4_bridge_open_opts(const char* model, int ctx, int stream, int prefill_chunk,
                                  uint64_t cache_bytes, int inspect_only);
+
+/* Opzioni complete (MTP/DSpark, offload, chunk). Le altre `open` sono scorciatoie. */
+typedef struct {
+    int ctx;                /* 0 = default del bridge (32768) */
+    int stream;             /* 1 = esperti in streaming da disco */
+    int prefill_chunk;      /* 0 = default del motore */
+    uint64_t cache_bytes;   /* 0 = auto-sizing del motore */
+    const char* mtp_path;   /* NULL/"" = nessun draft MTP */
+    int dspark;             /* 1 = proposta speculativa DSpark (richiede mtp_path) */
+    int dspark_strict;      /* 1 = accettazione strict */
+    int inspect_only;       /* 1 = valida solo i metadati */
+} ds4_bridge_options;
+
+ds4_bridge* ds4_bridge_open2(const char* model, const ds4_bridge_options* o);
+/* 1 se il motore aperto ha un draft MTP/DSpark utilizzabile. */
+int ds4_bridge_has_mtp(ds4_bridge* b);
 void        ds4_bridge_close(ds4_bridge* b);
 
 /* ---- sessioni esplicite ---------------------------------------------------------------------
