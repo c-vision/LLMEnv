@@ -49,10 +49,19 @@ static const LlmEngineLlmEngine* llm_mlx_engine_symbol(const char* name) {
     *(void**)(&fn) = dlsym(RTLD_DEFAULT, name);
     return fn ? fn() : NULL;
 }
-/* Engine per un modello DS4: il VENDOR (unico motore GGUF). Il nome `_ds4` e' un alias del vendor
- * dal 2026-10-30 (il nativo e' ritirato): resta qui per non cambiare il simbolo cercato. */
+/* Engine per un modello DS4: il VENDOR (unico motore GGUF). Prima `_ds4n`, poi il vecchio nome
+ * `_ds4` (alias del vendor dal 2026-10-30): cosi' funziona anche con una dylib piu' vecchia. */
 static const LlmEngineLlmEngine* llm_mlx_pick_ds4_engine(void) {
-    return llm_mlx_engine_symbol("llmengine_llm_engine_ds4");
+    const LlmEngineLlmEngine* e = llm_mlx_engine_symbol("llmengine_llm_engine_ds4n");
+    return e != NULL ? e : llm_mlx_engine_symbol("llmengine_llm_engine_ds4");
+}
+/* Le famiglie GGUF che il VENDOR esegue. Prima del 2026-10-30 qui c'era solo `deepseek4`: cosi'
+ * un consumer che carica via `llm_ai_mlx_load_model` (GMBasic server/brain) non poteva eseguire
+ * V4.1/GLM 5.3/Qwen3.8 anche se LLMEnv li supporta. */
+static int llm_mlx_arch_is_ds4(const char* a) {
+    return a != NULL && (strcmp(a, "deepseek4") == 0 || strcmp(a, "deepseek41") == 0 ||
+                         strcmp(a, "glm-dsa") == 0 || strcmp(a, "glm5-next") == 0 ||
+                         strcmp(a, "qwen4exp") == 0);
 }
 
 
@@ -321,15 +330,15 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
     { char ep[2048]; if (llm_ai_mlx_opt_get_str("execplan", ep, (int)sizeof ep) == 0 && ep[0]) llm_mlx_execplan_load(ep); else llm_mlx_execplan_reset(); }
     { char xp[2048]; if (llm_ai_mlx_opt_get_str("expolicy", xp, (int)sizeof xp) == 0 && xp[0]) { if (llm_mlx_expolicy_load(xp) == 0) llm_mlx_expolicy_apply(); } else llm_mlx_expolicy_reset(); }
 
-    /* DS4 (DeepSeek V4 Flash): gestito da un engine AUTONOMO (ABI a 9 metodi), non dal forward
-     * MLX generico. Vendored (`ds4`) o nativo (`ds4`) scelti con `ds4_backend`. Se il GGUF
-     * non e' un DS4 il load dell'engine fallisce e si prosegue col GGUF generico. */
+    /* DS4 (tutte le famiglie GGUF che il VENDOR esegue): engine AUTONOMO (ABI a 9 metodi), non
+     * il forward MLX generico. L'arch si legge dal GGUF e si delega SOLO per le famiglie note
+     * (`deepseek4`, `deepseek41`, `glm-dsa`, `glm5-next`, `qwen4exp`): il loader vendored non e'
+     * sicuro su un GGUF arbitrario (`ds4.c:required_u32` fa exit(1) sui metadati mancanti).
+     * Cosi' anche chi carica via `llm_ai_mlx_load_model` (GMBasic server/brain) puo' eseguire
+     * tutti i modelli DS4, non solo V4 Flash. */
     {
         size_t dn = strlen(model_dir);
         if (dn > 5 && strcmp(model_dir + dn - 5, ".gguf") == 0) {
-            /* Il loader vendored `ds4` NON e' sicuro su modelli non-DS4: `ds4.c:required_u32`
-             * fa exit(1) sui metadati mancanti (nessun fallback). Va tentato SOLO se l'arch del
-             * GGUF e' DS4 (`deepseek4`); ogni altro `.gguf` prosegue col ramo generico sotto. */
             char ds4arch[64] = "";
             { LlmEngineMoeGguf g; void* gmap = NULL; size_t gmaplen = 0;
               if (llm_gguf_open_file(model_dir, &g, &gmap, &gmaplen)) {
@@ -340,7 +349,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                   llm_gguf_close_file(&g, gmap, gmaplen);
               }
             }
-            if (strcmp(ds4arch, "deepseek4") == 0) {
+            if (llm_mlx_arch_is_ds4(ds4arch)) {
                 const LlmEngineLlmEngine* eng = llm_mlx_pick_ds4_engine();
                 if (eng != NULL && eng->load_model != NULL) {
                     void* dm;
@@ -388,8 +397,7 @@ llm_ai_mlx_model_handle llm_ai_mlx_load_model(const char* model_dir) {
                     int n = (int)v->slen; if (n > 63) n = 63; memcpy(at, v->s, (size_t)n); at[n] = 0;
                 }
                 llm_gguf_close_file(&g, gmap, gmaplen);
-                if (at[0] != 0 && strcmp(at, "deepseek4") != 0 && strcmp(at, "deepseek_v41") != 0 &&
-                    find_arch_ops(at) != NULL) {
+                if (at[0] != 0 && !llm_mlx_arch_is_ds4(at) && find_arch_ops(at) != NULL) {
                     if (llm_mlx_load_generic_gguf(model_dir, m, at)) { m->arch = find_arch_ops(at); return m; }
                     fprintf(stderr, "llm_ai_mlx_load_model: load GGUF generico fallito (%s)\n", model_dir);
                     llm_mlx_model_destroy(m); free(m); return NULL;
