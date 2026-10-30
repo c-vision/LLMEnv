@@ -443,6 +443,7 @@ bool gemma4_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
                                                    cache_offset, n_tokens, /*step=*/256,
                                                    &k_src, &v_src, m->stream);
         if (ok && !kv_inplace) {
+        if (has_cache) llm_mlx_kv_trim(k_cache, v_cache, cache_offset, m->stream);
         if (has_cache) {
             mlx_vector_array kv = mlx_vector_array_new();
             mlx_vector_array_append_value(kv, *k_cache);
@@ -813,6 +814,7 @@ bool mixtral_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, in
                                                        cache_offset, n_tokens, /*step=*/256,
                                                        &k_src, &v_src, m->stream);
             if (ok && !kv_inplace) {
+            if (has_cache) llm_mlx_kv_trim(k_cache, v_cache, cache_offset, m->stream);
             if (has_cache) {
                 mlx_vector_array kv = mlx_vector_array_new();
                 mlx_vector_array_append_value(kv, *k_cache);
