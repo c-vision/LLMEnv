@@ -151,9 +151,11 @@ bool kimi_mla_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
         if (ok) ok = mlx_quantized_matmul(&out_attn, attn, uw, us, ub, true, gsz_o, bts_o, mode, m->stream)==0;
     } else if (ok) {
         /* prefill: k_nope = embed_q(kv_latent, transpose=false) [peso H,kvl,qn];
-         * v = unembed_out(kv_latent) con transpose=TRUE [peso H,vhd,kvl come nn.Linear]. */
-        if (ok) ok = mlx_quantized_matmul(&k_attn, kvl4, ew, es, eb, /*transpose=*/false, gsz_o, bts_o, mode, m->stream)==0;
-        if (ok) ok = mlx_quantized_matmul(&v_attn, kvl4, uw, us, ub, /*transpose=*/true, gsz_o, bts_o, mode, m->stream)==0;
+         * v = unembed_out(kv_latent) con transpose=TRUE [peso H,vhd,kvl come nn.Linear]. 
+         * Si usa il latente COMPLETO (*k_cache = cache + nuovi token), non solo `kvl4`: con una cache gia' piena (secondo append della
+         * sessione, secondo chunk di un prompt lungo, riuso del prefisso) chiavi e valori devono coprire tutto il contesto, come la maschera. */
+        if (ok) ok = mlx_quantized_matmul(&k_attn, *k_cache, ew, es, eb, /*transpose=*/false, gsz_o, bts_o, mode, m->stream)==0;
+        if (ok) ok = mlx_quantized_matmul(&v_attn, *k_cache, uw, us, ub, /*transpose=*/true, gsz_o, bts_o, mode, m->stream)==0;
         if (ok) ok = mlx_fast_scaled_dot_product_attention(&attn, q_nope, k_attn, v_attn, scale, "", spe_m, no_sinks, m->stream)==0;
         if (ok) ok = mlx_array_set(&out_attn, attn)==0;
     }

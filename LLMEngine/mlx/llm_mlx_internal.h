@@ -503,6 +503,9 @@ typedef struct {
     mlx_array* k_cache;
     mlx_array* v_cache;
     bool* has_cache;
+    mlx_array* aux_cache;  /* per-layer ausiliari della sessione (KDA/MLA k_pe, stash gemma): NULL se la sessione non ne ha */
+    bool recurrent;        /* modello con stato ricorrente (GDN/KDA/SSM/conv): lo stato vale SOLO a token_len esatto, quindi il riuso
+                            * richiede che TUTTO il prefisso combaci (mai troncare) e non si spilla su disco */
 
     int cache_offset;
     int32_t* history;

@@ -294,6 +294,11 @@ int llm_ai_mlx_session_set_min_p(llm_ai_mlx_session_handle handle, float min_p);
 int llm_ai_mlx_session_set_prefill_chunk(llm_ai_mlx_session_handle handle,
                                           int chunk_size);
 
+/* 1 if the saved prefixes of this model are valid only at their exact length (recurrent state: GDN/KDA/SSM/conv). The caller that saves
+ * prefixes must then save at the STABLE boundary of the prompt (before the generation header), because the end of the prompt will not
+ * match the next turn and a recurrent state cannot be truncated. 0 for plain attention models. */
+int llm_ai_mlx_model_prefix_exact(llm_ai_mlx_model_handle mh);
+
 /* T2 speculative — verify a 1 token (tappa 1, senza rollback):
  * verifica che il token proposto dal draft coincida col greedy del modello alla posizione
  * corrente (s->pending_next_id). Semantica:

@@ -278,8 +278,8 @@ void llm_mlx_model_destroy(LlmMlxModel* m) {
     /* Prefix cache: libera i prefissi salvati (cache alias, token, history). */
     for (int i = 0; i < m->n_prefixes; i++) {
         SavedPrefix* p = &m->prefixes[i];
-        for (int l = 0; l < p->n_layers; l++) { mlx_array_free(p->k_cache[l]); mlx_array_free(p->v_cache[l]); }
-        free(p->k_cache); free(p->v_cache); free(p->has_cache);
+        for (int l = 0; l < p->n_layers; l++) { mlx_array_free(p->k_cache[l]); mlx_array_free(p->v_cache[l]); if (p->aux_cache) mlx_array_free(p->aux_cache[l]); }
+        free(p->k_cache); free(p->v_cache); free(p->aux_cache); free(p->has_cache);
         free(p->tokens); free(p->history);
     }
     free(m->prefixes);

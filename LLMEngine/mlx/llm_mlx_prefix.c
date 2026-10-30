@@ -385,15 +385,28 @@ int llm_session_unpark(LlmMlxModel* m, LlmMlxSession* s) {
  * §G: con l'opzione di registro `kvdisk` attiva, la KV del LRU ancora in RAM viene prima SPILLATA su disco
  * (unified memory liberata, tokens/name conservati: il riuso la ripristina da disco).
  * Ritorna true se ha evittato (o spillato) almeno un prefisso. */
+/* Tetto ai prefissi salvati. Un prefisso ricorrente porta lo stato completo di ogni layer GDN/KDA/SSM (centinaia di MB su un 27B):
+ * per quei modelli il tetto e' piu' basso (opzione `prefix_recurrent_max`, default 4). 0 = nessun tetto. */
+static int llm_prefix_cap(const LlmMlxModel* m) {
+    int cap = m->prefix_max;
+    if (llm_mlx_model_has_recurrent_state(m)) {
+        int rmax = 4;
+        if (llm_ai_mlx_opt_get_int("prefix_recurrent_max", &rmax) != 0 || rmax < 1) rmax = 4;
+        if (cap <= 0 || cap > rmax) cap = rmax;
+    }
+    return cap;
+}
+
 static bool llm_prefix_evict_lru(LlmMlxModel* m) {
-    if (!m || m->prefix_max <= 0 || m->n_prefixes < m->prefix_max) return false;
+    const int cap = m ? llm_prefix_cap(m) : 0;
+    if (!m || cap <= 0 || m->n_prefixes < cap) return false;
     if (llm_kvdisk_enabled(m)) {
         int cand = -1; uint64_t oldest = UINT64_MAX;
         /* C5: spill SELETTIVO — scrivere su SSD un prefisso mai riusato e' I/O sprecato (SGLang HiCache: dal 2o hit).
          * I prefissi sotto soglia, se vittime, vengono evitti senza spill. 0 = spill incondizionato (comportamento storico). */
         int min_hits = 1; (void)llm_ai_mlx_opt_get_int("prefix_spill_min_hits", &min_hits);
         for (int i = 0; i < m->n_prefixes; i++)
-            if (m->prefixes[i].has_kv && !m->prefixes[i].on_disk && m->prefixes[i].hits >= min_hits && m->prefixes[i].last_used < oldest) {
+            if (!m->prefixes[i].recurrent && m->prefixes[i].has_kv && !m->prefixes[i].on_disk && m->prefixes[i].hits >= min_hits && m->prefixes[i].last_used < oldest) {
                 oldest = m->prefixes[i].last_used; cand = i;
             }
         if (cand >= 0) {
@@ -421,8 +434,8 @@ static bool llm_prefix_evict_lru(LlmMlxModel* m) {
     SavedPrefix* p = &m->prefixes[victim];
     if (p->on_disk && p->token_len > 0 && m->kvdisk_state == 1)
         llm_kv_disk_del(&m->kvdisk, llm_prefix_kvdisk_key(m, p->tokens, p->token_len));
-    for (int l = 0; l < p->n_layers; l++) { mlx_array_free(p->k_cache[l]); mlx_array_free(p->v_cache[l]); }
-    free(p->k_cache); free(p->v_cache); free(p->has_cache); free(p->tokens); free(p->history);
+    for (int l = 0; l < p->n_layers; l++) { mlx_array_free(p->k_cache[l]); mlx_array_free(p->v_cache[l]); if (p->aux_cache) mlx_array_free(p->aux_cache[l]); }
+    free(p->k_cache); free(p->v_cache); free(p->aux_cache); free(p->has_cache); free(p->tokens); free(p->history);
     memset(p, 0, sizeof(*p));
     if (victim != m->n_prefixes - 1) {
         memmove(&m->prefixes[victim], &m->prefixes[victim + 1], (size_t)(m->n_prefixes - victim - 1) * sizeof(SavedPrefix));
@@ -457,7 +470,6 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
 
     /* Modello DELEGATO (DS4/DS4.1): prefix-cache non esposto dall'ABI a 9 metodi -> non supportato. */
     if (m->deleg) return -1;
-    if (llm_mlx_model_has_recurrent_state(m)) return -1;   /* stato ricorrente non salvabile col prefisso (vedi sopra) */
 
     int idx = -1;
 
@@ -477,7 +489,7 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
 
         }
 
-        if (m->prefix_max > 0 && m->n_prefixes >= m->prefix_max) llm_prefix_evict_lru(m);
+        if (llm_prefix_cap(m) > 0 && m->n_prefixes >= llm_prefix_cap(m)) llm_prefix_evict_lru(m);
         idx = m->n_prefixes++;
         /* slot nuova: la memoria da realloc NON e' azzerata -> il ramo "libera il vecchio contenuto"
          * sotto leggerebbe n_layers/k_cache spazzatura (SIGSEGV a n_layers>0 && k_cache==NULL). */
@@ -493,9 +505,9 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
 
     if (p->n_layers > 0) {
 
-        for (int l = 0; l < p->n_layers; l++) { mlx_array_free(p->k_cache[l]); mlx_array_free(p->v_cache[l]); }
+        for (int l = 0; l < p->n_layers; l++) { mlx_array_free(p->k_cache[l]); mlx_array_free(p->v_cache[l]); if (p->aux_cache) mlx_array_free(p->aux_cache[l]); }
 
-        free(p->k_cache); free(p->v_cache); free(p->has_cache); free(p->tokens); free(p->history);
+        free(p->k_cache); free(p->v_cache); free(p->aux_cache); free(p->has_cache); free(p->tokens); free(p->history);
 
     }
 
@@ -524,6 +536,13 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
 
         p->has_cache[i] = s->has_cache[i];
 
+    }
+
+    /* stato ausiliario per-layer (KDA/MLA k_pe, stash gemma): senza, un modello che lo usa riprenderebbe con uno stato stantio */
+    p->recurrent = llm_mlx_model_has_recurrent_state(m) != 0;
+    if (p->recurrent && s->aux_cache != NULL) {
+        p->aux_cache = (mlx_array*)calloc((size_t)s->n_layers, sizeof(mlx_array));
+        if (p->aux_cache) for (int i = 0; i < s->n_layers; i++) { p->aux_cache[i] = mlx_array_new(); llm_mlx_cache_checkpoint(&p->aux_cache[i], s->aux_cache[i], m->stream); }
     }
 
     p->cache_offset = s->cache_offset;
@@ -557,7 +576,8 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
      * evitando il re-prefill. Spillando si libera la RAM (on_disk=true → il riuso ripristina). */
     {
         char pp[2048];
-        if (llm_prefix_cache_path(m, pp, (int)sizeof pp)[0] != '\0') {
+        /* uno stato ricorrente non si spilla ne' si persiste: vale solo a token_len esatto e vive in RAM (vedi SavedPrefix.recurrent) */
+        if (!p->recurrent && llm_prefix_cache_path(m, pp, (int)sizeof pp)[0] != '\0') {
             if (m->kvdisk_state < 0) (void)llm_kvdisk_enabled(m);
             if (m->kvdisk_state == 1 && p->has_kv && llm_prefix_spill(m, p) == 0) {
                 for (int l = 0; l < p->n_layers; l++) {
@@ -663,6 +683,13 @@ int llm_ai_mlx_session_append_reuse_prefix(llm_ai_mlx_session_handle sh, llm_ai_
 
     }
 
+    /* stato ausiliario dei modelli ricorrenti (salvato solo per loro): senza, KDA/MLA riprenderebbe da uno stato stantio */
+    if (p->recurrent && p->aux_cache != NULL && s->aux_cache != NULL)
+        for (int l = 0; l < s->n_layers; l++) {
+            if (p->aux_cache[l].ctx) mlx_array_set(&s->aux_cache[l], p->aux_cache[l]);
+            else { mlx_array_free(s->aux_cache[l]); s->aux_cache[l] = mlx_array_new(); }
+        }
+
     s->cache_offset = p->cache_offset;
 
     free(s->history); s->history = NULL; s->history_len = 0; s->history_cap = 0;
@@ -721,8 +748,21 @@ int llm_ai_mlx_session_append_auto_prefix(llm_ai_mlx_session_handle sh, llm_ai_m
     /* Modello DELEGATO (DS4/DS4.1): auto-prefix non esposto dall'ABI a 9 metodi -> non supportato. */
     if (m->deleg) return -1;
 
-    /* Stato ricorrente fuori da K/V: il prefisso riporta solo K/V -> append lineare (prefill completo, corretto). */
-    if (llm_mlx_model_has_recurrent_state(m)) return llm_ai_mlx_session_append(sh, token_ids, n_ids);
+    /* Stato ricorrente (GDN/KDA/SSM/conv): lo stato salvato vale solo al token_len esatto, quindi un prefisso e' riusabile solo se
+     * TUTTI i suoi token combaciano con l'inizio del prompt (niente match parziale: la radix darebbe un prefisso piu' lungo che poi
+     * non combacia). Si sceglie fra i salvati in RAM il piu' lungo a corrispondenza completa; senza, prefill completo. */
+    if (llm_mlx_model_has_recurrent_state(m)) {
+        int best = -1, best_len = 0;
+        for (int i = 0; i < m->n_prefixes; i++) {
+            const SavedPrefix* q = &m->prefixes[i];
+            if (!q->recurrent || !q->has_kv || q->token_len < min_match || q->token_len > n_ids || q->token_len <= best_len) continue;
+            if (memcmp(q->tokens, token_ids, (size_t)q->token_len * sizeof(int32_t)) == 0) { best = i; best_len = q->token_len; }
+        }
+        if (llm_ai_mlx_opt_env("FMLX_PREFIX_DEBUG"))
+            fprintf(stderr, "[prefix-auto] recurrent n_ids=%d full_match=%d n_prefixes=%d\n", n_ids, best_len, m->n_prefixes);
+        if (best >= 0) return llm_ai_mlx_session_append_reuse_prefix(sh, mh, m->prefixes[best].name, token_ids, n_ids);
+        return llm_ai_mlx_session_append(sh, token_ids, n_ids);
+    }
 
     /* DFlash2 (drafter esplicito O auto-rilevato): la radix prefix-cache e' INCOMPATIBILE con la
      * cattura-ctx del drafter. `append_reuse_prefix` NON esegue il prefill (riusa la KV salvata),
@@ -773,7 +813,7 @@ static int llm_prefix_register_persisted(LlmMlxModel* m, const char* name, const
         if (!np) return -1;
         m->prefixes = np; m->prefix_cap = ncap;
     }
-    if (m->prefix_max > 0 && m->n_prefixes >= m->prefix_max) llm_prefix_evict_lru(m);
+    if (llm_prefix_cap(m) > 0 && m->n_prefixes >= llm_prefix_cap(m)) llm_prefix_evict_lru(m);
     int idx = m->n_prefixes++;
     SavedPrefix* p = &m->prefixes[idx];
     memset(p, 0, sizeof(*p));
@@ -886,4 +926,11 @@ int llm_ai_mlx_session_last_hidden(llm_ai_mlx_session_handle handle, float* out,
     }
     mlx_array_free(h32);
     return ok ? hidden : -1;
+}
+
+/* 1 se i prefissi di questo modello valgono SOLO a lunghezza esatta (stato ricorrente: GDN/KDA/SSM/conv). Il chiamante che salva i
+ * prefissi deve allora salvarli al confine STABILE del prompt (prima dell'intestazione di generazione), non alla fine: la fine non
+ * combacia col turno successivo, e uno stato ricorrente non si puo' troncare. */
+int llm_ai_mlx_model_prefix_exact(llm_ai_mlx_model_handle mh) {
+    return mh ? llm_mlx_model_has_recurrent_state((const LlmMlxModel*)mh) : 0;
 }
