@@ -27,11 +27,14 @@ static const struct { const char* match; const char* role; } k_rules[] = {
     { "e_score_correction_bias", "ROUTER" }, { "mlp.router", "ROUTER" }, { ".router.", "ROUTER" },
     { "block_sparse_moe.gate", "ROUTER" }, { "moe.gate", "ROUTER" }, { "expert_bias", "ROUTER" },
     { "feed_forward.gate.weight", "ROUTER" },
+    { "qkv_proj", "ATTN_QKV" }, { "query_key_value", "ATTN_QKV" }, { "c_attn", "ATTN_QKV" },   /* prima di q|k|v_proj: "qkv_proj" li contiene */
     { "q_a_proj", "ATTN_Q_A" }, { "q_b_proj", "ATTN_Q_B" }, { "q_lora", "ATTN_Q_A" },
     { "kv_a_proj", "ATTN_KV" }, { "kv_b_proj", "ATTN_KV" }, { "kv_a_layernorm", "NORM" },
     { "q_norm", "NORM" }, { "k_norm", "NORM" },
     { "q_proj", "ATTN_Q" }, { "k_proj", "ATTN_KV" }, { "v_proj", "ATTN_V" }, { "o_proj", "ATTN_WO" },
     { "linear_attn", "ATTN_LINEAR" },
+    { "attention.dense", "ATTN_WO" },
+    { "gate_up_proj", "FFN" }, { "dense_h_to_4h", "FFN" }, { "dense_4h_to_h", "FFN" }, { "c_fc", "FFN" },
     { "gate_proj", "FFN" }, { "up_proj", "FFN" }, { "down_proj", "FFN" }, { "mlp.", "FFN" }, { "feed_forward", "FFN" },
     { "ffn.", "FFN" }, { "norm", "NORM" }, { "layernorm", "NORM" }, { ".ln_", "NORM" },
 };
@@ -324,7 +327,17 @@ int llmdesc_ensure_for_dir(const char* hf_dir, const char* abi_dir, char* out_pa
         fprintf(f, ",\n    \"moe\": { \"experts\": \"cfg:experts\", \"top_k\": \"cfg:top_k\", \"steps\": [ {\"op\":\"router_topk\",\"prim\":\"\"}, "
                    "{\"op\":\"experts\",\"prim\":\"\"}, {\"op\":\"shared\",\"prim\":\"\"} ] }");
     if (vis) fprintf(f, ",\n    \"vision\": { \"type\": \"vit\", \"present\": true }");
-    fprintf(f, "\n  }\n}\n");
+    fprintf(f, "\n  },\n");
+    /* blocchi standard (come i descrittori curati): codec disponibili, sorgente pesi MLX/HF, parametri di quantizzazione */
+    fputs("  \"codecs\": {\n    \"mlx_affine\": \"mlx_affine\",\n    \"plain\": \"plain\",\n    \"fp8_block\": \"fp8_block\",\n"
+          "    \"fp4_expert\": \"fp4_expert\",\n    \"f16\": \"f16\"\n  },\n"
+          "  \"weight_source\": {\n"
+          "    \"mlx_affine\": { \"dtype\": \"U32\", \"codec\": \"mlx_affine\", \"scale_suffix\": \".scales\", \"bias_suffix\": \".biases\" },\n"
+          "    \"plain_f16\": { \"dtype\": \"F16\", \"codec\": \"plain\", \"fmt\": 1 },\n"
+          "    \"plain_bf16\": { \"dtype\": \"BF16\", \"codec\": \"plain\", \"fmt\": 2 },\n"
+          "    \"plain_f32\": { \"dtype\": \"F32\", \"codec\": \"plain\", \"fmt\": 0 }\n  },\n"
+          "  \"quant_params\": { \"group\": 32, \"bits\": 4 },\n"
+          "  \"convert_target\": { \"default\": { \"codec\": \"mlx_affine\", \"p0\": 32, \"p1\": 4 } }\n}\n", f);
     int werr = ferror(f);
     fclose(f);
     free(cfg);
