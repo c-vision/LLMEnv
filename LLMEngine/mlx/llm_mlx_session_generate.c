@@ -503,7 +503,8 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
          * Mamba, Falcon-H1, Jamba, Granite-hybrid, OLMo-hybrid, RWKV. Senza questa esclusione il rollback riporta
          * K/V ma non lo stato: il testo degenera (LFM2-8B generava solo virgolette). */
         const bool hybrid_recurrent = llm_mlx_model_has_recurrent_state(m) != 0;   /* elenco unico in llm_mlx_prefix.c */
-        if (ord >= 2 && !hybrid_recurrent) {
+        /* PLE (qwen4_exp): il forward batch di verifica non imposta il side-channel degli id -> "PLE richiesto ma non disponibile". */
+        if (ord >= 2 && !hybrid_recurrent && m->cfg.ple_layer_ids_n == 0) {
             llm_mlx_sampling_t smn = llm_mlx_session_sampling(s);
             if (!smn.active || smn.temperature <= 0.0f) {
                 if (!s->ngram_built) llm_ai_mlx_session_build_ngram(handle, ord);
