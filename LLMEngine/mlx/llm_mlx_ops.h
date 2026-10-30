@@ -323,6 +323,21 @@ static bool llm_mlx_gqa_sdpa_sinks(mlx_array* out, mlx_array q, mlx_array k, mlx
  * se la capacita' S >= off+n_tokens scrive in-place, altrimenti migra a un buffer
  * arrotondato a `step`. Ritorna in *k_view/*v_view la vista troncata [0..off+n) da
  * passare alla SDPA (il buffer puo' avere padding). false = non applicabile. */
+/* La cache KV puo' avere capacita' > token validi (llm_ai_mlx_session_append la arrotonda a 256 con zeri):
+ * i blocchi che concatenano il nuovo K/V in coda devono prima scartare il padding, altrimenti l'attention
+ * vede gli zeri. Taglia in-place [0:off] sull'asse dei token; no-op se gia' esatta. */
+static void llm_mlx_kv_trim(mlx_array* k_cache, mlx_array* v_cache, int off, mlx_stream stream) {
+    mlx_array* c[2] = { k_cache, v_cache };
+    for (int i = 0; i < 2; i++) {
+        if (c[i] == NULL || (*c[i]).ctx == NULL || mlx_array_ndim(*c[i]) != 4) continue;
+        const int* sh = mlx_array_shape(*c[i]);
+        if (sh == NULL || off <= 0 || sh[2] <= off) continue;
+        int p0[4] = {0,0,0,0}, pe[4] = {sh[0], sh[1], off, sh[3]}, ps[4] = {1,1,1,1};
+        mlx_array t = mlx_array_new();
+        if (mlx_slice(&t, *c[i], p0,4, pe,4, ps,4, stream) == 0) mlx_array_set(c[i], t);
+        mlx_array_free(t);
+    }
+}
 static int g_kv_inplace_state = -1;
 static bool llm_mlx_kv_inplace_enabled(void) {
     /* LLM_KV_DEQUANT_READ: cache = soli recenti (cold nel pending) -> no append in-place. */

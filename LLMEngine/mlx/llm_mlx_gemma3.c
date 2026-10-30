@@ -116,6 +116,7 @@ bool gemma3_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int
 
     mlx_array k_full=mlx_array_new(), v_full=mlx_array_new();
     if (ok) {
+        if (has_cache) llm_mlx_kv_trim(k_cache, v_cache, cache_offset, s);
         if (has_cache && (*k_cache).ctx != NULL && mlx_array_ndim(*k_cache)==4) {
             mlx_vector_array kv = mlx_vector_array_new();
             mlx_vector_array_append_value(kv, *k_cache); mlx_vector_array_append_value(kv, k_rope);

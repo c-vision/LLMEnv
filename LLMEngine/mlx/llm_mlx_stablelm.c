@@ -93,6 +93,7 @@ bool stablelm_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
     if (ok) { ok = quantized_linear_cfg(&q, normed, qw,qs,qb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"q_proj"); }
     if (ok) { ok = quantized_linear_cfg(&k, normed, kw,ks,kb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"k_proj"); }
     if (ok) { ok = quantized_linear_cfg(&v, normed, vw,vs,vb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"v_proj"); }
+    if (ok && qs.ctx != NULL) { ok = llm_mlx_add_linear_bias(m, layer_idx, "self_attn.q_proj", &q, s) && llm_mlx_add_linear_bias(m, layer_idx, "self_attn.k_proj", &k, s) && llm_mlx_add_linear_bias(m, layer_idx, "self_attn.v_proj", &v, s); CHK(ok, "qkv bias"); }
 
     /* reshape [1,L,H,hd]; qk_layernorm (se presente) PRIMA del transpose; poi transpose. */
     mlx_array q_t=mlx_array_new(), k_t=mlx_array_new(), v_t=mlx_array_new();
@@ -127,6 +128,7 @@ bool stablelm_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
 
     mlx_array k_full=mlx_array_new(), v_full=mlx_array_new();
     if (ok) {
+        if (has_cache) llm_mlx_kv_trim(k_cache, v_cache, cache_offset, s);
         if (has_cache && (*k_cache).ctx != NULL && mlx_array_ndim(*k_cache)==4) {
             mlx_vector_array kv=mlx_vector_array_new(); mlx_vector_array_append_value(kv,*k_cache); mlx_vector_array_append_value(kv,k_r);
             ok = mlx_concatenate_axis(&k_full, kv, 2, s)==0; mlx_vector_array_free(kv);
@@ -135,7 +137,7 @@ bool stablelm_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, i
         } else { ok = mlx_array_set(&k_full, k_r)==0 && mlx_array_set(&v_full, v_t)==0; }
         CHK(ok,"kv");
     }
-    if (ok && has_cache) { ok = mlx_array_set(k_cache, k_full)==0 && mlx_array_set(v_cache, v_full)==0; CHK(ok,"kv store"); }
+    if (ok && k_cache && v_cache) { ok = mlx_array_set(k_cache, k_full)==0 && mlx_array_set(v_cache, v_full)==0; CHK(ok,"kv store"); }
 
     mlx_array attn=mlx_array_new();
     if (ok) { ok = llm_mlx_gqa_sdpa(&attn, q_r, k_full, v_full, 1.0f/sqrtf((float)hd), 0, s); CHK(ok,"sdpa"); }

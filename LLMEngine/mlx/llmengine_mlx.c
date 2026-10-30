@@ -1503,7 +1503,7 @@ int llm_mlx_qmatmul_auto(mlx_array* res, mlx_array x, mlx_array w, mlx_array sc,
 char g_qmm_tag[96] = "?";
 
 bool quantized_linear_cfg(mlx_array* res, mlx_array x, mlx_array w, mlx_array scales, mlx_array biases, int group_size, int bits, const char* mode, mlx_stream stream) {
-    if (w.ctx != NULL && mlx_array_dtype(w) != MLX_UINT32) {
+    if (w.ctx != NULL && mlx_array_dtype(w) != MLX_UINT32 && scales.ctx != NULL) {
         const int* ws = mlx_array_ndim(w) >= 2 ? mlx_array_shape(w) : NULL;
         const int* xs = mlx_array_ndim(x) >= 2 ? mlx_array_shape(x) : NULL;
         fprintf(stderr, "[bad-weight] tag=%s dtype=%d ndimw=%d w=[%d,%d] x=[%d,%d] caller=%p\n",

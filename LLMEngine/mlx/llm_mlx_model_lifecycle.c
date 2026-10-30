@@ -323,3 +323,17 @@ void llm_mlx_model_destroy(LlmMlxModel* m) {
         m->dense_ffn_n = 0;
     }
 }
+/* Bias lineare reale `<prefix>.<modulo>.bias` (distinto dai `.biases` di quantizzazione) sommato a *y se presente.
+ * Va chiamato SOLO per pesi quantizzati: per i pesi plain il bias lo applica gia' il triple. */
+bool llm_mlx_add_linear_bias(LlmMlxModel* m, int layer_idx, const char* module, mlx_array* y, mlx_stream stream) {
+    char sub[96], nb[320]; snprintf(sub, sizeof sub, "%s.bias", module);
+    tname(m->cfg.layer_prefix, layer_idx, sub, nb, sizeof nb);
+    mlx_array bt = mlx_array_new(); bool ok = true;
+    if (multishard_get(&m->weights, nb, &bt) && bt.ctx != NULL) {
+        mlx_array sum = mlx_array_new();
+        ok = mlx_add(&sum, *y, bt, stream) == 0 && mlx_array_set(y, sum) == 0;
+        mlx_array_free(sum);
+    }
+    mlx_array_free(bt);
+    return ok;
+}

@@ -198,6 +198,7 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
     if (cfg->rms_norm_eps == 0.0f) OPT_FLOAT(rms_norm_eps, "layer_norm_eps", 0.0f);
     /* Mamba (HF): la chiave e' "layer_norm_epsilon" (con 'epsilon'), non "layer_norm_eps". */
     if (cfg->rms_norm_eps == 0.0f) OPT_FLOAT(rms_norm_eps, "layer_norm_epsilon", 0.0f);
+    if (cfg->rms_norm_eps == 0.0f) OPT_FLOAT(rms_norm_eps, "norm_epsilon", 0.0f);   /* starcoder2 */
     /* StarCoder2 (HF): la chiave e' "norm_epsilon". */
     if (cfg->rms_norm_eps == 0.0f) OPT_FLOAT(rms_norm_eps, "norm_epsilon", 0.0f);
     if (cfg->rms_norm_eps == 0.0f) cfg->rms_norm_eps = 1e-6f;

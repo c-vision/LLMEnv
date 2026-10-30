@@ -100,6 +100,7 @@ bool lfm2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset, int n
     }
     mlx_array attn = mlx_array_new();
     if (ok) {   /* KV cache: concat su asse 2 (BHTD). Semplice/corretto (non ottimizzato paging). */
+        if (has_cache) llm_mlx_kv_trim(k_cache, v_cache, cache_offset, s);
         if (has_cache && mlx_array_size(*k_cache) > 0 && mlx_array_ndim(*k_cache) == 4) {
             mlx_array kn = mlx_array_new(), vn = mlx_array_new();
             mlx_vector_array kv = mlx_vector_array_new();

@@ -66,6 +66,7 @@ bool starcoder2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset,
     if (ok) { ok = quantized_linear_cfg(&q, normed, qw,qs,qb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"q_proj"); }
     if (ok) { ok = quantized_linear_cfg(&k, normed, kw,ks,kb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"k_proj"); }
     if (ok) { ok = quantized_linear_cfg(&v, normed, vw,vs,vb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"v_proj"); }
+    if (ok && qs.ctx != NULL) { ok = llm_mlx_add_linear_bias(m, layer_idx, "self_attn.q_proj", &q, s) && llm_mlx_add_linear_bias(m, layer_idx, "self_attn.k_proj", &k, s) && llm_mlx_add_linear_bias(m, layer_idx, "self_attn.v_proj", &v, s); CHK(ok, "qkv bias"); }
 
     mlx_array q_t=mlx_array_new(), k_t=mlx_array_new(), v_t=mlx_array_new();
     if (ok) { int qs4[4]={1,n_tokens,nh,hd}, kvs4[4]={1,n_tokens,nkv,hd};
@@ -83,6 +84,7 @@ bool starcoder2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset,
 
     mlx_array k_full=mlx_array_new(), v_full=mlx_array_new();
     if (ok) {
+        if (has_cache) llm_mlx_kv_trim(k_cache, v_cache, cache_offset, s);
         if (has_cache && (*k_cache).ctx != NULL && mlx_array_ndim(*k_cache)==4) {
             mlx_vector_array kv=mlx_vector_array_new(); mlx_vector_array_append_value(kv,*k_cache); mlx_vector_array_append_value(kv,k_r);
             ok = mlx_concatenate_axis(&k_full, kv, 2, s)==0; mlx_vector_array_free(kv);
@@ -91,7 +93,7 @@ bool starcoder2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset,
         } else { ok = mlx_array_set(&k_full, k_r)==0 && mlx_array_set(&v_full, v_t)==0; }
         CHK(ok,"kv");
     }
-    if (ok && has_cache) { ok = mlx_array_set(k_cache, k_full)==0 && mlx_array_set(v_cache, v_full)==0; CHK(ok,"kv store"); }
+    if (ok && k_cache && v_cache) { ok = mlx_array_set(k_cache, k_full)==0 && mlx_array_set(v_cache, v_full)==0; CHK(ok,"kv store"); }
 
     mlx_array attn=mlx_array_new();
     if (ok) { ok = llm_mlx_gqa_sdpa(&attn, q_r, k_full, v_full, 1.0f/sqrtf((float)hd), 0, s); CHK(ok,"sdpa"); }
@@ -104,6 +106,7 @@ bool starcoder2_attention_block(LlmMlxModel* m, int layer_idx, int cache_offset,
     tname(m->cfg.layer_prefix, layer_idx, "self_attn.o_proj", nb, sizeof nb); ok = ok && multishard_get_triple(&m->weights, nb, &ow,&os,&ob);
     mlx_array ao=mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&ao, afl, ow,os,ob, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"o_proj"); }
+    if (ok && os.ctx != NULL) { ok = llm_mlx_add_linear_bias(m, layer_idx, "self_attn.o_proj", &ao, s); CHK(ok, "o bias"); }
     if (ok) { ok = mlx_add(out_h, x, ao, s)==0; CHK(ok,"residual (attn)"); }
 
     mlx_array all[] = { lnw,lnb,normed, qw,qs,qb, kw,ks,kb, vw,vs,vb, q,k,v, q_t,k_t,v_t, q_r,k_r,
@@ -129,11 +132,13 @@ bool starcoder2_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array
     tname(m->cfg.layer_prefix, layer_idx, "mlp.c_fc", nb, sizeof nb); ok = ok && multishard_get_triple(&m->weights, nb, &fw,&fs,&fb);
     mlx_array fc = mlx_array_new(), g = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&fc, normed, fw,fs,fb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"c_fc"); }
+    if (ok && fs.ctx != NULL) { ok = llm_mlx_add_linear_bias(m, layer_idx, "mlp.c_fc", &fc, s); CHK(ok, "c_fc bias"); }
     if (ok) { ok = sc2_gelu(&g, fc, s); CHK(ok,"gelu"); }
     mlx_array pw=mlx_array_new(), ps=mlx_array_new(), pb=mlx_array_new();
     tname(m->cfg.layer_prefix, layer_idx, "mlp.c_proj", nb, sizeof nb); ok = ok && multishard_get_triple(&m->weights, nb, &pw,&ps,&pb);
     mlx_array dn = mlx_array_new();
     if (ok) { ok = quantized_linear_cfg(&dn, g, pw,ps,pb, gsz,bts, m->cfg.quant_mode, s); CHK(ok,"c_proj"); }
+    if (ok && ps.ctx != NULL) { ok = llm_mlx_add_linear_bias(m, layer_idx, "mlp.c_proj", &dn, s); CHK(ok, "c_proj bias"); }
     if (ok) { ok = mlx_add(out, h, dn, s)==0; CHK(ok,"residual (ffn)"); }
 
     mlx_array all[] = { lnw,lnb,normed, fw,fs,fb, fc, g, pw,ps,pb, dn };

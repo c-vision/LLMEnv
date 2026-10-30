@@ -70,6 +70,7 @@ void llm_mlx_quant_derive(mlx_array w, mlx_array scales, int fb_group, int fb_bi
 bool multishard_get(const MultiShardWeights* mw, const char* name, mlx_array* out);
 bool multishard_get_triple(const MultiShardWeights* mw, const char* base, mlx_array* w, mlx_array* scales, mlx_array* biases);
 void tname(const char* layer_prefix, int layer_idx, const char* suffix, char* out, size_t out_cap);
+bool llm_mlx_add_linear_bias(LlmMlxModel* m, int layer_idx, const char* module, mlx_array* y, mlx_stream stream);
 extern mlx_array g_mlx_empty_arr;
 extern bool g_bf16_all;
 extern mlx_dtype g_act16;
