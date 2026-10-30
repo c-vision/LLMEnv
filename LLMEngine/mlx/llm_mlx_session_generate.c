@@ -502,12 +502,7 @@ int llm_ai_mlx_session_generate(llm_ai_mlx_session_handle handle, int max_new_to
         /* Stesso vincolo per ogni architettura con stato ricorrente/convoluzionale fuori da K/V: LFM2 (conv corta),
          * Mamba, Falcon-H1, Jamba, Granite-hybrid, OLMo-hybrid, RWKV. Senza questa esclusione il rollback riporta
          * K/V ma non lo stato: il testo degenera (LFM2-8B generava solo virgolette). */
-        static const char* const k_rec_types[] = { "kimi_linear", "lfm2", "lfm2_moe", "mamba", "mamba2", "falcon_mamba",
-            "falcon_h1", "jamba", "granitemoehybrid", "olmo_hybrid", "rwkv7",
-            "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_next" };   /* GDN (DeltaNet): il rollback n-gram non ripristina lo stato -> testo corrotto (Qwen3.8-27B) */
-        bool hybrid_recurrent = false;
-        for (size_t ri = 0; m->cfg.model_type != NULL && ri < sizeof k_rec_types / sizeof k_rec_types[0]; ri++)
-            if (strcmp(m->cfg.model_type, k_rec_types[ri]) == 0) { hybrid_recurrent = true; break; }
+        const bool hybrid_recurrent = llm_mlx_model_has_recurrent_state(m) != 0;   /* elenco unico in llm_mlx_prefix.c */
         if (ord >= 2 && !hybrid_recurrent) {
             llm_mlx_sampling_t smn = llm_mlx_session_sampling(s);
             if (!smn.active || smn.temperature <= 0.0f) {

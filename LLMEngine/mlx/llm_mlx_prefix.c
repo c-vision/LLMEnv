@@ -432,6 +432,18 @@ static bool llm_prefix_evict_lru(LlmMlxModel* m) {
     return true;
 }
 
+/* 1 se il modello ha uno stato ricorrente FUORI dalla cache K/V (DeltaNet/GDN, convoluzione corta, SSM, RWKV, KDA). Il
+ * prefisso salvato/ripristinato e il rollback n-gram riportano solo K/V: lo stato ricorrente resterebbe quello della fine
+ * della sequenza e il testo si corrompe (Qwen3.5 "![]()", LFM2 "<|pad|>"). Per questi modelli niente riuso di prefissi. */
+int llm_mlx_model_has_recurrent_state(const LlmMlxModel* m) {
+    static const char* const k_rec[] = { "kimi_linear", "lfm2", "lfm2_moe", "mamba", "mamba2", "falcon_mamba", "falcon_h1",
+        "jamba", "granitemoehybrid", "olmo_hybrid", "rwkv7", "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_next" };
+    if (m == NULL || m->cfg.model_type == NULL) return 0;
+    for (size_t i = 0; i < sizeof k_rec / sizeof k_rec[0]; i++)
+        if (strcmp(m->cfg.model_type, k_rec[i]) == 0) return 1;
+    return 0;
+}
+
 int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, llm_ai_mlx_session_handle sh) {
 
     if (!mh || !name || !sh) return -1;
@@ -445,6 +457,7 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
 
     /* Modello DELEGATO (DS4/DS4.1): prefix-cache non esposto dall'ABI a 9 metodi -> non supportato. */
     if (m->deleg) return -1;
+    if (llm_mlx_model_has_recurrent_state(m)) return -1;   /* stato ricorrente non salvabile col prefisso (vedi sopra) */
 
     int idx = -1;
 
@@ -638,9 +651,13 @@ int llm_ai_mlx_session_append_reuse_prefix(llm_ai_mlx_session_handle sh, llm_ai_
 
     for (int l = 0; l < s->n_layers; l++) {
 
-        mlx_array_set(&s->k_cache[l], p->k_cache[l]);
+        /* nei modelli ibridi (LFM2: livelli a convoluzione) la cache K del prefisso non esiste: mlx_array_set su un array mai
+         * inizializzato lancia, quindi si azzera la destinazione invece di copiarla */
+        if (p->k_cache[l].ctx) mlx_array_set(&s->k_cache[l], p->k_cache[l]);
+        else { mlx_array_free(s->k_cache[l]); s->k_cache[l] = mlx_array_new(); }
 
-        mlx_array_set(&s->v_cache[l], p->v_cache[l]);
+        if (p->v_cache[l].ctx) mlx_array_set(&s->v_cache[l], p->v_cache[l]);
+        else { mlx_array_free(s->v_cache[l]); s->v_cache[l] = mlx_array_new(); }
 
         s->has_cache[l] = p->has_cache[l];
 
@@ -703,6 +720,9 @@ int llm_ai_mlx_session_append_auto_prefix(llm_ai_mlx_session_handle sh, llm_ai_m
 
     /* Modello DELEGATO (DS4/DS4.1): auto-prefix non esposto dall'ABI a 9 metodi -> non supportato. */
     if (m->deleg) return -1;
+
+    /* Stato ricorrente fuori da K/V: il prefisso riporta solo K/V -> append lineare (prefill completo, corretto). */
+    if (llm_mlx_model_has_recurrent_state(m)) return llm_ai_mlx_session_append(sh, token_ids, n_ids);
 
     /* DFlash2 (drafter esplicito O auto-rilevato): la radix prefix-cache e' INCOMPATIBILE con la
      * cattura-ctx del drafter. `append_reuse_prefix` NON esegue il prefill (riusa la KV salvata),

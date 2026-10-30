@@ -68,6 +68,7 @@ static inline int llm_kvdisk_buf_reserve(uint8_t** buf, size_t* cap, size_t len,
 /* Appende (record + dati) di un tensore al blob. Ritorna 0 / -1 (dtype non serializzabile, OOM). */
 static inline int llm_kvdisk_blob_append_tensor(uint8_t** buf, size_t* len, size_t* cap,
                                                 mlx_array a, int layer, int kind) {
+    if (a.ctx == NULL) return -1;   /* array mai inizializzato (es. la cache K dei livelli a convoluzione di LFM2): niente da salvare, e mlx_array_ndim lancerebbe */
     int nd = mlx_array_ndim(a);
     if (nd < 1 || nd > 4) return -1;
     int dc = llm_kvdisk_dtype_code(mlx_array_dtype(a));

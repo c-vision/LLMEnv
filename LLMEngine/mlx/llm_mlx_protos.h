@@ -363,6 +363,7 @@ void llm_mlx_df2_preload(LlmMlxModel* m);
  * del sibling <stem>-DFlash2). Usato per NON usare la radix prefix-cache (append_reuse_prefix non
  * fa il prefill -> cattura-ctx non armata -> drafter degenerato). Diagnosi 2026-10-03. */
 int llm_mlx_df2_will_use(LlmMlxModel* m);
+int llm_mlx_model_has_recurrent_state(const LlmMlxModel* m);   /* llm_mlx_prefix.c */
 /* HOOK cattura-DFlash2-durante-prefill (in forward_tokens_batch): armato da llm_mlx_df2_preload. */
 extern int g_df2_pf_active;
 extern void (*g_df2_pf_hook)(int layer, mlx_array h, int n_tokens, int cache_offset);
