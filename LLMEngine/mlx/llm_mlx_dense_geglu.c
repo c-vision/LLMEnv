@@ -12,6 +12,110 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+/* gelu_approx(gate) * up, come nn.gelu_approx di mlx_lm (stesse operazioni del ramo eager di dense_geglu_ffn). */
+static bool g4_geglu(mlx_array* out, mlx_array gate, mlx_array up, mlx_stream s) {
+    mlx_array c3 = mlx_array_new_float32(3.0f), ck = mlx_array_new_float32(0.044715f);
+    mlx_array sp = mlx_array_new_float32(0.7978845608028654f), one = mlx_array_new_float32(1.0f), half = mlx_array_new_float32(0.5f);
+    mlx_array x3 = mlx_array_new(), t = mlx_array_new(), in = mlx_array_new(), th = mlx_array_new(), g = mlx_array_new();
+    bool ok = mlx_power(&x3, gate, c3, s) == 0 && mlx_multiply(&t, x3, ck, s) == 0 && mlx_add(&in, gate, t, s) == 0 &&
+              mlx_multiply(&t, in, sp, s) == 0 && mlx_tanh(&th, t, s) == 0 && mlx_add(&t, th, one, s) == 0 &&
+              mlx_multiply(&g, gate, t, s) == 0 && mlx_multiply(&g, g, half, s) == 0 && mlx_multiply(out, g, up, s) == 0;
+    mlx_array all[] = { c3, ck, sp, one, half, x3, t, in, th, g };
+    for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) mlx_array_free(all[i]);
+    return ok;
+}
+
+/* Ramo MoE di Gemma-4 (26b-a4b, enable_moe_block): router -> top-k -> esperti SwitchGLU (gather_qmm) -> post_feedforward_layernorm_2.
+ * Riferimento: mlx_lm gemma4_text.py (Router, Experts, DecoderLayer). `h` e' lo stato dopo l'attention (residuo), non normalizzato.
+ * Ritorna true e *out = uscita normalizzata dell'ramo esperti [1,T,H]; *present=false se il layer non ha esperti. */
+static bool gemma4_moe_branch(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out, bool* present) {
+    char nb[256];
+    mlx_stream s = m->stream;
+    *present = false;
+    mlx_array rw = mlx_array_new(), rs = mlx_array_new(), rb = mlx_array_new();
+    tname_gemma4(layer_idx, "router.proj", nb, sizeof nb);
+    if (!multishard_get_triple(&m->weights, nb, &rw, &rs, &rb) || rw.ctx == NULL) {
+        mlx_array_free(rw); mlx_array_free(rs); mlx_array_free(rb);
+        return true;
+    }
+    *present = true;
+    bool ok = true;
+    const int K = m->cfg.top_k, H = m->cfg.hidden_size, E = m->cfg.n_experts;
+#define G4CHK(c, w) do { if (!(c)) { fprintf(stderr, "gemma4_moe[layer=%d]: %s failed\n", layer_idx, (w)); ok = false; } } while (0)
+    G4CHK(K > 0 && E > 0, "config (top_k_experts/num_experts)");
+
+    mlx_array rscale = mlx_array_new(), pes = mlx_array_new();
+    tname_gemma4(layer_idx, "router.scale", nb, sizeof nb); ok = ok && multishard_get(&m->weights, nb, &rscale);
+    tname_gemma4(layer_idx, "router.per_expert_scale", nb, sizeof nb); ok = ok && multishard_get(&m->weights, nb, &pes);
+    G4CHK(ok, "router tensors");
+
+    /* x = rms_norm(h, scale * hidden^-0.5); scores = proj(x) */
+    mlx_array rsc = mlx_array_new(), rootc = mlx_array_new_float32(1.0f / sqrtf((float)H));
+    mlx_array xr = mlx_array_new(), scores = mlx_array_new();
+    if (ok) { ok = mlx_multiply(&rsc, rscale, rootc, s) == 0; G4CHK(ok, "router scale"); }
+    if (ok) { ok = rms_norm_cfg(&xr, h, rsc, m->cfg.rms_norm_eps, s); G4CHK(ok, "router rms_norm"); }
+    if (ok) {
+        int g = 0, b = 0; char md[16];
+        llm_mlx_quant_derive(rw, rs, m->cfg.quant_group_size, m->cfg.quant_bits, "affine", &g, &b, md, sizeof md);
+        ok = quantized_linear_cfg(&scores, xr, rw, rs, rb, g, b, md, s); G4CHK(ok, "router proj");
+    }
+
+    /* top-k: argpartition, softmax SOLO sui k punteggi scelti, poi * per_expert_scale[indice] */
+    mlx_array part = mlx_array_new(), idx = mlx_array_new(), topv = mlx_array_new(), wsm = mlx_array_new();
+    mlx_array pe_g = mlx_array_new(), wts = mlx_array_new(), idx_u = mlx_array_new();
+    if (ok) { ok = mlx_argpartition_axis(&part, scores, E - K, -1, s) == 0; G4CHK(ok, "argpartition"); }
+    if (ok) {
+        const int p0[3] = {0, 0, E - K}, p1[3] = {1, n_tokens, E}, st[3] = {1, 1, 1};
+        ok = mlx_slice(&idx, part, p0, 3, p1, 3, st, 3, s) == 0; G4CHK(ok, "topk slice");
+    }
+    if (ok) { ok = mlx_take_along_axis(&topv, scores, idx, -1, s) == 0 && mlx_softmax_axis(&wsm, topv, -1, true, s) == 0; G4CHK(ok, "topk softmax"); }
+    if (ok) { ok = mlx_take_axis(&pe_g, pes, idx, 0, s) == 0 && mlx_multiply(&wts, wsm, pe_g, s) == 0; G4CHK(ok, "per_expert_scale"); }
+
+    /* esperti: x2 = pre_feedforward_layernorm_2(h); gate/up/down via gather_qmm */
+    mlx_array ln2 = mlx_array_new(), x2 = mlx_array_new(), x1 = mlx_array_new(), idx2 = mlx_array_new();
+    tname_gemma4(layer_idx, "pre_feedforward_layernorm_2.weight", nb, sizeof nb); ok = ok && multishard_get(&m->weights, nb, &ln2);
+    if (ok) { ok = rms_norm_cfg(&x2, h, ln2, m->cfg.rms_norm_eps, s); G4CHK(ok, "pre_feedforward_layernorm_2"); }
+    if (ok) {
+        const int xs[4] = {n_tokens, 1, 1, H}, is[2] = {n_tokens, K};
+        mlx_array iu = mlx_array_new();
+        ok = mlx_reshape(&x1, x2, xs, 4, s) == 0 && mlx_astype(&iu, idx, MLX_UINT32, s) == 0 &&
+             mlx_reshape(&idx_u, iu, is, 2, s) == 0 && mlx_contiguous(&idx2, idx_u, false, s) == 0;
+        mlx_array_free(iu); G4CHK(ok, "reshape x/idx");
+    }
+    mlx_array gw = mlx_array_new(), gs = mlx_array_new(), gb = mlx_array_new();
+    mlx_array uw = mlx_array_new(), us = mlx_array_new(), ub = mlx_array_new();
+    mlx_array dw = mlx_array_new(), ds = mlx_array_new(), db = mlx_array_new();
+    tname_gemma4(layer_idx, "experts.switch_glu.gate_proj", nb, sizeof nb); ok = ok && multishard_get_triple(&m->weights, nb, &gw, &gs, &gb);
+    tname_gemma4(layer_idx, "experts.switch_glu.up_proj", nb, sizeof nb); ok = ok && multishard_get_triple(&m->weights, nb, &uw, &us, &ub);
+    tname_gemma4(layer_idx, "experts.switch_glu.down_proj", nb, sizeof nb); ok = ok && multishard_get_triple(&m->weights, nb, &dw, &ds, &db);
+    G4CHK(ok, "experts lookup");
+    mlx_array no_lhs = mlx_array_new(), go = mlx_array_new(), uo = mlx_array_new(), act = mlx_array_new(), dout = mlx_array_new();
+    int eg = 0, eb = 0; char emd[16];
+    if (ok) llm_mlx_quant_derive(gw, gs, m->cfg.quant_group_size, m->cfg.quant_bits, "affine", &eg, &eb, emd, sizeof emd);
+    mlx_optional_int og = { eg, true }, ob = { eb, true };
+    if (ok) { ok = mlx_gather_qmm(&go, x1, gw, gs, gb, no_lhs, idx2, true, og, ob, emd, false, s) == 0; G4CHK(ok, "gather gate"); }
+    if (ok) { ok = mlx_gather_qmm(&uo, x1, uw, us, ub, no_lhs, idx2, true, og, ob, emd, false, s) == 0; G4CHK(ok, "gather up"); }
+    if (ok) { ok = g4_geglu(&act, go, uo, s); G4CHK(ok, "geglu"); }
+    if (ok) { ok = mlx_gather_qmm(&dout, act, dw, ds, db, no_lhs, idx2, true, og, ob, emd, false, s) == 0; G4CHK(ok, "gather down"); }
+
+    /* somma pesata sui k esperti -> [1,T,H], poi post_feedforward_layernorm_2 */
+    mlx_array w4 = mlx_array_new(), sc = mlx_array_new(), sm = mlx_array_new(), mo = mlx_array_new(), pln = mlx_array_new();
+    if (ok) {
+        const int ws[4] = {n_tokens, K, 1, 1}, os[3] = {1, n_tokens, H};
+        mlx_array wf = mlx_array_new();
+        ok = mlx_astype(&wf, wts, mlx_array_dtype(dout), s) == 0 && mlx_reshape(&w4, wf, ws, 4, s) == 0 &&
+             mlx_multiply(&sc, dout, w4, s) == 0 && mlx_sum_axis(&sm, sc, 1, false, s) == 0 && mlx_reshape(&mo, sm, os, 3, s) == 0;
+        mlx_array_free(wf); G4CHK(ok, "weighted sum");
+    }
+    tname_gemma4(layer_idx, "post_feedforward_layernorm_2.weight", nb, sizeof nb); ok = ok && multishard_get(&m->weights, nb, &pln);
+    if (ok) { ok = rms_norm_cfg(out, mo, pln, m->cfg.rms_norm_eps, s); G4CHK(ok, "post_feedforward_layernorm_2"); }
+#undef G4CHK
+    mlx_array all[] = { rw, rs, rb, rscale, pes, rsc, rootc, xr, scores, part, idx, topv, wsm, pe_g, wts, idx_u, ln2, x2, x1, idx2,
+                        gw, gs, gb, uw, us, ub, dw, ds, db, no_lhs, go, uo, act, dout, w4, sc, sm, mo, pln };
+    for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) mlx_array_free(all[i]);
+    return ok;
+}
+
 bool dense_geglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out) {
     (void)n_tokens;
     bool ok = true;
@@ -162,6 +266,17 @@ bool dense_geglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, m
     tname_gemma4(layer_idx, "post_feedforward_layernorm.weight", namebuf, sizeof(namebuf));
     ok = ok && multishard_get(&m->weights, namebuf, &ln_post_w);
     CHK(ok, "post_feedforward_layernorm lookup");
+    /* Gemma-4 MoE: ramo denso -> post_feedforward_layernorm_1, ramo esperti (router sullo stato non normalizzato) -> somma. */
+    mlx_array moe_out = mlx_array_new(), ffn_sum = mlx_array_new(), dense_n1 = mlx_array_new(), pln1 = mlx_array_new();
+    bool has_moe = false;
+    if (ok) { ok = gemma4_moe_branch(m, layer_idx, n_tokens, h, &moe_out, &has_moe); CHK(ok, "moe branch"); }
+    if (ok && has_moe) {
+        tname_gemma4(layer_idx, "post_feedforward_layernorm_1.weight", namebuf, sizeof(namebuf));
+        ok = multishard_get(&m->weights, namebuf, &pln1) && rms_norm_cfg(&dense_n1, down_out, pln1, m->cfg.rms_norm_eps, m->stream) &&
+             mlx_add(&ffn_sum, dense_n1, moe_out, m->stream) == 0;
+        CHK(ok, "dense+moe sum");
+        if (ok) { mlx_array_set(&down_out, ffn_sum); }
+    }
     mlx_array down_normed = mlx_array_new();
     if (ok) { ok = rms_norm_cfg(&down_normed, down_out, ln_post_w, m->cfg.rms_norm_eps, m->stream); CHK(ok, "post_feedforward_layernorm"); }
 
@@ -248,6 +363,7 @@ bool dense_geglu_ffn(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, m
         down_w, down_s, down_b, gate_out, up_out,
         gate3, gate3_scaled, inner, inner_scaled, tanh_out, one_plus_tanh, gelu_out, act,
         down_out, ln_post_w, down_normed, residual_out, layer_scalar,
+        moe_out, ffn_sum, dense_n1, pln1,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) mlx_array_free(all[i]);
 

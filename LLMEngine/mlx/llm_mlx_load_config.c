@@ -238,6 +238,9 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
         OPT_INT(global_head_dim, "global_head_dim");
         OPT_INT(num_global_kv_heads, "num_global_key_value_heads");
         OPT_BOOL(attention_k_eq_v, "attention_k_eq_v");
+        OPT_INT(top_k, "top_k_experts");               /* gemma4 MoE (26b-a4b) */
+        OPT_INT(n_experts, "num_experts");
+        OPT_INT(moe_intermediate_size, "moe_intermediate_size");
         OPT_FLOAT(final_logit_softcap, "final_logit_softcapping", 0.0f);
         OPT_INT(sliding_window, "sliding_window");
         /* FASE 1b.4.5 (Gemma4): l'embedding in ingresso è scalato per sqrt(hidden_size)
