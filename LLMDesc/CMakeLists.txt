@@ -7,7 +7,7 @@ project(llmdesc C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-add_library(llmdesc STATIC llmdesc.c)
+add_library(llmdesc STATIC llmdesc.c llmdesc_gen.c)
 target_include_directories(llmdesc PUBLIC .)
 
 # Test: per ogni modello locale il descrittore risolto dalla cartella ABI/ ha la geometria di config.json.
@@ -23,3 +23,7 @@ set_tests_properties(llmdesc_geometry_selfcheck PROPERTIES SKIP_RETURN_CODE 77)
 add_executable(llmdesc_abi_selfcheck llmdesc_abi_selfcheck.c)
 target_link_libraries(llmdesc_abi_selfcheck PRIVATE llmdesc)
 add_test(NAME llmdesc_abi_selfcheck COMMAND llmdesc_abi_selfcheck "${CMAKE_CURRENT_SOURCE_DIR}/../ABI")
+
+# Strumento: crea i `.gmbarch` mancanti da cartelle modello HF (llmdesc_ensure_for_dir).
+add_executable(llmdesc_gen tools/llmdesc_gen.c)
+target_link_libraries(llmdesc_gen PRIVATE llmdesc ${CMAKE_DL_LIBS})

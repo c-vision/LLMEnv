@@ -64,6 +64,32 @@ int main(int argc, char** argv) {
     }
     llmdesc_set_abi_policy(NULL, 0);
 
+    /* generazione del descrittore da una cartella modello (llmdesc_ensure_for_dir) */
+    {
+        char gm[1024], abi2[1024], path[2048], er[256];
+        snprintf(gm, sizeof gm, "%s/genmodel", root);  mkdir(gm, 0755);
+        snprintf(abi2, sizeof abi2, "%s/abi2", root);  mkdir(abi2, 0755);
+        put(gm, "config.json", "{\"model_type\":\"mixtral\",\"hidden_size\":64,\"num_hidden_layers\":2,\"num_attention_heads\":4,"
+                               "\"num_key_value_heads\":2,\"num_local_experts\":8,\"num_experts_per_tok\":2,\"vocab_size\":100}");
+        put(gm, "model.safetensors.index.json",
+            "{\"metadata\":{},\"weight_map\":{\"model.embed_tokens.weight\":\"a\",\"lm_head.weight\":\"a\","
+            "\"model.layers.0.self_attn.q_proj.weight\":\"a\",\"model.layers.1.self_attn.q_proj.weight\":\"a\","
+            "\"model.layers.0.block_sparse_moe.gate.weight\":\"a\",\"model.layers.0.block_sparse_moe.experts.3.w1.weight\":\"a\","
+            "\"model.layers.0.input_layernorm.weight\":\"a\"}}");
+        CHECK(llmdesc_ensure_for_dir(gm, abi2, path, sizeof path, er, sizeof er) == 1);
+        char want[2048]; snprintf(want, sizeof want, "%s/mixtral.gmbarch", abi2);
+        CHECK(strcmp(path, want) == 0);
+        LlmDesc g; memset(&g, 0, sizeof g);
+        CHECK(llmdesc_load(want, &g) == 0 && strcmp(g.arch, "mixtral") == 0);
+        CHECK(!strcmp(llmdesc_role(&g, "model.layers.0.block_sparse_moe.gate.weight"), "ROUTER"));
+        CHECK(!strcmp(llmdesc_role(&g, "model.layers.0.block_sparse_moe.experts.3.w1.weight"), "ROUTED_EXPERT"));
+        CHECK(!strcmp(llmdesc_role(&g, "model.layers.1.self_attn.q_proj.weight"), "ATTN_Q"));
+        CHECK(llmdesc_struct(&g, "moe") != NULL);
+        CHECK(llmdesc_ensure_for_dir(gm, abi2, path, sizeof path, er, sizeof er) == 0);   /* gia' presente: non si tocca */
+        put(gm, "config.json", "{\"model_type\":\"whisper\"}");
+        CHECK(llmdesc_ensure_for_dir(gm, abi2, path, sizeof path, er, sizeof er) == -1);   /* non e' un modello di linguaggio */
+    }
+
     if (repo_abi != NULL) {
         CHECK(llmdesc_abi_valid(repo_abi) == 1);
         setenv("LLMDESC_ABI_DIR", repo_abi, 1);

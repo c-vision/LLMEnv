@@ -1,0 +1,43 @@
+{
+  "_comment": "Generato automaticamente da llmdesc_ensure_for_dir (modello opendatalab/MinerU2.5-Pro-2605-1.2B). Base dedotta dai nomi dei tensori: si puo' rifinire a mano; il file esistente non viene mai sovrascritto.",
+  "arch": "qwen2_vl",
+  "source": {
+    "format": "safetensors",
+    "config": "config.json",
+    "index": "model.safetensors.index.json"
+  },
+  "config_map": {
+    "n_layers": "num_hidden_layers",
+    "hidden": "hidden_size",
+    "n_heads": "num_attention_heads",
+    "n_kv": "num_key_value_heads",
+    "vocab": "vocab_size",
+    "rope_theta": "rope_theta",
+    "dense_inter": "intermediate_size"
+  },
+  "roles": [
+    { "match": "embed_tokens", "role": "EMBEDDING" },
+    { "match": "norm", "role": "NORM" },
+    { "match": "down_proj", "role": "FFN" },
+    { "match": "gate_proj", "role": "FFN" },
+    { "match": "up_proj", "role": "FFN" },
+    { "match": "k_proj", "role": "ATTN_KV" },
+    { "match": "o_proj", "role": "ATTN_WO" },
+    { "match": "q_proj", "role": "ATTN_Q" },
+    { "match": "v_proj", "role": "ATTN_V" },
+    { "match": "visual.", "role": "VISION" }
+  ],
+  "quant": {
+    "NORM": "f32",
+    "EMBEDDING": "f16",
+    "OUTPUT": "q6_k",
+    "recipe": "_M",
+    "recipe_boost": ["attn_v", "ffn_down"],
+    "recipe_boost_fmt": "q6_k"
+  },
+  "structures": {
+    "norm": { "type": "rmsnorm", "prim": "rmsnorm" },
+    "attention": { "type": "gqa", "steps": [ {"op":"rope","prim":""}, {"op":"sdpa","prim":""} ] },
+    "vision": { "type": "vit", "present": true }
+  }
+}

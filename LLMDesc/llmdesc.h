@@ -78,6 +78,11 @@ const LlmDescStruct* llmdesc_struct(const LlmDesc* a, const char* key);
  * Ordine: $LLMDESC_ABI_DIR; il risolutore dell'applicazione (llmdesc_set_abi_policy), se registrato; poi llmdesc_abi_locate.
  * Ritorna 1 e scrive il path in `out` se trovata. */
 int llmdesc_abi_dir(char* out, size_t cap);
+/* Garantisce il descrittore dell'ARCHITETTURA di una cartella modello HF nella cartella ABI (`abi_dir`, NULL = llmdesc_abi_dir):
+ * se `<model_type>.gmbarch` (o `.llmarch`) esiste non lo tocca; altrimenti lo genera da config.json e dai nomi dei tensori
+ * (model.safetensors.index.json o header di model.safetensors). Ritorna 1 = creato, 0 = gia' presente, -1 = errore
+ * (messaggio in `err`). `out_path` (opz.) riceve il percorso del descrittore. */
+int llmdesc_ensure_for_dir(const char* hf_dir, const char* abi_dir, char* out_path, size_t cap, char* err, size_t errcap);
 /* Schema dei `.gmbarch` che questa libreria sa leggere; `ABI/ABI_VERSION` dichiara quello della cartella. */
 #define LLMDESC_ABI_SCHEMA 1
 /* 1 se `dir` e' una cartella ABI valida: contiene almeno un `.gmbarch` e lo schema di ABI_VERSION (se presente) e' leggibile. */
