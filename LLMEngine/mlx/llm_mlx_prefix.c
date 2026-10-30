@@ -121,6 +121,10 @@ static int llm_prefix_spill(LlmMlxModel* m, SavedPrefix* p) {
     }
     if (nt == 0) { free(buf); return -1; }
     memcpy(buf + 16, &nt, 4);
+    /* trailer: il prossimo token greedy dopo il prefisso. Senza, un prefisso ripristinato da un altro processo con la coda vuota
+     * (stesso prompt) ripartirebbe da pending_next_id=0 (il token "!") e il testo uscirebbe sbagliato. */
+    if (llm_kvdisk_buf_reserve(&buf, &cap, len, 8) != 0) { free(buf); return -1; }
+    memcpy(buf + len, "PEND", 4); memcpy(buf + len + 4, &p->pending_next_id, 4); len += 8;
     int rc = llm_kv_disk_put(&m->kvdisk, llm_prefix_kvdisk_key(m, p->tokens, p->token_len), buf, len);
     free(buf);
     if (rc != 0) return -1;
@@ -162,6 +166,11 @@ static int llm_prefix_restore(LlmMlxModel* m, SavedPrefix* p) {
         mlx_array_free(a);
         p->has_cache[layer] = true;
         n_ok++;
+    }
+    /* trailer opzionale (blob scritti da questa versione): il pending del prefisso */
+    if (got >= off + 8 && memcmp(buf + off, "PEND", 4) == 0) {
+        memcpy(&p->pending_next_id, buf + off + 4, 4);
+        p->pending_valid = true;
     }
     free(buf);
     if (n_ok == 0) return -1;
@@ -552,6 +561,7 @@ int llm_ai_mlx_model_save_prefix(llm_ai_mlx_model_handle mh, const char* name, l
     if (p->history) { p->history_len = s->history_len; p->history_cap = s->history_len; if (s->history_len) memcpy(p->history, s->history, (size_t)s->history_len * sizeof(int32_t)); }
 
     p->pending_next_id = s->pending_next_id;
+    p->pending_valid = true;
     p->has_kv = true; /* salvato in-process: la KV e' presente e riusabile */
     /* radix-trie: registra i token del prefisso con prefix_id = indice in prefixes */
     if (p->token_len > 0) llm_radix_insert(&m->radix, p->tokens, p->token_len, idx);
@@ -666,6 +676,10 @@ int llm_ai_mlx_session_append_reuse_prefix(llm_ai_mlx_session_handle sh, llm_ai_
             return llm_ai_mlx_session_append(sh, token_ids, n_ids);
         }
     }
+
+    /* Coda vuota (stesso prompt del prefisso) con pending sconosciuto (prefisso registrato da disco il cui blob non porta il trailer): il
+     * primo token uscirebbe da pending_next_id=0 e il testo sarebbe sbagliato. Si rifa' il prefill completo: corretto, solo piu' lento. */
+    if (n_ids == p->token_len && !p->pending_valid) return llm_ai_mlx_session_append(sh, token_ids, n_ids);
 
     /* ripristina lo stato del prefisso (alias MLX refcount) e segna l'uso LRU */
 

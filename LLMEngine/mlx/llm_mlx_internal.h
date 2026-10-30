@@ -513,6 +513,7 @@ typedef struct {
     int history_cap;
 
     int32_t pending_next_id;
+    bool pending_valid;    /* pending_next_id e' noto: vero se salvato in RAM o ripristinato da un blob che lo porta; falso per un prefisso solo registrato da disco */
     int n_layers;
     uint64_t last_used; /* LRU: timestamp (lru_clock del modello) dell'ultimo uso */
     bool has_kv;        /* true = KV cache presente (salvato in-process); false = caricato

@@ -7,6 +7,10 @@
 
 typedef enum { T_INT, T_FLOAT, T_BOOL, T_STR } OptType;
 
+/* Lunghezza massima del valore di un'opzione stringa, percorsi compresi. Era 64: un percorso piu' lungo veniva troncato in silenzio
+ * (prefix_cache, ds4_mtp, dflash_model, kvdisk puntavano a una cartella diversa da quella scritta). Oltre il limite si rifiuta. */
+#define OPT_STR_MAX 1024
+
 typedef struct {
     const char* name;
     const char* desc;
@@ -14,7 +18,7 @@ typedef struct {
     int         i,  def_i;
     double      f,  def_f;
     int         b,  def_b;
-    char        s[64];
+    char        s[OPT_STR_MAX];
     const char* def_s;
     int         set;      /* 1 = sovrascritto dall'utente */
     const char* ex;       /* valore d'esempio per l'help (--opt nome=ex) */
@@ -81,7 +85,7 @@ static Opt* find(const char* name) {
 
 /* ── Registro AVANZATO: qualunque nome di switch interno (non curato) può essere impostato via
  * API/CLI e letto con opt_get_*: è il ponte con cui si migrano i `getenv` di funzionamento. ── */
-static struct { char name[64]; char val[64]; int set; } g_adv[256];
+static struct { char name[64]; char val[OPT_STR_MAX]; int set; } g_adv[256];
 static int g_adv_n = 0;
 static int adv_find(const char* name) {
     if (!name) return -1;
@@ -101,6 +105,7 @@ int llm_ai_mlx_opt_set(const char* name, const char* value) {
     if (!o) {
         /* Nome non curato: registro avanzato (accetta qualunque switch interno). */
         if (!name || !*name || !value) return -2;
+        if (strlen(name) >= sizeof g_adv[0].name || strlen(value) >= sizeof g_adv[0].val) return -2;   /* niente troncamento silenzioso */
         int i = adv_find(name);
         if (i < 0) {
             if (g_adv_n >= (int)(sizeof g_adv / sizeof g_adv[0])) return -1;
@@ -124,7 +129,7 @@ int llm_ai_mlx_opt_set(const char* name, const char* value) {
             o->f = v; break;
         }
         case T_STR: {
-            if (!value) return -2;
+            if (!value || strlen(value) >= sizeof o->s) return -2;   /* niente troncamento silenzioso */
             snprintf(o->s, sizeof o->s, "%s", value); break;
         }
     }
@@ -191,7 +196,7 @@ static void fmt(const Opt* o, char* out, int cap) {
 }
 
 const char* llm_ai_mlx_opt_env(const char* name) {
-    static char buf[128];
+    static char buf[OPT_STR_MAX];
     Opt* o = find(name);
     if (o) {
         if (!o->set) return NULL;          /* non impostato: il codice usa il suo default */
