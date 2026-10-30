@@ -17,7 +17,7 @@
 #
 # Le dylib costruite in locale hanno rpath assoluti verso le cartelle di build: qui vengono rimossi, si aggiunge
 # @loader_path e si rifirma ad-hoc (su arm64 una dylib modificata senza firma valida non si carica).
-# Dipendenza esterna: libllm_ai_llamacpp usa OpenSSL 3 (brew install openssl@3).
+# Nessuna dipendenza esterna: llama.cpp e' costruito senza OpenSSL (vedi LLMEngine/llama/CMakeLists.txt).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
@@ -125,7 +125,6 @@ class Llmenv < Formula
 
   depends_on arch: :arm64
   depends_on :macos
-  depends_on "openssl@3"
 
   def install
     prefix.install "lib", "include", "share"

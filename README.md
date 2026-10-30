@@ -56,19 +56,29 @@ In short: LLMEnv is the engine, FastLLM is how you drive it.
 
 ## Installing (macOS, Apple Silicon)
 
-Download the latest release from the [Releases page](https://github.com/c-vision/LLMEnv/releases) and use one of:
+LLMEnv comes in two builds of the same engine. The **compatible** build runs on macOS 14 or later. The **NAX** build needs macOS 26.2 or later and
+uses the tensor units of the M5 for the prefill. The installer script and Homebrew pick the right one for your Mac; if you download a file
+yourself, `macos14` is the compatible build and `macos26` the NAX one.
 
-- **Installer:** open `llmenv-<version>-macos-arm64.pkg`. It puts the libraries in `/usr/local/lib/llmenv`
+- **Installer script** (no sudo, installs into `~/.local`, safe to run again):
+
+  ```sh
+  curl -fsSL https://github.com/c-vision/LLMEnv/releases/latest/download/install-llmenv.sh | bash
+  ```
+
+  If a suitable LLMEnv is already on the machine (Homebrew, the `.pkg`, an earlier run), it does nothing and tells you where it is.
+  Options: `--prefix DIR`, `--version X.Y.Z`, `--variant compat|nax`, `--force`, `--check`, `--uninstall`.
+- **Homebrew:** `brew tap c-vision/fastllm`, then `brew trust c-vision/fastllm` (Homebrew 7 does not load a third-party tap until you trust it), then `brew install llmenv`. The formula lives in the [FastLLM tap](https://github.com/c-vision/homebrew-fastllm), together with `fastllm`.
+- **Installer package:** open `llmenv-<version>-macos14-arm64.pkg` (or `macos26`). It puts the libraries in `/usr/local/lib/llmenv`
   and the headers in `/usr/local/include/llmenv`. The package is not signed with an Apple Developer ID,
-  so macOS will ask you to confirm (System Settings > Privacy & Security > Open Anyway).
-- **Archive:** unpack `llmenv-<version>-macos-arm64.tar.gz` anywhere. The libraries find each other,
+  so macOS will ask you to confirm (right-click, Open, or System Settings > Privacy & Security > Open Anyway).
+- **Archive:** unpack `llmenv-<version>-macos14-arm64.tar.gz` (or `macos26`) anywhere. The libraries find each other,
   so the folder can be moved freely.
-- **Homebrew:** `brew tap c-vision/llmenv https://github.com/c-vision/LLMEnv` and then
-  `brew install llmenv`.
 
-All three put the model descriptions in `lib/llmenv/ABI`, next to the libraries. A program that needs them can look the folder up with `llmdesc_abi_locate()` (see [ABI](ABI/README.md)).
+All of them put the model descriptions in `lib/llmenv/ABI`, next to the libraries. A program that needs them can look the folder up with `llmdesc_abi_locate()` (see [ABI](ABI/README.md)).
+The file `lib/llmenv/LLMENV_VERSION` says which version and variant is installed.
 
-One library, the llama.cpp back end, needs OpenSSL 3 (`brew install openssl@3`).
+There are no external dependencies: from 0.3.0 the llama.cpp back end no longer links OpenSSL.
 
 ## Building
 

@@ -109,7 +109,13 @@ if [ "$CHECK" = 1 ]; then
     echo "LLMEnv $VERSION not found"; exit 1
 fi
 if [ -n "$found" ] && [ "$FORCE" = 0 ]; then
-    say "LLMEnv $VERSION is already installed: $found. Nothing to do."; exit 0
+    say "LLMEnv $VERSION is already installed: $found. Nothing to do."
+    # a program installed in this prefix looks for the engine in $PREFIX/lib/llmenv: link it if the engine lives elsewhere
+    if [ ! -e "$PREFIX/lib/llmenv" ] && [ -n "${FOUND_PATH:-}" ]; then
+        mkdir -p "$PREFIX/lib"; ln -s "$FOUND_PATH" "$PREFIX/lib/llmenv"
+        say "   linked $PREFIX/lib/llmenv -> $FOUND_PATH"
+    fi
+    exit 0
 fi
 
 # --- download and verification ---
@@ -140,7 +146,8 @@ swap "$ID" "$PREFIX/opt/llmenv/current"
 swap "../opt/llmenv/current/lib/llmenv" "$PREFIX/lib/llmenv"
 swap "../opt/llmenv/current/include/llmenv" "$PREFIX/include/llmenv"
 # keeps the previous version for a manual rollback, removes older ones
-ls -1dt "$PREFIX"/opt/llmenv/*/ 2>/dev/null | sed 's:/$::' | grep -v -- "/$ID\$" | tail -n +2 | while IFS= read -r old; do rm -rf "$old"; done
+# (only real version folders: -type d does not match the `current` symlink)
+find "$PREFIX/opt/llmenv" -mindepth 1 -maxdepth 1 -type d ! -name "$ID" -print0 2>/dev/null | xargs -0 ls -1dt 2>/dev/null | tail -n +2 | while IFS= read -r old; do rm -rf "$old"; done
 
 say "== LLMEnv $VERSION installed in $PREFIX/lib/llmenv"
 if ! command -v otool >/dev/null 2>&1; then :; fi
