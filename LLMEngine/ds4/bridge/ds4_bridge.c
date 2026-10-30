@@ -20,6 +20,38 @@
 struct ds4_bridge { ds4_engine* e; ds4_session* s; int ctx; };
 struct ds4_bridge_session { ds4_session* s; ds4_engine* e; int ctx; };
 
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#include <sys/stat.h>
+#endif
+
+/* Cartella con `metal/*.metal` (i kernel di ds4 si leggono come file, relativi alla CWD). Ordine: accanto all'eseguibile
+ * installato (`<bin>/../share/fastllm/ds4`, come lo mette il pacchetto di FastLLM), poi la cartella dei sorgenti usata alla
+ * compilazione (build di sviluppo). Scrive il percorso in `out`; 0 = nessuna trovata (si resta nella CWD). */
+static int ds4_resource_dir(char* out, size_t cap) {
+#ifdef __APPLE__
+    char raw[PATH_MAX], real[PATH_MAX], probe[PATH_MAX + 64];
+    uint32_t n = sizeof raw;
+    if (_NSGetExecutablePath(raw, &n) == 0 && realpath(raw, real)) {
+        char* slash = strrchr(real, '/');
+        struct stat st;
+        if (slash) {
+            *slash = 0;
+            snprintf(out, cap, "%s/../share/fastllm/ds4", real);
+            snprintf(probe, sizeof probe, "%s/metal/dense.metal", out);
+            if (stat(probe, &st) == 0) return 1;
+        }
+    }
+#endif
+#ifdef DS4_RESOURCE_DIR
+    snprintf(out, cap, "%s", DS4_RESOURCE_DIR);
+    return 1;
+#else
+    (void)out; (void)cap;
+    return 0;
+#endif
+}
+
 ds4_bridge* ds4_bridge_open_ex(const char* model, int ctx, int stream, int prefill_chunk, int inspect_only);
 
 ds4_bridge* ds4_bridge_open(const char* model, int ctx, int stream, int prefill_chunk) {
@@ -65,9 +97,7 @@ ds4_bridge* ds4_bridge_open2(const char* model, const ds4_bridge_options* o) {
     /* ds4 carica i kernel .metal dalla CWD: ci si sposta nella resource dir per l'apertura
      * (nessuna env), poi si ripristina la CWD. */
     have_cwd = (getcwd(oldcwd, sizeof oldcwd) != NULL);
-#ifdef DS4_RESOURCE_DIR
-    if (chdir(DS4_RESOURCE_DIR) != 0) { /* resta la CWD corrente */ }
-#endif
+    { char rdir[PATH_MAX]; if (ds4_resource_dir(rdir, sizeof rdir) && chdir(rdir) != 0) { /* resta la CWD corrente */ } }
     orc = ds4_engine_open(&e, &opt);
     if (have_cwd) { if (chdir(oldcwd) != 0) { /* ignore */ } }
     if (orc != 0) { fprintf(stderr, "bridge: open fallita\n"); return NULL; }

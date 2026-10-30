@@ -16,6 +16,9 @@ set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 set(LLAMA_CURL OFF CACHE BOOL "" FORCE)
+# Niente OpenSSL: serve solo al download HTTPS di modelli da parte di llama.cpp, che qui non si usa (FastLLM scarica con curl).
+# Con OpenSSL attivo la libreria si collega a un percorso Homebrew assoluto (openssl@4) e non si carica su un Mac che non lo ha.
+set(LLAMA_OPENSSL OFF CACHE BOOL "" FORCE)
 # FASE 5B: mtmd (multimodal tool-kit) -- OCR/visione/audio embedded. Vendored in
 # llama.cpp's tools/mtmd/, built as its own static lib. See
 # Native-LLM-Provider-Plan.md FASE 5 Parte B. paddleocr.cpp/deepseekocr.cpp are

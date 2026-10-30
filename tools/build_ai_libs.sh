@@ -13,7 +13,7 @@
 # aggancia i layer in ordine e i target engine (plugin, moe, llama, mlx).
 #
 # USO:
-#   tools/build_ai_libs.sh [--rid <rid>] [--build-dir <dir>] [--clean]
+#   tools/build_ai_libs.sh [--rid <rid>] [--build-dir <dir>] [--deployment-target <macOS>] [--clean]
 #
 # ENV:
 #   --build-dir  (default: <repo>/build)   # dist = <build-dir>/dist/<rid>  (gitignored)
@@ -44,11 +44,12 @@ detect_rid() {
     if [ "$os" = "win" ]; then echo "win-$arch"; else echo "$os-$arch"; fi
 }
 
-RID=""; BUILD_DIR=""; CLEAN=0
+RID=""; BUILD_DIR=""; CLEAN=0; DEPLOY_TARGET=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --rid) RID="$2"; shift 2 ;;
         --build-dir) BUILD_DIR="$2"; shift 2 ;;
+        --deployment-target) DEPLOY_TARGET="$2"; shift 2 ;;   # versione minima di macOS (es. 14.0, 26.2)
         --clean) CLEAN=1; shift ;;
         *) echo "?opzione sconosciuta: $1"; exit 1 ;;
     esac
@@ -85,7 +86,11 @@ fi
 # Superbuild: layer base + engine (plugin, moe, llama, mlx). MLX è Apple-Silicon-only;
 # su altre piattaforme il target mlx viene comunque configurato ma è l'unico che
 # richiede Metal. Build dell'intero grafo.
-cmake -S "$ROOT" -B "$BUILD_DIR" -DLLMENV_BUILD_ENGINE=ON -DCMAKE_BUILD_TYPE=Release
+# Il deployment target decide la variante: sotto 26.2 MLX NON costruisce i kernel NAX (tensor unit M5) e la libreria
+# si carica anche su macOS 14+; da 26.2 in su i kernel NAX ci sono e la libreria richiede macOS 26.2.
+TARGET_ARGS=()
+if [ -n "$DEPLOY_TARGET" ]; then export MACOSX_DEPLOYMENT_TARGET="$DEPLOY_TARGET"; TARGET_ARGS=(-DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOY_TARGET"); fi
+cmake -S "$ROOT" -B "$BUILD_DIR" -DLLMENV_BUILD_ENGINE=ON -DCMAKE_BUILD_TYPE=Release ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"}
 cmake --build "$BUILD_DIR" -j4
 # MLX Metal: la `mlx.metallib` (kernels Metal AOT) è un artefatto runtime necessario
 # all'engine MLX (MLX la cerca colocated accanto alla libreria, o al METAL_PATH del build).
@@ -93,7 +98,9 @@ cmake --build "$BUILD_DIR" -j4
 # NB: il target puo' NON essere nel grafo di default; lo si costruisce SEMPRE (guardia sulla
 # presenza del target, non su un match fragile di `--target help`). Il fallimento e' LOUD:
 # una metallib assente = engine MLX inutilizzabile, e in passato e' passata in silenzio.
-if cmake --build "$BUILD_DIR" --target help 2>/dev/null | grep -qi 'mlx-metallib'; then
+# (con pipefail `cmake | grep -q` fallisce per SIGPIPE quando grep esce al primo match: si legge prima l'elenco in una variabile)
+TARGETS="$(cmake --build "$BUILD_DIR" --target help 2>/dev/null || true)"
+if grep -qi 'mlx-metallib' <<<"$TARGETS"; then
     cmake --build "$BUILD_DIR" --target mlx-metallib -j4 || true
 fi
 if ! find "$BUILD_DIR" -name 'mlx.metallib' -print -quit | grep -q .; then
