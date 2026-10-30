@@ -323,20 +323,11 @@ if(LLM_ENABLE_TRAIN)
     set(LLM_MLX_TRAIN_SRC llm_mlx_diff_forward.c)
 endif()
 
-# ds4 (nostro engine DS4 nativo) e' OPZIONALE: se disattivato (LLM_WITH_DS4=OFF) o se la
-# cartella non c'e', il motore degrada sul vendored `ds4` / su `ds41`. Cosi' la cartella e'
-# cancellabile senza errori di configurazione/compilazione, e un consumer che non vuole il nativo
-# (es. chi ha un motore vendorizzato) non lo compila affatto.
-option(LLM_WITH_DS4 "Compila il motore DS4 nativo (ds4) in llm_ai_mlx" ON)
-set(LLM_DS4_SRC "")
-set(LLM_DS4_INC "")
-if(LLM_WITH_DS4 AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ds4)
-  list(APPEND LLM_DS4_SRC
-       ds4/llm_dsv4_metal.mm
-       ds4/llm_dsv4_gpu_ctx.mm
-       ds4/llm_ds4_abi.c)
-  set(LLM_DS4_INC ds4)
-endif()
+# DS4 NATIVO (ex ds4-slow) RITIRATO il 2026-10-30: il motore DS4 e' SOLO il vendorizzato
+# (`LLMEngine/ds4`, vedi `llm_ds4_engine_abi.c`), che espone `llmengine_llm_engine_ds4n` e, per
+# compatibilita', anche il vecchio nome `llmengine_llm_engine_ds4`. Il codice del nativo e i suoi
+# oracoli sono in `Projects/LLMEnv-deprecated/` (non costruiti). Misura che ha deciso: vendor
+# 6,5-7,2 tok/s decode e 45 GB RSS contro 5,0-5,6 tok/s e 85 GB (stesso GGUF, SSD streaming).
 
 add_library(llm_ai_mlx SHARED
     llmengine_mlx.c
@@ -432,9 +423,6 @@ add_library(llm_ai_mlx SHARED
     llm_kvmetal_bridge.m
     llm_gemvq4_bridge.m
     ../engine_select.c
-    # ds4 (Metal DS4 IQ2/Q8, contesto GPU, adapter ABI): OPZIONALE (vedi LLM_DS4_SRC).
-    # Se presente: Metal DS4 zero-copy + adapter llmengine_llm_engine_ds4.
-    ${LLM_DS4_SRC}
     # Adapter ds41-native -> ABI LlmEngine (stessi 9 metodi di ds4/ds4).
     ds41-native/llm_ds41_abi.c
     # P10: GEMM int8-activation x Q4/Q5 sui tensor unit M5 (port oMLX; bridge ABI-C, ObjC/Metal)
@@ -495,15 +483,13 @@ target_link_libraries(llm_ai_mlx PUBLIC ${ACCELERATE_FRAMEWORK})
 target_include_directories(llm_ai_mlx PRIVATE "${cjson_SOURCE_DIR}")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/oq_a8")
 target_include_directories(llm_ai_mlx PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../LLMMetal/mpp_q4")
-target_include_directories(llm_ai_mlx PUBLIC . oss ${LLM_DS4_INC} tokenizers ds41-native ../Options)
+target_include_directories(llm_ai_mlx PUBLIC . oss tokenizers ds41-native ../Options)
 
-# FIX dipendenze: gli header ds4/ds41-native sono header-only (NON sono sorgenti) e il tracking
-# automatico non li vede -> una modifica a *.h NON ricompila i TU consumatori (build "verde" ma binario
-# STALE, molto insidioso). Aggiungendoli come SOURCES del target, CMake li traccia come dipendenze.
-file(GLOB LLM_DS4_HDRS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ds4/*.h)
+# FIX dipendenze: gli header ds41-native sono header-only (NON sono sorgenti) e il tracking
+# automatico non li vede -> una modifica a *.h NON ricompila i TU consumatori.
 file(GLOB LLM_DS41_HDRS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native/*.h)
-if(LLM_DS4_HDRS OR LLM_DS41_HDRS)
-  target_sources(llm_ai_mlx PRIVATE ${LLM_DS4_HDRS} ${LLM_DS41_HDRS})
+if(LLM_DS41_HDRS)
+  target_sources(llm_ai_mlx PRIVATE ${LLM_DS41_HDRS})
 endif()
 
 
@@ -551,8 +537,6 @@ set_target_properties(llm_ai_mlx PROPERTIES
 option(LLM_BUILD_DSV4_TESTS "Compila i test/bench DS4 come target CMake (dipendenze tracciate, niente stale)" OFF)
 if(LLM_BUILD_DSV4_TESTS)
     file(GLOB DSV4_TEST_SRCS CONFIGURE_DEPENDS
-        ${CMAKE_CURRENT_SOURCE_DIR}/ds4/tests/llm_dsv4_*_test.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/ds4/tests/llm_dsv4_prefill_bench.c
         ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native/tests/llm_dsv41_*_test.c
         ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native/tests/llm_dsv41_*_bench.c)
     foreach(_src ${DSV4_TEST_SRCS})
@@ -561,7 +545,6 @@ if(LLM_BUILD_DSV4_TESTS)
         target_link_libraries(${_t} PRIVATE llm_ai_mlx llmcodec_ggml llmcodec llmcodec_fp8 llmcodec_fp4 llmcodec_mxfp llmcodec_plain llmcodec_mlx_affine)
         target_include_directories(${_t} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}
-            ${CMAKE_CURRENT_SOURCE_DIR}/ds4
             ${CMAKE_CURRENT_SOURCE_DIR}/ds41-native
             ${CMAKE_CURRENT_SOURCE_DIR}/../Options
             ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMCodec/include

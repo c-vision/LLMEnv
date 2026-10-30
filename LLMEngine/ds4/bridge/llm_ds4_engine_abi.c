@@ -292,3 +292,9 @@ static const LlmEngineLlmEngine DS4N_ENGINE = {
 };
 
 const LlmEngineLlmEngine* llmengine_llm_engine_ds4n(void) { return &DS4N_ENGINE; }
+
+/* Compatibilita' ABI: il motore DS4 NATIVO (ex ds4-slow, `LLMEngine/mlx/ds4`) e' stato ritirato il
+ * 2026-10-30 (piu' lento e con il doppio della RAM sullo stesso GGUF). Il vecchio nome resta e
+ * restituisce lo STESSO vendor: un consumer compilato prima continua a funzionare, e chi legge il
+ * nome non riceve un simbolo assente. */
+const LlmEngineLlmEngine* llmengine_llm_engine_ds4(void) { return &DS4N_ENGINE; }

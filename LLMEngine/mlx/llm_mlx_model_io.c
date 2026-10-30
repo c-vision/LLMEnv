@@ -49,7 +49,8 @@ static const LlmEngineLlmEngine* llm_mlx_engine_symbol(const char* name) {
     *(void**)(&fn) = dlsym(RTLD_DEFAULT, name);
     return fn ? fn() : NULL;
 }
-/* Engine per un modello DS4: il motore unico `llmengine_llm_engine_ds4` (LLMEngine/mlx/ds4). */
+/* Engine per un modello DS4: il VENDOR (unico motore GGUF). Il nome `_ds4` e' un alias del vendor
+ * dal 2026-10-30 (il nativo e' ritirato): resta qui per non cambiare il simbolo cercato. */
 static const LlmEngineLlmEngine* llm_mlx_pick_ds4_engine(void) {
     return llm_mlx_engine_symbol("llmengine_llm_engine_ds4");
 }
