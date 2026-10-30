@@ -275,7 +275,7 @@ static int ds4n_kv_clear(LlmEngineLlmSession ss) {
 static void ds4n_free_str(char* p) { free(p); }
 
 static const LlmEngineLlmEngine DS4N_ENGINE = {
-    .name = "ds4",
+    .name = "ds4-vendor",
     .caps = LLMMODELIO_CAP_IDS | LLMMODELIO_CAP_KV | LLMMODELIO_CAP_KV_MAX,
     .load_model = ds4n_load,
     .free_model = ds4n_free,
