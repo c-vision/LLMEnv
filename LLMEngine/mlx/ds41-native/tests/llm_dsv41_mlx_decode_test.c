@@ -1,6 +1,6 @@
 /* llm_dsv41_mlx_decode_test.c — verifica del forward MLX con CACHE (prefill+decode) vs
  * riferimento tiny oMLX (`llm_dsv41_decode_ref.h`). Riusa i pesi del pak CSA (stesso seed).
- * Build: tools/dsv41_decode_test.sh */
+ * Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <math.h>
 #include <mlx/c/mlx.h>

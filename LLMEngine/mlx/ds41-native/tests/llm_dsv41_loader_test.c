@@ -6,7 +6,7 @@
  *     con `llm_dsv41_st_ref.h`.
  * T3) load + forward: carica il checkpoint tiny sintetico e riproduce REF_CSA_LOGITS.
  *
- * Build: tools/dsv41_loader_test.sh */
+ * Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>

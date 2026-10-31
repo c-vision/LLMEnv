@@ -1,5 +1,5 @@
 /* llm_dsv41_dspark_attn_test.c — verifica DSparkContextCache + DSparkAttention vs riferimento.
- * Build: tools/dsv41_dspark_attn_test.sh */
+ * Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <math.h>
 #include <mlx/c/mlx.h>

@@ -1,4 +1,4 @@
-/* llm_dsv41_vision_test.c — verifica ViT + Aligner vs riferimento tiny. Build: tools/dsv41_vision_test.sh */
+/* llm_dsv41_vision_test.c — verifica ViT + Aligner vs riferimento tiny. Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <math.h>
 #include <mlx/c/mlx.h>

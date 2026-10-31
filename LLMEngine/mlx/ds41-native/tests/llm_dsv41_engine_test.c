@@ -1,7 +1,7 @@
 /* llm_dsv41_engine_test.c — verifica dell'integrazione engine (ARCH_TABLE) DeepSeek V4.1:
  * carica il checkpoint sintetico sharded via `llm_ai_mlx_load_model` (whole-model), appende il
  * prompt e genera. Copre greedy (primo token = argmax ref), sampling temperature=0 (greedy) e
- * determinismo del sampling con seed fisso. Build: tools/dsv41_engine_test.sh */
+ * determinismo del sampling con seed fisso. Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <stdint.h>
 #include "llmengine_mlx.h"

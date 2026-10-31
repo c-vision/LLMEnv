@@ -1,5 +1,5 @@
 /* llm_dsv41_dspark_spec_test.c — verifica DSparkBlock/proposal_forward/forward_spec
- * (tiny mtp) vs riferimento. Build: tools/dsv41_dspark_spec_test.sh */
+ * (tiny mtp) vs riferimento. Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <math.h>
 #include <mlx/c/mlx.h>

@@ -1,5 +1,5 @@
 /* llm_dsv41_mlx_share_test.c — verifica condivisione cross-layer (index_source-only) vs
- * riferimento tiny (`llm_dsv41_share_ref.h`). Build: tools/dsv41_share_test.sh */
+ * riferimento tiny (`llm_dsv41_share_ref.h`). Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <math.h>
 #include <mlx/c/mlx.h>

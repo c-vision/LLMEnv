@@ -1,7 +1,7 @@
 /* llm_dsv41_mlx_csa_test.c — verifica del forward MLX CSA2 (ratio>0) vs riferimento tiny.
  * Carica il pak `llm_dsv41_fwd_csa_ref.h` (layer1 ratio=2, kv+index source) ed esegue il
  * forward MLX con compressor + KV compresso fp4. Nessun download.
- * Build: tools/dsv41_mlx_csa_test.sh */
+ * Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <math.h>
 #include <mlx/c/mlx.h>

@@ -1,6 +1,6 @@
 /* llm_dsv41_dspark_st_test.c — verifica del loader DSpark (`mtp.*`) + forward_spec.
  * Richiede il fixture /tmp/dsv41_st/mtp.safetensors (tools/gen_dsv41_dspark_st_ref.py).
- * Build: tools/dsv41_dspark_st_test.sh */
+ * Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <math.h>
 #include <mlx/c/mlx.h>

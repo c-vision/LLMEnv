@@ -1,5 +1,5 @@
 /* llm_dsv41_mlx_engram_decode_test.c — verifica Engram nel path DECODE (history slot 6) vs
- * riferimento tiny prefill+decode (`llm_dsv41_engram_decode_ref.h`). Build: tools/dsv41_engram_decode_test.sh */
+ * riferimento tiny prefill+decode (`llm_dsv41_engram_decode_ref.h`). Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <math.h>
 #include <mlx/c/mlx.h>

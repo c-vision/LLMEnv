@@ -1,5 +1,5 @@
 /* llm_dsv41_metal_test.c — parità del kernel Metal Sinkhorn vs la versione semantica MLX.
- * Build: tools/dsv41_metal_test.sh */
+ * Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>

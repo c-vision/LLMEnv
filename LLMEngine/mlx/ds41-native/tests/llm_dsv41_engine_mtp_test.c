@@ -1,5 +1,5 @@
 /* llm_dsv41_engine_mtp_test.c — engine MTP wiring: parità MTP vs greedy (tiny, fixture mtp.*).
- * Build: tools/dsv41_engine_mtp_test.sh */
+ * Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <string.h>
 #include <mlx/c/mlx.h>

@@ -1,5 +1,5 @@
 /* llm_dsv41_engram_table_test.c — verifica del loader a righe della tabella Engram (fp8+ue8m0).
- * Build: tools/dsv41_engram_table_test.sh */
+ * Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include "llm_dsv41_engram_table.h"
 #include "llm_dsv41_engram_table_ref.h"

@@ -1,7 +1,7 @@
 /* llm_dsv41_engine_mtp_spec_test.c — test mirato del batch/rollback MTP:
  * costruisce una proposta = continuazione greedy reale del target e ne verifica
  * l'accettazione completa; poi corrompe l'ultimo token per forzare il rollback.
- * Build: tools/dsv41_engine_mtp_spec_test.sh */
+ * Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <string.h>
 #include <mlx/c/mlx.h>

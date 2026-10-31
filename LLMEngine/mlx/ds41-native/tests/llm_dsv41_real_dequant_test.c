@@ -1,6 +1,6 @@
 /* llm_dsv41_real_dequant_test.c — verifica del loader C su TUTTI i tipi di tensore del layer 0
  * reale (fp8 32x32, fp4 e2m1, bf16/f32 plain). Richiede shard reali + index.
- * Build: tools/dsv41_real_dequant_test.sh */
+ * Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include "llm_engine_opts.h"
 #include <math.h>

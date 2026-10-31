@@ -1,6 +1,6 @@
 /* llm_dsv41_mlx_engram_test.c — verifica dell'integrazione Engram nel forward MLX vs
  * riferimento tiny (`llm_dsv41_engram_fwd_ref.h`). Nessun download.
- * Build: tools/dsv41_engram_test.sh */
+ * Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <math.h>
 #include <mlx/c/mlx.h>

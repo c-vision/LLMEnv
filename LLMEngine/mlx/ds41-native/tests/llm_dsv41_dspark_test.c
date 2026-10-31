@@ -1,4 +1,4 @@
-/* llm_dsv41_dspark_test.c — verifica matematica DSpark vs riferimento tiny. Build: tools/dsv41_dspark_test.sh */
+/* llm_dsv41_dspark_test.c — verifica matematica DSpark vs riferimento tiny. Build: tools/dsv41_run_tests.sh */
 #include <stdio.h>
 #include <math.h>
 #include <stdint.h>
