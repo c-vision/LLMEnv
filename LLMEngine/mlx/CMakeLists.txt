@@ -609,3 +609,19 @@ if(LLM_BUILD_DSV4_TESTS)
     target_include_directories(llm_mlx_xs_pool_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME llm_mlx_xs_pool COMMAND llm_mlx_xs_pool_test)
 endif()
+
+# Route B 24 GB (2026-10-30): esegue un modello MLX reale con budget stretto
+# (LLM_NO_WIRE/LLM_NO_PRETOUCH via registro, offload, kvquant) e stampa
+# load/prefill/decode + peak RSS. Richiede un modello: NON è un ctest, è un probe.
+# Abilita con -DLLM_BUILD_QWEN38_24GB_PROBE=ON.
+# Uso: ./llm_mlx_qwen38_24gb <model_dir> [cache_mb] [ctx] [max_new] [hold_s]
+option(LLM_BUILD_QWEN38_24GB_PROBE "Compila il probe 24 GB per Qwen3.8-Flash-Next (MLX)" OFF)
+if(LLM_BUILD_QWEN38_24GB_PROBE AND TARGET llmtoken)
+    add_executable(llm_mlx_qwen38_24gb tests/mlx_qwen38_24gb.c)
+    target_link_libraries(llm_mlx_qwen38_24gb PRIVATE llm_ai_mlx llmtoken llmjinja cjson)
+    target_include_directories(llm_mlx_qwen38_24gb PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../Options ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMToken
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../LLMJinja ${cjson_SOURCE_DIR})
+    set_target_properties(llm_mlx_qwen38_24gb PROPERTIES LINKER_LANGUAGE CXX)
+endif()

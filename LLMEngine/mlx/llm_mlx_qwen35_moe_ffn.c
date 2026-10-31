@@ -534,10 +534,18 @@ bool qwen3_5_moe_ffn_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_arra
 bool qwen4_exp_moe_block(LlmMlxModel* m, int layer_idx, int n_tokens, mlx_array h, mlx_array* out) {
     bool ok = true;
     {                                                     /* packed anche in prefill (righe N) */
+        /* Il tentativo packed costa poco (la cache dei layer falliti risponde subito) ma il
+         * log NO: senza guardia stampa una riga per (layer, token) — misurato 6192 righe su
+         * 128 token con Qwen3.8-Flash-Next 2-bit, dove i layer packed non vengono costruiti.
+         * Si segnala una volta per layer: il resto è silenzioso. */
         mlx_array pk = mlx_array_new();
         int prc = qwen4_exp_moe_packed_try(&pk, m, layer_idx, h);
         if (prc == 0) { *out = pk; return true; }
-        fprintf(stderr, "[moe-packed] layer=%d rc=%d -> fallback MLX\n", layer_idx, prc);
+        static unsigned char warned[1024];
+        if (layer_idx >= 0 && layer_idx < (int)sizeof warned && !warned[layer_idx]) {
+            warned[layer_idx] = 1;
+            fprintf(stderr, "[moe-packed] layer=%d rc=%d -> fallback MLX (una volta per layer)\n", layer_idx, prc);
+        }
         mlx_array_free(pk);
     }
     const int gsz = m->cfg.quant_group_size;

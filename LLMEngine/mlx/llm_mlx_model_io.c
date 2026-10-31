@@ -248,7 +248,30 @@ static void llm_mlx_register_module_qparams(const char* dir, MultiShardWeights* 
                             { int rr = (mlx_array_ndim(val) >= 2) ? (int)mlx_array_shape(val)[0] : 0;
                               int pp = (mlx_array_ndim(val) >= 2) ? (int)mlx_array_shape(val)[mlx_array_ndim(val) - 1] : 0;
                               /* niente registrazione per ctx: val e' una copia riusata a ogni iterazione (e liberata a fine ciclo), il ctx non identifica il tensore; vale la chiave per forma */
-                              llm_mlx_qp_register_shape(rr, pp, mg, mb); }
+                              llm_mlx_qp_register_shape(rr, pp, mg, mb);
+                              /* VERIFICA DI CONSISTENZA (2026-10-30): il peso packed e le scales devono
+                               * implicare gli stessi bits dichiarati dal config. bits = 32*cols_w/(cols_s*group).
+                               * Senza questo controllo un override non onorato produce output degenere
+                               * invece di un errore — misurato su Qwen3.8-Flash-Next 2bit (global bits=2,
+                               * attenzione/embed/lm_head 4-bit): prima riga "the name of the name of…". */
+                              if (mlx_array_dtype(val) == MLX_UINT32 && mlx_array_ndim(val) >= 2) {
+                                  char sk[256];
+                                  int nsk = snprintf(sk, sizeof sk, "%.*s.scales", (int)kl, mod);
+                                  mlx_array sc = mlx_array_new();
+                                  if (nsk > 0 && nsk < (int)sizeof sk &&
+                                      mlx_map_string_to_array_get(&sc, W->shards[si], sk) == 0 &&
+                                      sc.ctx != NULL && mlx_array_ndim(sc) >= 2) {
+                                      int scols = (int)mlx_array_shape(sc)[mlx_array_ndim(sc) - 1];
+                                      if (pp > 0 && scols > 0 && mg > 0) {
+                                          int implied = (int)((32 * (long long)pp) / ((long long)scols * (long long)mg));
+                                          if (implied != mb)
+                                              fprintf(stderr, "[quant-check] %s: config bits=%d ma il layout implica %d "
+                                                      "(w cols=%d, scales cols=%d, group=%d) — override NON onorato?\n",
+                                                      mod, mb, implied, pp, scols, mg);
+                                      }
+                                  }
+                                  mlx_array_free(sc);
+                              } }
                         }
                     }
                     mlx_array_free(val);

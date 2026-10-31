@@ -1102,6 +1102,35 @@ bool load_config(const char* model_dir, ModelConfig* cfg) {
                 if (child->string && strchr(child->string, '.') != NULL) { cfg->per_tensor_quant = 1; break; }
             }
         }
+        /* GUARDIA (2026-10-30) — modello MISTO con esperti a <4 bit + override per-tensore:
+         * il backend "mlx" ricostruisce i bit per FORMA (w cols vs scales cols), deduzione
+         * AMBIGUA sui misti 2/4 bit (4-bit g32 e 2-bit g64 condividono le stesse forme) e da
+         * luogo a output degenere: misurato su Qwen3.8-Flash-Next-2bit, "the name of the name
+         * of…" col backend mlx e testo corretto col backend packed. Se l'utente NON ha scelto
+         * un backend, si passa a `packed` (che ha i bit per tensore nel descrittore); se l'ha
+         * scelto, si rispetta ma si avvisa. Non vale per i modelli uniformemente 2-bit
+         * (ternary/Bonsai), dove il backend mlx è corretto e più leggero. */
+        if (cfg->per_tensor_quant && cfg->quant_bits > 0 && cfg->quant_bits < 4) {
+            const char* wb = llm_ai_mlx_opt_env("weights_backend");
+            const int wb_set = llm_ai_mlx_opt_is_set("weights_backend");
+            if (wb == NULL || strcmp(wb, "packed") != 0) {
+                if (wb_set != 1) {
+                    (void)llm_ai_mlx_opt_set("weights_backend", "packed");
+                    fprintf(stderr, "[quant] modello misto %d/4 bit: backend 'mlx' non ricostruisce i bit "
+                            "per tensore (ambiguita' per forma) -> uso 'packed'\n", cfg->quant_bits);
+                } else {
+                    /* Scelta esplicita SBAGLIATA su un modello per cui produce testo degenere:
+                     * si rifiuta il load invece di restituire output silenziosamente sbagliato.
+                     * Il modo per andare avanti è togliere l'opzione (o metterla a packed). */
+                    fprintf(stderr, "[quant] ERRORE: modello misto %d/4 bit con backend '%s' esplicito: "
+                            "questo percorso deduce i bit per forma e produce output degenere. "
+                            "Rimuovere weights_backend o usare weights_backend=packed.\n",
+                            cfg->quant_bits, wb != NULL ? wb : "mlx");
+                    cJSON_Delete(j);
+                    return false;
+                }
+            }
+        }
     }
     if (getenv("LLM_BONSAI_DBG")) fprintf(stderr, "[cfg] quant mode=%s group=%d bits=%d model_type=%s prefix=%s\n",
                                           cfg->quant_mode, cfg->quant_group_size, cfg->quant_bits, cfg->model_type, cfg->layer_prefix);
