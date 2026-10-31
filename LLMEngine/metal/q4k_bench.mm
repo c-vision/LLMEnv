@@ -27,10 +27,12 @@ static double now_ms(void) { return (double)mach_absolute_time() * 1e-6; } /* un
 
 int main(int argc, char** argv) {
     @autoreleasepool {
-        if (argc < 4) { fprintf(stderr, "uso: %s <tensor_q4k.raw> <N> <K>\n", argv[0]); return 2; }
+        if (argc < 4) { fprintf(stderr, "uso: %s <tensor.raw> <N> <K> [q4k|q6k]\n", argv[0]); return 2; }
+        const char* ty = argc > 4 ? argv[4] : "q4k";
+        const int is6 = (strcmp(ty, "q6k") == 0);
         const int N = atoi(argv[2]), K = atoi(argv[3]);
         if (K % 256) { fprintf(stderr, "K deve essere multiplo di 256\n"); return 2; }
-        const size_t NB = (size_t)K / 256, rowb = NB * 144;
+        const size_t NB = (size_t)K / 256, rowb = NB * (is6 ? 210 : 144);
         FILE* f = fopen(argv[1], "rb");
         if (!f) { fprintf(stderr, "open fallito\n"); return 3; }
         unsigned char* w = (unsigned char*)malloc(rowb * (size_t)N);
@@ -44,7 +46,7 @@ int main(int argc, char** argv) {
         float* rowf = (float*)malloc((size_t)K * sizeof(float));
         double* y_ref = (double*)malloc((size_t)N * sizeof(double));
         for (int n = 0; n < N; n++) {
-            if (llmcodec_ggml_dequant_row(LLMCODEC_GGML_T_Q4_K, w + (size_t)n * rowb, rowf, K) != 0) {
+            if (llmcodec_ggml_dequant_row(is6 ? LLMCODEC_GGML_T_Q6_K : LLMCODEC_GGML_T_Q4_K, w + (size_t)n * rowb, rowf, K) != 0) {
                 fprintf(stderr, "dequant_row fallito (riga %d)\n", n); return 4;
             }
             double acc = 0.0;
@@ -59,18 +61,18 @@ int main(int argc, char** argv) {
         NSString* dir = @".";
         if (_NSGetExecutablePath(exe, &exe_sz) == 0)
             dir = [[NSString stringWithUTF8String:exe] stringByDeletingLastPathComponent];
-        NSString* path = [dir stringByAppendingPathComponent:@"gemv_gguf_q4k.metal"];
+        NSString* path = [dir stringByAppendingPathComponent:(is6 ? @"gemv_gguf_q6k.metal" : @"gemv_gguf_q4k.metal")];
         NSString* src = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
         if (!src) {
             NSString* p2 = [[[NSString stringWithUTF8String:__FILE__] stringByDeletingLastPathComponent]
-                            stringByAppendingPathComponent:@"gemv_gguf_q4k.metal"];
+                            stringByAppendingPathComponent:(is6 ? @"gemv_gguf_q6k.metal" : @"gemv_gguf_q4k.metal")];
             src = [NSString stringWithContentsOfFile:p2 encoding:NSUTF8StringEncoding error:nil];
         }
         if (!src) { fprintf(stderr, "kernel .metal non trovato accanto al binario\n"); return 5; }
         NSError* err = nil;
         id<MTLLibrary> lib = [dev newLibraryWithSource:src options:[MTLCompileOptions new] error:&err];
         if (!lib) { fprintf(stderr, "compile: %s\n", err.localizedDescription.UTF8String); return 5; }
-        id<MTLComputePipelineState> p0  = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"gemv_q4_k"] error:&err];
+        id<MTLComputePipelineState> p0  = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:(is6 ? @"gemv_q6_k" : @"gemv_q4_k")] error:&err];
         id<MTLComputePipelineState> p16 = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"gemv_f16"]  error:&err];
         if (!p0 || !p16) { fprintf(stderr, "pipeline: %s\n", err.localizedDescription.UTF8String); return 5; }
 
@@ -127,7 +129,7 @@ int main(int argc, char** argv) {
         }
         double scale = 1.0; for (int n = 0; n < N; n++) if (isfinite(y_ref[n]) && fabs(y_ref[n]) > scale) scale = fabs(y_ref[n]);
         if (nan) printf("  ATTENZIONE: %d righe non finite (dati estremi/overflow) -> escluse dalla parita'\n", nan);
-        printf("q4_K VERO (GGUF): N=%d K=%d  riga=%zu B  (%.1f B/peso)\n", N, K, rowb, (double)rowb / K);
+        printf("%s VERO (GGUF): N=%d K=%d  riga=%zu B  (%.1f B/peso)\n", is6 ? "q6_K" : "q4_K", N, K, rowb, (double)rowb / K);
         printf("  fused : %8.4f ms  %7.1f GB/s(blocchi)\n", t_q4,  (double)rowb * N / t_q4 / 1e6);
         printf("  f16   : %8.4f ms  %7.1f GB/s\n",          t_f16, (double)N * K * 2 / t_f16 / 1e6);
         printf("  speedup fused vs f16: %.2fx\n", t_f16 / t_q4);
