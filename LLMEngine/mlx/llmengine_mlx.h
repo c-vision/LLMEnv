@@ -291,6 +291,9 @@ int llm_ai_mlx_session_set_min_p(llm_ai_mlx_session_handle handle, float min_p);
  * grows between them, causal mask preserved), so a huge prompt never builds
  * a single enormous Metal graph. chunk_size<=0 resets to the default (4096).
  * Returns 0 on success, -1 on invalid handle. */
+/* F1: legge il chunk di prefill corrente della sessione (0 se non impostato). Serve ai test del
+ * profilo adattivo/termico: con `qos=adaptive` e `qos_thermal_sim` si verifica il divisore. */
+int llm_ai_mlx_session_get_prefill_chunk(llm_ai_mlx_session_handle handle);
 int llm_ai_mlx_session_set_prefill_chunk(llm_ai_mlx_session_handle handle,
                                           int chunk_size);
 

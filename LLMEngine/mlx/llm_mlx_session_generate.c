@@ -955,6 +955,11 @@ int llm_ai_mlx_session_set_presence_penalty(llm_ai_mlx_session_handle handle, fl
     return 0;
 }
 
+int llm_ai_mlx_session_get_prefill_chunk(llm_ai_mlx_session_handle handle) {
+    if (handle == NULL) return -1;
+    return ((LlmMlxSession*)handle)->prefill_chunk_size;
+}
+
 int llm_ai_mlx_session_set_prefill_chunk(llm_ai_mlx_session_handle handle,
                                           int chunk_size) {
     if (handle == NULL) return -1;

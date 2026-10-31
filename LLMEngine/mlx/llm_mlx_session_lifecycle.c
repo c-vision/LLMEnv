@@ -341,7 +341,9 @@ llm_mlx_sampling_t llm_mlx_session_sampling(const LlmMlxSession* s) {
 
 #if defined(__APPLE__)
 #include <pthread/qos.h>
+#include <notify.h>
 #endif
+#include "llm_mlx_qos.h"
 
 /* I12 (todo Ishizuki): profilo QoS ADATTIVO (opzione di registro `qos` = adaptive|utility) per la
  * macchina condivisa: abbassa il QoS del thread a UTILITY (cede la CPU alle altre app) e riduce il
@@ -355,6 +357,36 @@ static int llm_mlx_qos_adaptive(void) {
     return v;
 }
 
+/* F1 (2026-10-31): backoff TERMICO del profilo adattivo. Lo stato viene dalla notifica di sistema
+ * `com.apple.system.thermalpressurelevel` (0 nominal · 1 fair · 2 serious · 3 critical), API C di
+ * darwin — niente Obj-C, niente env. `qos_thermal_sim` (registro) forza il valore per i test
+ * deterministici: -1 = reale (default).  Ritorna -1 se lo stato non e' leggibile. */
+static int llm_mlx_thermal_state(void) {
+    int sim = -1;
+    if (llm_ai_mlx_opt_get_int("qos_thermal_sim", &sim) == 0 && sim >= 0) return sim;
+#if defined(__APPLE__)
+    {
+        /* notify(3): serve un TOKEN da notify_register_check, non il nome. Il token si registra una
+         * volta sola per processo e si riusa (la registrazione per chiamata costerebbe un syscall). */
+        static int token = 0;
+        if (token == 0 && notify_register_check("com.apple.system.thermalpressurelevel", &token) != NOTIFY_STATUS_OK)
+            token = -1;
+        if (token > 0) {
+            uint64_t v = 0;
+            if (notify_get_state(token, &v) == NOTIFY_STATUS_OK) return (int)v;
+        }
+    }
+#endif
+    return -1;
+}
+
+/* Backoff attivo solo se il profilo adattivo e' scelto E `qos_thermal` non e' stato spento. */
+static int llm_mlx_qos_thermal_on(void) {
+    int on = 1;
+    if (llm_ai_mlx_opt_get_int("qos_thermal", &on) != 0) on = 1;
+    return llm_mlx_qos_adaptive() && on != 0;
+}
+
 LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
     LlmMlxSession* s = (LlmMlxSession*)calloc(1, sizeof(LlmMlxSession));
     s->model = m;
@@ -365,7 +397,11 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
     }
 #if defined(__APPLE__)
     /* I12: profilo adattivo -> QoS UTILITY sul thread chiamante (cede la CPU alla macchina condivisa). */
-    if (llm_mlx_qos_adaptive()) (void)pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+    if (llm_mlx_qos_adaptive()) {
+        const int th = llm_mlx_qos_thermal_on() ? llm_mlx_thermal_state() : -1;
+        (void)pthread_set_qos_class_self_np(llm_mlx_qos_wants_background(th) ? QOS_CLASS_BACKGROUND
+                                                                            : QOS_CLASS_UTILITY, 0);
+    }
 #endif
     s->n_layers = m->cfg.n_layers;
     s->k_cache = (mlx_array*)malloc((size_t)m->cfg.n_layers * sizeof(mlx_array));
@@ -484,8 +520,13 @@ LlmMlxSession* llm_mlx_session_create(LlmMlxModel* m) {
             /* gpt_oss: chunk in oss/ (llm_oss_config.c). La parità gpt-oss è chunk-dipendente
              * (SDPA fusa shape-dependent) -> determinismo a config fissa, non bit fra chunk. */
             defc = llm_oss_default_prefill_chunk();
-        /* I12: profilo adattivo -> chunk di prefill a 1/4 (burst GPU piu' piccoli, cede la macchina). */
-        if (chunk_env <= 0 && llm_mlx_qos_adaptive() && defc > 512) defc /= 4;
+        /* I12 + F1: profilo adattivo -> chunk di prefill ridotto (burst GPU piu' piccoli, cede la
+         * macchina); il divisore cresce con lo stress termico (4 nominale -> 8 serious -> 16 critical),
+         * con floor 128. Senza profilo adattivo, invariato. */
+        if (chunk_env <= 0 && llm_mlx_qos_adaptive() && defc > LLM_MLX_QOS_CHUNK_FLOOR) {
+            const int th = llm_mlx_qos_thermal_on() ? llm_mlx_thermal_state() : -1;
+            defc = llm_mlx_qos_apply_thermal(defc, th);
+        }
         s->prefill_chunk_size = chunk_env > 0 ? chunk_env : defc;
     }
     /* N-Gram: history vuota all'avvio; tabella pre-allocata (ordine default 3, riempita
