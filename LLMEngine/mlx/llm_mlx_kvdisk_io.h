@@ -26,7 +26,25 @@
 #include "llm_mlx_kvdisk.h"
 
 #define LLM_KVDISK_BLOB_MAGIC 0x3042444Bu  /* "KDB0" */
-#define LLM_KVDISK_BLOB_VER   1u
+#define LLM_KVDISK_BLOB_BASE  1u
+
+/* La versione del blob dipende anche dal runtime MLX: una KV scritta da un MLX diverso (kernel/dtype/layout
+ * possono cambiare) non va ricaricata in un altro. Hash FNV-1a della stringa mlx_version(), calcolato una volta. */
+static inline uint32_t llm_kvdisk_blob_ver(void) {
+    static uint32_t cached = 0;
+    if (cached != 0) return cached;
+    uint32_t h = 2166136261u;
+    mlx_string vs = mlx_string_new();
+    if (vs.ctx != NULL && mlx_version(&vs) == 0) {
+        const char* s = mlx_string_data(vs);
+        for (; s != NULL && *s; s++) { h ^= (uint8_t)*s; h *= 16777619u; }
+    }
+    mlx_string_free(vs);
+    h = (h & 0xFFFFFF00u) | LLM_KVDISK_BLOB_BASE;   /* byte basso = versione del formato */
+    cached = h;
+    return cached;
+}
+#define LLM_KVDISK_BLOB_VER   llm_kvdisk_blob_ver()
 
 static inline int llm_kvdisk_dtype_code(mlx_dtype d) {
     switch (d) {
