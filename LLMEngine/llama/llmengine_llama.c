@@ -41,6 +41,13 @@
 #include <time.h>
 #include <string.h>
 #include <math.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#else
+#include <unistd.h>
+#endif
 
 /* llama.h dichiara questi tipi opachi come "struct nome;" nudi, senza
  * typedef -- funziona in C++ (dove il nome del tag e' gia' un nome di tipo)
@@ -66,6 +73,18 @@ typedef struct {
     llama_model* model;
     const llama_vocab* vocab;
     char* model_name; /* owned, strdup'd */
+    /* P1 (2026-10-30): placement MoE. Se non NULL è un array terminato da
+     * {NULL, NULL} passato a llama_model_params.tensor_buft_overrides: gli
+     * esperti che matchano il pattern finiscono nel buffer CPU. Con mmap
+     * attivo restano file-backed (pagina-cache espellibile, nessuna copia).
+     * I pattern sono posseduti qui e vivono quanto il modello: llama.cpp li
+     * usa durante il load, ma tenerli vivi fino all'unload evita dangling se
+     * una futura versione li rilesse. */
+    struct llama_model_tensor_buft_override* buft_overrides;
+    char** buft_patterns;
+    int32_t n_cpu_moe_effective;   /* dopo la risoluzione AUTO (-1 = tutti) */
+    int32_t load_mode_used;        /* enum llama_load_mode applicato */
+    int32_t n_gpu_layers_used;
     /* Context di EMBEDDING PERSISTENTE per modello (RAG/bert): riusato tra le chiamate invece
      * di fare llama_init_from_model+llama_free a ogni testo. Su Metal l'init/free ripetuto del
      * device faceva scattare 'GGML_ASSERT([rsets->data count] == 0)' alla distruzione (bug di
@@ -533,17 +552,170 @@ static bool read_meta_file(const char* path, LoadedMeta* out) {
  * -------------------------------------------------------------------------- */
 
 int llm_ai_load_model(const char* model_path, int n_gpu_layers) {
+    llm_ai_model_params p;
+    llm_ai_model_params_defaults(&p);
+    p.n_gpu_layers = n_gpu_layers;
+    return llm_ai_load_model_ex(model_path, &p);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * P1 (2026-10-30) — parametri di caricamento e placement MoE.
+ * Obiettivo: i modelli MoE più grandi della RAM (es. un 125B) eseguibili su una
+ * macchina piccola tenendo gli ESPERTI in CPU come mmap file-backed (pagina-cache
+ * del sistema, espellibile) e attenzione/dense su Metal. Nessuna env: i default
+ * sono compilati, i valori arrivano dall'API o dal registro opzioni.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+void llm_ai_model_params_defaults(llm_ai_model_params* p) {
+    if (p == NULL) return;
+    memset(p, 0, sizeof(*p));
+    p->size = (int32_t)sizeof(*p);
+    p->n_gpu_layers = -1;
+    p->n_cpu_moe = -2;          /* AUTO */
+    p->load_mode = -1;          /* AUTO (mmap quando supportato) */
+    p->ram_budget_mb = 0;       /* 0 = RAM fisica */
+    p->check_tensors = 0;
+    p->no_host = 0;
+}
+
+void llm_ai_session_params_defaults(llm_ai_session_params* p) {
+    if (p == NULL) return;
+    memset(p, 0, sizeof(*p));
+    p->size = (int32_t)sizeof(*p);
+    p->n_ctx = 0;
+    p->n_batch = 0;
+    p->n_ubatch = 0;
+    p->kv_type_k = 1;           /* GGML_TYPE_F16 */
+    p->kv_type_v = 1;
+    p->flash_attn = -1;         /* AUTO */
+    p->offload_kqv = -1;
+}
+
+/* RAM fisica in MB. macOS: sysctl hw.memsize; Linux: sysconf. 0 = ignoto. */
+static uint64_t llm_ai_total_ram_mb(void) {
+#if defined(__APPLE__)
+    uint64_t bytes = 0; size_t len = sizeof bytes;
+    if (sysctlbyname("hw.memsize", &bytes, &len, NULL, 0) != 0) return 0;
+    return bytes / (1024u * 1024u);
+#else
+    long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGE_SIZE);
+    if (pages <= 0 || psz <= 0) return 0;
+    return ((uint64_t)pages * (uint64_t)psz) / (1024u * 1024u);
+#endif
+}
+
+/* Dimensione del file (primo shard per i GGUF splittati): serve alla politica AUTO
+ * di n_cpu_moe PRIMA del load, quando llama_model_size() non esiste ancora. */
+static uint64_t llm_ai_file_size(const char* path) {
+    struct stat st;
+    if (path == NULL || stat(path, &st) != 0) return 0;
+    return (uint64_t)st.st_size;
+}
+
+/* Costruisce gli override di placement per gli esperti MoE.
+ *  n_cpu_moe == 0  -> nessun override
+ *  n_cpu_moe <  0  -> TUTTI gli esperti in CPU (pattern senza indice di layer)
+ *  n_cpu_moe >  0  -> esperti dei primi N layer in CPU (pattern per blk.0..N-1;
+ *                     i pattern di layer inesistenti semplicemente non matchano)
+ * Ritorna il numero di pattern installati (0 = nessuno). */
+static int llm_ai_build_moe_overrides(LlamaModel* e, int32_t n_cpu_moe) {
+    if (e == NULL || n_cpu_moe == 0) return 0;
+    int n = (n_cpu_moe < 0) ? 1 : (int)n_cpu_moe;
+    if (n > 512) n = 512;   /* guardia: nessun modello ha 512+ layer */
+
+    e->buft_overrides = (struct llama_model_tensor_buft_override*)calloc((size_t)n + 1, sizeof(*e->buft_overrides));
+    e->buft_patterns = (char**)calloc((size_t)n, sizeof(char*));
+    if (e->buft_overrides == NULL || e->buft_patterns == NULL) {
+        free(e->buft_overrides); free(e->buft_patterns);
+        e->buft_overrides = NULL; e->buft_patterns = NULL;
+        return 0;
+    }
+    for (int i = 0; i < n; ++i) {
+        char buf[128];
+        if (n_cpu_moe < 0)
+            snprintf(buf, sizeof buf, "\\.ffn_(up|down|gate|gate_up)_(ch|)exps");
+        else
+            snprintf(buf, sizeof buf, "blk\\.%d\\.ffn_(up|down|gate|gate_up)_(ch|)exps", i);
+        e->buft_patterns[i] = strdup(buf);
+        e->buft_overrides[i].pattern = e->buft_patterns[i];
+        e->buft_overrides[i].buft = ggml_backend_cpu_buffer_type();
+    }
+    e->buft_overrides[n].pattern = NULL;   /* sentinella */
+    e->buft_overrides[n].buft = NULL;
+    return n;
+}
+
+static void llm_ai_free_moe_overrides(LlamaModel* e) {
+    if (e == NULL) return;
+    if (e->buft_patterns != NULL) {
+        int n = (e->n_cpu_moe_effective < 0) ? 1 : e->n_cpu_moe_effective;
+        for (int i = 0; i < n; ++i) free(e->buft_patterns[i]);
+        free(e->buft_patterns);
+    }
+    free(e->buft_overrides);
+    e->buft_patterns = NULL;
+    e->buft_overrides = NULL;
+}
+
+int llm_ai_load_model_ex(const char* model_path, const llm_ai_model_params* p) {
     if (model_path == NULL) return -1;
+
+    llm_ai_model_params d;
+    if (p == NULL) { llm_ai_model_params_defaults(&d); p = &d; }
+    /* Guardia ABI: un chiamante vecchio (struct più piccola) non deve essere
+     * interpretato oltre i suoi byte. */
+    if (p->size < 0 || (size_t)p->size < sizeof(int32_t) * 2) return -1;
 
     ensure_backend_initialized();
 
     llama_model_params model_params = llama_model_default_params();
-    model_params.n_gpu_layers = n_gpu_layers;
+    model_params.n_gpu_layers = p->n_gpu_layers;
 
-    llama_model* model = llama_model_load_from_file(model_path, model_params);
-    if (model == NULL) return -1;
+    /* load_mode: -1 = lascia il default di llama.cpp (AUTO). */
+    if (p->load_mode >= 0) {
+        switch (p->load_mode) {
+            case 0: model_params.load_mode = LLAMA_LOAD_MODE_NONE; break;
+            case 1: model_params.load_mode = LLAMA_LOAD_MODE_MMAP; break;
+            case 2: model_params.load_mode = LLAMA_LOAD_MODE_MLOCK; break;
+            case 3: model_params.load_mode = LLAMA_LOAD_MODE_MMAP_MLOCK; break;
+            case 4: model_params.load_mode = LLAMA_LOAD_MODE_DIRECT_IO; break;
+            default: model_params.load_mode = LLAMA_LOAD_MODE_AUTO; break;
+        }
+    }
+    model_params.check_tensors = p->check_tensors != 0;
+    model_params.no_host = p->no_host != 0;
+
+    /* Politica AUTO del placement MoE: se i pesi non stanno nel budget RAM,
+     * gli esperti vanno in CPU (file-backed). Soglia 60%: lascia spazio a KV,
+     * compute buffer e al sistema. */
+    int32_t n_cpu_moe = p->n_cpu_moe;
+    if (n_cpu_moe == -2) {
+        uint64_t budget_mb = (p->ram_budget_mb > 0) ? (uint64_t)p->ram_budget_mb : llm_ai_total_ram_mb();
+        uint64_t file_mb = llm_ai_file_size(model_path) / (1024u * 1024u);
+        if (budget_mb > 0 && file_mb > 0 && file_mb > (budget_mb / 100u) * 60u) n_cpu_moe = -1;
+        else n_cpu_moe = 0;
+    }
 
     LlamaModel* entry = (LlamaModel*)calloc(1, sizeof(LlamaModel));
+    if (entry == NULL) return -1;
+    entry->n_gpu_layers_used = p->n_gpu_layers;
+    entry->load_mode_used = (int)model_params.load_mode;
+    entry->n_cpu_moe_effective = n_cpu_moe;
+
+    if (llm_ai_build_moe_overrides(entry, n_cpu_moe) > 0) {
+        model_params.tensor_buft_overrides = entry->buft_overrides;
+    } else if (n_cpu_moe != 0) {
+        free(entry);
+        return -1;   /* override richiesti ma non costruibili: meglio fallire che ignorarli in silenzio */
+    }
+
+    llama_model* model = llama_model_load_from_file(model_path, model_params);
+    if (model == NULL) {
+        llm_ai_free_moe_overrides(entry);
+        free(entry);
+        return -1;
+    }
+
     entry->model = model;
     entry->vocab = llama_model_get_vocab(model);
 
@@ -552,12 +724,44 @@ int llm_ai_load_model(const char* model_path, int n_gpu_layers) {
     entry->model_name = strdup(name_len > 0 ? name_buf : model_path);
     pthread_mutex_init(&entry->emb_lock, NULL);
 
+    /* Una riga su stderr: placement effettivo, così il test a 24 GB è verificabile
+     * senza dedurlo dai consumi. */
+    {
+        uint64_t size = llama_model_size(model);
+        const char* lm = llama_load_mode_name(model_params.load_mode);
+        fprintf(stderr, "[llamacpp] model: %s | %.1f GiB | ngl=%d n_cpu_moe=%d load_mode=%s | params=%llu\n",
+                entry->model_name, (double)size / 1073741824.0, (int)p->n_gpu_layers,
+                (int)n_cpu_moe, lm ? lm : "?", (unsigned long long)llama_model_n_params(model));
+    }
+
     pthread_mutex_lock(&g_registry_mutex);
     int handle = g_next_model_handle++;
     models_array_ensure(handle);
     g_models[handle] = entry;
     pthread_mutex_unlock(&g_registry_mutex);
     return handle;
+}
+
+int llm_ai_model_n_cpu_moe(int model_handle) {
+    pthread_mutex_lock(&g_registry_mutex);
+    LlamaModel* m = find_model_locked(model_handle);
+    int v = (m == NULL) ? -1 : (int)m->n_cpu_moe_effective;
+    pthread_mutex_unlock(&g_registry_mutex);
+    return v;
+}
+
+int llm_ai_model_stats(int model_handle, int64_t* out_n_params, int64_t* out_size,
+                       int* out_n_layer, int* out_n_embd, int* out_ctx_train) {
+    pthread_mutex_lock(&g_registry_mutex);
+    LlamaModel* m = find_model_locked(model_handle);
+    if (m == NULL) { pthread_mutex_unlock(&g_registry_mutex); return -1; }
+    if (out_n_params)  *out_n_params  = (int64_t)llama_model_n_params(m->model);
+    if (out_size)      *out_size      = (int64_t)llama_model_size(m->model);
+    if (out_n_layer)   *out_n_layer   = llama_model_n_layer(m->model);
+    if (out_n_embd)    *out_n_embd    = llama_model_n_embd(m->model);
+    if (out_ctx_train) *out_ctx_train = llama_model_n_ctx_train(m->model);
+    pthread_mutex_unlock(&g_registry_mutex);
+    return 0;
 }
 
 void llm_ai_unload_model(int model_handle) {
@@ -571,6 +775,7 @@ void llm_ai_unload_model(int model_handle) {
     pthread_mutex_destroy(&m->emb_lock);
 
     llama_model_free(m->model);
+    llm_ai_free_moe_overrides(m);
     free(m->model_name);
     free(m);
     g_models[model_handle] = NULL;
@@ -596,18 +801,58 @@ const char* llm_ai_model_name(int model_handle) {
 }
 
 int llm_ai_create_session(int model_handle, int ctx_size, int kv_type_k, int kv_type_v) {
+    llm_ai_session_params p;
+    llm_ai_session_params_defaults(&p);
+    p.n_ctx = ctx_size;
+    p.kv_type_k = kv_type_k;
+    p.kv_type_v = kv_type_v;
+    return llm_ai_create_session_ex(model_handle, &p);
+}
+
+int llm_ai_create_session_ex(int model_handle, const llm_ai_session_params* p_in) {
     pthread_mutex_lock(&g_registry_mutex);
     LlamaModel* model = find_model_locked(model_handle);
     if (model == NULL) { pthread_mutex_unlock(&g_registry_mutex); return -1; }
 
+    llm_ai_session_params d;
+    if (p_in == NULL) { llm_ai_session_params_defaults(&d); p_in = &d; }
+    if (p_in->size < 0 || (size_t)p_in->size < sizeof(int32_t) * 2) {
+        pthread_mutex_unlock(&g_registry_mutex); return -1;
+    }
+
     llama_context_params ctx_params = llama_context_default_params();
-    ctx_params.n_ctx = (uint32_t)(ctx_size > 0 ? ctx_size : 4096);
-    ctx_params.n_batch = ctx_params.n_ctx;
+    const uint32_t n_ctx = (uint32_t)(p_in->n_ctx > 0 ? p_in->n_ctx : 4096);
+    ctx_params.n_ctx = n_ctx;
+
+    /* P1 (2026-10-30): i due parametri di batch, prima non esposti e con
+     * `n_batch = n_ctx` forzato.
+     *   n_batch  = batch logico (quanti token per singola llama_decode)  -> default min(ctx, 2048)
+     *   n_ubatch = microbatch fisico (buffer di calcolo realmente allocati) -> default min(batch, 512)
+     * MISURATO (OLMoE 4,2 GB, ctx 32k/128k): la memoria NON dipende da n_batch —
+     * il buffer di calcolo lo dimensiona n_ubatch, che era già 512 di default.
+     * Quindi il valore di questi knob è il CONTROLLO (chunk di prefill più o meno
+     * grande = più o meno chiamate di decode), non un risparmio di RAM. Default
+     * prudenti: un chunk enorme raramente aiuta e rende il primo token più lento. */
+    uint32_t n_batch = (p_in->n_batch > 0) ? (uint32_t)p_in->n_batch
+                                           : (n_ctx < 2048u ? n_ctx : 2048u);
+    if (n_batch > n_ctx) n_batch = n_ctx;
+    uint32_t n_ubatch = (p_in->n_ubatch > 0) ? (uint32_t)p_in->n_ubatch
+                                             : (n_batch < 512u ? n_batch : 512u);
+    if (n_ubatch > n_batch) n_ubatch = n_batch;
+    ctx_params.n_batch = n_batch;
+    ctx_params.n_ubatch = n_ubatch;
+    if (p_in->n_threads > 0)       ctx_params.n_threads = p_in->n_threads;
+    if (p_in->n_threads_batch > 0) ctx_params.n_threads_batch = p_in->n_threads_batch;
     /* Quantized KV-cache types (Q8_0/Q4_0) need flash attention -- AUTO (llama.cpp's own
      * default) enables it automatically when the backend/quant combination requires it, so
      * this only matters when kv_type_k/v differ from F16; harmless no-op otherwise. */
-    ctx_params.type_k = (enum ggml_type)kv_type_k;
-    ctx_params.type_v = (enum ggml_type)kv_type_v;
+    ctx_params.type_k = (enum ggml_type)p_in->kv_type_k;
+    ctx_params.type_v = (enum ggml_type)p_in->kv_type_v;
+    if (p_in->flash_attn >= 0) {
+        ctx_params.flash_attn_type = (p_in->flash_attn == 0)
+            ? LLAMA_FLASH_ATTN_TYPE_DISABLED : LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    }
+    if (p_in->offload_kqv >= 0) ctx_params.offload_kqv = p_in->offload_kqv != 0;
 
     llama_context* ctx = llama_init_from_model(model->model, ctx_params);
     if (ctx == NULL) { pthread_mutex_unlock(&g_registry_mutex); return -1; }
@@ -615,8 +860,8 @@ int llm_ai_create_session(int model_handle, int ctx_size, int kv_type_k, int kv_
     LlamaChatSession* session = (LlamaChatSession*)calloc(1, sizeof(LlamaChatSession));
     session->model_handle = model_handle;
     session->ctx_size = (int)ctx_params.n_ctx;
-    session->kv_type_k = kv_type_k;
-    session->kv_type_v = kv_type_v;
+    session->kv_type_k = p_in->kv_type_k;
+    session->kv_type_v = p_in->kv_type_v;
     session->ctx = ctx;
     pthread_mutex_init(&session->session_mutex, NULL);
 

@@ -5,9 +5,11 @@
 #include "llmengine.h"
 #include "llmengine_llama.h"
 #include "llmengine_llama_ocr.h"
+#include "llm_engine_opts.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/types.h>
 
 /* Memoria del sistema: macOS usa sysctl/mach, Linux /proc/meminfo.
@@ -21,9 +23,27 @@
 #include <unistd.h>
 #endif
 
+/* ── Parametri dal REGISTRO OPZIONI (mai env, vedi Startup-Protocol) ────────────
+ * `llm_ai_mlx_opt_get_int` restituisce anche il default compilato, quindi la
+ * presenza va decisa con `is_set`; il ponte `opt_env` resta per il registro
+ * avanzato (nomi non curati) e per la transizione. */
+static int lc_opt_int(const char* name, int def) {
+    if (llm_ai_mlx_opt_is_set(name) == 1) {
+        int v = 0;
+        if (llm_ai_mlx_opt_get_int(name, &v) == 0) return v;
+    }
+    const char* s = llm_ai_mlx_opt_env(name);
+    if (s != NULL && *s != '\0') {
+        char* end = NULL;
+        long l = strtol(s, &end, 10);
+        if (end != s) return (int)l;
+        if (strcmp(s, "auto") == 0) return def;
+    }
+    return def;
+}
+
 static LlmEngineLlmModel lc_load(const char* path) { return (LlmEngineLlmModel)(intptr_t)llm_ai_load_model(path, 0); }
-static LlmEngineLlmModel lc_load_opts(const char* path, int n_gpu_layers) { return (LlmEngineLlmModel)(intptr_t)llm_ai_load_model(path, n_gpu_layers); }
-static void        lc_free(LlmEngineLlmModel m)    { llm_ai_unload_model((int)(intptr_t)m); }
+static LlmEngineLlmModel lc_load_opts(const char* path, int n_gpu_layers) { return (LlmEngineLlmModel)(intptr_t)llm_ai_load_model(path, n_gpu_layers); }static void        lc_free(LlmEngineLlmModel m)    { llm_ai_unload_model((int)(intptr_t)m); }
 static LlmEngineLlmSession lc_sess(LlmEngineLlmModel m)  { return (LlmEngineLlmSession)(intptr_t)llm_ai_create_session((int)(intptr_t)m, 0, 0, 0); }
 static void        lc_dsess(LlmEngineLlmSession s) { llm_ai_destroy_session((int)(intptr_t)s); }
 
@@ -83,7 +103,22 @@ const LlmEngineLlmEngine* llmengine_llm_engine_llamacpp(void) { return &LLMENGIN
 static int g_ids_ctx = 0;   /* contesto richiesto con kv_set_max: 0 = automatico (contesto di addestramento, entro la memoria) */
 void llm_ai_shutdown(void);   /* definita in llmengine_llama.c */
 static LlmEngineLlmModel lci_load(const char* path) {
-    int h = llm_ai_load_model(path, 99);   /* tutti gli strati su GPU */
+    /* Placement dal registro opzioni (2026-10-30): `n_cpu_moe` decide se gli esperti
+     * stanno in CPU (file-backed) o sul device; `llama_ngl` quanti strati su Metal.
+     * `n_cpu_moe` default AUTO: se il file del modello supera il 60% del budget RAM
+     * (o della RAM fisica) gli esperti vanno tutti in CPU — è il caso "modello più
+     * grande della RAM", es. 125B su 24 GB. `llama_ram_budget_mb` permette di
+     * simulare una macchina più piccola senza toccare il sistema. */
+    llm_ai_model_params mp;
+    llm_ai_model_params_defaults(&mp);
+    mp.n_gpu_layers   = lc_opt_int("llama_ngl", -1);
+    mp.n_cpu_moe      = lc_opt_int("n_cpu_moe", -2);
+    mp.ram_budget_mb  = lc_opt_int("llama_ram_budget_mb", 0);
+    mp.load_mode      = lc_opt_int("llama_load_mode", -1);
+    mp.check_tensors  = lc_opt_int("llama_check_tensors", 0);
+    mp.no_host        = lc_opt_int("llama_no_host", 0);
+
+    int h = llm_ai_load_model_ex(path, &mp);
     /* All uscita libera sessioni e modelli PRIMA che ggml distrugga il device Metal (altrimenti GGML_ASSERT sui residency set).
      * Va registrato DOPO il load: gli atexit girano in ordine inverso e il device Metal nasce (e registra il suo distruttore)
      * durante il load, quindi un atexit registrato prima verrebbe eseguito dopo. */
@@ -131,6 +166,14 @@ static LlmEngineLlmSession lci_sess(LlmEngineLlmModel m) {
     lc_mem_stats(&ram, &avail);
     uint64_t budget = avail > 0 ? avail / 10 * 6 : ram / 4;
     if (ram > 0 && budget > ram / 3) budget = ram / 3;
+    /* Simulazione di una macchina piu' piccola (es. 24 GB su un M5 Max): il budget
+     * dichiarato vince su quello misurato, altrimenti la KV mangia la pagina-cache
+     * del modello (con un MoE mmap'd da 76 GB sarebbe thrashing, non contesto). */
+    int ram_budget_mb = lc_opt_int("llama_ram_budget_mb", 0);
+    if (ram_budget_mb > 0) {
+        uint64_t cap = (uint64_t)ram_budget_mb * 1024u * 1024u / 3u;
+        if (budget > cap) budget = cap;
+    }
     (void)mbytes;
     /* contesto massimo la cui KV entra nel budget (KV monotona in n_ctx: ricerca binaria); 0 = ignoto */
     long long fit = 0;
@@ -146,7 +189,21 @@ static LlmEngineLlmSession lci_sess(LlmEngineLlmModel m) {
     if (eff < 2048) eff = 2048;
     int s = -1;
     for (;;) {
-        s = llm_ai_create_session(mh, (int)eff, 0, 0);
+        /* Due knob di batch (2026-10-30), prima non esposti:
+         * `n_batch` = batch logico del prefill (chunk per llama_decode),
+         * `n_ubatch` = microbatch fisico (buffer di calcolo).
+         * Misurato: la RAM la decide n_ubatch, non n_batch. Qui servono a
+         * scegliere il compromesso prefill/latenza, non a risparmiare memoria. */
+        llm_ai_session_params sp;
+        llm_ai_session_params_defaults(&sp);
+        sp.n_ctx          = (int)eff;
+        sp.n_batch        = lc_opt_int("llama_n_batch", 0);
+        sp.n_ubatch       = lc_opt_int("llama_n_ubatch", 0);
+        sp.n_threads      = lc_opt_int("llama_threads", 0);
+        sp.n_threads_batch= lc_opt_int("llama_threads_batch", 0);
+        sp.flash_attn     = lc_opt_int("llama_flash_attn", -1);
+        sp.offload_kqv    = lc_opt_int("llama_offload_kqv", -1);
+        s = llm_ai_create_session_ex(mh, &sp);
         if (s >= 0 || eff <= 2048) break;
         eff /= 2; if (eff < 2048) eff = 2048;
     }

@@ -37,6 +37,67 @@ extern "C" {
  * or more sessions from it via llm_ai_create_session. */
 int llm_ai_load_model(const char* model_path, int n_gpu_layers);
 
+/* ---------------------------------------------------------------------------
+ * Parametri di caricamento (P1, 2026-10-30) — abilita i modelli MoE più grandi
+ * della RAM: gli esperti possono restare nella CPU (file-backed via mmap,
+ * quindi pagina-cache espellibile) mentre attenzione/dense restano su Metal.
+ *
+ * Tutti i campi sono opzionali: `llm_ai_model_params_defaults` riempie i default
+ * (identici al comportamento storico). `size` DEVE essere
+ * sizeof(llm_ai_model_params): un chiamante compilato contro una versione
+ * precedente (size più piccolo) viene rifiutato, non interpretato a caso.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    int32_t size;            /* = sizeof(llm_ai_model_params) */
+
+    /* -1 = tutti gli strati sul device, 0 = solo CPU, N = primi N strati sul
+     * device (llama.cpp `n_gpu_layers`). Default: -1. */
+    int32_t n_gpu_layers;
+
+    /* Placement degli esperti MoE (llama.cpp `--n-cpu-moe`):
+     *   0  = nessun override (tutti gli esperti dove li mette llama.cpp)
+     *   N>0 = esperti dei primi N layer in CPU
+     *  -1  = TUTTI gli esperti in CPU (`--cpu-moe`)
+     *  -2  = AUTO (default): tutti in CPU se il file del modello supera il 60%
+     *        del budget RAM (`ram_budget_mb`, 0 = RAM fisica totale).
+     * Con mmap attivo i pesi in CPU restano FILE-BACKED (nessuna copia in RAM):
+     * è il meccanismo che permette un 125B su 24 GB. */
+    int32_t n_cpu_moe;
+
+    /* Modalità di caricamento (llama_load_mode):
+     *  -1 auto (default), 0 none (carica tutto in RAM, niente mmap),
+     *   1 mmap, 2 mlock, 3 mmap+mlock, 4 direct I/O. */
+    int32_t load_mode;
+
+    /* Budget RAM in MB usato SOLO dalla politica AUTO di `n_cpu_moe`
+     * (0 = RAM fisica totale). Permette di simulare una macchina più piccola. */
+    int32_t ram_budget_mb;
+
+    int32_t check_tensors;   /* 0/1, default 0 */
+    int32_t no_host;         /* 0/1, default 0 (bypass host buffer) */
+} llm_ai_model_params;
+
+void llm_ai_model_params_defaults(llm_ai_model_params* p);
+
+/* Come llm_ai_load_model, ma con i parametri espliciti. `p` NULL = default.
+ * Ritorna un handle >= 0, oppure -1. */
+int llm_ai_load_model_ex(const char* model_path, const llm_ai_model_params* p);
+
+/* Valore effettivo di `n_cpu_moe` dopo la risoluzione AUTO (utile per log e
+ * per verificare che la politica abbia scelto quello che ci si aspetta).
+ * Ritorna -1 su handle invalido. */
+int llm_ai_model_n_cpu_moe(int model_handle);
+
+/* Statistiche del modello caricato (per pianificare il placement a 24 GB):
+ *   *out_n_params  = parametri totali
+ *   *out_size      = byte dei pesi
+ *   *out_n_layer   = numero di layer
+ *   *out_n_embd    = dimensione embedding
+ *   *out_ctx_train = contesto di addestramento
+ * I puntatori possono essere NULL. Ritorna 0 su successo, -1 su handle invalido. */
+int llm_ai_model_stats(int model_handle, int64_t* out_n_params, int64_t* out_size,
+                       int* out_n_layer, int* out_n_embd, int* out_ctx_train);
+
 /* Releases a model's weights. Caller must destroy all sessions created from
  * this model first -- undefined behavior otherwise (matches llama.cpp's own
  * ownership: a context cannot outlive its model). Safe to call on an
@@ -57,6 +118,37 @@ const char* llm_ai_model_name(int model_handle);
  * unquantized behavior. Returns an opaque handle >= 0, or -1 on failure
  * (e.g. invalid model handle). */
 int llm_ai_create_session(int model_handle, int ctx_size, int kv_type_k, int kv_type_v);
+
+/* ---------------------------------------------------------------------------
+ * Parametri di sessione (P1, 2026-10-30) — separano i due budget di memoria
+ * che prima erano fusi in `n_batch = n_ctx`:
+ *   `n_batch`  = batch logico massimo (prefill: quanti token per llama_decode)
+ *   `n_ubatch` = microbatch fisico (buffer di calcolo realmente allocati)
+ * Con n_batch = n_ctx (comportamento storico) un contesto 64k allocava buffer
+ * di calcolo per 64k token: il picco di memoria più grande dopo i pesi.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    int32_t size;             /* = sizeof(llm_ai_session_params) */
+
+    int32_t n_ctx;            /* 0 = 4096 */
+    int32_t n_batch;          /* 0 = min(n_ctx, 2048) */
+    int32_t n_ubatch;         /* 0 = min(n_batch, 512) */
+
+    int32_t n_threads;        /* 0 = default llama.cpp */
+    int32_t n_threads_batch;  /* 0 = come n_threads */
+
+    int32_t kv_type_k;        /* ggml_type; GGML_TYPE_F16=1 = non quantizzata */
+    int32_t kv_type_v;
+
+    int32_t flash_attn;       /* -1 auto (default), 0 off, 1 on */
+    int32_t offload_kqv;      /* -1 default llama.cpp, 0/1 esplicito */
+} llm_ai_session_params;
+
+void llm_ai_session_params_defaults(llm_ai_session_params* p);
+
+/* Come llm_ai_create_session, ma con i parametri espliciti (p NULL = default).
+ * Ritorna un handle >= 0, oppure -1. */
+int llm_ai_create_session_ex(int model_handle, const llm_ai_session_params* p);
 
 /* Releases a session's context + KV cache. Does NOT touch the underlying
  * model (other sessions on the same model are unaffected). Safe to call on

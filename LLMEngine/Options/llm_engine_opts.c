@@ -53,6 +53,21 @@ static Opt g_opts[] = {
     { "memgov_grow_min_free_mb", "libero minimo richiesto per crescere le cache (MB)", T_INT, 1024, 1024, 0, 0, 0, 0, {0}, NULL, 0, "1024" },
     { "memgov_timeout_ms", "attesa massima del governor per la memoria (ms)",         T_INT,   30000, 30000, 0, 0, 0, 0, {0}, NULL, 0, "30000" },
     { "prefill",          "chunk di prefill (0 = default)",                          T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0, "2048" },
+    /* ── Ramo llama.cpp (2026-10-30): placement e memoria dei GGUF. Servono a eseguire
+     * modelli MoE più grandi della RAM (es. 125B su 24 GB): esperti in CPU file-backed
+     * via mmap, attenzione/dense su Metal. ─────────────────────────────────────── */
+    { "llama_ngl",          "ramo llama.cpp: strati su GPU (-1 = tutti, 0 = solo CPU)", T_INT, -1, -1, 0, 0, 0, 0, {0}, NULL, 0, "8" },
+    { "n_cpu_moe",          "esperti MoE in CPU: 0 nessuno, N primi N layer, -1 tutti, -2 auto (file > 60% RAM)", T_INT, -2, -2, 0, 0, 0, 0, {0}, NULL, 0, "-1" },
+    { "llama_ram_budget_mb","ramo llama.cpp: budget RAM per la politica AUTO di n_cpu_moe (0 = RAM fisica)", T_INT, 0, 0, 0, 0, 0, 0, {0}, NULL, 0, "24576" },
+    { "llama_load_mode",    "ramo llama.cpp: -1 auto, 0 none, 1 mmap, 2 mlock, 3 mmap+mlock, 4 direct I/O", T_INT, -1, -1, 0, 0, 0, 0, {0}, NULL, 0, "1" },
+    { "llama_n_batch",      "ramo llama.cpp: batch logico (0 = min(ctx, 2048))",      T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0, "2048" },
+    { "llama_n_ubatch",     "ramo llama.cpp: microbatch fisico (0 = min(batch, 512))", T_INT,  0, 0, 0, 0, 0, 0, {0}, NULL, 0, "512" },
+    { "llama_threads",      "ramo llama.cpp: thread di generazione (0 = default)",    T_INT,   0, 0, 0, 0, 0, 0, {0}, NULL, 0, "8" },
+    { "llama_threads_batch","ramo llama.cpp: thread di batch/prefill (0 = come llama_threads)", T_INT, 0, 0, 0, 0, 0, 0, {0}, NULL, 0, "10" },
+    { "llama_flash_attn",   "ramo llama.cpp: flash attention -1 auto, 0 off, 1 on",   T_INT,  -1, -1, 0, 0, 0, 0, {0}, NULL, 0, "1" },
+    { "llama_offload_kqv",  "ramo llama.cpp: KQV sul device -1 default, 0/1",         T_INT,  -1, -1, 0, 0, 0, 0, {0}, NULL, 0, "1" },
+    { "llama_check_tensors","ramo llama.cpp: valida i byte dei tensori al load (1/0)", T_INT,  0, 0, 0, 0, 0, 0, {0}, NULL, 0, "0" },
+    { "llama_no_host",      "ramo llama.cpp: bypass host buffer (1/0, sperimentale)",  T_INT,  0, 0, 0, 0, 0, 0, {0}, NULL, 0, "0" },
     { "temp",             "temperatura di sampling",                                 T_FLOAT, 0, 0, 1.0, 1.0, 0, 0, {0}, NULL, 0, "0" },
     { "topp",             "top-p",                                                   T_FLOAT, 0, 0, 1.0, 1.0, 0, 0, {0}, NULL, 0, "0.95" },
     { "minp",             "min-p",                                                   T_FLOAT, 0, 0, 0.0, 0.0, 0, 0, {0}, NULL, 0, "0.05" },

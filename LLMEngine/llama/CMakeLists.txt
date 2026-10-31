@@ -90,9 +90,17 @@ add_library(llm_ai_llamacpp SHARED
     llm_engine_llama.c   # adapter all'ABI comune llmengine
 )
 
-target_link_libraries(llm_ai_llamacpp PRIVATE llama mtmd llama-common)
+# Registro opzioni condiviso (parametri senza env): il ramo llama espone
+# n_gpu_layers / n_cpu_moe / load mode / batch, quindi ha bisogno del registro
+# come moe e mlx. Guard sul target: nel superbuild Options e' gia' stato aggiunto.
+if(NOT TARGET llmengine_opts)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../Options llmengine_opts_llama)
+endif()
+
+target_link_libraries(llm_ai_llamacpp PRIVATE llama mtmd llama-common llmengine_opts)
 target_include_directories(llm_ai_llamacpp PUBLIC . PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../Options
     ${CMAKE_CURRENT_BINARY_DIR}/_deps/llama_cpp-src
     ${CMAKE_CURRENT_BINARY_DIR}/_deps/llama_cpp-src/common)
 
@@ -102,8 +110,24 @@ set_target_properties(llm_ai_llamacpp PROPERTIES
     LINKER_LANGUAGE CXX
 )
 
-# FASE 5 Parte B (opzionale): shim Apple Vision OCR (VNRecognizeTextRequest),
-# macOS-only, zero-download. Compilato solo su Apple; il dylib finisce accanto
+# Smoke test dei parametri di placement/batch (2026-10-30). OFF di default: non
+# aggiunge lavoro alla build normale. ON per:
+#   cmake -DLLMENGINE_LLAMA_BUILD_TESTS=ON
+#   cmake --build <dir> --target llama_params_smoke llama_options_smoke
+# Uso: ./llama_params_smoke <model.gguf> [n_cpu_moe] [ram_budget_mb] [ngl] [hold_s]
+#      ./llama_options_smoke <model.gguf>    (percorso ABI + registro opzioni)
+option(LLMENGINE_LLAMA_BUILD_TESTS "Build llama backend smoke tests" OFF)
+if(LLMENGINE_LLAMA_BUILD_TESTS)
+    add_executable(llama_params_smoke tests/llama_params_smoke.c)
+    target_link_libraries(llama_params_smoke PRIVATE llm_ai_llamacpp)
+    add_executable(llama_options_smoke tests/llama_options_smoke.c)
+    target_link_libraries(llama_options_smoke PRIVATE llm_ai_llamacpp)
+    target_include_directories(llama_options_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../Options)
+endif()
+
+# FASE 5 Parte B (opzionale): shim Apple Vision OCR (VNRecognizeTextRequest),# macOS-only, zero-download. Compilato solo su Apple; il dylib finisce accanto
 # a llm_ai_llamacpp così DYLD_LIBRARY_PATH lo trova.
 if(APPLE)
     add_custom_command(
