@@ -23,7 +23,7 @@
  * v3 = token_topk (distribuzione top-k alla posizione pending, MLX).
  * v4 = embed_ids (embedding IDS-based, MLX).
  * v5 = set_expert_swap (offload esperti MoE da disco, MLX). */
-#define LLMENGINE_ABI_VERSION 6u
+#define LLMENGINE_ABI_VERSION 7u
 
 #ifdef __cplusplus
 extern "C" {
@@ -59,6 +59,19 @@ typedef struct {
 typedef void* LlmEngineLlmModel;
 typedef void* LlmEngineLlmSession;
 typedef void* LlmEngineLlmVision;    /* handle OCR/visione (mmproj) */
+
+/* ABI v7: statistiche di speculazione (spec_ngram / DFlash2 / MTP). */
+typedef struct {
+    int32_t size;              /* = sizeof(LlmEngineLlmSpecStats) */
+    int64_t drafts;            /* draft proposti */
+    int64_t accepted;          /* token confermati (include il generato gratis) */
+    int64_t rounds;            /* round di verifica */
+    double  rate;              /* accepted/drafts (alpha) */
+    double  al;                /* acceptance length = accepted/rounds */
+    int32_t npos;              /* posizioni valide in proposed[]/accepted[] (<= 8) */
+    int32_t proposed[8];       /* per posizione: volte proposta */
+    int32_t accepted_pos[8];   /* per posizione: volte accettata */
+} LlmEngineLlmSpecStats;
 
 typedef struct LlmEngineLlmEngine {
     const char* name;
@@ -175,6 +188,14 @@ typedef struct LlmEngineLlmEngine {
      * Greedy (la temperatura non si applica). `n_words` = (n_vocab+31)/32. Ritorna 0 / -1 (nessun bit valido,
      * sessione senza pending, modello delegato). */
     int   (*generate_id_masked)(LlmEngineLlmSession s, const uint32_t* mask_words, int n_words, int32_t* out_token_id);
+
+    /* ── ABI v7 — campo NUOVO in coda (NULL se il motore non lo implementa). ────────────────────
+     * STATISTICHE DI SPECULAZIONE della sessione: `drafts`/`accepted` cumulativi, `rounds` di
+     * verifica, `al` = token confermati per verifica incluso il gratis (= accepted/rounds, con
+     * AR puro = 1) e `accept_h{i}` per posizione (acceptance CONDIZIONALE del draft i). Serve a
+     * distinguere "K troppo grande" da "draft debole", che in tok/s si confondono.
+     * `size` obbligatorio (= sizeof): campi futuri accodati. Ritorna 0/-1. */
+    int   (*spec_stats)(LlmEngineLlmSession s, LlmEngineLlmSpecStats* out);
 } LlmEngineLlmEngine;
 
 /* Versione dell'ABI esportata dal runner (== LLMENGINE_ABI_VERSION dell'header con cui e' stato

@@ -371,6 +371,14 @@ typedef struct LlmMlxSession {
     /* F20: acceptance CUMULATIVA per sessione (metrica di primo livello: draft proposti vs
      * accettati dal target). Esposta da llm_ai_mlx_session_spec_stats(). */
     long long spec_drafts, spec_accepted;
+    /* F22 (2026-10-30): accettazione PER POSIZIONE del draft — `accept_h{i}` = P(accetto il
+     * draft i | tutti i precedenti accettati). `spec_prop[i]` = quante volte la posizione i e'
+     * stata proposta, `spec_acc[i]` = quante volte e' stata accettata. Fino a 8 posizioni; oltre,
+     * si contano solo i totali (le posizioni oltre la 8ª non si distinguono). */
+    int spec_prop[8], spec_acc[8];
+    /* F22: round di verifica (una per chiamata speculativa): AL = spec_accepted/spec_rounds
+     * (token confermati per verifica, incluso il gratis). */
+    long long spec_rounds;
     /* RMLX10 Fase B (2026-09-03): decode-step compilato (mlx_compile). La
      * closure e' creata lazy al primo step compilato e VIVE per tutta la
      * sessione (la cache di compile di mlx core e' keyed per fun_id: riusare

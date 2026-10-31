@@ -1120,7 +1120,14 @@ int llm_ai_mlx_session_generate_ngram(llm_ai_mlx_session_handle handle, int max_
         if (okb) { for (int i = 1; i < nd; i++) { if (greedy[i - 1] == draft[i]) M++; else break; } }
         int32_t next = okb ? greedy[M - 1] : 0;
         /* F20: acceptance cumulativa (draft proposti vs accettati). */
-        s->spec_drafts += nd; s->spec_accepted += M;
+        s->spec_drafts += nd; s->spec_accepted += M; s->spec_rounds += 1;
+        /* F22 (2026-10-30): per posizione. `M` include il token gratis, quindi i draft
+         * accettati sono M-1 (il primo draft e' la posizione 0). */
+        { int nac = M - 1; if (nac < 0) nac = 0;
+          for (int pi = 0; pi < nd && pi < 8; ++pi) {
+              s->spec_prop[pi] += 1;
+              if (pi < nac) s->spec_acc[pi] += 1;
+          } }
         /* Feedback al controllore adattivo (Gufo): EWMA dell'acceptance + streak full-accept. */
         s->spec_acc_ewma = (s->spec_acc_ewma <= 0.0f) ? (float)M : 0.75f * s->spec_acc_ewma + 0.25f * (float)M;
         s->spec_full_streak = (okb && M == nd) ? s->spec_full_streak + 1 : 0;
@@ -1216,6 +1223,24 @@ void llm_mlx_session_spec_free(LlmMlxSession* s) {
 
 /* F20: acceptance CUMULATIVA della speculazione per la sessione (draft proposti vs accettati dal
  * target) — metrica di primo livello, non solo tok/s o errore numerico. `rate`=accepted/drafts. */
+/* ABI v7: round di verifica cumulativi (per AL). Wrapper C puro, nessuno stato condiviso. */
+long long llm_mlx_session_spec_rounds(void* session) {
+    LlmMlxSession* s = (LlmMlxSession*)session;
+    return (s != NULL) ? s->spec_rounds : 0;
+}
+
+int llm_ai_mlx_session_spec_stats_pos(llm_ai_mlx_session_handle handle,
+                                      int* prop, int* acc, int cap) {
+    if (handle == NULL || cap < 0) return -1;
+    LlmMlxSession* s = (LlmMlxSession*)handle;
+    int n = 8; if (cap < n) n = cap;
+    for (int i = 0; i < n; ++i) {
+        if (prop) prop[i] = s->spec_prop[i];
+        if (acc)  acc[i]  = s->spec_acc[i];
+    }
+    return n;
+}
+
 int llm_ai_mlx_session_spec_stats(llm_ai_mlx_session_handle handle,
                                   long long* out_drafts, long long* out_accepted, double* out_rate) {
     if (handle == NULL) return -1;

@@ -68,6 +68,19 @@ static Opt g_opts[] = {
     { "llama_offload_kqv",  "ramo llama.cpp: KQV sul device -1 default, 0/1",         T_INT,  -1, -1, 0, 0, 0, 0, {0}, NULL, 0, "1" },
     { "llama_check_tensors","ramo llama.cpp: valida i byte dei tensori al load (1/0)", T_INT,  0, 0, 0, 0, 0, 0, {0}, NULL, 0, "0" },
     { "llama_no_host",      "ramo llama.cpp: bypass host buffer (1/0, sperimentale)",  T_INT,  0, 0, 0, 0, 0, 0, {0}, NULL, 0, "0" },
+    /* ── PFlash (compressione lossy del prompt) nel REGISTRO — 2026-10-30. Prima si
+     * pilotava solo da env (LLM_PFLASH*), contro la regola di casa; le env restano come
+     * alias legacy, il registro vince. Default invariati (AUTO, soglia 32768). ─────── */
+    { "pflash",             "PFlash (prompt lossy): off|auto|always",                 T_STR,   0, 0, 0, 0, 0, 0, "auto", "auto", 0, "off" },
+    { "pflash_threshold",   "PFlash: sopra N token comprime (mode auto)",             T_INT,   32768, 32768, 0, 0, 0, 0, {0}, NULL, 0, "32768" },
+    { "pflash_keep_ratio",  "PFlash: frazione dei blocchi centrali tenuti",           T_FLOAT, 0, 0, 0.20, 0.20, 0, 0, {0}, NULL, 0, "0.2" },
+    { "pflash_min_keep",    "PFlash: token centrali minimi tenuti",                   T_INT,   2048, 2048, 0, 0, 0, 0, {0}, NULL, 0, "2048" },
+    { "pflash_sink",        "PFlash: token iniziali sempre tenuti",                   T_INT,   256, 256, 0, 0, 0, 0, {0}, NULL, 0, "256" },
+    { "pflash_tail",        "PFlash: token finali sempre tenuti (dove sta la query)",  T_INT,  2048, 2048, 0, 0, 0, 0, {0}, NULL, 0, "2048" },
+    { "pflash_block",       "PFlash: token per blocco di scoring",                    T_INT,   128, 128, 0, 0, 0, 0, {0}, NULL, 0, "128" },
+    { "pflash_query_window","PFlash: finestra query per lo scoring di rilevanza",     T_INT,   512, 512, 0, 0, 0, 0, {0}, NULL, 0, "512" },
+    { "pflash_stride",      "PFlash: blocchi di stride nel campionamento dei centrali", T_INT,  8, 8, 0, 0, 0, 0, {0}, NULL, 0, "8" },
+    { "pflash_tools",       "PFlash: comprime anche i prompt con tool (0 = fail-closed)", T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0, "1" },
     { "temp",             "temperatura di sampling",                                 T_FLOAT, 0, 0, 1.0, 1.0, 0, 0, {0}, NULL, 0, "0" },
     { "topp",             "top-p",                                                   T_FLOAT, 0, 0, 1.0, 1.0, 0, 0, {0}, NULL, 0, "0.95" },
     { "minp",             "min-p",                                                   T_FLOAT, 0, 0, 0.0, 0.0, 0, 0, {0}, NULL, 0, "0.05" },

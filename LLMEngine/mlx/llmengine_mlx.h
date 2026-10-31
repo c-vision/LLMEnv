@@ -412,6 +412,12 @@ int llm_ai_mlx_session_kv_stats(llm_ai_mlx_session_handle handle, int* out_used,
 /* F20: acceptance cumulativa della speculazione (draft proposti vs accettati + rate). */
 int llm_ai_mlx_session_spec_stats(llm_ai_mlx_session_handle handle,
                                   long long* out_drafts, long long* out_accepted, double* out_rate);
+/* F22: accettazione PER POSIZIONE (accept_h{i}). Scrive fino a `cap` coppie in `prop`/`acc`
+ * (NULL ammesso) e ritorna il numero di posizioni valide (<= 8), -1 su handle invalido.
+ * `AL` (acceptance length) = mean(m)+1 si ricava dai totali di `spec_stats`; qui c'e' il
+ * dettaglio che dice DOVE si perde (se crolla alla 2ª posizione, K=3 e' sprecato). */
+int llm_ai_mlx_session_spec_stats_pos(llm_ai_mlx_session_handle handle,
+                                      int* prop, int* acc, int cap);
 
 /* FASE 3: native tool dispatch -- decides exactly ONE token at the session's current
  * (already-pending, undecided) position via an argmax restricted to allowed_ids, instead of

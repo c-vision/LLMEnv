@@ -700,7 +700,13 @@ static int df2_dflash_verify(LlmMlxSession* s, int anchor, const int32_t* d, int
         accepted = 1;
         for (int j = 1; j < K; j++) { if (greedy[j] == d[j]) accepted++; else break; }
     }
-    if (s) { s->spec_drafts += K; s->spec_accepted += accepted; }   /* F20: acceptance cumulativa */
+    if (s) {   /* F20: acceptance cumulativa; F22: per posizione (accepted = draft accettati) */
+        s->spec_drafts += K; s->spec_accepted += accepted; s->spec_rounds += 1;
+        for (int pi = 0; pi < K && pi < 8; ++pi) {
+            s->spec_prop[pi] += 1;
+            if (pi < accepted) s->spec_acc[pi] += 1;
+        }
+    }
     if (ok && getenv("DF2_VDBG")) {
         static int vn = 0;
         if (vn < 100000) { vn++;
@@ -1256,7 +1262,14 @@ static int df2_dflash_verify_multi(DFlash2Runtime* rt, LlmMlxSession** sess, int
             for (int j = 1; j < K; j++) { if ((int32_t)g[j] == drafts[i][j]) accepted++; else break; }
         }
         out_accepted[i] = accepted;
-        { LlmMlxSession* _s = sess[i]; if (_s) { _s->spec_drafts += K; _s->spec_accepted += accepted; } }  /* F20 */
+        { LlmMlxSession* _s = sess[i];
+          if (_s) {   /* F20 + F22 (per posizione) */
+              _s->spec_drafts += K; _s->spec_accepted += accepted; _s->spec_rounds += 1;
+              for (int pi = 0; pi < K && pi < 8; ++pi) {
+                  _s->spec_prop[pi] += 1;
+                  if (pi < accepted) _s->spec_acc[pi] += 1;
+              }
+          } }
         out_next[i] = (int32_t)g[accepted];
         int keep = nprev[i] + 1 + accepted;
         if (accepted < K) {

@@ -116,49 +116,74 @@ static inline void llm_pflash_config_defaults(LlmPflashConfig* c) {
     c->skip_when_tools = 1;
 }
 
-static inline int llm_pflash_env_int(const char* name, int dflt) {
-    const char* v = getenv(name);
-    if (v == NULL || *v == '\0') return dflt;
-    return atoi(v);
+static inline int llm_pflash_opt_is_set(const char* name) {
+    return llm_ai_mlx_opt_is_set(name) == 1;
 }
 
-static inline double llm_pflash_env_double(const char* name, double dflt) {
-    const char* v = getenv(name);
-    if (v == NULL || *v == '\0') return dflt;
-    return atof(v);
+/* Precedenza: registro opzioni (nome nuovo) -> alias legacy via `opt_env` -> default.
+ * L'alias legacy esiste solo per non rompere chi ha script con LLM_PFLASH*: il registro
+ * vince sempre. Nessuna nuova env e' accettata (regola di casa). */
+static inline int llm_pflash_opt_int(const char* name, const char* legacy_env, int dflt) {
+    int v = 0;
+    if (llm_pflash_opt_is_set(name) && llm_ai_mlx_opt_get_int(name, &v) == 0) return v;
+    const char* e = (legacy_env != NULL) ? llm_ai_mlx_opt_env(legacy_env) : NULL;
+    if (e != NULL && *e != '\0') return atoi(e);
+    return dflt;
 }
 
-/* Legge la configurazione dall'ambiente. Ritorna 1 se PFlash e' ATTIVO
- * (mode != OFF), 0 altrimenti. Variabili:
- *   LLM_PFLASH=off|0 (kill-switch) | auto (DEFAULT se assente) | always|1|on
- *   LLM_PFLASH_THRESHOLD, LLM_PFLASH_KEEP_RATIO, LLM_PFLASH_MIN_KEEP_TOKENS,
- *   LLM_PFLASH_SINK_TOKENS, LLM_PFLASH_TAIL_TOKENS, LLM_PFLASH_BLOCK_SIZE,
- *   LLM_PFLASH_QUERY_WINDOW, LLM_PFLASH_STRIDE_BLOCKS,
- *   LLM_PFLASH_INCLUDE_TOOLS=1 (disattiva il fail-closed sui tool)
+static inline double llm_pflash_opt_double(const char* name, const char* legacy_env, double dflt) {
+    double v = 0.0;
+    if (llm_pflash_opt_is_set(name) && llm_ai_mlx_opt_get_float(name, &v) == 0) return v;
+    const char* e = (legacy_env != NULL) ? llm_ai_mlx_opt_env(legacy_env) : NULL;
+    if (e != NULL && *e != '\0') return atof(e);
+    return dflt;
+}
+
+static inline int llm_pflash_opt_bool(const char* name, const char* legacy_env, int dflt) {
+    int v = 0;
+    if (llm_pflash_opt_is_set(name) && llm_ai_mlx_opt_get_bool(name, &v) == 0) return v;
+    const char* e = (legacy_env != NULL) ? llm_ai_mlx_opt_env(legacy_env) : NULL;
+    if (e != NULL) return 1;
+    return dflt;
+}
+
+/* Legge la configurazione dal REGISTRO OPZIONI (con alias legacy LLM_PFLASH*). Ritorna 1 se
+ * PFlash e' ATTIVO (mode != OFF), 0 altrimenti. Voci curate:
+ *   pflash = off|auto|always        (default auto)
+ *   pflash_threshold (32768) · pflash_keep_ratio (0.20) · pflash_min_keep (2048)
+ *   pflash_sink (256) · pflash_tail (2048) · pflash_block (128)
+ *   pflash_query_window (512) · pflash_stride (8)
+ *   pflash_tools (0 = fail-closed sui prompt con tool, 1 = comprime anche quelli)
  * I valori fuori range vengono clampati ai default del profilo (mai un
  * comportamento silenzioso diverso da quello dichiarato: si stampa un avviso). */
 static inline int llm_pflash_config_from_env(LlmPflashConfig* c) {
     llm_pflash_config_defaults(c);
-    const char* m = llm_ai_mlx_opt_env("LLM_PFLASH");
-    /* Default PROMOSSO a AUTO il 2026-09-18: env ASSENTE => AUTO col profilo validato.
-     * Il kill-switch resta LLM_PFLASH=off|0 (unica via per disattivare del tutto). */
-    if (m == NULL || *m == '\0') { /* tiene il default AUTO */ }
-    else if (strcmp(m, "0") == 0 || strcmp(m, "off") == 0) return 0;
-    else if (strcmp(m, "auto") == 0) c->mode = LLM_PFLASH_MODE_AUTO;
-    else if (strcmp(m, "1") == 0 || strcmp(m, "on") == 0 || strcmp(m, "always") == 0)
-        c->mode = LLM_PFLASH_MODE_ALWAYS;
-    else {
-        fprintf(stderr, "[pflash] LLM_PFLASH='%s' non riconosciuto (off|auto|always) -> AUTO\n", m);
+    /* mode: nuovo nome `pflash`, poi alias legacy LLM_PFLASH. */
+    {
+        char m[16] = {0};
+        const char* mv = NULL;
+        if (llm_pflash_opt_is_set("pflash") && llm_ai_mlx_opt_get_str("pflash", m, (int)sizeof m) == 0)
+            mv = m;
+        else
+            mv = llm_ai_mlx_opt_env("LLM_PFLASH");
+        if (mv == NULL || *mv == '\0') { /* tiene il default AUTO */ }
+        else if (strcmp(mv, "0") == 0 || strcmp(mv, "off") == 0 || strcmp(mv, "no") == 0) return 0;
+        else if (strcmp(mv, "auto") == 0) c->mode = LLM_PFLASH_MODE_AUTO;
+        else if (strcmp(mv, "1") == 0 || strcmp(mv, "on") == 0 || strcmp(mv, "always") == 0)
+            c->mode = LLM_PFLASH_MODE_ALWAYS;
+        else {
+            fprintf(stderr, "[pflash] pflash='%s' non riconosciuto (off|auto|always) -> AUTO\n", mv);
+        }
     }
-    c->threshold = llm_pflash_env_int("LLM_PFLASH_THRESHOLD", c->threshold);
-    c->keep_ratio = llm_pflash_env_double("LLM_PFLASH_KEEP_RATIO", c->keep_ratio);
-    c->min_keep_tokens = llm_pflash_env_int("LLM_PFLASH_MIN_KEEP_TOKENS", c->min_keep_tokens);
-    c->sink_tokens = llm_pflash_env_int("LLM_PFLASH_SINK_TOKENS", c->sink_tokens);
-    c->tail_tokens = llm_pflash_env_int("LLM_PFLASH_TAIL_TOKENS", c->tail_tokens);
-    c->block_size = llm_pflash_env_int("LLM_PFLASH_BLOCK_SIZE", c->block_size);
-    c->query_window = llm_pflash_env_int("LLM_PFLASH_QUERY_WINDOW", c->query_window);
-    c->stride_blocks = llm_pflash_env_int("LLM_PFLASH_STRIDE_BLOCKS", c->stride_blocks);
-    if (llm_ai_mlx_opt_env("LLM_PFLASH_INCLUDE_TOOLS") != NULL) c->skip_when_tools = 0;
+    c->threshold      = llm_pflash_opt_int("pflash_threshold", "LLM_PFLASH_THRESHOLD", c->threshold);
+    c->keep_ratio     = llm_pflash_opt_double("pflash_keep_ratio", "LLM_PFLASH_KEEP_RATIO", c->keep_ratio);
+    c->min_keep_tokens= llm_pflash_opt_int("pflash_min_keep", "LLM_PFLASH_MIN_KEEP_TOKENS", c->min_keep_tokens);
+    c->sink_tokens    = llm_pflash_opt_int("pflash_sink", "LLM_PFLASH_SINK_TOKENS", c->sink_tokens);
+    c->tail_tokens    = llm_pflash_opt_int("pflash_tail", "LLM_PFLASH_TAIL_TOKENS", c->tail_tokens);
+    c->block_size     = llm_pflash_opt_int("pflash_block", "LLM_PFLASH_BLOCK_SIZE", c->block_size);
+    c->query_window   = llm_pflash_opt_int("pflash_query_window", "LLM_PFLASH_QUERY_WINDOW", c->query_window);
+    c->stride_blocks  = llm_pflash_opt_int("pflash_stride", "LLM_PFLASH_STRIDE_BLOCKS", c->stride_blocks);
+    if (llm_pflash_opt_bool("pflash_tools", "LLM_PFLASH_INCLUDE_TOOLS", 0)) c->skip_when_tools = 0;
     if (c->threshold < 0) c->threshold = 0;
     if (!(c->keep_ratio > 0.0 && c->keep_ratio <= 1.0)) c->keep_ratio = 0.20;
     if (c->min_keep_tokens < 0) c->min_keep_tokens = 0;

@@ -63,6 +63,27 @@ static int mlx_embed_ids(LlmEngineLlmModel m, const int32_t* ids, int n, float* 
 static void mlx_set_expert_swap(const char* dir) { llm_ai_mlx_set_moe_swap_dir(dir); }
 
 /* ABI v6 — MASKED: argmax ristretto a una bitmask sul vocabolario (grammatica). */
+/* ABI v7: statistiche di speculazione per la sessione (totals + AL + accept_h{i}). */
+static int mlx_spec_stats(LlmEngineLlmSession s, LlmEngineLlmSpecStats* out) {
+    if (s == NULL || out == NULL || out->size < (int32_t)sizeof(int32_t)) return -1;
+    long long drafts = 0, accepted = 0; double rate = 0.0;
+    if (llm_ai_mlx_session_spec_stats((llm_ai_mlx_session_handle)s, &drafts, &accepted, &rate) != 0) return -1;
+    int prop[8], acc[8];
+    int npos = llm_ai_mlx_session_spec_stats_pos((llm_ai_mlx_session_handle)s, prop, acc, 8);
+    if (npos < 0) npos = 0;
+    long long rounds = 0;
+    {   /* i round sono nel campo omologo della sessione: letti via la variante pos (stessa struct) */
+        extern long long llm_mlx_session_spec_rounds(void* session);   /* definita in llm_mlx_session_spec.c */
+        rounds = llm_mlx_session_spec_rounds(s);
+    }
+    out->drafts = drafts; out->accepted = accepted; out->rate = rate;
+    out->rounds = rounds;
+    out->al = (rounds > 0) ? (double)accepted / (double)rounds : 1.0;
+    out->npos = npos;
+    for (int i = 0; i < 8; ++i) { out->proposed[i] = (i < npos) ? prop[i] : 0; out->accepted_pos[i] = (i < npos) ? acc[i] : 0; }
+    return 0;
+}
+
 static int mlx_generate_id_masked(LlmEngineLlmSession s, const uint32_t* mask_words, int n_words, int32_t* out_token_id) {
     return llm_ai_mlx_session_generate_masked((llm_ai_mlx_session_handle)s, mask_words, n_words, out_token_id);
 }
@@ -145,6 +166,8 @@ static const LlmEngineLlmEngine LLM_MLX_ENGINE = {
     .set_expert_swap = mlx_set_expert_swap,
     /* ABI v6 (in coda): grammatica con bitmask. */
     .generate_id_masked = mlx_generate_id_masked,
+    /* ABI v7 (in coda): statistiche di speculazione per posizione. */
+    .spec_stats = mlx_spec_stats,
 };
 
 const LlmEngineLlmEngine* llmengine_llm_engine_mlx(void) { return &LLM_MLX_ENGINE; }
