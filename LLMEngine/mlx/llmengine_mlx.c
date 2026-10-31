@@ -1045,14 +1045,20 @@ static bool llm_mlx_oq_a8_active_for(int K) {
     if (!g_bf16_all) return false;
     if (llm_mlx_oq_a8_enabled()) return true;          /* LLMMETAL_OQ_A8=1 */
     if (!llm_mlx_oq_a8_auto_enabled()) return false;   /* LLMMETAL_OQ_A8=0 */
-    /* AUTO DISATTIVATO (2026-09-19 sera): l'indagine qualita' ha trovato un BUG REALE nel
-     * path W8A8 del prefill — il modello resta UN TOKEN INDIETRO (score su conteggio:
-     * argmax(i) == ref(i-1); MLX 24/24 vs W8A8 17/24 con prefill-only e 0/24 con decode
-     * incluso; riproducibile anche con prefill MONO-chunk e con lm_head escluso). Non e'
-     * precisione int8: e' disallineamento di stato. Finche' non e' risolto il default e'
-     * QUALITY-SAFE (MLX); W8A8 resta opt-in esplicito con LLMMETAL_OQ_A8=1 (per chi indaga).
-     * Storia: AUTO era ON dal 2026-09-18 (guadagni +44..+69% sul prefill) ma la qualita' non
-     * era mai stata validata su testo reale — vedi Knowledge/oQ-A8-...-M5-NAX.md §6quinquies.4bis. */
+    /* AUTO DISATTIVATO (2026-09-19), RIVERIFICATO IL 2026-10-31 — il sintomo «un token
+     * indietro» NON si riproduce piu' con il gate attuale (bf16 ON, min_tokens=128,
+     * MAXN=16384, prim in-graph). Protocollo e risultati in
+     * `Knowledge/MLX-A8-Fedele-Stato-2026-09-18.md` §«Riverifica 2026-10-31»:
+     *   - Qwen3-8B-4bit, prefill 485 / 1470 / ~9k token (multi-chunk), 40/64/96 token greedy
+     *     -> output IDENTICO a MLX (anche con MINTOK=1 e MAXN=0, cioe' lm_head in W8A8);
+     *   - Qwen3.6-27B-4bit (GDN, condivisione Stage-A su in_proj) -> IDENTICO;
+     *   - a 300 token gli output DIVERGONO nel testo, ma restano coerenti e sul tema: e' la
+     *     deriva numerica normale del W8A8 (max|diff| logits 3e-3..1,4e-1, media ~1e-3), non
+     *     uno shift di stato. Il vecchio «argmax(i) == ref(i-1)» non si osserva.
+     * Resta OPT-IN per una ragione di PRODOTTO, non di bug: l'A8 non e' bit-identico a MLX
+     * oltre ~100 token, quindi accenderlo cambia le risposte degli utenti (a parita' di prompt).
+     * `LLMMETAL_OQ_A8=1` lo forza, `=0` lo spegne; le metallib non sono versionate (vedi
+     * llm_mlx_oq_a8_ctx: avviso esplicito se l'A8 e' chiesto e non disponibile). */
     return false;
 }
 static bool llm_mlx_oq_a8_verify_enabled(void) {
@@ -1092,7 +1098,20 @@ LlmMetalOqA8Ctx* llm_mlx_oq_a8_ctx(void) {
         if (a == NULL) { snprintf(abuf, sizeof(abuf), "%s/oq_a8_quantize.metallib", d); a = abuf; }
     }
     g_oq_a8_ctx = llmmetal_oq_a8_create(q, a);
-    if (!g_oq_a8_ctx) g_oq_a8_failed = 1;
+    if (!g_oq_a8_ctx) {
+        g_oq_a8_failed = 1;
+        /* FAIL-LOUD (2026-10-31): l'A8 e' OPT-IN e le metallib NON sono versionate ne' costruite
+         * da CMake. Senza questo avviso `LLMMETAL_OQ_A8=1` ricade su MLX **in silenzio**: un A/B
+         * "A8 on/off" misura due volte lo stesso percorso (successo davvero il 2026-10-31:
+         * 3038 vs 3081 tok/s, nessuna differenza). L'avviso compare UNA volta e SOLO quando
+         * l'utente ha chiesto l'A8 (env o VERIFY): in AUTO l'assenza e' normale e non si stampa. */
+        if (llm_mlx_oq_a8_enabled() || llm_mlx_oq_a8_verify_enabled()) {
+            fprintf(stderr, "[oq_a8] ATTIVO RICHIESTO MA NON DISPONIBILE: metallib non caricate"
+                            " (qmm='%s' quant='%s'). Il prefill resta su MLX (nessun guadagno).\n"
+                            "        Costruiscile con: LLMMetal/oq_a8/build_metallibs.sh <mlx-src> <out>"
+                            "  e passa LLMMETAL_OQ_A8_QMM_LIB / LLMMETAL_OQ_A8_QUANT_LIB.\n", q, a);
+        }
+    }
     return g_oq_a8_ctx;
 }
 
