@@ -405,14 +405,54 @@ int llmdesc_abi_valid(const char* dir) {
     return 1;
 }
 
+/* Porta `in` a percorso ASSOLUTO e normalizzato **lessicalmente** (nessuna risoluzione di link
+ * simbolici: il link `opt` di Homebrew deve restare valido dopo un aggiornamento, mentre il
+ * percorso versionato a cui punta no). Un percorso relativo viene ancorato alla cwd: `llmdesc_abi_dir`
+ * restituisce un percorso che i consumer possono usare anche dopo un `chdir`.
+ * Collassa `//`, `/./` e `/../` senza toccare il filesystem. */
+static void abi_abs_norm(const char* in, char* out, size_t cap) {
+    char buf[PATH_MAX_ABI];
+    if (in == NULL || *in == '\0') { if (out && cap) out[0] = '\0'; return; }
+    if (in[0] == '/') {
+        snprintf(buf, sizeof buf, "%s", in);
+    } else {
+        char cwd[2048];
+        if (getcwd(cwd, sizeof cwd) == NULL) { if (out && cap) snprintf(out, cap, "%s", in); return; }
+        snprintf(buf, sizeof buf, "%s/%s", cwd, in);
+    }
+    char tmp[PATH_MAX_ABI]; size_t o = 0;
+    const char* p = buf;
+    while (*p != '\0') {
+        while (*p == '/') ++p;
+        const char* s = p;
+        while (*p != '\0' && *p != '/') ++p;
+        const size_t n = (size_t)(p - s);
+        if (n == 0) break;
+        if (n == 1 && s[0] == '.') continue;
+        if (n == 2 && s[0] == '.' && s[1] == '.') {
+            while (o > 0 && tmp[o - 1] != '/') --o;
+            if (o > 0) --o;
+            continue;
+        }
+        if (o + 1 + n >= sizeof tmp) break;   /* troncamento: meglio un percorso corto che overrun */
+        tmp[o++] = '/';
+        memcpy(tmp + o, s, n); o += n;
+    }
+    if (o == 0) tmp[o++] = '/';
+    tmp[o] = '\0';
+    if (out && cap) snprintf(out, cap, "%s", tmp);
+}
+
 static int abi_hit(const char* dir, char* out, size_t cap) {
     if (!llmdesc_abi_valid(dir)) return 0;
     if (out != NULL && cap > 0) {
-        /* i percorsi con ".." (es. <Projects>/GMBasic/../LLMEnv/ABI) si normalizzano; i link simbolici NO: il link `opt` di
-         * Homebrew resta valido dopo un aggiornamento, la cartella versionata a cui punta no. */
+        /* i percorsi con ".." (es. <Projects>/GMBasic/../LLMEnv/ABI) si risolvono anche contro il
+         * filesystem (l'unico modo per attraversare un link in mezzo); i link simbolici NON si
+         * risolvono: il link `opt` di Homebrew resta valido dopo un aggiornamento, la cartella
+         * versionata a cui punta no. Tutti gli altri si normalizzano solo lessicalmente. */
         char rp[PATH_MAX_ABI];
         if (strstr(dir, "/..") != NULL && realpath(dir, rp) != NULL) snprintf(out, cap, "%s", rp);
-        else snprintf(out, cap, "%s", dir);
+        else abi_abs_norm(dir, out, cap);
     }
     return 1;
 }
@@ -507,9 +547,10 @@ void llmdesc_set_abi_policy(int (*resolver)(char* out, size_t cap), int required
 }
 
 int llmdesc_abi_dir(char* out, size_t cap) {
-    /* (0) Override esplicito. */
+    /* (0) Override esplicito. Normalizzato come in `abi_hit`: un percorso relativo non deve
+     * diventare invalido dopo un `chdir` del consumer. */
     const char* env = getenv("LLMDESC_ABI_DIR");
-    if (env != NULL && *env != '\0') { if (out && cap) snprintf(out, cap, "%s", env); return 1; }
+    if (env != NULL && *env != '\0') { if (out && cap) abi_abs_norm(env, out, cap); return 1; }
     /* (1) Risolutore dell'applicazione (impostazioni salvate + localizzazione alla prima esecuzione). */
     if (g_abi_resolver != NULL) {
         char t[4096];
