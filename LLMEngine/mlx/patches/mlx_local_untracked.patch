@@ -1,0 +1,424 @@
+Modifiche in-place a mlx-src (MLX v0.32.0) NON tracciate in precedenza, registrate il 2026-10-31.
+Ordine di applicazione sul sorgente pristino v0.32.0 (patch -p1):
+  mlx_inplace_slice, mlx_metal41_nax, mlx_sdpa_hd512, poi QUESTA.
+NON applicare mlx_resource_count / mlx_disable_qmv_wide: sono malformate (non applicano) e il loro contenuto e' gia' qui
+(get_resource_count, set_qmv_wide), insieme a: split-K forzato a 32 (set_qmv_split_k), dump_retained, sonda MLX_DONATE_DBG
+in array.h, metallib non compilata con SDK 27 (kernels/CMakeLists.txt) e commenti di marcatura delle patch in-place.
+Verificato: pristino + queste patch == libs/mlx-deps/mlx-src (diff -r vuoto).
+
+diff -ru a/mlx/array.h b/mlx/array.h
+--- a/mlx/array.h	2026-10-31 16:37:14
++++ b/mlx/array.h	2026-10-01 05:18:16
+@@ -292,7 +292,17 @@
+ 
+   /** True indicates the arrays buffer is safe to reuse */
+   bool is_donatable() const {
+-    return array_desc_.use_count() == 1 && (array_desc_->data.use_count() == 1);
++    const bool d = array_desc_.use_count() == 1 && (array_desc_->data.use_count() == 1);
++    /* SONDA deterministica (A): log del fallback DONATION quando l'env e' attivo. Se una
++     * cattura (snap) tiene vivo un intermedio, il suo use_count sale e qui diventiamo non
++     * donatable -> la op ripiega su copia -> semantica diversa. Serve a pinpointare l'op. */
++    if (!d && std::getenv("MLX_DONATE_DBG") != nullptr) {
++      std::fprintf(stderr, "[donate] NOT id=%llu hasprim=%d desc_uc=%ld data_uc=%ld nin=%zu\n",
++                   (unsigned long long)this->id(), (int)has_primitive(),
++                   (long)array_desc_.use_count(), (long)array_desc_->data.use_count(),
++                   array_desc_->inputs.size());
++    }
++    return d;
+   }
+ 
+   /** The array's siblings. */
+diff -ru a/mlx/backend/metal/allocator.cpp b/mlx/backend/metal/allocator.cpp
+--- a/mlx/backend/metal/allocator.cpp	2026-10-31 16:37:14
++++ b/mlx/backend/metal/allocator.cpp	2026-10-28 15:06:58
+@@ -6,6 +6,12 @@
+ #include "mlx/memory.h"
+ 
+ #include <mach/vm_page_size.h>
++#include <execinfo.h>
++#include <cstdio>
++#include <cstring>
++#include <cstdlib>
++#include <algorithm>
++#include <vector>
+ #include <unistd.h>
+ #include <cassert>
+ #include <cstdlib>
+@@ -49,12 +55,14 @@
+           vm_page_size,
+           [](MTL::Buffer* buf) { return buf->length(); },
+           [this](MTL::Buffer* buf) {
++            if (trace_on_) alloc_trace_.erase(static_cast<void*>(buf));
+             if (!buf->heap()) {
+               residency_set_.erase(buf);
+             }
+             auto pool = metal::new_scoped_memory_pool();
+             buf->release();
+           }) {
++  { const char* e = getenv("MLX_BUF_TRACE"); trace_on_ = (e != nullptr && *e != '0'); }
+   const auto& info = gpu::device_info(0);
+   auto memsize = std::get<size_t>(info.at("memory_size"));
+   auto max_rec_size =
+@@ -158,6 +166,14 @@
+     }
+     lk.lock();
+     num_resources_++;
++    if (trace_on_) {
++      void* bt[20]; int nbt = backtrace(bt, 20);
++      char** syms = backtrace_symbols(bt, nbt);
++      std::string s;
++      for (int i = 0; i < nbt; i++) { s += (syms ? syms[i] : "?"); s += "\n"; }
++      if (syms) ::free(syms);
++      alloc_trace_[static_cast<void*>(buf)] = s;
++    }
+     if (!buf->heap()) {
+       residency_set_.insert(buf);
+     }
+@@ -180,6 +196,19 @@
+   num_resources_ -= buffer_cache_.clear();
+ }
+ 
++void MetalAllocator::dump_retained() {
++  std::unique_lock lk(mutex_);
++  { auto pool = metal::new_scoped_memory_pool(); buffer_cache_.clear(); }
++  std::unordered_map<std::string, size_t> hist;
++  for (auto& kv : alloc_trace_) hist[kv.second]++;
++  std::vector<std::pair<size_t,std::string>> v;
++  for (auto& kv : hist) v.push_back({kv.second, kv.first});
++  std::sort(v.begin(), v.end(), [](const auto&a, const auto&b){return a.first>b.first;});
++  fprintf(stderr, "[BUFTRACE] retained=%zu distinct_sites=%zu\n", alloc_trace_.size(), hist.size());
++  for (size_t i=0; i<v.size() && i<10; i++)
++    fprintf(stderr, "[BUFTRACE] #%zu count=%zu\n%s\n", i, v[i].first, v[i].second.c_str());
++}
++
+ void MetalAllocator::free(Buffer buffer) {
+   auto buf = static_cast<MTL::Buffer*>(buffer.ptr());
+   if (buf == nullptr) {
+@@ -271,6 +300,12 @@
+ }
+ size_t get_cache_memory() {
+   return metal::allocator().get_cache_memory();
++}
++size_t get_resource_count() {
++  return metal::allocator().get_resource_count();
++}
++void dump_retained() {
++  metal::allocator().dump_retained();
+ }
+ void clear_cache() {
+   return metal::allocator().clear_cache();
+diff -ru a/mlx/backend/metal/allocator.h b/mlx/backend/metal/allocator.h
+--- a/mlx/backend/metal/allocator.h	2026-10-31 16:37:14
++++ b/mlx/backend/metal/allocator.h	2026-10-28 15:06:58
+@@ -5,6 +5,8 @@
+ #include <map>
+ #include <mutex>
+ #include <vector>
++#include <string>
++#include <unordered_map>
+ 
+ #include "mlx/allocator.h"
+ #include "mlx/backend/common/buffer_cache.h"
+@@ -36,6 +38,9 @@
+   size_t get_cache_memory() {
+     return buffer_cache_.cache_size();
+   };
++  size_t get_resource_count() {
++    return num_resources_;
++  };
+   size_t set_cache_limit(size_t limit);
+   size_t set_memory_limit(size_t limit);
+   size_t get_memory_limit();
+@@ -71,6 +76,11 @@
+   size_t wired_limit_{0};
+   size_t num_resources_{0};
+   size_t resource_limit_{0};
++  // L25 trace (diagnostica): buffer -> backtrace, attivo se MLX_BUF_TRACE
++  bool trace_on_{false};
++  std::unordered_map<void*, std::string> alloc_trace_;
++ public:
++  void dump_retained();
+ 
+   std::mutex mutex_;
+ };
+diff -ru a/mlx/backend/metal/eval.cpp b/mlx/backend/metal/eval.cpp
+--- a/mlx/backend/metal/eval.cpp	2026-10-31 16:37:14
++++ b/mlx/backend/metal/eval.cpp	2026-10-17 16:33:23
+@@ -8,6 +8,74 @@
+ #include "mlx/scheduler.h"
+ #include "mlx/utils.h"
+ 
++/* ── GMBasic patch (diagnostica GPU per-primitiva) ─────────────────────────────
++ * Con GMB_MLX_PEROP=1 ogni primitiva viene chiusa in un PROPRIO command buffer e
++ * cronometrata con GPUEndTime-GPUStartTime; a fine processo si stampa la classifica
++ * per tempo GPU. Serve a trovare quale kernel Metal consuma (niente Xcode/attach).
++ * Default OFF: zero overhead. */
++#include <algorithm>
++#include <cstdio>
++#include <cstdlib>
++#include <map>
++#include <mutex>
++#include <string>
++#include <vector>
++
++namespace {
++struct GmbPerOp {
++    std::map<std::string, double> ms;
++    std::map<std::string, long> n;
++    std::mutex mu;
++};
++GmbPerOp& gmb_perop() { static GmbPerOp s; return s; }
++long gmb_perop_count = 0;
++const char* gmb_dtname(const mlx::core::Dtype& d) {
++    if (d == mlx::core::float16) return "f16";
++    if (d == mlx::core::bfloat16) return "bf16";
++    if (d == mlx::core::float32) return "f32";
++    return "?";
++}
++bool gmb_perop_on() {
++    static int v = -1;
++    if (v < 0) v = (getenv("GMB_MLX_PEROP") != nullptr) ? 1 : 0;
++    return v == 1;
++}
++int gmb_perop_mode() {
++    static int v = -2;
++    if (v == -2) {
++        const char* e = getenv("GMB_MLX_PEROP");
++        v = e ? atoi(e) : 0;
++    }
++    return v;
++}
++void gmb_perop_dump() {
++    GmbPerOp& s = gmb_perop();
++    std::vector<std::pair<std::string, double>> v(s.ms.begin(), s.ms.end());
++    std::sort(v.begin(), v.end(),
++              [](const auto& a, const auto& b) { return a.second > b.second; });
++    double tot = 0;
++    for (auto& p : v) tot += p.second;
++    fprintf(stderr, "[GMB_MLX_PEROP] n_prim=%ld distinct=%zu total_gpu=%.2f ms\n",
++            gmb_perop_count, v.size(), tot);
++    for (auto& p : v)
++        if (p.second > 0.01)
++            fprintf(stderr, "  %-44s %8.3f ms  n=%ld\n", p.first.c_str(), p.second,
++                    s.n[p.first]);
++}
++void gmb_perop_maybe_dump() {
++    if (!gmb_perop_on()) return; /* silenzioso di default: il dump esce solo con GMB_MLX_PEROP */
++    if (++gmb_perop_count % 1000 == 0) gmb_perop_dump();
++}
++struct GmbPerOpAtExit {
++    GmbPerOpAtExit() { if (gmb_perop_on()) atexit(gmb_perop_dump); }
++};
++GmbPerOpAtExit gmb_perop_atexit;
++} // namespace
++
++/* Esportate per gli harness: azzera/stampa subito la classifica per-primitiva (GMB_MLX_PEROP=1). */
++extern "C" __attribute__((visibility("default"))) void gmb_perop_reset() { GmbPerOp& s = gmb_perop(); std::lock_guard<std::mutex> lk(s.mu); s.ms.clear(); s.n.clear(); gmb_perop_count = 0; }
++extern "C" __attribute__((visibility("default"))) void gmb_perop_dump_now() { gmb_perop_dump(); }
++
+ namespace mlx::core::gpu {
+ 
+ void init() {}
+@@ -56,12 +124,64 @@
+     buffers.erase(it);
+   }
+ 
+-  if (encoder.needs_commit()) {
++  if (gmb_perop_mode() == 1) {
++    /* GMBasic: una primitiva = un command buffer, cronometrato. Nome + shape + dtype. */
++    std::string pname = arr.primitive().name();
++    {
++      auto o = arr.outputs();
++      if (!o.empty()) {
++        pname += " ";
++        pname += gmb_dtname(o[0].dtype());
++        pname += " in=";
++        auto in = arr.inputs();
++        for (size_t k = 0; k < in.size() && k < 3; k++)
++          pname += in[k].flags().row_contiguous ? "C" : "N";
++        pname += " [";
++        for (int i = 0; i < o[0].ndim(); i++) {
++          if (i) pname += ",";
++          pname += std::to_string(o[0].shape(i));
++        }
++        pname += "]";
++      }
++    }
++    MTL::CommandBuffer* cb = command_buffer;
+     encoder.end_encoding();
+     scheduler::notify_new_task(s);
+-    encoder.commit([s, buffers = std::move(buffers)]() {
++    encoder.commit([s, cb, pname, buffers = std::move(buffers)]() {
++      double dt = (cb->GPUEndTime() - cb->GPUStartTime()) * 1e3;
++      GmbPerOp& st = gmb_perop();
++      {
++        std::lock_guard<std::mutex> lk(st.mu);
++        st.ms[pname] += dt;
++        st.n[pname] += 1;
++      }
++      gmb_perop_maybe_dump();
+       scheduler::notify_task_completion(s);
+     });
++  } else if (encoder.needs_commit()) {
++    MTL::CommandBuffer* cb = command_buffer;
++    encoder.end_encoding();
++    scheduler::notify_new_task(s);
++    if (gmb_perop_mode() == 2) {
++      encoder.commit([s, cb, buffers = std::move(buffers)]() {
++        std::string lbl = "?";
++        if (auto l = cb->label(); l) lbl = l->utf8String();
++        if (lbl.size() > 60) lbl = lbl.substr(0, 60);
++        double dt = (cb->GPUEndTime() - cb->GPUStartTime()) * 1e3;
++        GmbPerOp& st = gmb_perop();
++        {
++          std::lock_guard<std::mutex> lk(st.mu);
++          st.ms[lbl] += dt;
++          st.n[lbl] += 1;
++        }
++        gmb_perop_maybe_dump();
++        scheduler::notify_task_completion(s);
++      });
++    } else {
++      encoder.commit([s, buffers = std::move(buffers)]() {
++        scheduler::notify_task_completion(s);
++      });
++    }
+   } else {
+     command_buffer->addCompletedHandler(
+         [buffers = std::move(buffers)](MTL::CommandBuffer* cbuf) {});
+@@ -73,7 +193,19 @@
+   auto& encoder = metal::get_command_encoder(s);
+   auto* cb = encoder.get_command_buffer();
+   encoder.end_encoding();
+-  encoder.commit();
++  if (gmb_perop_mode() == 2) {
++    encoder.commit([cb]() {
++      std::string lbl = "?";
++      if (auto l = cb->label(); l) lbl = l->utf8String();
++      if (lbl.size() > 60) lbl = lbl.substr(0, 60);
++      double dt = (cb->GPUEndTime() - cb->GPUStartTime()) * 1e3;
++      GmbPerOp& st = gmb_perop();
++      { std::lock_guard<std::mutex> lk(st.mu); st.ms[lbl] += dt; st.n[lbl] += 1; }
++    });
++    gmb_perop_dump();  /* cumulativo: l'ultima riga e' il totale */
++  } else {
++    encoder.commit();
++  }
+ }
+ 
+ void synchronize(Stream s) {
+diff -ru a/mlx/backend/metal/indexing.cpp b/mlx/backend/metal/indexing.cpp
+--- a/mlx/backend/metal/indexing.cpp	2026-10-31 16:37:15
++++ b/mlx/backend/metal/indexing.cpp	2026-10-03 04:16:17
+@@ -743,7 +743,7 @@
+     return;
+   }
+ 
+-  /* PROTOTIPO (gated MLX_INPLACE_SLICE): append IN-PLACE, senza la copia O(cap) di
++  /* PROTOTIPO GMBASIC (gated MLX_INPLACE_SLICE): append IN-PLACE, senza la copia O(cap) di
+    * `in`->`out`. `out` ALIASA il buffer di `in` e si scrive solo la regione `upd`, ordinato nello
+    * stream (nessun round-trip host). Serve per l'append KV O(n). Default OFF: comportamento
+    * invariato (copia) se l'env e' assente. */
+diff -ru a/mlx/backend/metal/kernels/CMakeLists.txt b/mlx/backend/metal/kernels/CMakeLists.txt
+--- a/mlx/backend/metal/kernels/CMakeLists.txt	2026-10-31 16:37:15
++++ b/mlx/backend/metal/kernels/CMakeLists.txt	2026-09-28 17:32:47
+@@ -194,7 +194,7 @@
+ 
+ add_custom_target(mlx-metallib DEPENDS ${MLX_METAL_PATH}/mlx.metallib)
+ 
+-add_dependencies(mlx mlx-metallib)
++# GMBASIC: metallib non compilabile con SDK 27 (nax.h); caricato a runtime. add_dependencies(mlx mlx-metallib)
+ 
+ # Install metallib
+ include(GNUInstallDirs)
+diff -ru a/mlx/backend/metal/quantized.cpp b/mlx/backend/metal/quantized.cpp
+--- a/mlx/backend/metal/quantized.cpp	2026-10-31 16:37:14
++++ b/mlx/backend/metal/quantized.cpp	2026-10-16 15:29:50
+@@ -11,6 +11,7 @@
+ #include "mlx/fast_primitives.h"
+ #include "mlx/primitives.h"
+ #include "mlx/utils.h"
++#include <cstdlib>
+ 
+ namespace mlx::core {
+ 
+@@ -296,7 +297,19 @@
+ }
+ 
+ // affine qmv_wide only beats qmv on gen-15+; fp benefits on every gen.
++// GMBasic patch (2026-10-03, patches/mlx_disable_qmv_wide.patch): il kernel qmv_wide (M>=2) NON e'
++// bit-identico al qmv (M==1) -> sul batch rompe la bit-parity di gpt-oss. Controllo via API (NO env):
++// mlx::core::set_qmv_wide(v) con v = -1 (default: auto per-arch), 0 (off), 1 (on). L'engine lo imposta
++// dal registro opzioni. Default -1 = comportamento stock (gen-15+ -> wide).
++int g_qmv_wide_opt = -1;
++int g_qmv_split_k = 0;   /* 0 = auto; >0 = split-K forzato (A/B via API) */
++void set_qmv_split_k(int v) { g_qmv_split_k = v; }
++void set_qmv_wide(int v) { g_qmv_wide_opt = v; }
++int get_qmv_wide() { return g_qmv_wide_opt; }
+ inline bool use_qmv_wide(const std::string& mode, metal::Device& d) {
++  const int o = g_qmv_wide_opt;
++  if (o == 0) return false;
++  if (o == 1) return mode != "affine" || d.get_architecture_gen() >= 15;
+   return mode != "affine" || d.get_architecture_gen() >= 15;
+ }
+ 
+@@ -401,7 +414,9 @@
+     const std::string& mode) {
+   auto& compute_encoder = metal::get_command_encoder(s);
+ 
+-  int split_k = K > 8192 ? 32 : 8;
++  /* Promosso 2026-10-03: split_k=32 anche a K piccolo (oracolo: +34% GB/s a N=5120 M=1; il 8 era
++   * sub-ottimale a N piccolo). Override via mlx_set_qmv_split_k. */
++  int split_k = mlx::core::g_qmv_split_k > 0 ? mlx::core::g_qmv_split_k : 32;
+   int split_D = (K + split_k - 1) / split_k;
+   int B = out.size() / M / N;
+   B *= split_k;
+diff -ru a/mlx/memory.h b/mlx/memory.h
+--- a/mlx/memory.h	2026-10-31 16:37:14
++++ b/mlx/memory.h	2026-10-16 15:30:35
+@@ -33,6 +33,9 @@
+  * */
+ MLX_API size_t get_cache_memory();
+ 
++/* Number of live GPU resource buffers (Metal num_resources_). Diagnostic only. */
++MLX_API size_t get_resource_count();
++
+ /* Set the memory limit.
+  * The memory limit is a guideline for the maximum amount of memory to use
+  * during graph evaluation. If the memory limit is exceeded and there is no
+@@ -76,5 +79,11 @@
+  * Returns the previous wired limit.
+  * */
+ MLX_API size_t set_wired_limit(size_t limit);
++
++/* GMBasic: diagnostica buffer trattenuti. */
++MLX_API void dump_retained();
++/* GMBasic: forza il kernel qmv_wide (M>=2): -1 default(arch), 0 off, 1 on. No env. */
++MLX_API void set_qmv_wide(int v);
++MLX_API void set_qmv_split_k(int v);
+ 
+ } // namespace mlx::core
+diff -ru a/mlx/ops.cpp b/mlx/ops.cpp
+--- a/mlx/ops.cpp	2026-10-31 16:37:15
++++ b/mlx/ops.cpp	2026-10-03 04:16:36
+@@ -901,7 +901,7 @@
+       {src, upd});
+ }
+ 
+-/* (2026-10-03): variante IN-PLACE — scrive `update` nella regione `[start,stop)` del
++/* GMBASIC (2026-10-03): variante IN-PLACE — scrive `update` nella regione `[start,stop)` del
+  * buffer di `src` SENZA copiare `src` (O(n) invece di O(cap)). Muta il buffer di `src` in-stream.
+  * Usata SOLO per l'append KV (il chiamante ri-assegna il risultato allo stesso slot). */
+ array slice_update_inplace(
+diff -ru a/mlx/ops.h b/mlx/ops.h
+--- a/mlx/ops.h	2026-10-31 16:37:15
++++ b/mlx/ops.h	2026-10-03 04:16:46
+@@ -222,7 +222,7 @@
+     Shape strides,
+     StreamOrDevice s = {});
+ 
+-/** update a slice IN-PLACE (no O(cap) copy of src; writes only the region). */
++/** GMBASIC: update a slice IN-PLACE (no O(cap) copy of src; writes only the region). */
+ MLX_API array slice_update_inplace(
+     const array& src,
+     const array& update,

@@ -1,0 +1,135 @@
+Modifiche in-place a mlx-c-src (mlx-c v0.6.0) NON tracciate in precedenza, registrate il 2026-10-31.
+Ordine (patch -p1 sul pristino v0.6.0): mlx_c_mlx032, mlx_c_inplace_slice_update, poi QUESTA.
+NON applicare mlx_c_resource_count (malformata) ne' mlx_c_inplace_slice (non applica sul tree attuale): il loro contenuto
+e' coperto da questa (mlx_get_resource_count, mlx_set_qmv_wide, mlx_set_qmv_split_k, mlx_dump_retained) o dalle precedenti.
+Verificato: pristino + queste patch == libs/mlx-deps/mlx-c-src (diff -r vuoto, escluso ops.h.orig).
+
+diff -ru -x *.orig -x *.rej a2/mlx/c/array.cpp b2/mlx/c/array.cpp
+--- a/mlx/c/array.cpp	2026-10-31 16:37:15
++++ b/mlx/c/array.cpp	2026-10-01 07:33:13
+@@ -349,6 +349,14 @@
+   try {
+     mlx_array_get_(arr).eval();
+   } catch (std::exception& e) {
++    if (getenv("MLX_EVAL_DBG")) {
++      auto& a = mlx_array_get_(arr);
++      fprintf(stderr, "[mlx-eval-dbg] eval FAIL shape=(");
++      const auto& sh = a.shape();
++      for (size_t i = 0; i < sh.size(); i++) fprintf(stderr, "%s%d", i ? "," : "", (int)sh[i]);
++      fprintf(stderr, ") ndim=%zu size=%lld dtype=%d | %s\n", sh.size(), (long long)a.size(),
++              (int)a.dtype().val(), e.what());
++    }
+     mlx_error(e.what());
+     return 1;
+   }
+diff -ru -x *.orig -x *.rej a2/mlx/c/fast.cpp b2/mlx/c/fast.cpp
+--- a/mlx/c/fast.cpp	2026-10-31 16:37:15
++++ b/mlx/c/fast.cpp	2026-10-17 18:16:35
+@@ -270,6 +270,7 @@
+             eps,
+             mlx_stream_get_(s)));
+   } catch (std::exception& e) {
++    fprintf(stderr, "[mlx-sdpa-exc] %s\n", e.what());
+     mlx_error(e.what());
+     return 1;
+   }
+diff -ru -x *.orig -x *.rej a2/mlx/c/memory.cpp b2/mlx/c/memory.cpp
+--- a/mlx/c/memory.cpp	2026-10-31 16:37:15
++++ b/mlx/c/memory.cpp	2026-10-16 15:29:50
+@@ -35,6 +35,27 @@
+   }
+   return 0;
+ }
++extern "C" int mlx_set_qmv_split_k(int v) {
++  try { mlx::core::set_qmv_split_k(v); } catch (std::exception& e) { mlx_error(e.what()); return 1; }
++  return 0;
++}
++extern "C" int mlx_set_qmv_wide(int v) {
++  try { mlx::core::set_qmv_wide(v); } catch (std::exception& e) { mlx_error(e.what()); return 1; }
++  return 0;
++}
++extern "C" int mlx_dump_retained(void) {
++  try { mlx::core::dump_retained(); } catch (std::exception& e) { mlx_error(e.what()); return 1; }
++  return 0;
++}
++extern "C" int mlx_get_resource_count(size_t* res) {
++  try {
++    *res = mlx::core::get_resource_count();
++  } catch (std::exception& e) {
++    mlx_error(e.what());
++    return 1;
++  }
++  return 0;
++}
+ extern "C" int mlx_get_memory_limit(size_t* res) {
+   try {
+     *res = mlx::core::get_memory_limit();
+diff -ru -x *.orig -x *.rej a2/mlx/c/memory.h b2/mlx/c/memory.h
+--- a/mlx/c/memory.h	2026-10-31 16:37:15
++++ b/mlx/c/memory.h	2026-10-16 15:30:35
+@@ -31,6 +31,10 @@
+ int mlx_clear_cache(void);
+ int mlx_get_active_memory(size_t* res);
+ int mlx_get_cache_memory(size_t* res);
++int mlx_get_resource_count(size_t* res);
++int mlx_dump_retained(void);
++int mlx_set_qmv_wide(int v);
++int mlx_set_qmv_split_k(int v);
+ int mlx_get_memory_limit(size_t* res);
+ int mlx_get_peak_memory(size_t* res);
+ int mlx_reset_peak_memory(void);
+diff -ru -x *.orig -x *.rej a2/mlx/c/ops.cpp b2/mlx/c/ops.cpp
+--- a/mlx/c/ops.cpp	2026-10-31 16:37:15
++++ b/mlx/c/ops.cpp	2026-10-07 16:40:04
+@@ -3237,14 +3237,37 @@
+   }
+   try {
+     auto& a = mlx_array_get_(*arr);
+-    auto res = mlx::core::slice_update(
++    if (getenv("LLM_SLICEUP_DBG")) fprintf(stderr,"[SU] donatable=%d shape0=%d\n", (int)a.is_donatable(), a.ndim()?a.shape(0):-1);
++    if (getenv("LLM_SLICEUP_DYN")) {
++      std::vector<int> st(start, start + start_num);
++      std::vector<int> ax(st.size());
++      for (size_t i = 0; i < st.size(); i++) ax[i] = (int)i;
++      auto sa = mlx::core::array(st.data(), {static_cast<int>(st.size())}, mlx::core::int32);
++      auto res = mlx::core::slice_update(a, mlx_array_get_(update), sa, ax, mlx_stream_get_(s));
++      a.overwrite_descriptor(res);
++    } else if (getenv("LLM_SLICEUP_COPY")) {
++      /* A/B parity: vecchio comportamento (copia O(cap) via slice_update funzionale). */
++      auto res = mlx::core::slice_update(
++        a, mlx_array_get_(update),
++        mlx::core::Shape(start, start + start_num),
++        mlx::core::Shape(stop, stop + stop_num),
++        mlx::core::Shape(strides, strides + strides_num),
++        mlx_stream_get_(s));
++      a.overwrite_descriptor(res);
++    } else {
++      /* GMBASIC 2026-10-03: vera scrittura IN-PLACE (O(n)) invece della copia O(cap) del
++       * `slice_update` funzionale. `slice_update_inplace` (op MLX) ALIASA il buffer di `a` e
++       * scrive solo la regione [start,stop) in-stream. `a` riprende il descrittore del
++       * risultato (dipendenza grafo preservata). */
++      auto res = mlx::core::slice_update_inplace(
+         a,
+         mlx_array_get_(update),
+         mlx::core::Shape(start, start + start_num),
+         mlx::core::Shape(stop, stop + stop_num),
+         mlx::core::Shape(strides, strides + strides_num),
+         mlx_stream_get_(s));
+-    a.overwrite_descriptor(res);
++      a.overwrite_descriptor(res);
++    }
+   } catch (std::exception& e) {
+     mlx_error(e.what());
+     return 1;
+diff -ru -x *.orig -x *.rej a2/mlx/c/ops.h b2/mlx/c/ops.h
+--- a/mlx/c/ops.h	2026-10-31 16:37:15
++++ b/mlx/c/ops.h	2026-09-28 01:57:28
+@@ -1004,7 +1004,7 @@
+     const int* axes,
+     size_t axes_num,
+     const mlx_stream s);
+-/* LLMEnv (2026-09-13): slice-update IN-PLACE. Replica `arr[..., a:b, ...] = update`
++/* GMBasic (2026-09-13): slice-update IN-PLACE. Replica `arr[..., a:b, ...] = update`
+  * di mlx_lm (python/src/indexing.cpp mlx_set_item):
+  * overwrite_descriptor(slice_update(arr, ...)). L'handle resta lo stesso ma il descrittore
+  * punta al risultato; la base e' referenziata solo dalla SliceUpdate -> append O(1),
