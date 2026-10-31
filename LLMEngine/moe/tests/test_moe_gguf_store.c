@@ -222,6 +222,31 @@ int main(void) {
         CHECK(st.bytes_read > 0);          /* lo store SWAP ha letto via pread */
         CHECK(llmengine_moe_cache_mb(rt) == 1);
         llmengine_moe_destroy(rt);
+
+        /* ── prefetch ASINCRONO end-to-end (2026-10-31): con async_workers>0 e prefetch_topn>0 il
+         * `notify_routing` deve ACCODARE i predetti sulla coda PREFETCH del pool (prima era una
+         * chiamata in linea). Serve piu' di un forward: la predizione per il layer 1 esiste solo
+         * dopo aver osservato il routing del layer 1. Controlliamo il CONTATORE di enqueue. ── */
+        LlmEngineMoeRuntime* rt2 = llmengine_moe_create();
+        CHECK(rt2 != NULL);
+        if (rt2 != NULL) {
+            LlmEngineMoeModelAdapter ad2 = llmengine_moe_gguf_adapter();
+            CHECK(llmengine_moe_register_adapter(rt2, &ad2) == LLMENGINE_MOE_OK);
+            LlmEngineMoeRuntimeConfig c2; memset(&c2, 0, sizeof(c2));
+            c2.mode = LLMENGINE_MOE_MODE_SWAP; c2.device = LLMENGINE_MOE_DEVICE_CPU; c2.cache_mb = 1;
+            c2.async_workers = 2; c2.prefetch_cap = 16; c2.prefetch_topn = 2;
+            CHECK(llmengine_moe_load_model_ex(rt2, gp, &c2) == LLMENGINE_MOE_OK);
+            float i2[1] = { 0 }, o2[4] = { 0 };
+            for (int it = 0; it < 4; ++it)
+                CHECK(llmengine_moe_forward(rt2, i2, 1, o2) == LLMENGINE_MOE_OK);
+            LlmEngineMoeAsyncStats as; memset(&as, 0, sizeof(as));
+            CHECK(llmengine_moe_prefetch_async_stats(rt2, &as) == LLMENGINE_MOE_OK);
+            CHECK(as.prefetch > 0);          /* notify_routing ha ACCODATO (non chiamato in linea) */
+            for (int w = 0; w < 200 && as.completed < as.prefetch; ++w) { usleep(5000); }
+            llmengine_moe_prefetch_async_stats(rt2, &as);
+            CHECK(as.completed > 0);         /* il worker le ha eseguite */
+            llmengine_moe_destroy(rt2);
+        }
     }
 
     /* ── D19: policy hotness sul cache REALE (oracolo deterministico LRU vs freq) ──
