@@ -309,6 +309,27 @@ static int llmdesc_load_pref(const char* path, LlmDesc* out, int need_roles) {
     return 1;
 }
 static int g_abi_required;   /* politica ABI (definita sotto, con llmdesc_set_abi_policy) */
+/* Alias di FAMIGLIA (2026-10-31): model_type che descrivono la stessa architettura di un descrittore
+ * gia' presente, con gli STESSI nomi di tensore. Serve a non duplicare il file (due copie divergono,
+ * vedi README di ABI/). L'alias cambia solo il file da caricare: `out->arch` resta il model_type del
+ * modello, cosi' il consumer vede l'identita' corretta.
+ *   granitemoehybrid -> granite_moe_hybrid   (stesso repo IBM, nome senza underscore)
+ *   llama3           -> llama                (nomenclatura dei tensori identica)
+ *   glm4_moe_lite    -> glm4_moe             (variante "lite": stessi nomi di layer; da confermare col checkpoint)
+ *   kimi_k2          -> deepseek_v3          (K2 usa l'architettura DeepSeek-V3: MLA + MoE; da confermare col checkpoint)
+ * Se un giorno una di queste famiglie diverge davvero, si crea il file dedicato e si toglie la riga. */
+static const char* arch_alias(const char* slug) {
+    static const struct { const char* from; const char* to; } k[] = {
+        { "granitemoehybrid", "granite_moe_hybrid" },
+        { "llama3",           "llama" },
+        { "glm4_moe_lite",    "glm4_moe" },
+        { "kimi_k2",          "deepseek_v3" },
+    };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; ++i)
+        if (strcmp(slug, k[i].from) == 0) return k[i].to;
+    return NULL;
+}
+
 static int llmdesc_resolve_core(const char* hf_dir, LlmDesc* out, char* out_path, size_t out_path_cap);
 /* Wrapper: risolve + garantisce la `geometry` (dal `.gmbarch` o derivata da config.json). GMAD eliminato. */
 int llmdesc_resolve(const char* hf_dir, LlmDesc* out, char* out_path, size_t out_path_cap) {
@@ -338,6 +359,19 @@ static int llmdesc_resolve_core(const char* hf_dir, LlmDesc* out, char* out_path
         for (int x = 0; x < 2; ++x) {
             char path[4096]; snprintf(path, sizeof path, "%s/%s.%s", abi, slug, exts[x]);
             if (llmdesc_load_pref(path, out, 0)) { if (out_path) snprintf(out_path, out_path_cap, "%s", path); return 0; }
+        }
+        /* Famiglia con descrittore sotto un altro nome (vedi arch_alias): si carica quello e si
+         * ripristina `arch` col model_type del modello. */
+        const char* al = arch_alias(slug);
+        if (al != NULL) {
+            for (int x = 0; x < 2; ++x) {
+                char path[4096]; snprintf(path, sizeof path, "%s/%s.%s", abi, al, exts[x]);
+                if (llmdesc_load_pref(path, out, 0)) {
+                    snprintf(out->arch, sizeof out->arch, "%s", arch);
+                    if (out_path) snprintf(out_path, out_path_cap, "%s", path);
+                    return 0;
+                }
+            }
         }
     } else if (g_abi_required) {
         /* l'applicazione ha dichiarato la cartella ABI obbligatoria (llmdesc_set_abi_policy): niente ripiego silenzioso. */

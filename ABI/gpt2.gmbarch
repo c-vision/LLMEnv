@@ -1,0 +1,145 @@
+{
+  "_comment": ".gmbarch — GPT-2 (decoder classico, Conv1D). Il fallback generico copriva gia' i ruoli; questo file aggiunge la mappa GGUF (llama.cpp: token_embd/position_embd/blk.*) usata dal converter.",
+  "arch": "gpt2",
+  "tokenizer_pre": "gpt2",
+  "source": {
+    "format": "safetensors",
+    "config": "config.json",
+    "index": "model.safetensors.index.json"
+  },
+  "config_map": {
+    "n_layers": "num_hidden_layers",
+    "hidden": "hidden_size",
+    "n_heads": "num_attention_heads",
+    "n_kv": "num_key_value_heads",
+    "vocab": "vocab_size",
+    "dense_inter": "intermediate_size",
+    "rope_theta": "rope_theta"
+  },
+  "roles": [
+    {
+      "match": "wte",
+      "role": "EMBEDDING",
+      "hf": "wte.weight",
+      "gguf": "token_embd.weight"
+    },
+    {
+      "match": "wpe",
+      "role": "OTHER",
+      "hf": "wpe.weight",
+      "gguf": "position_embd.weight"
+    },
+    {
+      "match": "h.%d.ln_1",
+      "role": "NORM",
+      "hf": "h.%d.ln_1.weight",
+      "gguf": "blk.%d.attn_norm.weight"
+    },
+    {
+      "match": "h.%d.attn.c_attn",
+      "role": "ATTN_QKV",
+      "hf": "h.%d.attn.c_attn.weight",
+      "gguf": "blk.%d.attn_qkv.weight"
+    },
+    {
+      "match": "h.%d.attn.c_proj",
+      "role": "ATTN_WO",
+      "hf": "h.%d.attn.c_proj.weight",
+      "gguf": "blk.%d.attn_output.weight"
+    },
+    {
+      "match": "h.%d.ln_2",
+      "role": "NORM",
+      "hf": "h.%d.ln_2.weight",
+      "gguf": "blk.%d.ffn_norm.weight"
+    },
+    {
+      "match": "h.%d.mlp.c_fc",
+      "role": "FFN",
+      "hf": "h.%d.mlp.c_fc.weight",
+      "gguf": "blk.%d.ffn_up.weight"
+    },
+    {
+      "match": "h.%d.mlp.c_proj",
+      "role": "FFN",
+      "hf": "h.%d.mlp.c_proj.weight",
+      "gguf": "blk.%d.ffn_down.weight"
+    },
+    {
+      "match": "ln_f",
+      "role": "FINAL_NORM",
+      "hf": "ln_f.weight",
+      "gguf": "output_norm.weight"
+    }
+  ],
+  "quant": {
+    "NORM": "f32",
+    "EMBEDDING": "f16",
+    "OUTPUT": "q6_k",
+    "recipe": "_M",
+    "recipe_boost": [
+      "attn_v",
+      "ffn_down"
+    ],
+    "recipe_boost_fmt": "q6_k"
+  },
+  "codecs": {
+    "plain": "plain",
+    "mlx_affine": "mlx_affine"
+  },
+  "weight_source": {
+    "plain_f16": {
+      "dtype": "F16",
+      "codec": "plain",
+      "fmt": 1
+    },
+    "plain_bf16": {
+      "dtype": "BF16",
+      "codec": "plain",
+      "fmt": 2
+    },
+    "plain_f32": {
+      "dtype": "F32",
+      "codec": "plain",
+      "fmt": 0
+    },
+    "mlx_affine": {
+      "dtype": "U32",
+      "codec": "mlx_affine",
+      "scale_suffix": ".scales",
+      "bias_suffix": ".biases"
+    }
+  },
+  "structures": {
+    "layer": {
+      "type": "transformer_layer",
+      "steps": [
+        {
+          "op": "attention",
+          "prim": ""
+        },
+        {
+          "op": "ffn",
+          "prim": ""
+        }
+      ]
+    },
+    "norm": {
+      "type": "layernorm"
+    },
+    "attention": {
+      "type": "mha"
+    }
+  },
+  "quant_params": {
+    "group": 32,
+    "bits": 4
+  },
+  "convert_target": {
+    "default": {
+      "codec": "mlx_affine",
+      "p0": 32,
+      "p1": 4
+    }
+  }
+}

@@ -53,3 +53,19 @@ cmake -S LLMDesc -B build/desc && cmake --build build/desc && ctest --test-dir b
 `llmdesc_abi_selfcheck` checks the validity rules, the lookup and the required-folder policy;
 `llmdesc_geometry_selfcheck` checks, for the models found under `~/ai/Models`, that the geometry the engine derives
 matches the model's `config.json`.
+
+## Alias di famiglia (2026-10-31)
+
+Alcuni `model_type` descrivono l'architettura di un file gia' presente con un altro nome (stessi nomi
+di tensore). Per non duplicare il file (due copie divergono) la risoluzione passa da una tabella in
+`LLMDesc/llmdesc.c` (`arch_alias()`): `out->arch` resta il `model_type` del modello, il descrittore
+caricato e' quello della famiglia.
+
+| `model_type` | descrittore usato | perché |
+|---|---|---|
+| `granitemoehybrid` | `granite_moe_hybrid` | stesso repo IBM, nome senza underscore |
+| `llama3` | `llama` | nomenclatura dei tensori identica |
+| `glm4_moe_lite` | `glm4_moe` | variante "lite"; **da confermare col checkpoint** |
+| `kimi_k2` | `deepseek_v3` | K2 usa l'architettura DeepSeek-V3 (MLA + MoE); **da confermare col checkpoint** |
+
+Se una famiglia diverge davvero, si crea il file dedicato e si toglie la riga dalla tabella.
