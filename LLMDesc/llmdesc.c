@@ -309,21 +309,32 @@ static int llmdesc_load_pref(const char* path, LlmDesc* out, int need_roles) {
     return 1;
 }
 static int g_abi_required;   /* politica ABI (definita sotto, con llmdesc_set_abi_policy) */
-/* Alias di FAMIGLIA (2026-10-31): model_type che descrivono la stessa architettura di un descrittore
- * gia' presente, con gli STESSI nomi di tensore. Serve a non duplicare il file (due copie divergono,
- * vedi README di ABI/). L'alias cambia solo il file da caricare: `out->arch` resta il model_type del
- * modello, cosi' il consumer vede l'identita' corretta.
- *   granitemoehybrid -> granite_moe_hybrid   (stesso repo IBM, nome senza underscore)
- *   llama3           -> llama                (nomenclatura dei tensori identica)
- *   glm4_moe_lite    -> glm4_moe             (variante "lite": stessi nomi di layer; da confermare col checkpoint)
- *   kimi_k2          -> deepseek_v3          (K2 usa l'architettura DeepSeek-V3: MLA + MoE; da confermare col checkpoint)
- * Se un giorno una di queste famiglie diverge davvero, si crea il file dedicato e si toglie la riga. */
+/* Alias di FAMIGLIA (2026-10-31, CONFERMATI sul codice del motore): model_type che descrivono la
+ * stessa architettura di un descrittore gia' presente, con gli STESSI nomi di tensore. Serve a non
+ * duplicare il file (due copie divergono, vedi README di ABI/). L'alias cambia solo il file da
+ * caricare: `out->arch` resta il model_type del modello, cosi' il consumer vede l'identita' corretta.
+ *
+ * Prove (LLMEngine/mlx):
+ *   granitemoehybrid -> granite_moe_hybrid : llm_mlx_granite_hybrid.c "Modellato 1:1 su
+ *                        mlx_lm/models/granitemoehybrid.py" (il blocco dell'engine e' quello).
+ *   llama3           -> llama              : stesso dominio llama (llm_mlx_llama.c); l'unica
+ *                        differenza e' `use_llama3_rope` (config), non i nomi dei tensori.
+ *   glm4_moe_lite    -> deepseek_v3        : llm_mlx_model_lifecycle.c "glm4_moe_lite ->
+ *                        deepseek_v3_attention_block, deepseek_v2_ffn_block (GLM-4.5-Air: MLA
+ *                        assorbita + MoE noaux_tc)" e load_config lo mette nella famiglia MLA.
+ *                        NON e' glm4_moe (quello usa q/k/v + gate sigmoid, nomi diversi).
+ *   kimi_k2          -> deepseek_v3        : lifecycle "Kimi K2 = deepseek_v3"; load_config
+ *                        "mlx_lm remappa kimi_k2 -> deepseek_v3: stesso codice".
+ *   joyai_llm_flash  -> deepseek_v3        : lifecycle "= deepseek_v3" (stessa riga di K2).
+ * Se una famiglia diverge davvero si crea il file dedicato e si toglie la riga:
+ * `youtu_llm` (deepseek_v2 attention + FFN DENSE) NON e' aliasato per questo motivo. */
 static const char* arch_alias(const char* slug) {
     static const struct { const char* from; const char* to; } k[] = {
         { "granitemoehybrid", "granite_moe_hybrid" },
         { "llama3",           "llama" },
-        { "glm4_moe_lite",    "glm4_moe" },
+        { "glm4_moe_lite",    "deepseek_v3" },
         { "kimi_k2",          "deepseek_v3" },
+        { "joyai_llm_flash",  "deepseek_v3" },
     };
     for (size_t i = 0; i < sizeof k / sizeof k[0]; ++i)
         if (strcmp(slug, k[i].from) == 0) return k[i].to;

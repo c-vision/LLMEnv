@@ -54,18 +54,23 @@ cmake -S LLMDesc -B build/desc && cmake --build build/desc && ctest --test-dir b
 `llmdesc_geometry_selfcheck` checks, for the models found under `~/ai/Models`, that the geometry the engine derives
 matches the model's `config.json`.
 
-## Alias di famiglia (2026-10-31)
+## Alias di famiglia (2026-10-31) — confermati sul codice del motore
 
 Alcuni `model_type` descrivono l'architettura di un file gia' presente con un altro nome (stessi nomi
 di tensore). Per non duplicare il file (due copie divergono) la risoluzione passa da una tabella in
 `LLMDesc/llmdesc.c` (`arch_alias()`): `out->arch` resta il `model_type` del modello, il descrittore
 caricato e' quello della famiglia.
 
-| `model_type` | descrittore usato | perché |
+| `model_type` | descrittore usato | prova (`LLMEngine/mlx`) |
 |---|---|---|
-| `granitemoehybrid` | `granite_moe_hybrid` | stesso repo IBM, nome senza underscore |
-| `llama3` | `llama` | nomenclatura dei tensori identica |
-| `glm4_moe_lite` | `glm4_moe` | variante "lite"; **da confermare col checkpoint** |
-| `kimi_k2` | `deepseek_v3` | K2 usa l'architettura DeepSeek-V3 (MLA + MoE); **da confermare col checkpoint** |
+| `granitemoehybrid` | `granite_moe_hybrid` | `llm_mlx_granite_hybrid.c`: «Modellato 1:1 su mlx_lm/models/granitemoehybrid.py» |
+| `llama3` | `llama` | stesso dominio (`llm_mlx_llama.c`); cambia solo `use_llama3_rope` (config), non i nomi |
+| `glm4_moe_lite` | **`deepseek_v3`** | `llm_mlx_model_lifecycle.c`: `glm4_moe_lite → deepseek_v3_attention_block + deepseek_v2_ffn_block` («GLM-4.5-Air: MLA assorbita + MoE noaux_tc»); `load_config` lo mette nella famiglia MLA |
+| `kimi_k2` | `deepseek_v3` | lifecycle: «Kimi K2 = deepseek_v3»; load_config: «mlx_lm remappa kimi_k2 → deepseek_v3» |
+| `joyai_llm_flash` | `deepseek_v3` | lifecycle: «= deepseek_v3» (stessa riga di K2) |
+
+**Non aliasato di proposito**: `youtu_llm` usa `deepseek_v2_attention_block` **+ FFN denso**
+(`dense_swiglu_ffn`), quindi non ha la stessa forma di `deepseek_v2` (MoE): merita un file suo o il
+fallback generico.
 
 Se una famiglia diverge davvero, si crea il file dedicato e si toglie la riga dalla tabella.
