@@ -10,6 +10,9 @@
 #include <string.h>
 #include <time.h>
 
+/* innesti MLX del motore (patch nostre): qmv_wide per M>=2, split-K per qmv M=1.
+ * Prototipi già in mlx/c/memory.h (incluso da mlx/c/mlx.h). */
+
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 
 static double bench(int N, int K, int bits, int group, int M, int reps) {
@@ -53,6 +56,13 @@ int main(int argc, char** argv) {
     int group = argc > 2 ? atoi(argv[2]) : 64;
     int reps = argc > 3 ? atoi(argv[3]) : 20;
     int trials = argc > 4 ? atoi(argv[4]) : 5;
+    /* 2026-10-31: i numeri del probe erano STOCK MLX. L'engine imposta due nostri innesti:
+     * `qmv_wide` (kernel per M>=2, cioe' il VERIFY) e `split_k` (qmv M=1). Qui si possono
+     * forzare per misurare il path che gira davvero: arg5 = qmv_wide, arg6 = split_k (-1 = lascia). */
+    int qw = argc > 5 ? atoi(argv[5]) : -1;
+    int sk = argc > 6 ? atoi(argv[6]) : -1;
+    if (qw >= 0) { mlx_set_qmv_wide(qw); printf("# qmv_wide=%d\n", qw); }
+    if (sk >= 0) { mlx_set_qmv_split_k(sk); printf("# qmv_split_k=%d\n", sk); }
     if (trials < 1) trials = 1; if (trials > 25) trials = 25;
     int Mv[] = {1, 2, 4, 8, 16, 32};
     const int NM = (int)(sizeof(Mv) / sizeof(Mv[0]));
