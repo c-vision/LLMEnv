@@ -89,6 +89,12 @@ add_executable(test_moe_cache tests/test_moe_cache.c)
 target_link_libraries(test_moe_cache PRIVATE llmengine_moe)
 target_compile_options(test_moe_cache PRIVATE -Wall -Wextra -Wpedantic)
 
+# Divergence MoE su Metal (2026-10-31): il sorgente esisteva dal 2026-10 e si compilava a mano —
+# fuori da ctest, quindi mai eseguito nei gate. Verifica GPU == CPU (max|diff|) sul kernel.
+add_executable(test_moe_diverge_metal tests/test_moe_diverge_metal.c)
+target_link_libraries(test_moe_diverge_metal PRIVATE llmengine_moe)
+target_compile_options(test_moe_diverge_metal PRIVATE -Wall -Wextra -Wpedantic)
+
 add_executable(test_moe_async tests/test_moe_async.c)
 target_link_libraries(test_moe_async PRIVATE llmengine_moe)
 target_compile_options(test_moe_async PRIVATE -Wall -Wextra -Wpedantic)
@@ -241,6 +247,7 @@ enable_testing()
 # Ripristinarli solo insieme al test corrispondente.
 add_test(NAME moe_cache COMMAND test_moe_cache)
 add_test(NAME moe_async COMMAND test_moe_async)
+add_test(NAME moe_diverge_metal COMMAND test_moe_diverge_metal)
 add_test(NAME moe_prefetch COMMAND test_moe_prefetch)
 add_test(NAME moe_cache_bench COMMAND test_moe_cache_bench)
 add_test(NAME moe_cache_adaptive COMMAND test_moe_cache_adaptive)

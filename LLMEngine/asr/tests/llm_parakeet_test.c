@@ -2,7 +2,7 @@
  * Uso: llm_parakeet_test <parakeet.gguf> <file.wav> [testo-atteso.txt]
  * Esce 77 (skip) se il GGUF o il WAV mancano; 1 se la trascrizione e' lontana dal testo atteso (<85% delle parole). */
 #include "llm_parakeet.h"
-#include "gmb_asr.h"
+#include "llm_asr.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
     LlmParakeet* m = llm_parakeet_load(argv[1], err, sizeof err);
     if (!m) { fprintf(stderr, "load fallito: %s\n", err); return 1; }
     int n = 0;
-    float* pcm = gmb_asr_wav_load(argv[2], &n);
+    float* pcm = llm_asr_wav_load(argv[2], &n);
     if (!pcm) { fprintf(stderr, "wav non leggibile\n"); llm_parakeet_free(m); return 1; }
     char* text = llm_parakeet_transcribe(m, pcm, n, err, sizeof err);
     if (!text) { fprintf(stderr, "trascrizione fallita: %s\n", err); return 1; }

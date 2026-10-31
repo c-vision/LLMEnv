@@ -11,14 +11,14 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # (`fastllm asr`). Nessuna copia su entrambi i lati.
 
 add_library(llm_asr STATIC
-    src/gmb_asr_audio.c
-    src/gmb_asr_kernels.c
-    src/gmb_asr_encoder.c
-    src/gmb_asr_decoder.c
-    src/gmb_asr_model.c
-    src/gmb_asr_tok.c
-    src/gmb_asr_transcribe.c
-    src/gmb_asr_pipeline.c)
+    src/llm_asr_audio.c
+    src/llm_asr_kernels.c
+    src/llm_asr_encoder.c
+    src/llm_asr_decoder.c
+    src/llm_asr_model.c
+    src/llm_asr_tok.c
+    src/llm_asr_transcribe.c
+    src/llm_asr_pipeline.c)
 
 target_include_directories(llm_asr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(llm_asr PUBLIC m)

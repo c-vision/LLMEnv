@@ -1,6 +1,6 @@
-/* gmb_asr_tok.c — tokenizer Qwen byte-level BPE (vocab.json + merges.txt), self-contained.
+/* llm_asr_tok.c — tokenizer Qwen byte-level BPE (vocab.json + merges.txt), self-contained.
  * Decode + encode (GPT-2-style byte-unicode). Reference: Qwen3-ASR. Nessuna dipendenza esterna. */
-#include "gmb_asr_tok.h"
+#include "llm_asr_tok.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,15 +59,15 @@ static void map_put(Map* m, const char* k, size_t len, int32_t v) { uint32_t h =
 static int map_get(const Map* m, const char* k, size_t len, int32_t* out) { uint32_t h = hsh(k, len); size_t mask = m->cap - 1, i = h & mask; while (m->k[i]) { if (m->h[i] == h && strlen(m->k[i]) == len && !memcmp(m->k[i], k, len)) { *out = m->v[i]; return 1; } i = (i + 1) & mask; } return 0; }
 static void map_free(Map* m) { for (size_t i = 0; i < m->cap; i++) free(m->k[i]); free(m->k); free(m->v); free(m->h); }
 
-struct GmbAsrTok { int vocab; char** id2tok; Map tok2id; Map merge; };
+struct LlmAsrTok { int vocab; char** id2tok; Map tok2id; Map merge; };
 
-GmbAsrTok* gmb_asr_tok_load(const char* dir) {
+LlmAsrTok* llm_asr_tok_load(const char* dir) {
     b2u_init();
     char vp[1400], mp[1400]; snprintf(vp, sizeof vp, "%s/vocab.json", dir); snprintf(mp, sizeof mp, "%s/merges.txt", dir);
     FILE* f = fopen(vp, "rb"); if (!f) return NULL;
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
     char* js = (char*)malloc((size_t)sz + 1); if (!js || fread(js, 1, (size_t)sz, f) != (size_t)sz) { free(js); fclose(f); return NULL; } js[sz] = 0; fclose(f);
-    GmbAsrTok* t = (GmbAsrTok*)calloc(1, sizeof(GmbAsrTok));
+    LlmAsrTok* t = (LlmAsrTok*)calloc(1, sizeof(LlmAsrTok));
     int cap = 200000; t->vocab = cap; t->id2tok = (char**)calloc((size_t)cap, sizeof(char*));
     map_init(&t->tok2id, 200000);
     char* p = js; while (*p && *p != '{') p++; if (*p) p++;
@@ -88,11 +88,11 @@ GmbAsrTok* gmb_asr_tok_load(const char* dir) {
     if (mf) { char line[1024]; int rank = 0; while (fgets(line, sizeof line, mf)) { if (line[0] == '#' || line[0] == '\n') continue; char* sp = strchr(line, ' '); if (!sp) continue; *sp = 0; char* r = sp + 1; size_t rl = strlen(r); while (rl && (r[rl - 1] == '\n' || r[rl - 1] == '\r')) r[--rl] = 0; char key[1024]; int kn = snprintf(key, sizeof key, "%s %s", line, r); map_put(&t->merge, key, (size_t)kn, rank++); } fclose(mf); }
     return t;
 }
-void gmb_asr_tok_free(GmbAsrTok* t) { if (!t) return; for (int i = 0; i < t->vocab; i++) free(t->id2tok[i]); free(t->id2tok); map_free(&t->tok2id); map_free(&t->merge); free(t); }
-int gmb_asr_tok_n_vocab(const GmbAsrTok* t) { return t->vocab; }
+void llm_asr_tok_free(LlmAsrTok* t) { if (!t) return; for (int i = 0; i < t->vocab; i++) free(t->id2tok[i]); free(t->id2tok); map_free(&t->tok2id); map_free(&t->merge); free(t); }
+int llm_asr_tok_n_vocab(const LlmAsrTok* t) { return t->vocab; }
 
 static char g_piece[8192];
-const char* gmb_asr_tok_decode(GmbAsrTok* t, int id) {
+const char* llm_asr_tok_decode(LlmAsrTok* t, int id) {
     if (id < 0 || id >= t->vocab || !t->id2tok[id]) { g_piece[0] = 0; return g_piece; }
     const unsigned char* s = (const unsigned char*)t->id2tok[id]; size_t n = 0;
     while (*s) { int cl; int cp = u8_cp(s, &cl); s += cl; if (cp >= 0 && cp < 0x11000 && s_cp2byte[cp]) g_piece[n++] = (char)(s_cp2byte[cp] & 0xff); else n += cp_u8(g_piece + n, cp); if (n > 8000) break; }
@@ -100,7 +100,7 @@ const char* gmb_asr_tok_decode(GmbAsrTok* t, int id) {
 }
 
 /* BPE di un "word" (array di stringhe-simbolo UTF-8) -> id accodati a `ids`. */
-static int bpe_word(GmbAsrTok* t, char** sym, int ns, int* ids, int ni) {
+static int bpe_word(LlmAsrTok* t, char** sym, int ns, int* ids, int ni) {
     while (ns >= 2) {
         int best = -1, br = 1 << 30;
         for (int i = 0; i + 1 < ns; i++) { char key[1024]; int kl = snprintf(key, sizeof key, "%s %s", sym[i], sym[i + 1]); int32_t r; if (map_get(&t->merge, key, (size_t)kl, &r) && r < br) { br = r; best = i; } }
@@ -115,7 +115,7 @@ static int bpe_word(GmbAsrTok* t, char** sym, int ns, int* ids, int ni) {
     return ni;
 }
 
-int* gmb_asr_tok_encode(GmbAsrTok* t, const char* utf8, int* out_n) {
+int* llm_asr_tok_encode(LlmAsrTok* t, const char* utf8, int* out_n) {
     b2u_init();
     /* testo -> stringa byte-unicode (ogni byte dell'input rappresentato dal suo char byte-unicode) */
     size_t bl = strlen(utf8);

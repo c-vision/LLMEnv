@@ -1,10 +1,10 @@
-/* gmb_asr_transcribe.c — orchestrazione ASR: mel -> encoder -> prompt -> decoder greedy.
+/* llm_asr_transcribe.c — orchestrazione ASR: mel -> encoder -> prompt -> decoder greedy.
  * Port di antirez/qwen-asr `qwen_asr.c` (MIT). Il prompt ASR usa le costanti di token
  * (system/user/audio_start/audio_end/assistant) e inietta l'output dell'encoder nelle posizioni
- * audio. Decodifica id->testo delegata al tokenizer del chiamante (GmbAsrPieceFn).
+ * audio. Decodifica id->testo delegata al tokenizer del chiamante (LlmAsrPieceFn).
  * Streaming fedele a qwen-asr: chunk 2s + cache delle finestre encoder (8s, immutabili) +
  * prefix rollback sui token raw gia' generati. */
-#include "gmb_asr.h"
+#include "llm_asr.h"
 
 #include <ctype.h>
 #include <stdint.h>
@@ -36,7 +36,7 @@ static void embed_one(float* dst, const uint16_t* tok_emb, int id, int dim) {
  *   [PREFIX_HEAD][prompt][PREFIX_TAIL][enc_output][SUFFIX_BASE][force][past_tokens]
  * `past_tokens` sono i token RAW gia' generati (language + <asr_text> + testo), come in qwen-asr:
  * la generazione riparte dopo di essi. Ritorna il numero di token generati (>=0) o -1. */
-static int asr_generate(const GmbAsrDecConfig* dcfg, const GmbAsrDecoder* dec,
+static int asr_generate(const LlmAsrDecConfig* dcfg, const LlmAsrDecoder* dec,
                         const float* enc_out, int enc_seq,
                         const int* prompt_tokens, int n_prompt,
                         const int* force_tokens, int n_force,
@@ -51,10 +51,10 @@ static int asr_generate(const GmbAsrDecConfig* dcfg, const GmbAsrDecoder* dec,
     float* input_embeds = (float*)malloc((size_t)total_seq * dim * sizeof(float));
     float* tmp_embed = (float*)malloc((size_t)dim * sizeof(float));
     float* logits = (float*)malloc((size_t)dcfg->vocab * sizeof(float));
-    GmbAsrKv kv;
-    gmb_asr_kv_init(&kv, dcfg->layers, dcfg->kv_heads * dcfg->head_dim, total_seq + max_new + 16);
+    LlmAsrKv kv;
+    llm_asr_kv_init(&kv, dcfg->layers, dcfg->kv_heads * dcfg->head_dim, total_seq + max_new + 16);
     if (!input_embeds || !tmp_embed || !logits || !kv.k) {
-        free(input_embeds); free(tmp_embed); free(logits); gmb_asr_kv_free(&kv); return -1;
+        free(input_embeds); free(tmp_embed); free(logits); llm_asr_kv_free(&kv); return -1;
     }
 
     int off = 0;
@@ -69,9 +69,9 @@ static int asr_generate(const GmbAsrDecConfig* dcfg, const GmbAsrDecoder* dec,
     for (int i = 0; i < n_past; i++) embed_one(input_embeds + (size_t)(text_off + i) * dim, dec->tok_embeddings, past_tokens[i], dim);
 
     int prefill_len = total_seq - 1;
-    if (gmb_asr_decoder_forward(dcfg, dec, &kv, input_embeds, prefill_len, NULL) != 0 ||
-        gmb_asr_decoder_forward(dcfg, dec, &kv, input_embeds + (size_t)prefill_len * dim, 1, logits) != 0) {
-        free(input_embeds); free(tmp_embed); free(logits); gmb_asr_kv_free(&kv); return -1;
+    if (llm_asr_decoder_forward(dcfg, dec, &kv, input_embeds, prefill_len, NULL) != 0 ||
+        llm_asr_decoder_forward(dcfg, dec, &kv, input_embeds + (size_t)prefill_len * dim, 1, logits) != 0) {
+        free(input_embeds); free(tmp_embed); free(logits); llm_asr_kv_free(&kv); return -1;
     }
     free(input_embeds);
     int token = argmax_f32(logits, dcfg->vocab);
@@ -81,28 +81,28 @@ static int asr_generate(const GmbAsrDecConfig* dcfg, const GmbAsrDecoder* dec,
         if (token == T_ENDOFTEXT || token == T_IM_END) break;
         if (n < out_cap) out_tokens[n++] = token;
         embed_one(tmp_embed, dec->tok_embeddings, token, dim);
-        if (gmb_asr_decoder_forward(dcfg, dec, &kv, tmp_embed, 1, logits) != 0) break;
+        if (llm_asr_decoder_forward(dcfg, dec, &kv, tmp_embed, 1, logits) != 0) break;
         token = argmax_f32(logits, dcfg->vocab);
     }
-    free(tmp_embed); free(logits); gmb_asr_kv_free(&kv);
+    free(tmp_embed); free(logits); llm_asr_kv_free(&kv);
     return n;
 }
 
-char* gmb_asr_transcribe_segment(const GmbAsrEncConfig* ecfg, const GmbAsrEncoder* enc,
-                                 const GmbAsrDecConfig* dcfg, const GmbAsrDecoder* dec,
+char* llm_asr_transcribe_segment(const LlmAsrEncConfig* ecfg, const LlmAsrEncoder* enc,
+                                 const LlmAsrDecConfig* dcfg, const LlmAsrDecoder* dec,
                                  const float* samples, int n_samples,
                                  const int* prompt_tokens, int n_prompt,
                                  const int* force_tokens, int n_force,
                                  const int* past_tokens, int n_past,
-                                 GmbAsrPieceFn decode_fn, void* decode_ctx, int* out_text_tokens) {
+                                 LlmAsrPieceFn decode_fn, void* decode_ctx, int* out_text_tokens) {
     if (out_text_tokens) *out_text_tokens = 0;
     if (!ecfg || !enc || !dcfg || !dec || !samples || n_samples <= 0) return NULL;
 
     int mel_frames = 0;
-    float* mel = gmb_asr_mel(samples, n_samples, &mel_frames);
+    float* mel = llm_asr_mel(samples, n_samples, &mel_frames);
     if (!mel) return NULL;
     int enc_seq = 0;
-    float* enc_out = gmb_asr_encoder_forward(ecfg, enc, mel, mel_frames, &enc_seq);
+    float* enc_out = llm_asr_encoder_forward(ecfg, enc, mel, mel_frames, &enc_seq);
     free(mel);
     if (!enc_out) return NULL;
 
@@ -144,26 +144,26 @@ char* gmb_asr_transcribe_segment(const GmbAsrEncConfig* ecfg, const GmbAsrEncode
     return text;
 }
 
-char* gmb_asr_transcribe(const GmbAsrEncConfig* ecfg, const GmbAsrEncoder* enc,
-                         const GmbAsrDecConfig* dcfg, const GmbAsrDecoder* dec,
+char* llm_asr_transcribe(const LlmAsrEncConfig* ecfg, const LlmAsrEncoder* enc,
+                         const LlmAsrDecConfig* dcfg, const LlmAsrDecoder* dec,
                          const float* samples, int n_samples,
                          const int* prompt_tokens, int n_prompt,
                          const int* force_tokens, int n_force,
-                         GmbAsrPieceFn decode_fn, void* decode_ctx,
+                         LlmAsrPieceFn decode_fn, void* decode_ctx,
                          float segment_sec, float search_sec, int* out_text_tokens) {
     if (out_text_tokens) *out_text_tokens = 0;
-    int seg = (int)(segment_sec * GMB_ASR_SR);
+    int seg = (int)(segment_sec * LLM_ASR_SR);
     if (segment_sec <= 0.0f || n_samples <= seg)
-        return gmb_asr_transcribe_segment(ecfg, enc, dcfg, dec, samples, n_samples,
+        return llm_asr_transcribe_segment(ecfg, enc, dcfg, dec, samples, n_samples,
                                           prompt_tokens, n_prompt, force_tokens, n_force, NULL, 0, decode_fn, decode_ctx, out_text_tokens);
     int cuts[256];
-    int nc = gmb_asr_segment_split(samples, n_samples, seg, (int)(search_sec * GMB_ASR_SR), cuts, 256);
+    int nc = llm_asr_segment_split(samples, n_samples, seg, (int)(search_sec * LLM_ASR_SR), cuts, 256);
     size_t cap = 4096, len = 0; char* out = (char*)malloc(cap); out[0] = 0; int tot = 0, start = 0;
     for (int i = 0; i <= nc; i++) {
         int end = (i < nc) ? cuts[i] : n_samples;
         if (end <= start) continue;
         int nt = 0;
-        char* s = gmb_asr_transcribe_segment(ecfg, enc, dcfg, dec, samples + start, end - start,
+        char* s = llm_asr_transcribe_segment(ecfg, enc, dcfg, dec, samples + start, end - start,
                                              prompt_tokens, n_prompt, force_tokens, n_force, NULL, 0, decode_fn, decode_ctx, &nt);
         start = end;
         if (!s) continue;
@@ -191,38 +191,38 @@ typedef struct { int64_t start_sample; int n_samples; int seq_len; float* enc_ou
 #define S_UNFIXED_CHUNKS    2
 #define S_MAX_NEW_TOKENS    32
 
-static int enc_span(const GmbAsrEncConfig* ecfg, const GmbAsrEncoder* enc,
+static int enc_span(const LlmAsrEncConfig* ecfg, const LlmAsrEncoder* enc,
                     const float* samples, int n_samples, int* out_seq, float** out) {
     *out = NULL; *out_seq = 0;
     if (n_samples <= 0) return 0;
     int mel_frames = 0;
-    float* mel = gmb_asr_mel(samples, n_samples, &mel_frames);
+    float* mel = llm_asr_mel(samples, n_samples, &mel_frames);
     if (!mel) return -1;
     int seq = 0;
-    float* e = gmb_asr_encoder_forward(ecfg, enc, mel, mel_frames, &seq);
+    float* e = llm_asr_encoder_forward(ecfg, enc, mel, mel_frames, &seq);
     free(mel);
     if (!e || seq <= 0) { free(e); return -1; }
     *out = e; *out_seq = seq;
     return 0;
 }
 
-char* gmb_asr_transcribe_stream(const GmbAsrEncConfig* ecfg, const GmbAsrEncoder* enc,
-                                const GmbAsrDecConfig* dcfg, const GmbAsrDecoder* dec,
+char* llm_asr_transcribe_stream(const LlmAsrEncConfig* ecfg, const LlmAsrEncoder* enc,
+                                const LlmAsrDecConfig* dcfg, const LlmAsrDecoder* dec,
                                 const float* samples, int n_samples,
                                 const int* prompt_tokens, int n_prompt,
                                 const int* force_tokens, int n_force,
-                                GmbAsrPieceFn decode_fn, void* decode_ctx,
+                                LlmAsrPieceFn decode_fn, void* decode_ctx,
                                 int rollback_tokens, float chunk_sec,
-                                GmbAsrStreamEmit emit, void* emit_ctx) {
+                                LlmAsrStreamEmit emit, void* emit_ctx) {
     if (!ecfg || !enc || !dcfg || !dec || !samples || n_samples <= 0) return NULL;
     const int dim = dcfg->hidden;
-    int chunk_samples = (int)((chunk_sec > 0.0f ? chunk_sec : 2.0f) * GMB_ASR_SR);
-    if (chunk_samples <= 0) chunk_samples = GMB_ASR_SR * 2;
+    int chunk_samples = (int)((chunk_sec > 0.0f ? chunk_sec : 2.0f) * LLM_ASR_SR);
+    if (chunk_samples <= 0) chunk_samples = LLM_ASR_SR * 2;
     if (rollback_tokens < 0) rollback_tokens = 5;
     int enc_win_frames = ecfg->n_window_infer;
     if (enc_win_frames < 100) enc_win_frames = 100;
     if (enc_win_frames > 800) enc_win_frames = 800;
-    int enc_win_samples = enc_win_frames * GMB_ASR_HOP;
+    int enc_win_samples = enc_win_frames * LLM_ASR_HOP;
 
     int* raw = (int*)malloc(8192 * sizeof(int)); int n_raw = 0, raw_cap = 8192;
     int* stable = (int*)malloc(8192 * sizeof(int)); int n_stable = 0, stable_cap = 8192;

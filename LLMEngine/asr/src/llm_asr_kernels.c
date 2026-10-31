@@ -1,7 +1,7 @@
-/* gmb_asr_kernels.c — kernel numerici host per Qwen3-ASR.
+/* llm_asr_kernels.c — kernel numerici host per Qwen3-ASR.
  * Semantica allineata a antirez/qwen-asr `qwen_asr_kernels*.c` (MIT); implementazione propria
  * (formule canoniche). Include un path NEON per il matvec BF16 (point 4) + generic (parità). */
-#include "gmb_asr.h"
+#include "llm_asr.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +24,7 @@ static int asr_ncpu(void) {
 /* bf16 -> f32 (shift dei 16 bit alti). */
 static inline float gmb_bf16_to_f32(uint16_t h) { uint32_t u = (uint32_t)h << 16; float f; memcpy(&f, &u, 4); return f; }
 
-void gmb_asr_matmul_t(float* C, const float* A, const float* B, int M, int K, int N) {
+void llm_asr_matmul_t(float* C, const float* A, const float* B, int M, int K, int N) {
     for (int i = 0; i < M; i++)
         for (int j = 0; j < N; j++) {
             const float* a = A + (size_t)i * K; const float* b = B + (size_t)j * K; float s = 0;
@@ -46,7 +46,7 @@ static void* lin_worker(void* p) {
     return NULL;
 }
 
-void gmb_asr_linear(float* y, const float* x, const float* W, const float* b, int seq, int in, int out) {
+void llm_asr_linear(float* y, const float* x, const float* W, const float* b, int seq, int in, int out) {
     long total = (long)seq * out;
     int nth = asr_ncpu();
     if (nth <= 1 || total * in < 4000000L) {
@@ -64,7 +64,7 @@ void gmb_asr_linear(float* y, const float* x, const float* W, const float* b, in
     for (int t = 0; t < nt; t++) pthread_join(th[t], NULL);
 }
 
-void gmb_asr_add_inplace(float* a, const float* b, int n) { for (int i = 0; i < n; i++) a[i] += b[i]; }
+void llm_asr_add_inplace(float* a, const float* b, int n) { for (int i = 0; i < n; i++) a[i] += b[i]; }
 
 /* una riga: y[o] = b[o] + dot(W[o,:], x). */
 static inline float lin_bf_dot(const float* xr, const uint16_t* wr, int in) {
@@ -97,7 +97,7 @@ static void* lin_bf_worker(void* p) {
     return NULL;
 }
 
-void gmb_asr_linear_bf16(float* y, const float* x, const uint16_t* W, const float* b, int seq, int in, int out) {
+void llm_asr_linear_bf16(float* y, const float* x, const uint16_t* W, const float* b, int seq, int in, int out) {
     long total = (long)seq * out;
     int nth = asr_ncpu();
     if (nth <= 1 || total * in < 4000000L) {
@@ -138,7 +138,7 @@ static void* conv_worker(void* p) {
     return NULL;
 }
 
-void gmb_asr_conv2d(float* out, const float* in, const float* w, const float* b,
+void llm_asr_conv2d(float* out, const float* in, const float* w, const float* b,
                     int cin, int cout, int hin, int win, int kh, int kw, int stride, int pad) {
     int hout = (hin + 2 * pad - kh) / stride + 1;
     int wout = (win + 2 * pad - kw) / stride + 1;
@@ -162,7 +162,7 @@ void gmb_asr_conv2d(float* out, const float* in, const float* w, const float* b,
     for (int t = 0; t < nt; t++) pthread_join(th[t], NULL);
 }
 
-void gmb_asr_layer_norm(float* out, const float* x, const float* w, const float* b, int seq, int hid, float eps) {
+void llm_asr_layer_norm(float* out, const float* x, const float* w, const float* b, int seq, int hid, float eps) {
     for (int s = 0; s < seq; s++) {
         const float* xr = x + (size_t)s * hid; float mean = 0, var = 0;
         for (int i = 0; i < hid; i++) mean += xr[i]; mean /= hid;
@@ -172,7 +172,7 @@ void gmb_asr_layer_norm(float* out, const float* x, const float* w, const float*
     }
 }
 
-void gmb_asr_rms_norm(float* out, const float* x, const float* w, int seq, int hid, float eps) {
+void llm_asr_rms_norm(float* out, const float* x, const float* w, int seq, int hid, float eps) {
     for (int s = 0; s < seq; s++) {
         const float* xr = x + (size_t)s * hid; float ss = 0;
         for (int i = 0; i < hid; i++) ss += xr[i] * xr[i];
@@ -181,7 +181,7 @@ void gmb_asr_rms_norm(float* out, const float* x, const float* w, int seq, int h
     }
 }
 
-void gmb_asr_rms_norm_per_head(float* x, const float* w, int seq, int heads, int hd, float eps) {
+void llm_asr_rms_norm_per_head(float* x, const float* w, int seq, int heads, int hd, float eps) {
     for (int s = 0; s < seq; s++)
         for (int h = 0; h < heads; h++) {
             float* xr = x + ((size_t)s * heads + h) * hd; float ss = 0;
@@ -191,10 +191,10 @@ void gmb_asr_rms_norm_per_head(float* x, const float* w, int seq, int heads, int
         }
 }
 
-void gmb_asr_silu(float* x, int n) { for (int i = 0; i < n; i++) x[i] = x[i] / (1.0f + expf(-x[i])); }
-void gmb_asr_gelu(float* x, int n) { for (int i = 0; i < n; i++) x[i] = 0.5f * x[i] * (1.0f + erff(x[i] * 0.70710678f)); }
+void llm_asr_silu(float* x, int n) { for (int i = 0; i < n; i++) x[i] = x[i] / (1.0f + expf(-x[i])); }
+void llm_asr_gelu(float* x, int n) { for (int i = 0; i < n; i++) x[i] = 0.5f * x[i] * (1.0f + erff(x[i] * 0.70710678f)); }
 
-void gmb_asr_softmax(float* x, int rows, int cols) {
+void llm_asr_softmax(float* x, int rows, int cols) {
     for (int r = 0; r < rows; r++) {
         float* xr = x + (size_t)r * cols; float mx = xr[0];
         for (int i = 1; i < cols; i++) if (xr[i] > mx) mx = xr[i];
@@ -203,14 +203,14 @@ void gmb_asr_softmax(float* x, int rows, int cols) {
     }
 }
 
-void gmb_asr_swiglu(float* out, const float* gate_up, int seq, int inter) {
+void llm_asr_swiglu(float* out, const float* gate_up, int seq, int inter) {
     for (int s = 0; s < seq; s++) {
         const float* g = gate_up + (size_t)s * 2 * inter;
         for (int j = 0; j < inter; j++) { float gate = g[2 * j]; out[(size_t)s * inter + j] = (gate / (1.0f + expf(-gate))) * g[2 * j + 1]; }
     }
 }
 
-void gmb_asr_attn_bidirectional(float* out, const float* Q, const float* K, const float* V,
+void llm_asr_attn_bidirectional(float* out, const float* Q, const float* K, const float* V,
                                 int seq, int heads, int hd, float scale, const int* ws, int nwin) {
     for (int w = 0; w < nwin; w++) {
         int a = ws[w], b = ws[w + 1];
@@ -229,7 +229,7 @@ void gmb_asr_attn_bidirectional(float* out, const float* Q, const float* K, cons
     }
 }
 
-void gmb_asr_attn_causal_gqa(float* out, const float* Q, const float* K, const float* V,
+void llm_asr_attn_causal_gqa(float* out, const float* Q, const float* K, const float* V,
                              int sq, int sk, int heads, int kv_heads, int hd, float scale, int q_offset) {
     int rep = heads / kv_heads;
     for (int i = 0; i < sq; i++) {
@@ -249,7 +249,7 @@ void gmb_asr_attn_causal_gqa(float* out, const float* Q, const float* K, const f
     }
 }
 
-void gmb_asr_sinusoidal_pe(float* pe, int n_pos, int d_model) {
+void llm_asr_sinusoidal_pe(float* pe, int n_pos, int d_model) {
     int half = d_model / 2;
     for (int p = 0; p < n_pos; p++)
         for (int i = 0; i < half; i++) {
@@ -260,7 +260,7 @@ void gmb_asr_sinusoidal_pe(float* pe, int n_pos, int d_model) {
         }
 }
 
-void gmb_asr_rope_neox_prep(float* cos_out, float* sin_out, const int* pos, int seq, int hd, float theta) {
+void llm_asr_rope_neox_prep(float* cos_out, float* sin_out, const int* pos, int seq, int hd, float theta) {
     int half = hd / 2;
     for (int s = 0; s < seq; s++)
         for (int i = 0; i < half; i++) {
@@ -272,7 +272,7 @@ void gmb_asr_rope_neox_prep(float* cos_out, float* sin_out, const int* pos, int 
         }
 }
 
-void gmb_asr_rope_neox_apply(float* x, const float* cos_v, const float* sin_v, int seq, int heads, int hd) {
+void llm_asr_rope_neox_apply(float* x, const float* cos_v, const float* sin_v, int seq, int heads, int hd) {
     int half = hd / 2;
     for (int s = 0; s < seq; s++)
         for (int h = 0; h < heads; h++) {
@@ -286,7 +286,7 @@ void gmb_asr_rope_neox_apply(float* x, const float* cos_v, const float* sin_v, i
         }
 }
 
-int gmb_asr_argmax_bf16(const float* x, const uint16_t* W, int in, int out) {
+int llm_asr_argmax_bf16(const float* x, const uint16_t* W, int in, int out) {
     int best = 0; float bestv = -1e30f;
     for (int o = 0; o < out; o++) {
         const uint16_t* wr = W + (size_t)o * in; float s = 0;
@@ -297,19 +297,19 @@ int gmb_asr_argmax_bf16(const float* x, const uint16_t* W, int in, int out) {
 }
 
 /* ===== Q8 runtime (point 5) ===== */
-void gmb_asr_q8_quantize(const float* x, int8_t* q, float* scales, int n) {
-    int nb = n / GMB_ASR_Q8_BLK;
+void llm_asr_q8_quantize(const float* x, int8_t* q, float* scales, int n) {
+    int nb = n / LLM_ASR_Q8_BLK;
     for (int b = 0; b < nb; b++) {
-        const float* xb = x + (size_t)b * GMB_ASR_Q8_BLK; float amax = 0;
-        for (int i = 0; i < GMB_ASR_Q8_BLK; i++) { float a = fabsf(xb[i]); if (a > amax) amax = a; }
+        const float* xb = x + (size_t)b * LLM_ASR_Q8_BLK; float amax = 0;
+        for (int i = 0; i < LLM_ASR_Q8_BLK; i++) { float a = fabsf(xb[i]); if (a > amax) amax = a; }
         float sc = amax > 0 ? amax / 127.0f : 1.0f; scales[b] = sc;
-        for (int i = 0; i < GMB_ASR_Q8_BLK; i++) {
+        for (int i = 0; i < LLM_ASR_Q8_BLK; i++) {
             float v = xb[i] / sc; long r = (long)(v < 0 ? v - 0.5f : v + 0.5f);
-            if (r > 127) r = 127; if (r < -127) r = -127; q[(size_t)b * GMB_ASR_Q8_BLK + i] = (int8_t)r;
+            if (r > 127) r = 127; if (r < -127) r = -127; q[(size_t)b * LLM_ASR_Q8_BLK + i] = (int8_t)r;
         }
     }
 }
 
-void gmb_asr_q8_dequantize(const int8_t* q, const float* scales, float* x, int n) {
-    for (int i = 0; i < n; i++) x[i] = (float)q[i] * scales[i / GMB_ASR_Q8_BLK];
+void llm_asr_q8_dequantize(const int8_t* q, const float* scales, float* x, int n) {
+    for (int i = 0; i < n; i++) x[i] = (float)q[i] * scales[i / LLM_ASR_Q8_BLK];
 }

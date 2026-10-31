@@ -1,8 +1,8 @@
-/* gmb_asr_model.c — loader dei pesi Qwen3-ASR (HF/safetensors multi-shard).
+/* llm_asr_model.c — loader dei pesi Qwen3-ASR (HF/safetensors multi-shard).
  * Reader safetensors minimale self-contained (header JSON + pread per tensore); nessuna dipendenza.
  * Encoder -> F32 (i bf16 sono convertiti all'load); decoder -> BF16 nativo. Config rilevata dalla
  * presenza di `thinker.audio_tower.layers.18` (0.6B: 18 layer; 1.7B: 24). Riferimento: antirez/qwen-asr. */
-#include "gmb_asr.h"
+#include "llm_asr.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -95,13 +95,13 @@ static StStore* store_open(const char* dir) {
 static void store_free(StStore* s) { if (!s) return; for (int i = 0; i < s->ns; i++) { free(s->sh[i].t); close(s->sh[i].fd); } free(s->sh); free(s); }
 
 /* ===== modello ===== */
-struct GmbAsrModel {
-    GmbAsrEncConfig ecfg; GmbAsrDecConfig dcfg;
-    GmbAsrEncoder enc; GmbAsrDecoder dec;
+struct LlmAsrModel {
+    LlmAsrEncConfig ecfg; LlmAsrDecConfig dcfg;
+    LlmAsrEncoder enc; LlmAsrDecoder dec;
     void** allocs; int n_alloc, cap_alloc;
 };
 
-static void* oreg(GmbAsrModel* m, void* p) {
+static void* oreg(LlmAsrModel* m, void* p) {
     if (!p) return NULL;
     if (m->n_alloc == m->cap_alloc) { m->cap_alloc = m->cap_alloc ? m->cap_alloc * 2 : 128; m->allocs = (void**)realloc(m->allocs, (size_t)m->cap_alloc * sizeof(void*)); }
     m->allocs[m->n_alloc++] = p; return p;
@@ -110,7 +110,7 @@ static void* oreg(GmbAsrModel* m, void* p) {
 static size_t numel(const StT* t) { size_t n = 1; for (int i = 0; i < t->ndim; i++) n *= (size_t)t->shape[i]; return n; }
 
 /* bf16 -> f32 (encoder e norme decoder). Tutti i tensori del checkpoint sono BF16. */
-static float* load_bf16_f32(GmbAsrModel* m, const StStore* s, const char* name) {
+static float* load_bf16_f32(LlmAsrModel* m, const StStore* s, const char* name) {
     const StT* t = st_find(s, name); if (!t) { fprintf(stderr, "asr: manca %s\n", name); return NULL; }
     const StShard* sh = st_shard_of(s, t); size_t n = numel(t);
     uint16_t* b = (uint16_t*)malloc((n ? n : 1) * sizeof(uint16_t));
@@ -120,7 +120,7 @@ static float* load_bf16_f32(GmbAsrModel* m, const StStore* s, const char* name) 
     free(b); return (float*)oreg(m, a);
 }
 /* bf16 nativo (decoder). */
-static uint16_t* load_bf16(GmbAsrModel* m, const StStore* s, const char* name) {
+static uint16_t* load_bf16(LlmAsrModel* m, const StStore* s, const char* name) {
     const StT* t = st_find(s, name); if (!t) { fprintf(stderr, "asr: manca %s\n", name); return NULL; }
     const StShard* sh = st_shard_of(s, t); size_t n = numel(t);
     uint16_t* b = (uint16_t*)malloc((n ? n : 1) * sizeof(uint16_t));
@@ -130,8 +130,8 @@ static uint16_t* load_bf16(GmbAsrModel* m, const StStore* s, const char* name) {
 
 #define ENC "thinker.audio_tower."
 
-static int load_encoder(GmbAsrModel* m, const StStore* s) {
-    GmbAsrEncoder* e = &m->enc; char nm[512];
+static int load_encoder(LlmAsrModel* m, const StStore* s) {
+    LlmAsrEncoder* e = &m->enc; char nm[512];
     e->conv1_w = load_bf16_f32(m, s, ENC "conv2d1.weight"); e->conv1_b = load_bf16_f32(m, s, ENC "conv2d1.bias");
     e->conv2_w = load_bf16_f32(m, s, ENC "conv2d2.weight"); e->conv2_b = load_bf16_f32(m, s, ENC "conv2d2.bias");
     e->conv3_w = load_bf16_f32(m, s, ENC "conv2d3.weight"); e->conv3_b = load_bf16_f32(m, s, ENC "conv2d3.bias");
@@ -139,7 +139,7 @@ static int load_encoder(GmbAsrModel* m, const StStore* s) {
     if (!e->conv1_w || !e->conv2_w || !e->conv3_w || !e->conv_out_w) return -1;
     int L = m->ecfg.layers;
     for (int i = 0; i < L; i++) {
-        GmbAsrEncLayer* l = &e->layers[i];
+        LlmAsrEncLayer* l = &e->layers[i];
         snprintf(nm, sizeof nm, ENC "layers.%d.self_attn.q_proj.weight", i); l->wq = load_bf16_f32(m, s, nm);
         snprintf(nm, sizeof nm, ENC "layers.%d.self_attn.q_proj.bias", i);   l->bq = load_bf16_f32(m, s, nm);
         snprintf(nm, sizeof nm, ENC "layers.%d.self_attn.k_proj.weight", i); l->wk = load_bf16_f32(m, s, nm);
@@ -164,13 +164,13 @@ static int load_encoder(GmbAsrModel* m, const StStore* s) {
     return (e->ln_post_w && e->proj1_w && e->proj2_w) ? 0 : -1;
 }
 
-static int load_decoder(GmbAsrModel* m, const StStore* s) {
-    GmbAsrDecoder* d = &m->dec; char nm[512];
+static int load_decoder(LlmAsrModel* m, const StStore* s) {
+    LlmAsrDecoder* d = &m->dec; char nm[512];
     d->tok_embeddings = load_bf16(m, s, "thinker.model.embed_tokens.weight");
     d->norm = load_bf16_f32(m, s, "thinker.model.norm.weight");
     if (!d->tok_embeddings || !d->norm) return -1;
     for (int i = 0; i < m->dcfg.layers; i++) {
-        GmbAsrDecLayer* l = &d->layers[i];
+        LlmAsrDecLayer* l = &d->layers[i];
         snprintf(nm, sizeof nm, "thinker.model.layers.%d.self_attn.q_proj.weight", i); l->wq = load_bf16(m, s, nm);
         snprintf(nm, sizeof nm, "thinker.model.layers.%d.self_attn.k_proj.weight", i); l->wk = load_bf16(m, s, nm);
         snprintf(nm, sizeof nm, "thinker.model.layers.%d.self_attn.v_proj.weight", i); l->wv = load_bf16(m, s, nm);
@@ -187,10 +187,10 @@ static int load_decoder(GmbAsrModel* m, const StStore* s) {
     return 0;
 }
 
-GmbAsrModel* gmb_asr_load_model(const char* dir) {
+LlmAsrModel* llm_asr_load_model(const char* dir) {
     if (dir == NULL) return NULL;
     StStore* s = store_open(dir); if (!s) { fprintf(stderr, "asr: nessun .safetensors in %s\n", dir); return NULL; }
-    GmbAsrModel* m = (GmbAsrModel*)calloc(1, sizeof(GmbAsrModel));
+    LlmAsrModel* m = (LlmAsrModel*)calloc(1, sizeof(LlmAsrModel));
     /* detect 0.6B / 1.7B dalla presenza del layer 18 dell'encoder */
     int is17 = (st_find(s, ENC "layers.18.self_attn.q_proj.weight") != NULL);
     m->ecfg.d_model = is17 ? 1024 : 896; m->ecfg.layers = is17 ? 24 : 18; m->ecfg.heads = is17 ? 16 : 14;
@@ -200,17 +200,17 @@ GmbAsrModel* gmb_asr_load_model(const char* dir) {
     m->dcfg.head_dim = 128; m->dcfg.intermediate = is17 ? 6144 : 3072; m->dcfg.vocab = 151936;
     m->dcfg.rms_eps = 1e-6f; m->dcfg.rope_theta = 1e6f;
     int rc = load_encoder(m, s); if (rc == 0) rc = load_decoder(m, s);
-    if (rc != 0) { store_free(s); gmb_asr_model_free(m); return NULL; }
+    if (rc != 0) { store_free(s); llm_asr_model_free(m); return NULL; }
     store_free(s);
     return m;
 }
 
-void gmb_asr_model_free(GmbAsrModel* m) {
+void llm_asr_model_free(LlmAsrModel* m) {
     if (!m) return;
     for (int i = 0; i < m->n_alloc; i++) free(m->allocs[i]);
     free(m->allocs); free(m);
 }
-const GmbAsrEncConfig* gmb_asr_model_ecfg(const GmbAsrModel* m) { return &m->ecfg; }
-const GmbAsrDecConfig* gmb_asr_model_dcfg(const GmbAsrModel* m) { return &m->dcfg; }
-const GmbAsrEncoder*   gmb_asr_model_encoder(const GmbAsrModel* m) { return &m->enc; }
-const GmbAsrDecoder*   gmb_asr_model_decoder(const GmbAsrModel* m) { return &m->dec; }
+const LlmAsrEncConfig* llm_asr_model_ecfg(const LlmAsrModel* m) { return &m->ecfg; }
+const LlmAsrDecConfig* llm_asr_model_dcfg(const LlmAsrModel* m) { return &m->dcfg; }
+const LlmAsrEncoder*   llm_asr_model_encoder(const LlmAsrModel* m) { return &m->enc; }
+const LlmAsrDecoder*   llm_asr_model_decoder(const LlmAsrModel* m) { return &m->dec; }

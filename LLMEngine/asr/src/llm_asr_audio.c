@@ -1,7 +1,7 @@
-/* gmb_asr_audio.c — WAV + resample + log-mel per Qwen3-ASR.
+/* llm_asr_audio.c — WAV + resample + log-mel per Qwen3-ASR.
  * Porting VERBATIM (parametri e formule) da antirez/qwen-asr `qwen_asr_audio.c` (MIT), per
  * fedeltà bit-per-bit del mel. Estratto: niente stdin/thread live (non serve al runtime). */
-#include "gmb_asr.h"
+#include "llm_asr.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,19 +12,19 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define SR        GMB_ASR_SR
-#define N_MEL     GMB_ASR_N_MEL
-#define HOP       GMB_ASR_HOP
-#define WIN       GMB_ASR_WIN
-#define N_FFT     GMB_ASR_N_FFT
-#define N_FREQ    GMB_ASR_N_FREQ
+#define SR        LLM_ASR_SR
+#define N_MEL     LLM_ASR_N_MEL
+#define HOP       LLM_ASR_HOP
+#define WIN       LLM_ASR_WIN
+#define N_FFT     LLM_ASR_N_FFT
+#define N_FREQ    LLM_ASR_N_FREQ
 
 static uint16_t rd_u16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t rd_u32(const uint8_t* p) { return (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24)); }
 
-float* gmb_asr_wav_decode(const uint8_t* data, size_t file_size, int* out_n_samples) {
+float* llm_asr_wav_decode(const uint8_t* data, size_t file_size, int* out_n_samples) {
     if (data == NULL || file_size < 44 || memcmp(data, "RIFF", 4) != 0 || memcmp(data + 8, "WAVE", 4) != 0) {
-        fprintf(stderr, "gmb_asr_wav_decode: non e' un WAV valido\n");
+        fprintf(stderr, "llm_asr_wav_decode: non e' un WAV valido\n");
         return NULL;
     }
     int channels = 0, sample_rate = 0, bits = 0, fmt = 0;
@@ -42,7 +42,7 @@ float* gmb_asr_wav_decode(const uint8_t* data, size_t file_size, int* out_n_samp
         p += 8 + cs; if (cs & 1) p++;
     }
     if (fmt != 1 || bits != 16 || pcm == NULL || channels < 1) {
-        fprintf(stderr, "gmb_asr_wav_decode: formato non supportato (serve PCM 16-bit; fmt=%d bits=%d)\n", fmt, bits);
+        fprintf(stderr, "llm_asr_wav_decode: formato non supportato (serve PCM 16-bit; fmt=%d bits=%d)\n", fmt, bits);
         return NULL;
     }
     int n_frames = pcm_size / (channels * 2);
@@ -54,7 +54,7 @@ float* gmb_asr_wav_decode(const uint8_t* data, size_t file_size, int* out_n_samp
         else { float sum = 0; for (int c = 0; c < channels; c++) { int16_t v; memcpy(&v, &src[i * channels + c], 2); sum += v; } samples[i] = (sum / channels) / 32768.0f; }
     }
     if (sample_rate != SR) {
-        int nn = 0; float* rs = gmb_asr_resample(samples, n_frames, sample_rate, &nn);
+        int nn = 0; float* rs = llm_asr_resample(samples, n_frames, sample_rate, &nn);
         free(samples);
         if (!rs) return NULL;
         samples = rs; n_frames = nn;
@@ -63,14 +63,14 @@ float* gmb_asr_wav_decode(const uint8_t* data, size_t file_size, int* out_n_samp
     return samples;
 }
 
-float* gmb_asr_wav_load(const char* path, int* out_n_samples) {
+float* llm_asr_wav_load(const char* path, int* out_n_samples) {
     FILE* f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "gmb_asr_wav_load: impossibile aprire %s\n", path); return NULL; }
+    if (!f) { fprintf(stderr, "llm_asr_wav_load: impossibile aprire %s\n", path); return NULL; }
     fseek(f, 0, SEEK_END); long sz = ftell(f); if (sz <= 0) { fclose(f); return NULL; } fseek(f, 0, SEEK_SET);
     uint8_t* data = (uint8_t*)malloc((size_t)sz);
     if (!data || fread(data, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(data); return NULL; }
     fclose(f);
-    float* s = gmb_asr_wav_decode(data, (size_t)sz, out_n_samples);
+    float* s = llm_asr_wav_decode(data, (size_t)sz, out_n_samples);
     free(data);
     return s;
 }
@@ -82,7 +82,7 @@ static double bessel_i0(double x) {
     return sum;
 }
 
-float* gmb_asr_resample(const float* in, int n_in, int sr_in, int* out_n) {
+float* llm_asr_resample(const float* in, int n_in, int sr_in, int* out_n) {
     if (in == NULL || n_in <= 0 || sr_in <= 0) return NULL;
     if (sr_in == SR) { float* c = (float*)malloc((size_t)n_in * sizeof(float)); if (c) memcpy(c, in, (size_t)n_in * sizeof(float)); *out_n = n_in; return c; }
     int new_n = (int)((long long)n_in * SR / sr_in);
@@ -134,7 +134,7 @@ static float* build_mel_filters(void) {
     return filters;
 }
 
-float* gmb_asr_mel(const float* samples, int n_samples, int* out_frames) {
+float* llm_asr_mel(const float* samples, int n_samples, int* out_frames) {
     int pad_len = N_FFT / 2;
     int padded_len = n_samples + 2 * pad_len;
     float* padded = (float*)malloc((size_t)padded_len * sizeof(float));
@@ -144,7 +144,7 @@ float* gmb_asr_mel(const float* samples, int n_samples, int* out_frames) {
     for (int i = 0; i < pad_len; i++) { int s = n_samples - 2 - i; padded[pad_len + n_samples + i] = (s >= 0) ? samples[s] : 0.0f; }
     int n_frames_total = (padded_len - N_FFT) / HOP + 1;
     int n_frames = n_frames_total - 1;
-    if (n_frames <= 0) { fprintf(stderr, "gmb_asr_mel: audio troppo corto (%d campioni)\n", n_samples); free(padded); return NULL; }
+    if (n_frames <= 0) { fprintf(stderr, "llm_asr_mel: audio troppo corto (%d campioni)\n", n_samples); free(padded); return NULL; }
     float* filters = build_mel_filters();
     if (!filters) { free(padded); return NULL; }
     float window[WIN];
