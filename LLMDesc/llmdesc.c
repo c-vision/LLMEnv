@@ -335,6 +335,12 @@ static const char* arch_alias(const char* slug) {
         { "glm4_moe_lite",    "deepseek_v3" },
         { "kimi_k2",          "deepseek_v3" },
         { "joyai_llm_flash",  "deepseek_v3" },
+        /* Nome con sottolineatura diversa, stessa famiglia (lifecycle: qwen2 attention + dense). */
+        { "qwen2vl",          "qwen2_vl" },
+        /* lifecycle: telechat3 = llama_attention_block + dense_swiglu (bias in piu', non ruoli). */
+        { "telechat3",        "llama" },
+        /* V4 Flash: il loader MLX marchia i modelli delegati come "deepseek_v4"; la descrizione e' ds4. */
+        { "deepseek_v4",      "ds4" },
     };
     for (size_t i = 0; i < sizeof k / sizeof k[0]; ++i)
         if (strcmp(slug, k[i].from) == 0) return k[i].to;

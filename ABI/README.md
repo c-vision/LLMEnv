@@ -68,9 +68,13 @@ caricato e' quello della famiglia.
 | `glm4_moe_lite` | **`deepseek_v3`** | `llm_mlx_model_lifecycle.c`: `glm4_moe_lite → deepseek_v3_attention_block + deepseek_v2_ffn_block` («GLM-4.5-Air: MLA assorbita + MoE noaux_tc»); `load_config` lo mette nella famiglia MLA |
 | `kimi_k2` | `deepseek_v3` | lifecycle: «Kimi K2 = deepseek_v3»; load_config: «mlx_lm remappa kimi_k2 → deepseek_v3» |
 | `joyai_llm_flash` | `deepseek_v3` | lifecycle: «= deepseek_v3» (stessa riga di K2) |
+| `qwen2vl` | `qwen2_vl` | lifecycle: «Qwen2.5-Omni: parte TESTO = qwen2»; cambia solo la forma del nome |
+| `telechat3` | `llama` | lifecycle: «Telechat3: llama GQA + bias q/k/v/o/mlp» — stessi nomi, i bias non sono ruoli |
+| `deepseek_v4` | `ds4` | il loader MLX marca i modelli V4 delegati come `deepseek_v4`; il descrittore e' `ds4` |
 
-**Non aliasato di proposito**: `youtu_llm` usa `deepseek_v2_attention_block` **+ FFN denso**
-(`dense_swiglu_ffn`), quindi non ha la stessa forma di `deepseek_v2` (MoE): merita un file suo o il
-fallback generico.
+**Copertura**: tutti i 57 `model_type` della tabella del motore hanno un descrittore (68 file in
+`ABI/`) o un alias qui sopra (`gemma3_text` e le altre varianti `_text`/`_vision` sono ridotte dal
+resolver). `youtu_llm` NON e' aliasato a `deepseek_v2` (che e' MoE): ha il file suo, perche' usa
+l'attenzione DeepSeek-V2 ma il **FFN denso**.
 
 Se una famiglia diverge davvero, si crea il file dedicato e si toglie la riga dalla tabella.
