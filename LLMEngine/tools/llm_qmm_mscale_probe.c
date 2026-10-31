@@ -12,7 +12,7 @@
 
 static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
 
-static void bench(int N, int K, int bits, int group, int M, int reps) {
+static double bench(int N, int K, int bits, int group, int M, int reps) {
     size_t Kw = (size_t)K * bits / 32, G = (size_t)K / group;
     uint32_t* w = (uint32_t*)calloc((size_t)N * Kw, 4);
     _Float16* sc = (_Float16*)malloc((size_t)N * G * 2), *bs = (_Float16*)malloc((size_t)N * G * 2);
@@ -40,21 +40,44 @@ static void bench(int N, int K, int bits, int group, int M, int reps) {
     for (int r = 0; r < reps; r++) mlx_array_eval(outs[r]);
     double ms = (now_ms() - t0) / reps;
     for (int r = 0; r < reps; r++) mlx_array_free(outs[r]);
-    double wbytes = (double)N * K * bits / 8.0;
-    printf("N=%-6d K=%-6d %dbit g%d  M=%-3d : %.4f ms  %7.1f GB/s(W)\n", N, K, bits, group, M, ms, wbytes / ms / 1e6);
-
     mlx_array_free(ax); mlx_array_free(aw); mlx_array_free(asc); mlx_array_free(abs_); free(outs);
     free(w); free(sc); free(bs); free(x);
+    mlx_device_free(d); mlx_stream_free(s);
+    return ms;
 }
+
+static int cmp_d(const void* a, const void* b) { double x = *(const double*)a, y = *(const double*)b; return (x > y) - (x < y); }
 
 int main(int argc, char** argv) {
     int bits = argc > 1 ? atoi(argv[1]) : 8;
     int group = argc > 2 ? atoi(argv[2]) : 64;
     int reps = argc > 3 ? atoi(argv[3]) : 20;
+    int trials = argc > 4 ? atoi(argv[4]) : 5;
+    if (trials < 1) trials = 1; if (trials > 25) trials = 25;
     int Mv[] = {1, 2, 4, 8, 16, 32};
+    const int NM = (int)(sizeof(Mv) / sizeof(Mv[0]));
     int shapes[][2] = {{17408, 5120}, {5120, 17408}, {5120, 5120}};
-    for (size_t si = 0; si < sizeof(shapes) / sizeof(shapes[0]); si++)
-        for (size_t mi = 0; mi < sizeof(Mv) / sizeof(Mv[0]); mi++)
-            bench(shapes[si][0], shapes[si][1], bits, group, Mv[mi], reps);
+    printf("# %dbit g%d  reps=%d trials=%d  (mediana di %d prove INDIPENDENTI, M in ordine ruotato)\n",
+           bits, group, reps, trials, trials);
+    printf("%-22s %-5s %-10s %-10s %-10s %-9s\n", "shape NxK", "M", "mediana ms", "min ms", "max ms", "GB/s(W) med");
+    for (size_t si = 0; si < sizeof(shapes) / sizeof(shapes[0]); si++) {
+        int N = shapes[si][0], K = shapes[si][1];
+        double samples[32][25];
+        for (int mi = 0; mi < NM; mi++)
+            for (int t = 0; t < trials; t++) samples[mi][t] = 0.0;
+        /* M ruotati a ogni trial: un P-state che deriva nel tempo colpisce tutti gli M allo stesso modo */
+        for (int t = 0; t < trials; t++)
+            for (int k = 0; k < NM; k++) {
+                int mi = (k + t) % NM;
+                samples[mi][t] = bench(N, K, bits, group, Mv[mi], reps);
+            }
+        for (int mi = 0; mi < NM; mi++) {
+            qsort(samples[mi], (size_t)trials, sizeof(double), cmp_d);
+            double med = samples[mi][trials / 2], mn = samples[mi][0], mx = samples[mi][trials - 1];
+            double wbytes = (double)N * K * bits / 8.0;
+            char nm[32]; snprintf(nm, sizeof(nm), "%dx%d", N, K);
+            printf("%-22s %-5d %-10.4f %-10.4f %-10.4f %-9.1f\n", nm, Mv[mi], med, mn, mx, wbytes / med / 1e6);
+        }
+    }
     return 0;
 }
