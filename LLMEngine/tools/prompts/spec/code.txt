@@ -1,0 +1,6 @@
+---PROMPT---
+Write a C function that takes an array of 32-bit integers and its length, returns the index of the first element equal to the maximum, and documents in a comment why it returns -1 for an empty array. Handle ties by returning the earliest index.
+---PROMPT---
+Write a Python function that reads a JSON file containing a list of records with a timestamp and a value, keeps only the last record for each day, and returns a list sorted by day. Use only the standard library and explain the error handling.
+---PROMPT---
+Implement in C a bounded ring buffer for bytes with push and pop functions and a length query. It must never lose data silently: pushing on a full buffer returns an error. Show the struct and both functions.

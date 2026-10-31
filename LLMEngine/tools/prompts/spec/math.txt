@@ -1,0 +1,6 @@
+---PROMPT---
+A train leaves a station at 8:15 and travels at 90 km/h. A second train leaves the same station at 8:45 on a parallel track at 120 km/h. How far from the station does the second train catch the first, and at what time? Show each step.
+---PROMPT---
+Compute the probability that in a group of 6 people at least two share a birthday, assuming 365 equally likely days and independence. Give the exact expression and an approximate percentage with two decimals.
+---PROMPT---
+Prove that the sum of the first n odd numbers equals n squared, using induction. State the base case, the inductive hypothesis, and the step explicitly.

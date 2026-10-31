@@ -1,0 +1,6 @@
+---PROMPT---
+Explain, in a way a new colleague can follow, how a cache that keeps recently used experts behaves when a mixture-of-experts model runs on a machine with less memory than the model. Mention what happens to the first token of a conversation and why the answer is still complete.
+---PROMPT---
+Describe a city you know well: what a visitor should notice in the first hour, what changes between morning and evening, and which single detail a postcard would miss. Keep the description concrete and avoid listing landmarks one after another.
+---PROMPT---
+Tell the story of a small engineering team that ships a feature, learns from a failure in production, and decides what to change. Focus on the moment the decision is made rather than the technical details of the fix.
