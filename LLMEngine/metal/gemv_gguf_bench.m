@@ -33,13 +33,17 @@ int main(int argc,char**argv){ @autoreleasepool {
     id<MTLBuffer> bw16=[dev newBufferWithBytes:w16 length:(size_t)N*K*2 options:MTLResourceStorageModeShared];
     id<MTLBuffer> bx=[dev newBufferWithBytes:x length:(size_t)K*4 options:MTLResourceStorageModeShared];
     id<MTLBuffer> bo=[dev newBufferWithLength:(size_t)N*4 options:MTLResourceStorageModeShared];
-    int pr[2]={N,K}; id<MTLBuffer> bp=[dev newBufferWithBytes:pr length:8 options:MTLResourceStorageModeShared];
+    /* N e K in buffer DISTINTI (2026-10-31): con lo stesso buffer il kernel legge K=N, quindi
+     * le forme RETTANGOLARI misuravano con K sbagliato (out-of-bounds latente). */
+    int pN=N,pK=K;
+    id<MTLBuffer> bpN=[dev newBufferWithBytes:&pN length:4 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> bpK=[dev newBufferWithBytes:&pK length:4 options:MTLResourceStorageModeShared];
     id<MTLCommandQueue> q=[dev newCommandQueue];
     __block double t_q4=0,t_f16=0; __block float y0=0,y16=0;
     void(^run)(id<MTLComputePipelineState>,id<MTLBuffer>) = ^(id<MTLComputePipelineState>pso,id<MTLBuffer>bw){
-        for(int r=0;r<3;r++){id<MTLCommandBuffer> cb=[q commandBuffer];{id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];[e setComputePipelineState:pso];[e setBuffer:bw offset:0 atIndex:0];[e setBuffer:bx offset:0 atIndex:1];[e setBuffer:bo offset:0 atIndex:2];[e setBuffer:bp offset:0 atIndex:3];[e setBuffer:bp offset:4 atIndex:4];[e dispatchThreadgroups:MTLSizeMake((N+7)/8,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];[e endEncoding];}[cb commit];[cb waitUntilCompleted];}
+        for(int r=0;r<3;r++){id<MTLCommandBuffer> cb=[q commandBuffer];{id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];[e setComputePipelineState:pso];[e setBuffer:bw offset:0 atIndex:0];[e setBuffer:bx offset:0 atIndex:1];[e setBuffer:bo offset:0 atIndex:2];[e setBuffer:bpN offset:0 atIndex:3];[e setBuffer:bpK offset:0 atIndex:4];[e dispatchThreadgroups:MTLSizeMake((N+7)/8,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];[e endEncoding];}[cb commit];[cb waitUntilCompleted];}
         uint64_t t0=mach_absolute_time();
-        for(int r=0;r<reps;r++){id<MTLCommandBuffer> cb=[q commandBuffer];for(int i=0;i<BATCH;i++){id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];[e setComputePipelineState:pso];[e setBuffer:bw offset:0 atIndex:0];[e setBuffer:bx offset:0 atIndex:1];[e setBuffer:bo offset:0 atIndex:2];[e setBuffer:bp offset:0 atIndex:3];[e setBuffer:bp offset:4 atIndex:4];[e dispatchThreadgroups:MTLSizeMake((N+7)/8,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];[e endEncoding];}[cb commit];[cb waitUntilCompleted];}
+        for(int r=0;r<reps;r++){id<MTLCommandBuffer> cb=[q commandBuffer];for(int i=0;i<BATCH;i++){id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];[e setComputePipelineState:pso];[e setBuffer:bw offset:0 atIndex:0];[e setBuffer:bx offset:0 atIndex:1];[e setBuffer:bo offset:0 atIndex:2];[e setBuffer:bpN offset:0 atIndex:3];[e setBuffer:bpK offset:0 atIndex:4];[e dispatchThreadgroups:MTLSizeMake((N+7)/8,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];[e endEncoding];}[cb commit];[cb waitUntilCompleted];}
         uint64_t t1=mach_absolute_time(); mach_timebase_info_data_t tb; mach_timebase_info(&tb);
         double ms=(double)(t1-t0)*tb.numer/tb.denom/1e6/(reps*BATCH);
         if(pso==p0){t_q4=ms; y0=((float*)bo.contents)[0];} else {t_f16=ms; y16=((float*)bo.contents)[0];}
