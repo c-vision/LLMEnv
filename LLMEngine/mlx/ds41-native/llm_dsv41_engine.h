@@ -36,12 +36,20 @@ typedef struct {
     long mtp_prop_ok;        /* forward_spec ha prodotto una proposta */
 } LlmDsv41Engine;
 
+/* Tensori attesi dal checkpoint ma NON materializzati (oggi: tabelle Engram): mai in silenzio. */
+static inline void llm_dsv41_warn_unloaded(int unloaded) {
+    if (unloaded > 0)
+        fprintf(stderr, "ds41-native: %d tensori Engram del checkpoint NON caricati (tabelle non materializzate)\n",
+                unloaded);
+}
+
 static inline LlmDsv41Engine* llm_dsv41_engine_load(const char* dir, mlx_stream s) {
     LlmDsv41Engine* e = (LlmDsv41Engine*)calloc(1, sizeof *e);
     if (!e) return NULL;
     int unloaded = 0;
     if (!llm_dsv41_load_model_dir(&e->w, dir, s, &unloaded)) { free(e); return NULL; }
     e->vocab = e->w.cfg.vocab_size;
+    llm_dsv41_warn_unloaded(unloaded);
     if (e->w.cfg.n_mtp_layers > 0 && e->w.cfg.n_dspark_targets > 0) {
         e->has_dspark = llm_dsv41_load_dspark(&e->dspark, &e->w.cfg, dir, s);
     }
@@ -57,6 +65,7 @@ static inline LlmDsv41Engine* llm_dsv41_engine_load_container(const char* cfg_di
     int unloaded = 0;
     if (!llm_dsv41_load_container_dir(&e->w, cfg_dir, container_path, s, &unloaded)) { free(e); return NULL; }
     e->vocab = e->w.cfg.vocab_size;
+    llm_dsv41_warn_unloaded(unloaded);
     return e;
 }
 
