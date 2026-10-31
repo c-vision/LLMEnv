@@ -30,6 +30,8 @@ struct LlmEngineMoeAsync {
     uint32_t n_workers;
     LlmEngineMoeCacheLoadFn load;
     void* ctx;
+    LlmEngineMoePrefetchJobFn prefetch_job;   /* 2026-10-31: hook per le sole PREFETCH (store esterno) */
+    void* prefetch_job_ctx;
     LlmEngineMoeExpertCache* cache;
     LlmEngineMoeProfiler* prof;   /* K1: trace CACHE_HIT/MISS per il replay offline */
     uint32_t prefetch_cap, prefetch_n;
@@ -137,6 +139,14 @@ void llmengine_moe_async_set_profiler(LlmEngineMoeAsync* a, LlmEngineMoeProfiler
     if (a != NULL) a->prof = p;
 }
 
+void llmengine_moe_async_set_prefetch_fn(LlmEngineMoeAsync* a, LlmEngineMoePrefetchJobFn fn, void* ctx) {
+    if (a == NULL) return;
+    pthread_mutex_lock(&a->mu);
+    a->prefetch_job = fn;
+    a->prefetch_job_ctx = ctx;
+    pthread_mutex_unlock(&a->mu);
+}
+
 void llmengine_moe_async_stats(LlmEngineMoeAsync* a, LlmEngineMoeAsyncStats* out) {
     if (a == NULL || out == NULL) return;
     pthread_mutex_lock(&a->mu);
@@ -159,16 +169,33 @@ static void* worker_main(void* arg) {
             if (a->prefetch_n > 0) a->prefetch_n--;
         }
         int cancelled = r->cancelled;
+        LlmEngineMoePrefetchJobFn pjob = a->prefetch_job;   /* letto sotto lock: vince l'ultimo set */
+        void* pjob_ctx = a->prefetch_job_ctx;
         pthread_mutex_unlock(&a->mu);
         if (cancelled) { free(r); continue; }
 
         const void* data = NULL; size_t size = 0;
         int was_hit = 0;
-        LlmEngineMoeStatus s = llmengine_moe_cache_get_ex(a->cache, r->key, r->expected, a->load, a->ctx, &data, &size, &was_hit);
-        if (a->prof != NULL) {
-            llmengine_moe_prof_event(a->prof,
-                was_hit ? LLMENGINE_MOE_TRACE_CACHE_HIT : LLMENGINE_MOE_TRACE_CACHE_MISS,
-                r->key.layer, r->key.expert, 0, (uint64_t)size);
+        LlmEngineMoeStatus s;
+        if (r->type == REQ_PREFETCH && pjob != NULL) {
+            /* PREFETCH verso uno store ESTERNO (adapter GGUF): l'I/O avviene QUI, sul worker.
+             * Prima del 2026-10-31 questa coda esisteva ma nessuno la riempiva: il prefetch era
+             * una chiamata diretta sul thread del router (pread in linea). Le REQUIRED restano
+             * su cache+load: il prefetch non e' mai autoritativo. */
+            if (a->prof != NULL)
+                llmengine_moe_prof_event(a->prof, LLMENGINE_MOE_TRACE_PREFETCH_BEGIN,
+                                         r->key.layer, r->key.expert, 0, 0);
+            s = (pjob(pjob_ctx, r->key.layer, r->key.expert) == 0) ? LLMENGINE_MOE_OK : LLMENGINE_MOE_ERR_IO;
+            if (a->prof != NULL)
+                llmengine_moe_prof_event(a->prof, LLMENGINE_MOE_TRACE_PREFETCH_END,
+                                         r->key.layer, r->key.expert, 0, (uint64_t)(s == LLMENGINE_MOE_OK));
+        } else {
+            s = llmengine_moe_cache_get_ex(a->cache, r->key, r->expected, a->load, a->ctx, &data, &size, &was_hit);
+            if (a->prof != NULL) {
+                llmengine_moe_prof_event(a->prof,
+                    was_hit ? LLMENGINE_MOE_TRACE_CACHE_HIT : LLMENGINE_MOE_TRACE_CACHE_MISS,
+                    r->key.layer, r->key.expert, 0, (uint64_t)size);
+            }
         }
         pthread_mutex_lock(&a->mu);
         r->data = data; r->size = size; r->status = s; r->handled = 1;

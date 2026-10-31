@@ -3,6 +3,9 @@
 #include "llmengine_moe_qwen3_forward.h"
 #include "llmengine_moe_arch.h"   /* LLMENGINE_MOE_NORM_LAYER (M7.2) */
 
+/* Gate REALE anche in Release: il build passa -DNDEBUG e senza questo `assert()` e' un
+ * no-op (scoperto il 2026-10-31: test "verdi" che non eseguivano nulla). */
+#undef NDEBUG
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>

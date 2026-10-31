@@ -1,6 +1,9 @@
 /* test_moe_slot.c — M8 gate (slot pool): allocazione/riuso/eviction + remap logico->fisico. */
 #include "llmengine_moe_slot.h"
 
+/* Gate REALE anche in Release: il build passa -DNDEBUG e senza questo `assert()` e' un
+ * no-op (scoperto il 2026-10-31: test "verdi" che non eseguivano nulla). */
+#undef NDEBUG
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

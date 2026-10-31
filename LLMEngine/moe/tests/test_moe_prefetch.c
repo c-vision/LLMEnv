@@ -1,6 +1,9 @@
 /* test_moe_prefetch.c — M6 gate: coupling cross-layer, recall post-warm-up, bound, reset, metriche. */
 #include "llmengine_moe_prefetch.h"
 
+/* Gate REALE anche in Release: il build passa -DNDEBUG e senza questo `assert()` e' un
+ * no-op (scoperto il 2026-10-31: test "verdi" che non eseguivano nulla). */
+#undef NDEBUG
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -177,6 +177,28 @@ int main(void) {
     CHECK(ss->hits == 1);
     CHECK(llmengine_moe_gguf_store_resident_bytes(ss) > 0);
 
+    /* prefetch THREAD-SAFE (2026-10-31, per la coda PREFETCH del runtime): NON deve toccare
+     * l'LRU — niente hit/miss/bytes_read, e l'esperto resta fuori dalla cache. È l'invariante
+     * che lo rende chiamabile da un worker mentre il forward tiene i puntatori del bundle.
+     * Store NUOVO (LRU vuota) così il test è deterministico. */
+    {
+        GgufStore* ws = llmengine_moe_gguf_store_open(gp, &g, 2, 1 /*SWAP*/, 0);
+        CHECK(ws != NULL);
+        if (ws != NULL) {
+            CHECK(llmengine_moe_gguf_store_prefetch_warm(ws, 0, 0) == 0);
+            CHECK(ws->misses == 0);          /* il warm NON contabilizza una miss */
+            CHECK(ws->hits == 0);
+            CHECK(ws->bytes_read == 0);      /* niente pread in user space (F_RDADVISE) */
+            const uint8_t *u0, *d0;
+            CHECK(llmengine_moe_gguf_store_expert(ws, 0, 0, &u0, &d0) != NULL);
+            CHECK(ws->misses == 1);          /* l'esperto NON era in LRU: il warm non lo mette */
+            CHECK(llmengine_moe_gguf_store_prefetch_warm(ws, 0, 0) == 0);    /* ora residente: no-op */
+            CHECK(llmengine_moe_gguf_store_prefetch_warm(ws, 0, 9999) == -1); /* bounds-check */
+            CHECK(llmengine_moe_gguf_store_prefetch_warm(ws, 99, 0) == -1);
+            llmengine_moe_gguf_store_close(ws);
+        }
+    }
+
     fclose(f);
     llmengine_moe_gguf_store_close(rs);
     llmengine_moe_gguf_store_close(ss);

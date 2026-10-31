@@ -39,6 +39,15 @@ LlmEngineMoeStatus llmengine_moe_async_prefetch(LlmEngineMoeAsync* a, LlmEngineM
 /* Cancella TUTTE le prefetch in coda (mai le REQUIRED). Ritorna quante ne ha cancellate. */
 uint32_t llmengine_moe_async_cancel_prefetch(LlmEngineMoeAsync* a);
 
+/* Prefetch-job hook (2026-10-31): esegue le SOLE richieste PREFETCH sul worker, invece del
+ * percorso cache+`load`. Serve ai runtime che non caricano l'esperto in una cache generica ma
+ * in un proprio store (adapter GGUF: `gguf_store_prefetch`): senza questo hook la coda PREFETCH
+ * non puo' essere usata, perche' `load` per il GGUF e' un no-op (`ERR_NOT_IMPLEMENTED`).
+ * `fn` ritorna 0 = fatto. NULL (default) = comportamento storico (cache+load). Le REQUIRED
+ * restano SEMPRE su cache+load: il prefetch non deve mai diventare autoritativo. */
+typedef int (*LlmEngineMoePrefetchJobFn)(void* ctx, uint32_t layer, uint32_t expert);
+void llmengine_moe_async_set_prefetch_fn(LlmEngineMoeAsync* a, LlmEngineMoePrefetchJobFn fn, void* ctx);
+
 /* K1: profiler opzionale — quando impostato, ogni richiesta emette nel trace CACHE_HIT o
  * CACHE_MISS (con la chiave), rendendo il `.moetrace` ri-giocabile offline da `tools/moe_sim`. */
 void llmengine_moe_async_set_profiler(LlmEngineMoeAsync* a, LlmEngineMoeProfiler* p);

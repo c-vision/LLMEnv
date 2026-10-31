@@ -156,6 +156,15 @@ static int gguf_prefetch_fn(void* ctx, uint32_t layer, uint32_t expert) {
     return llmengine_moe_gguf_store_prefetch(s->store, layer, expert);
 }
 
+/* Variante per i WORKER della coda PREFETCH: `gguf_prefetch_fn` carica nell'LRU dello store,
+ * che NON e' thread-safe (il forward tiene i puntatori del bundle). Questa scalda solo la page
+ * cache dei record: nessuna mutazione condivisa, nessun rischio di evincere il bundle in uso. */
+static int gguf_prefetch_warm_fn(void* ctx, uint32_t layer, uint32_t expert) {
+    GgufSelf* s = (GgufSelf*)ctx;
+    if (s == NULL || s->store == NULL) return -1;
+    return llmengine_moe_gguf_store_prefetch_warm(s->store, layer, expert);
+}
+
 static void gguf_route_cb(void* ctx, uint32_t layer, const uint32_t* experts, const float* probs, uint32_t n) {
     GgufSelf* s = (GgufSelf*)ctx;
     if (s->store != NULL) {
@@ -209,7 +218,8 @@ static LlmEngineMoeStatus gguf_forward(void* self, LlmEngineMoeRuntime* rt, cons
         if (s->store != NULL) {
             s->store->prof = llmengine_moe_profiler(rt);   /* K1: trace */
             /* M6: collega il prefetch cross-layer (route_prob/future) allo store. */
-            llmengine_moe_set_prefetch_fn(rt, gguf_prefetch_fn, s);
+            llmengine_moe_set_prefetch_fn(rt, gguf_prefetch_fn, s);                 /* in linea */
+            llmengine_moe_set_prefetch_warm_fn(rt, gguf_prefetch_warm_fn, s);       /* worker */
         }
     }
     Q3KvCache kv; kv.k = s->kv_k; kv.v = s->kv_v;

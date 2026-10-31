@@ -3,6 +3,9 @@
 #include "llmengine_moe_kv.h"
 #include "llmengine_moe_cache.h"
 
+/* Gate REALE anche in Release: il build passa -DNDEBUG e senza questo `assert()` e' un
+ * no-op (scoperto il 2026-10-31: test "verdi" che non eseguivano nulla). */
+#undef NDEBUG
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

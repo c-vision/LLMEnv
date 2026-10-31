@@ -287,6 +287,48 @@ static inline int llmengine_moe_gguf_store_prefetch(GgufStore* s, uint32_t layer
     return llmengine_moe_gguf_store_expert(s, layer, e, &u, &d) != NULL ? 0 : -1;
 }
 
+/* Prefetch THREAD-SAFE (2026-10-31): scalda la page cache dei 3 record-esperto SENZA toccare
+ * l'LRU. `llmengine_moe_gguf_store_prefetch` qui sopra NON e' thread-safe: muta s->ents,
+ * evince bundle e puo' liberare il buffer che il thread del forward sta leggendo (contratto
+ * «puntatori validi fino alla prossima chiamata»). Va quindi chiamata SOLO dal thread del
+ * forward. Questa variante e' pensata per il worker della coda PREFETCH di
+ * `llmengine_moe_async`: usa F_RDADVISE (macOS, nessuna copia in user space) o `pread` in uno
+ * scratch, e non scrive nulla nello store. Effetto: al primo uso il `pread` vero trova i byte
+ * in page cache (hit del kernel) invece di andare su SSD. */
+static inline int llmengine_moe_gguf_store_prefetch_warm(GgufStore* s, uint32_t layer, uint32_t e) {
+    if (s == NULL || layer >= s->n_layer) return -1;
+    GgufStoreLayer* L = &s->layers[layer];
+    if (e >= L->g.n_experts || e >= L->u.n_experts || e >= L->d.n_experts) return -1;
+    if (!s->swap) return 0;                                     /* RESIDENT: mmap, nulla da scaldare */
+    if (gguf_store_find(s, (int)layer, (int)e) >= 0) return 0;  /* gia' in LRU */
+    const uint64_t off[3] = { L->g.off + (uint64_t)e * L->g.nb,
+                              L->u.off + (uint64_t)e * L->u.nb,
+                              L->d.off + (uint64_t)e * L->d.nb };
+    const uint64_t len[3] = { L->g.nb, L->u.nb, L->d.nb };
+#ifdef F_RDADVISE
+    for (int i = 0; i < 3; ++i) {
+        struct radvisory ra;
+        ra.ra_offset = (off_t)off[i];
+        ra.ra_count  = (int)len[i];
+        (void)fcntl(s->fd, F_RDADVISE, &ra);
+    }
+#else
+    uint8_t* sc = (uint8_t*)malloc(1u << 20);
+    if (sc == NULL) return -1;
+    for (int i = 0; i < 3; ++i) {
+        uint64_t done = 0;
+        while (done < len[i]) {
+            size_t chunk = (size_t)((len[i] - done) > (1u << 20) ? (1u << 20) : (len[i] - done));
+            ssize_t got = pread(s->fd, sc, chunk, (off_t)(off[i] + done));
+            if (got <= 0) break;
+            done += (uint64_t)got;
+        }
+    }
+    free(sc);
+#endif
+    return 0;
+}
+
 /* Ritorna i puntatori ai tre record-esperto (raw ggml bytes), validi fino alla prossima chiamata.
  * RESIDENT: puntatori nel mmap. SWAP: bundle in cache LRU (pread su miss). NULL su errore. */
 static inline const uint8_t* llmengine_moe_gguf_store_expert(GgufStore* s, uint32_t layer, uint32_t e,

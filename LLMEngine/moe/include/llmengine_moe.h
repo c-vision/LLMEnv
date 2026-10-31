@@ -17,6 +17,7 @@
 #include "llmengine_moe_cache.h"
 #include "llmengine_moe_kv.h"
 #include "llmengine_moe_prof.h"
+#include "llmengine_moe_async.h"
 
 typedef struct LlmEngineMoeRuntime LlmEngineMoeRuntime;
 
@@ -125,6 +126,10 @@ LlmEngineMoeStatus llmengine_moe_set_prefetch(LlmEngineMoeRuntime* rt, uint32_t 
  * Senza callback il prefetch e' un no-op (nessun container). */
 void llmengine_moe_set_prefetch_fn(LlmEngineMoeRuntime* rt,
                                    int (*fn)(void* ctx, uint32_t layer, uint32_t expert), void* ctx);
+/* Prefetch per i WORKER (coda PREFETCH): deve essere THREAD-SAFE (non deve mutare stato che il
+ * thread del forward legge/usa). L'adapter GGUF registra la variante "warm" dello store. */
+void llmengine_moe_set_prefetch_warm_fn(LlmEngineMoeRuntime* rt,
+                                        int (*fn)(void* ctx, uint32_t layer, uint32_t expert), void* ctx);
 LlmEngineMoeStatus llmengine_moe_set_async(LlmEngineMoeRuntime* rt, uint32_t workers, uint32_t cap); /* 0 = off */
 
 /* Forward generico: `in` [seq*hidden] -> `out` [seq*hidden]. */
@@ -162,6 +167,9 @@ LlmEngineMoeStatus llmengine_moe_prefetch_expert(LlmEngineMoeRuntime* rt, LlmEng
 LlmEngineMoeStatus llmengine_moe_notify_routing(LlmEngineMoeRuntime* rt, uint32_t layer,
                                     const uint32_t* experts, uint32_t n);
 LlmEngineMoeStatus llmengine_moe_prefetch_metrics(LlmEngineMoeRuntime* rt, LlmEngineMoePrefetchMetrics* out);
+/* Statistiche del pool async (PREFETCH eseguite / droppate / completate). Additiva: se il pool non
+ * c'e' la struct e' azzerata. */
+LlmEngineMoeStatus llmengine_moe_prefetch_async_stats(LlmEngineMoeRuntime* rt, LlmEngineMoeAsyncStats* out);
 void llmengine_moe_reset_prefetch(LlmEngineMoeRuntime* rt, int full);
 
 /* Genera fino a `n_out` token greedy a partire dal prompt. Ritorna il numero generato o

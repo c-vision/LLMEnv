@@ -3,11 +3,16 @@
 #include "llmengine_moe_async.h"
 #include "llmengine_moe_cache.h"
 
+/* I test usano assert(): in Release il build passa -DNDEBUG -> assert() diventa un no-op e il
+ * gate non verifica NULLA (scoperto il 2026-10-31: `load totali=0` con 5 prefetch "passate").
+ * `#undef NDEBUG` PRIMA di <assert.h> rende gli assert vivi anche in Release. */
+#undef NDEBUG
 #include <assert.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct { int loads; pthread_mutex_t mu; } LCtx;
@@ -22,6 +27,15 @@ static LlmEngineMoeStatus slow_load(void* ctx, LlmEngineMoeExpertKey key, void* 
 }
 static int loads(LCtx* lc) { pthread_mutex_lock(&lc->mu); int v = lc->loads; pthread_mutex_unlock(&lc->mu); return v; }
 static LlmEngineMoeExpertKey K(uint32_t l, uint32_t e) { LlmEngineMoeExpertKey k = {l, e}; return k; }
+
+/* Job del prefetch verso uno store esterno: dorme 30 ms (come un pread su SSD) e conta. */
+static int count_job(void* ctx, uint32_t layer, uint32_t expert) {
+    LCtx* jc = (LCtx*)ctx;
+    (void)layer; (void)expert;
+    pthread_mutex_lock(&jc->mu); jc->loads++; pthread_mutex_unlock(&jc->mu);
+    usleep(30000);
+    return 0;
+}
 
 static void check_blob(const void* data, size_t size, LlmEngineMoeExpertKey key) {
     assert(data != NULL && size == 64);
@@ -80,6 +94,37 @@ int main(void) {
     /* 5. shutdown pulito: destroy con richieste in volo (join di tutti i worker) */
     for (uint32_t e = 0; e < 8; ++e) llmengine_moe_async_prefetch(a, K(4, e), 64);
     llmengine_moe_async_destroy(a);          /* se un worker restasse attivo -> hang/TSan lo becca */
+
+    /* 6. PREFETCH-JOB verso uno store esterno (2026-10-31, fix del prefetch MoE sincrono).
+     *    - il chiamante NON deve bloccarsi (prima il pread era in linea sul thread del router);
+     *    - il job deve girare SUL WORKER (contatore), non sul thread chiamante;
+     *    - le REQUIRED devono continuare a passare da cache+load, MAI dal job. */
+    {
+        LCtx jc; jc.loads = 0; pthread_mutex_init(&jc.mu, NULL);   /* contatore del job */
+        LlmEngineMoeAsync* p = NULL;
+        assert(llmengine_moe_async_create(&p, 1, slow_load, &lc, cache, 64) == LLMENGINE_MOE_OK);
+        llmengine_moe_async_set_prefetch_fn(p, count_job, &jc);
+
+        struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (uint32_t e = 0; e < 8; ++e) assert(llmengine_moe_async_prefetch(p, K(7, e), 0) == LLMENGINE_MOE_OK);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double enqueue_ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+        /* 8 job da 30 ms: se fossero sincroni sarebbero >=240 ms. Con la coda: pochi microsecondi. */
+        assert(enqueue_ms < 40.0);
+        for (int w = 0; w < 200 && loads(&jc) < 8; ++w) usleep(10000);   /* attende i worker */
+        assert(loads(&jc) == 8);
+
+        /* REQUIRED: non deve passare dal job (e' il router a comandare) */
+        int job_before = loads(&jc), load_before = loads(&lc);
+        const void* d = NULL; size_t n = 0;
+        assert(llmengine_moe_async_get(p, K(8, 8), 64, &d, &n) == LLMENGINE_MOE_OK);
+        check_blob(d, n, K(8, 8));
+        assert(loads(&jc) == job_before);        /* job NON chiamato */
+        assert(loads(&lc) == load_before + 1);   /* load della cache si' */
+        llmengine_moe_async_destroy(p);
+        pthread_mutex_destroy(&jc.mu);
+        printf("test_moe_async: prefetch-job enqueue=%.3f ms (8 job da 30 ms, non bloccante)\n", enqueue_ms);
+    }
 
     llmengine_moe_cache_destroy(cache);
     pthread_mutex_destroy(&lc.mu);

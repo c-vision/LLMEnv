@@ -56,10 +56,18 @@ struct LlmEngineMoeRuntime {
      * Il predittore (route_prob/future) la invoca per gli esperti del layer successivo. */
     int (*prefetch_fn)(void* ctx, uint32_t layer, uint32_t expert);
     void* prefetch_ctx;
+    /* 2026-10-31: variante THREAD-SAFE per il worker della coda PREFETCH. `prefetch_fn` puo'
+     * mutare strutture non sincronizzate (store GGUF: LRU + buffer visti dal forward) → va
+     * usata solo in linea. Il worker usa questa, che deve scaldare la page cache senza
+     * toccare stato condiviso. NULL = si ricade su prefetch_fn (runtime che dichiara di
+     * essere thread-safe). */
+    int (*prefetch_warm_fn)(void* ctx, uint32_t layer, uint32_t expert);
+    void* prefetch_warm_ctx;
 };
 
 static LlmEngineMoeStatus llmengine_moe_rt_load_expert(void* ctx, LlmEngineMoeExpertKey key,
                                            void* buf, size_t cap, size_t* got);
+static int llmengine_moe_rt_prefetch_job(void* ctx, uint32_t layer, uint32_t expert);
 static LlmEngineMoeStatus llmengine_moe_preload_resident(LlmEngineMoeRuntime* rt);
 static void llmengine_moe_adaptive_step(LlmEngineMoeRuntime* rt);   /* M17 */
 
@@ -202,6 +210,8 @@ LlmEngineMoeStatus llmengine_moe_load_model_ex(LlmEngineMoeRuntime* rt, const ch
                     if (llmengine_moe_async_create(&async, c.async_workers, llmengine_moe_rt_load_expert, rt,
                                              rt->cache, c.prefetch_cap) == LLMENGINE_MOE_OK) {
                         llmengine_moe_async_set_profiler(async, rt->prof);   /* K1: trace richieste */
+                        /* le PREFETCH vanno allo store dell'adapter, non alla cache generica */
+                        llmengine_moe_async_set_prefetch_fn(async, llmengine_moe_rt_prefetch_job, rt);
                         rt->async = async;
                     }
                 }
@@ -289,12 +299,33 @@ void llmengine_moe_set_prefetch_fn(LlmEngineMoeRuntime* rt,
     rt->prefetch_fn = fn; rt->prefetch_ctx = ctx;
 }
 
+/* Variante usata dai WORKER (coda PREFETCH): DEVE essere thread-safe (nessuna mutazione di
+ * strutture lette dal thread del forward). Vedi llmengine_moe_rt_prefetch_job. */
+void llmengine_moe_set_prefetch_warm_fn(LlmEngineMoeRuntime* rt,
+                                        int (*fn)(void* ctx, uint32_t layer, uint32_t expert), void* ctx) {
+    if (rt == NULL) return;
+    rt->prefetch_warm_fn = fn; rt->prefetch_warm_ctx = ctx;
+}
+
 LlmEngineMoeStatus llmengine_moe_prefetch_expert(LlmEngineMoeRuntime* rt, LlmEngineMoeExpertKey key) {
     if (rt == NULL) return LLMENGINE_MOE_ERR_INVALID;
     /* M6: prefetch REALE via callback dell'adapter (che possiede lo store); senza callback = no-op
      * (nessun container: gli esperti GGUF li gestisce l'adapter, che la registra). */
     if (rt->prefetch_fn != NULL) (void)rt->prefetch_fn(rt->prefetch_ctx, key.layer, key.expert);
     return LLMENGINE_MOE_OK;
+}
+
+/* Bridge runtime→pool: il worker della coda PREFETCH chiama questo, che a sua volta chiama il
+ * callback dell'ADAPTER (che possiede lo store). `rt->prefetch_fn` e' letto a ogni job: l'adapter
+ * puo' registrarlo dopo la creazione del pool. Nessun callback = job no-op (0 = fatto). */
+static int llmengine_moe_rt_prefetch_job(void* ctx, uint32_t layer, uint32_t expert) {
+    LlmEngineMoeRuntime* rt = (LlmEngineMoeRuntime*)ctx;
+    if (rt == NULL) return 0;
+    if (rt->prefetch_warm_fn != NULL)
+        return rt->prefetch_warm_fn(rt->prefetch_warm_ctx, layer, expert) == 0 ? 0 : 1;
+    if (rt->prefetch_fn != NULL)
+        return rt->prefetch_fn(rt->prefetch_ctx, layer, expert) == 0 ? 0 : 1;
+    return 0;
 }
 
 LlmEngineMoeStatus llmengine_moe_notify_routing(LlmEngineMoeRuntime* rt, uint32_t layer,
@@ -322,7 +353,12 @@ LlmEngineMoeStatus llmengine_moe_notify_routing(LlmEngineMoeRuntime* rt, uint32_
     }
     for (uint32_t i = 0; i < np; ++i) {
         LlmEngineMoeExpertKey key = {layer + 1, pred[i]};
-        (void)llmengine_moe_prefetch_expert(rt, key);
+        /* 2026-10-31: il prefetch va in coda PREFETCH (droppabile, cap) e lo esegue il WORKER.
+         * Prima era una chiamata diretta (`llmengine_moe_prefetch_expert`) e il `pread` cadeva
+         * nel thread del router: nessun overlap. Il fallback sincrono resta per i runtime senza
+         * pool (test e adapter senza store). */
+        if (rt->async != NULL) (void)llmengine_moe_async_prefetch(rt->async, key, 0);
+        else (void)llmengine_moe_prefetch_expert(rt, key);
     }
     return LLMENGINE_MOE_OK;
 }
@@ -331,6 +367,17 @@ LlmEngineMoeStatus llmengine_moe_prefetch_metrics(LlmEngineMoeRuntime* rt, LlmEn
     if (rt == NULL || out == NULL) return LLMENGINE_MOE_ERR_INVALID;
     if (rt->predictor == NULL) { memset(out, 0, sizeof(*out)); return LLMENGINE_MOE_OK; }
     llmengine_moe_predictor_metrics(rt->predictor, out);
+    return LLMENGINE_MOE_OK;
+}
+
+/* Statistiche del pool async (prefetch eseguite / droppate / completate). Serve a distinguere
+ * «prefetch utile» da «lettura anticipata ma comunque in linea»: senza questi contatori il
+ * prefetch e' invisibile. out azzerata se il pool non esiste. */
+LlmEngineMoeStatus llmengine_moe_prefetch_async_stats(LlmEngineMoeRuntime* rt, LlmEngineMoeAsyncStats* out) {
+    if (out == NULL) return LLMENGINE_MOE_ERR_INVALID;
+    memset(out, 0, sizeof(*out));
+    if (rt == NULL || rt->async == NULL) return LLMENGINE_MOE_OK;
+    llmengine_moe_async_stats(rt->async, out);
     return LLMENGINE_MOE_OK;
 }
 
@@ -587,6 +634,7 @@ LlmEngineMoeStatus llmengine_moe_set_async(LlmEngineMoeRuntime* rt, uint32_t wor
     if (llmengine_moe_async_create(&a, workers, llmengine_moe_rt_load_expert, rt, rt->cache, cap) != LLMENGINE_MOE_OK)
         return LLMENGINE_MOE_ERR_NO_MEMORY;
     llmengine_moe_async_set_profiler(a, rt->prof);   /* K1: trace richieste */
+    llmengine_moe_async_set_prefetch_fn(a, llmengine_moe_rt_prefetch_job, rt);  /* PREFETCH -> store adapter */
     rt->async = a;
     return LLMENGINE_MOE_OK;
 }

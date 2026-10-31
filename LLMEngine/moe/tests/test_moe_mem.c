@@ -2,6 +2,9 @@
  * policy prefetch e ordine di eviction (PREFETCH prima degli attivi). */
 #include "llmengine_moe_mem.h"
 
+/* Gate REALE anche in Release: il build passa -DNDEBUG e senza questo `assert()` e' un
+ * no-op (scoperto il 2026-10-31: test "verdi" che non eseguivano nulla). */
+#undef NDEBUG
 #include <assert.h>
 #include <stdio.h>
 
@@ -87,13 +90,16 @@ int main(void) {
     assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_PREFETCH, 200) == LLMENGINE_MOE_ERR_NO_MEMORY);
     assert(llmengine_moe_mem_cat_used(m3, LLMENGINE_MOE_MEM_DENSE) == 700);
     assert(llmengine_moe_mem_cat_used(m3, LLMENGINE_MOE_MEM_EXPERT_RAM) == 200);
-    /* anche a CRITICAL l'ultimo slot disponibile va al trunk, non al prefetch */
-    assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_KV, 150) == LLMENGINE_MOE_OK); /* 950 -> 0.95 */
+    /* anche a CRITICAL l'ultimo slot disponibile va al trunk, non al prefetch.
+     * Aritmetica del budget: 700 + 200 = 900, il residuo e' 100. */
+    assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_KV, 100) == LLMENGINE_MOE_OK); /* 1000 -> 1.0 */
     assert(llmengine_moe_mem_pressure(m3) == LLMENGINE_MOE_PRESS_CRITICAL);
     assert(llmengine_moe_mem_allow_prefetch(m3) == 0);
-    assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_DENSE, 50) == LLMENGINE_MOE_OK); /* 1000 */
+    /* budget ESAURITO: nemmeno il trunk passa (e il trunk gia' allocato resta) */
+    assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_DENSE, 50) == LLMENGINE_MOE_ERR_NO_MEMORY);
     assert(llmengine_moe_mem_reserve(m3, LLMENGINE_MOE_MEM_PREFETCH, 1) == LLMENGINE_MOE_ERR_NO_MEMORY);
-    assert(llmengine_moe_mem_cat_used(m3, LLMENGINE_MOE_MEM_DENSE) == 750); /* trunk mai evinto dal manager */
+    assert(llmengine_moe_mem_cat_used(m3, LLMENGINE_MOE_MEM_DENSE) == 700); /* trunk mai evinto dal manager */
+    assert(llmengine_moe_mem_cat_used(m3, LLMENGINE_MOE_MEM_KV) == 100);
     llmengine_moe_mem_destroy(m3);
 
     llmengine_moe_mem_destroy(m);
