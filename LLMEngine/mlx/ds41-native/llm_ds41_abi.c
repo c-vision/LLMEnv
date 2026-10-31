@@ -9,14 +9,18 @@
 #define LLM_DS41_ABI_IMPL 1
 #include "llm_dsv41_engine.h"
 #include "llmengine.h"
+#include "llm_engine_opts.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 typedef struct {
     LlmDsv41Engine* e;
     mlx_device device;
     mlx_stream stream;
+    int ctx_max;   /* limite di contesto in token (0 = nessun limite): kv_set_max / opzione `context` */
 } Ds41Model;
 
 typedef struct {
@@ -44,25 +48,62 @@ static void ds41_hist_push(Ds41Session* s, const int32_t* ids, int n) {
     s->hist_n += n;
 }
 
+/* `path` = dir del checkpoint ufficiale (safetensors) OPPURE file `.gguf` (container ggml/RAW; il
+ * config.json deve stare nella stessa cartella: il container non lo contiene). Con l'opzione
+ * `ds41_stream` il container e' letto in streaming (layer on-demand, RAM limitata). */
+static LlmDsv41Engine* ds41_open(const char* path, mlx_stream st) {
+    size_t n = strlen(path);
+    if (n > 5 && strcmp(path + n - 5, ".gguf") == 0) {
+        char cfg[4096], cj[4400];
+        const char* slash = strrchr(path, '/');
+        int stream = 0;
+        size_t dl = slash ? (size_t)(slash - path) : 0;
+        if (dl >= sizeof cfg) return NULL;
+        if (slash) memcpy(cfg, path, dl);
+        else { cfg[0] = '.'; dl = 1; }
+        cfg[dl] = 0;
+        snprintf(cj, sizeof cj, "%s/config.json", cfg);
+        if (access(cj, R_OK) != 0) {
+            fprintf(stderr, "ds41-native: container %s: manca %s (il container non contiene la config)\n", path, cj);
+            return NULL;
+        }
+        (void)llm_ai_mlx_opt_get_bool("ds41_stream", &stream);
+        return stream ? llm_dsv41_engine_load_container_stream(cfg, path, st)
+                      : llm_dsv41_engine_load_container(cfg, path, st);
+    }
+    return llm_dsv41_engine_load(path, st);
+}
+
 static LlmEngineLlmModel ds41_load(const char* dir) {
     Ds41Model* m;
     mlx_device gpu, chosen;
     mlx_stream st;
     bool av = false;
     if (!dir || !*dir) return NULL;
+    st = mlx_stream_new();   /* mlx_get_default_stream scrive IN *st: ctx deve essere valido */
     gpu = mlx_device_new_type(MLX_GPU, 0);
     mlx_device_is_available(&av, gpu);
     chosen = av ? gpu : mlx_device_new_type(MLX_CPU, 0);
     if (!av) mlx_device_free(gpu);
     mlx_set_default_device(chosen);
-    if (mlx_get_default_stream(&st, chosen) != 0) { mlx_device_free(chosen); return NULL; }
+    if (mlx_get_default_stream(&st, chosen) != 0) { mlx_stream_free(st); mlx_device_free(chosen); return NULL; }
     (void)mlx_set_default_stream(st);
     m = (Ds41Model*)calloc(1, sizeof *m);
-    if (!m) { mlx_device_free(chosen); return NULL; }
+    if (!m) { mlx_stream_free(st); mlx_device_free(chosen); return NULL; }
     m->device = chosen;
     m->stream = st;
-    m->e = llm_dsv41_engine_load(dir, st);
-    if (!m->e) { free(m); mlx_device_free(chosen); return NULL; }
+    m->e = ds41_open(dir, st);
+    if (!m->e) { free(m); mlx_stream_free(st); mlx_device_free(chosen); return NULL; }
+    {   /* contesto: opzione `context` (0 = limite del modello) */
+        int ctx = 0;
+        (void)llm_ai_mlx_opt_get_int("context", &ctx);
+        m->ctx_max = ctx > 0 ? ctx : m->e->w.cfg.max_seq_len;
+        if (m->e->w.cfg.max_seq_len > 0 && m->ctx_max > m->e->w.cfg.max_seq_len) {
+            fprintf(stderr, "ds41-native: context=%d oltre il limite del modello (%d): uso %d\n",
+                    m->ctx_max, m->e->w.cfg.max_seq_len, m->e->w.cfg.max_seq_len);
+            m->ctx_max = m->e->w.cfg.max_seq_len;
+        }
+    }
     return (LlmEngineLlmModel)m;
 }
 
@@ -98,8 +139,13 @@ static int ds41_append(LlmEngineLlmSession ss, const int32_t* ids, int n) {
     Ds41Session* s = (Ds41Session*)ss;
     int rc;
     if (!s || n < 0) return -1;
+    if (s->m->ctx_max > 0 && (long)s->cache_offset + n > s->m->ctx_max) {
+        fprintf(stderr, "ds41-native: contesto superato (%d + %d > %d token): alza `context` o kv_set_max\n",
+                s->cache_offset, n, s->m->ctx_max);
+        return -1;
+    }
     s->sm.hist = s->hist; s->sm.hist_n = s->hist_n;
-    rc = llm_dsv41_engine_append(s->m->e, (void**)&s->cache, ids, n, &s->cache_offset,
+    rc =llm_dsv41_engine_append(s->m->e, (void**)&s->cache, ids, n, &s->cache_offset,
                                  &s->pending, &s->has_pending, &s->sm, s->m->stream);
     if (rc == 0) ds41_hist_push(s, ids, n);
     return rc;
@@ -123,19 +169,41 @@ static int ds41_generate(LlmEngineLlmSession ss, int max_new, int32_t eos, int32
     Ds41Session* s = (Ds41Session*)ss;
     int n;
     if (!s || !out) return -1;
+    if (s->m->ctx_max > 0) {   /* ogni token emesso avanza la cache: non oltre il contesto */
+        int room = s->m->ctx_max - s->cache_offset;
+        if (room < max_new) max_new = room;
+        if (max_new <= 0) return 0;
+    }
     s->sm.hist = s->hist; s->sm.hist_n = s->hist_n;
-    n = llm_dsv41_engine_generate(s->m->e, (void**)&s->cache, &s->cache_offset,
+    n =llm_dsv41_engine_generate(s->m->e, (void**)&s->cache, &s->cache_offset,
                                   s->pending, s->has_pending, max_new, eos, out, &s->sm, s->m->stream);
     if (n > 0) ds41_hist_push(s, out, n);
     return n;
 }
 
-static int ds41_kv_set_max(LlmEngineLlmModel mm, int n) { (void)mm; (void)n; return -1; }
-static void ds41_set_expert_swap(const char* dir) { (void)dir; }
+/* La cache cresce con i token (nessuna allocazione fissa): kv_set_max e' il LIMITE di contesto
+ * applicato da append/generate. Rifiuta (-1, con motivo) se n supera il limite del modello. */
+static int ds41_kv_set_max(LlmEngineLlmModel mm, int n) {
+    Ds41Model* m = (Ds41Model*)mm;
+    if (!m || n <= 0) return -1;
+    if (m->e->w.cfg.max_seq_len > 0 && n > m->e->w.cfg.max_seq_len) {
+        fprintf(stderr, "ds41-native: kv_set_max(%d) rifiutato: il modello arriva a %d token\n",
+                n, m->e->w.cfg.max_seq_len);
+        return -1;
+    }
+    m->ctx_max = n;
+    return 0;
+}
+/* Offload esperti non supportato dal checkpoint ufficiale (tutti i pesi sono residenti): non e'
+ * un no-op silenzioso. Per RAM limitata: container .gguf + opzione `ds41_stream`. */
+static void ds41_set_expert_swap(const char* dir) {
+    if (dir && *dir)
+        fprintf(stderr, "ds41-native: set_expert_swap(%s) non supportato (usa container .gguf + ds41_stream)\n", dir);
+}
 
 static const LlmEngineLlmEngine DS41_ENGINE = {
     .name = "ds41-native",
-    .caps = LLMMODELIO_CAP_IDS,
+    .caps = LLMMODELIO_CAP_IDS | LLMMODELIO_CAP_KV_MAX,
     .load_model = ds41_load,
     .free_model = ds41_free,
     .create_session = ds41_session,

@@ -39,6 +39,7 @@ static Opt g_opts[] = {
     { "ds4_mtp",          "GGUF draft MTP/DSpark per DS4 (path; vuoto = spento)",  T_STR, 0, 0, 0, 0, 0, 0, "", "", 0, "/percorso/DSpark-support.gguf" },
     { "ds4_dspark",       "DSpark: proposta speculativa (0/1; richiede ds4_mtp)",    T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0, "1" },
     { "ds4_dspark_strict","DSpark: accettazione strict (0/1)",                      T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0, "0" },
+    { "ds41_stream",       "ds41-native su container .gguf: streaming dei layer (RAM limitata; 0/1)", T_BOOL, 0, 0, 0, 0, 0, 0, {0}, NULL, 0, "1" },
     { "kvquant",          "off|8[:finestra]|auto[:soglia]|16",                       T_STR,   0, 0, 0, 0, 0, 0, "auto", "auto", 0, "8:8192" },
     { "kvq_split_tokens", "KV-quant attn fusa: token per split-K (piccolo = piu' split)", T_INT, 0, 1024, 0, 0, 0, 0, {0}, NULL, 0, "256" },
     { "kvq_splits_max",   "KV-quant attn fusa: n. massimo di split-K",                 T_INT, 0, 64, 0, 0, 0, 0, {0}, NULL, 0, "64" },
